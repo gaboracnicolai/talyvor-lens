@@ -90,7 +90,7 @@ func run() error {
 	defer nc.Close()
 
 	exactCache := cache.NewExactCache(redisClient, cfg.MaxCacheTTL)
-	semanticCache := cache.NewSemanticCache(pool, cfg.SemanticThreshold)
+	semanticCache := cache.NewSemanticCache(pool, nil, cfg.SemanticThreshold, cfg.MaxCacheTTL)
 	modelRouter := router.New()
 	promptCompressor := compressor.New()
 	patternLearner := learner.New(nc)
