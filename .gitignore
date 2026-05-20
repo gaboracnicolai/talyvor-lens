@@ -1,0 +1,10 @@
+/lens
+/dist/
+/out/
+*.test
+*.out
+.env
+.env.local
+.idea/
+.vscode/
+.DS_Store
