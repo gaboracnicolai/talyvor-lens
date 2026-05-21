@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
+	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/templates"
 )
@@ -38,6 +40,7 @@ type Proxy struct {
 	piiDetector      *pii.Detector
 	alertManager     *alerts.AlertManager
 	templateDetector *templates.TemplateDetector
+	scorer           *quality.Scorer
 	httpClient       *http.Client
 	openAIKey        string
 	anthropicKey     string
@@ -61,6 +64,7 @@ func New(
 	piiDetector *pii.Detector,
 	alertManager *alerts.AlertManager,
 	templateDetector *templates.TemplateDetector,
+	scorer *quality.Scorer,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -74,6 +78,7 @@ func New(
 		piiDetector:      piiDetector,
 		alertManager:     alertManager,
 		templateDetector: templateDetector,
+		scorer:           scorer,
 		httpClient:       &http.Client{Timeout: upstreamTimeout},
 		openAIKey:        openAIKey,
 		anthropicKey:     anthropicKey,
@@ -269,6 +274,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
+	// Score the response so we can gate caching on quality. Scoring is
+	// pure-Go heuristics — fast enough to do on the hot path. Score is
+	// only meaningful for a successful upstream (200); on errors we skip
+	// scoring entirely.
+	var qualityScore *quality.QualityScore
+	if p.scorer != nil && upstreamResp.StatusCode == http.StatusOK {
+		q := p.scorer.ScoreResponse(ctx, prompt, string(upstreamBody), cfg.name, model)
+		qualityScore = &q
+	}
+
 	// Headers must be set BEFORE WriteHeader. X-Talyvor-* surface routing
 	// decisions to the client; all of these go on the response, never on
 	// the upstream request.
@@ -281,6 +296,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if circuitOpen {
 		w.Header().Set("X-Talyvor-Circuit-Open", "true")
 	}
+	if qualityScore != nil {
+		w.Header().Set("X-Talyvor-Quality-Score", strconv.FormatFloat(qualityScore.Score, 'f', 2, 64))
+	}
 	if ct := upstreamResp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
@@ -288,7 +306,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	_, _ = w.Write(upstreamBody)
 
 	if upstreamResp.StatusCode == http.StatusOK {
-		if !piiDetected {
+		// Cache iff the prompt has no PII AND the response is judged
+		// cacheable by the quality scorer. Low-quality responses are
+		// forwarded to the client but never persisted.
+		shouldCache := !piiDetected
+		if qualityScore != nil && !qualityScore.ShouldCache {
+			shouldCache = false
+		}
+		if shouldCache {
 			// Cache against the original (uncompressed) prompt + originally
 			// requested model so repeat callers get cache hits.
 			p.storeCaches(ctx, cfg.name, model, prompt, upstreamBody)

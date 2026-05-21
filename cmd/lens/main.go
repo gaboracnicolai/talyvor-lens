@@ -31,6 +31,7 @@ import (
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/proxy"
+	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/templates"
 )
@@ -102,11 +103,12 @@ func run() error {
 	alertManager := alerts.New(pool, nc, nil) // rules loaded from DB in a future iteration
 	alertManager.StartMonitor(ctx)
 	templateDetector := templates.New(pool)
+	qualityScorer := quality.New(pool)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -124,6 +126,34 @@ func run() error {
 
 	r.Post("/v1/proxy/openai/*", p.HandleOpenAI)
 	r.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
+
+	r.Post("/v1/feedback", func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			PromptHash string                `json:"prompt_hash"`
+			Signal     quality.FeedbackSignal `json:"signal"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if in.PromptHash == "" || in.Signal == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "prompt_hash and signal are required"})
+			return
+		}
+		if err := qualityScorer.RecordFeedback(req.Context(), in.PromptHash, in.Signal); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

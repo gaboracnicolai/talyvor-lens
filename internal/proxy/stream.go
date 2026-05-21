@@ -236,7 +236,16 @@ func (s *StreamHandler) serve(
 	// we already paid for the upstream call, no reason to drop the result.
 	storeCtx := context.Background()
 	cached := ops.synthesizeCachePayload(accumulated.String())
-	if !piiDetected {
+	shouldCache := !piiDetected
+	if shouldCache && s.proxy.scorer != nil {
+		// Score against the accumulated text content, not the synthesized
+		// JSON, so the heuristics see what the user would see.
+		q := s.proxy.scorer.ScoreResponse(storeCtx, prompt, accumulated.String(), provider, model)
+		if !q.ShouldCache {
+			shouldCache = false
+		}
+	}
+	if shouldCache {
 		s.proxy.storeCaches(storeCtx, provider, model, prompt, cached)
 	}
 	eventPrompt := prompt
