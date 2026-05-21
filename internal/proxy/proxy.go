@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/router"
 )
 
 const (
@@ -27,6 +29,8 @@ type Proxy struct {
 	exact        *cache.ExactCache
 	semantic     *cache.SemanticCache
 	embedder     cache.Embedder
+	compressor   *compressor.Compressor
+	router       *router.Router
 	httpClient   *http.Client
 	openAIKey    string
 	anthropicKey string
@@ -38,13 +42,15 @@ type Proxy struct {
 	anthropicURL string
 }
 
-// New constructs a Proxy. The learner is variadic so existing callers and
-// tests that don't need usage analytics still compile; production wires
-// a *learner.Learner as the last argument.
+// New constructs a Proxy. The learner is variadic so callers that don't
+// need usage analytics still compile; production wires a *learner.Learner
+// as the last argument.
 func New(
 	exactCache *cache.ExactCache,
 	semanticCache *cache.SemanticCache,
 	embedder cache.Embedder,
+	compressorImpl *compressor.Compressor,
+	routerImpl *router.Router,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -53,6 +59,8 @@ func New(
 		exact:        exactCache,
 		semantic:     semanticCache,
 		embedder:     embedder,
+		compressor:   compressorImpl,
+		router:       routerImpl,
 		httpClient:   &http.Client{Timeout: upstreamTimeout},
 		openAIKey:    openAIKey,
 		anthropicKey: anthropicKey,
@@ -126,14 +134,52 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
-	upstreamResp, upstreamBody, err := p.forward(ctx, r, body, cfg)
+	// Compress the prompt before forwarding upstream. Cache lookups above
+	// still key on the uncompressed prompt so repeat callers hit cache.
+	compressedPrompt := prompt
+	var savingsPct float64
+	if p.compressor != nil {
+		result := p.compressor.Compress(ctx, prompt)
+		compressedPrompt = result.CompressedPrompt
+		savingsPct = result.SavingsPct
+	}
+
+	// Pick the model to send upstream. Router may downgrade to a cheaper
+	// model in the same provider family; it never silently upgrades.
+	upstreamModel := model
+	var overrideModel, overrideReason string
+	if p.router != nil {
+		decision := p.router.Route(ctx, cfg.name, model, compressedPrompt)
+		if p.router.ShouldOverride(model, decision) {
+			upstreamModel = decision.Model
+			overrideModel = decision.Model
+			overrideReason = decision.Reason
+		}
+	}
+
+	upstreamBodyOut, err := rebuildBody(body, upstreamModel, compressedPrompt)
+	if err != nil {
+		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
+		writeError(w, http.StatusBadGateway, "rebuild request body: "+err.Error())
+		return
+	}
+
+	upstreamResp, upstreamBody, err := p.forward(ctx, r, upstreamBodyOut, cfg)
 	if err != nil {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+err.Error())
 		return
 	}
 
-	// Pass upstream status + content-type through to the client.
+	// Headers must be set BEFORE WriteHeader. X-Talyvor-* surface routing
+	// decisions to the client; both headers go on the response, never on
+	// the upstream request.
+	if overrideModel != "" {
+		w.Header().Set("X-Talyvor-Model-Override", overrideModel)
+	}
+	if overrideReason != "" {
+		w.Header().Set("X-Talyvor-Route-Reason", overrideReason)
+	}
 	if ct := upstreamResp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
@@ -141,15 +187,32 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	_, _ = w.Write(upstreamBody)
 
 	if upstreamResp.StatusCode == http.StatusOK {
+		// Cache against the original (uncompressed) prompt + originally
+		// requested model so repeat callers get cache hits.
 		p.storeCaches(ctx, cfg.name, model, prompt, upstreamBody)
-		p.recordTokenEvent(ctx, cfg.name, model, prompt, upstreamBody)
+		p.recordTokenEvent(ctx, cfg.name, model, prompt, upstreamBody, savingsPct)
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
 	} else {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "upstream_error").Inc()
 	}
 }
 
-func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte) {
+// rebuildBody re-emits the JSON request body with the (possibly overridden)
+// model and the compressed prompt collapsed into a single user message.
+// All other fields (temperature, max_tokens, tools, ...) are preserved.
+func rebuildBody(originalBody []byte, model, prompt string) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal(originalBody, &m); err != nil {
+		return nil, err
+	}
+	m["model"] = model
+	m["messages"] = []map[string]any{
+		{"role": "user", "content": prompt},
+	}
+	return json.Marshal(m)
+}
+
+func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte, savingsPct float64) {
 	if p.learner == nil {
 		return
 	}
@@ -162,7 +225,8 @@ func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt st
 		InputTokens:  len(prompt) / 4,
 		OutputTokens: len(response) / 4,
 		Cached:       false,
-		Compressed:   false,
+		Compressed:   savingsPct > 0,
+		SavingsPct:   savingsPct,
 	})
 }
 
