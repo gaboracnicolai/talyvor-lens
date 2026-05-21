@@ -19,6 +19,7 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/learner"
+	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/quality"
@@ -48,6 +49,7 @@ type Proxy struct {
 	abTester         *ab.Tester
 	tracker          *attribution.Tracker
 	workspaceManager *workspace.Manager
+	localRouter      *localrouter.LocalRouter
 	httpClient       *http.Client
 	openAIKey        string
 	anthropicKey     string
@@ -75,6 +77,7 @@ func New(
 	abTester *ab.Tester,
 	tracker *attribution.Tracker,
 	workspaceManager *workspace.Manager,
+	localRouter *localrouter.LocalRouter,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -92,6 +95,7 @@ func New(
 		abTester:         abTester,
 		tracker:          tracker,
 		workspaceManager: workspaceManager,
+		localRouter:      localRouter,
 		httpClient:       &http.Client{Timeout: upstreamTimeout},
 		openAIKey:        openAIKey,
 		anthropicKey:     anthropicKey,
@@ -245,6 +249,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_semantic").Inc()
 			return
 		}
+	}
+
+	// Local-model short-circuit: simple queries from the default
+	// workspace can be served by a local Ollama instance for free. On
+	// any failure we fall through to the regular cloud path — local
+	// routing must never break the main request.
+	if p.tryLocalRouting(w, ctx, cfg.name, model, prompt, cachePrompt, wsID, team, feature, piiDetected, redactedPrompt) {
+		return
 	}
 
 	// Streaming path: detected by "stream": true in the request JSON. The
@@ -414,6 +426,65 @@ func rebuildBody(originalBody []byte, model, prompt string) ([]byte, error) {
 		{"role": "user", "content": prompt},
 	}
 	return json.Marshal(m)
+}
+
+// tryLocalRouting attempts to serve the request from a locally-hosted
+// Ollama model. Returns true if the request was fully handled (response
+// written, caches/events updated). Any failure returns false so the
+// caller falls through to the regular cloud path.
+func (p *Proxy) tryLocalRouting(
+	w http.ResponseWriter,
+	ctx context.Context,
+	provider, model, prompt, cachePrompt, wsID, team, feature string,
+	piiDetected bool,
+	redactedPrompt string,
+) bool {
+	if p.localRouter == nil {
+		return false
+	}
+	decision := p.localRouter.ShouldUseLocal(router.AnalyseComplexity(prompt), wsID)
+	if !decision.UseLocal {
+		return false
+	}
+
+	raw, err := p.localRouter.Forward(ctx, decision.Model, prompt)
+	if err != nil {
+		slog.Warn("localrouter: forward failed, falling through to cloud",
+			slog.String("model", decision.Model),
+			slog.String("err", err.Error()),
+		)
+		return false
+	}
+	formatted, err := p.localRouter.FormatAsOpenAI(raw, decision.Model)
+	if err != nil {
+		slog.Warn("localrouter: format failed, falling through to cloud",
+			slog.String("err", err.Error()),
+		)
+		return false
+	}
+
+	w.Header().Set("X-Talyvor-Local-Model", decision.Model)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(formatted)
+
+	if !piiDetected {
+		p.storeCaches(ctx, provider, model, cachePrompt, formatted)
+	}
+	eventPrompt := prompt
+	if piiDetected {
+		eventPrompt = redactedPrompt
+	}
+	// Local runs are free, so the cost recorded by RecordSpend is 0
+	// (the model isn't in the price table). recordTokenEvent stores
+	// the local model name so usage analytics distinguish local from
+	// cloud traffic.
+	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected)
+	if p.alertManager != nil {
+		_ = p.alertManager.RecordSpend(ctx, team, feature, decision.Model, len(prompt)/4, len(formatted)/4)
+	}
+	metrics.RequestsTotal.WithLabelValues(provider, "local").Inc()
+	return true
 }
 
 // launchABShadows fans out shadow probes for every active A/B test that

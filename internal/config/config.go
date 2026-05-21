@@ -19,6 +19,7 @@ type Config struct {
 	SemanticThreshold float64
 	MaxCacheTTL       time.Duration
 	LogLevel          string
+	OllamaURL         string
 }
 
 func Load() (*Config, error) {
@@ -33,6 +34,7 @@ func Load() (*Config, error) {
 		SemanticThreshold: 0.92,
 		MaxCacheTTL:       24 * time.Hour,
 		LogLevel:          getEnv("LENS_LOG_LEVEL", "info"),
+		OllamaURL:         getEnv("LENS_OLLAMA_URL", "http://localhost:11434"),
 	}
 
 	if v := os.Getenv("LENS_SEMANTIC_THRESHOLD"); v != "" {

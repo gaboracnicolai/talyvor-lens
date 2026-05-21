@@ -31,6 +31,7 @@ import (
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/learner"
+	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/proxy"
@@ -120,10 +121,13 @@ func run() error {
 		logger.Warn("workspace: default registration failed", slog.String("err", err.Error()))
 	}
 
+	lr := localrouter.New(cfg.OllamaURL)
+	go lr.StartHealthCheck(ctx)
+
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
