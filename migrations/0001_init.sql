@@ -44,3 +44,9 @@ ALTER TABLE token_events
 
 CREATE INDEX IF NOT EXISTS idx_token_events_prompt_hash
   ON token_events(prompt_hash);
+
+ALTER TABLE token_events
+  ADD COLUMN IF NOT EXISTS cost_usd FLOAT NOT NULL DEFAULT 0;
+
+ALTER TABLE token_events
+  ADD COLUMN IF NOT EXISTS pii_detected BOOLEAN NOT NULL DEFAULT false;

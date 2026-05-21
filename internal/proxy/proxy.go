@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/learner"
@@ -34,6 +35,7 @@ type Proxy struct {
 	compressor   *compressor.Compressor
 	router       *router.Router
 	piiDetector  *pii.Detector
+	alertManager *alerts.AlertManager
 	httpClient   *http.Client
 	openAIKey    string
 	anthropicKey string
@@ -55,6 +57,7 @@ func New(
 	compressorImpl *compressor.Compressor,
 	routerImpl *router.Router,
 	piiDetector *pii.Detector,
+	alertManager *alerts.AlertManager,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -66,6 +69,7 @@ func New(
 		compressor:   compressorImpl,
 		router:       routerImpl,
 		piiDetector:  piiDetector,
+		alertManager: alertManager,
 		httpClient:   &http.Client{Timeout: upstreamTimeout},
 		openAIKey:    openAIKey,
 		anthropicKey: anthropicKey,
@@ -126,6 +130,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
+
+	// Team / feature attribution for cost accounting and circuit breakers.
+	// Both default to "" when callers don't supply the headers; the alert
+	// manager treats empty values as a distinct attribution bucket.
+	team := r.Header.Get("X-Talyvor-Team")
+	feature := r.Header.Get("X-Talyvor-Feature")
 
 	// PII gate. When the prompt contains PII we never read from or write
 	// to the cache — one user's PII must never be served to another user.
@@ -207,6 +217,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 	}
 
+	// Circuit breaker override. When the alert manager has tripped a
+	// circuit for this (team, feature), force the cheapest model for the
+	// provider regardless of what the router decided. The X-Talyvor-Circuit-Open
+	// header below tells the client this happened.
+	circuitOpen := false
+	if p.alertManager != nil && p.alertManager.IsCircuitOpen(team, feature) {
+		circuitOpen = true
+		upstreamModel = p.alertManager.GetDowngradeModel(cfg.name, model)
+	}
+
 	upstreamBodyOut, err := rebuildBody(body, upstreamModel, compressedPrompt)
 	if err != nil {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
@@ -222,13 +242,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	}
 
 	// Headers must be set BEFORE WriteHeader. X-Talyvor-* surface routing
-	// decisions to the client; both headers go on the response, never on
+	// decisions to the client; all of these go on the response, never on
 	// the upstream request.
 	if overrideModel != "" {
 		w.Header().Set("X-Talyvor-Model-Override", overrideModel)
 	}
 	if overrideReason != "" {
 		w.Header().Set("X-Talyvor-Route-Reason", overrideReason)
+	}
+	if circuitOpen {
+		w.Header().Set("X-Talyvor-Circuit-Open", "true")
 	}
 	if ct := upstreamResp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
@@ -247,6 +270,18 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			eventPrompt = redactedPrompt
 		}
 		p.recordTokenEvent(ctx, cfg.name, model, eventPrompt, upstreamBody, savingsPct, piiDetected)
+		// RecordSpend prices the model that was actually billed by the
+		// LLM (the upstream model, after any router or circuit override).
+		// Fire-and-forget — alert manager failures must never break a
+		// successful request.
+		if p.alertManager != nil {
+			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel,
+				len(prompt)/4, len(upstreamBody)/4); err != nil {
+				slog.Warn("alerts: RecordSpend failed",
+					slog.String("err", err.Error()),
+				)
+			}
+		}
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
 	} else {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "upstream_error").Inc()
