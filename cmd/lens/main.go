@@ -23,13 +23,10 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
 	"github.com/talyvor/lens/internal/cache"
-	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/embedder"
-	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/proxy"
-	"github.com/talyvor/lens/internal/router"
 )
 
 func main() {
@@ -93,18 +90,8 @@ func run() error {
 	exactCache := cache.NewExactCache(redisClient, cfg.MaxCacheTTL)
 	openAIEmbedder := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingModel)
 	semanticCache := cache.NewSemanticCache(pool, openAIEmbedder, cfg.SemanticThreshold, cfg.MaxCacheTTL)
-	modelRouter := router.New()
-	promptCompressor := compressor.New()
-	patternLearner := learner.New(nc)
 
-	p := proxy.New(proxy.Deps{
-		Logger:     logger,
-		Exact:      exactCache,
-		Semantic:   semanticCache,
-		Router:     modelRouter,
-		Compressor: promptCompressor,
-		Learner:    patternLearner,
-	})
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
