@@ -31,10 +31,11 @@ func (s *StreamHandler) ServeOpenAI(
 	provider string,
 	model string,
 	prompt string,
+	cachePrompt string,
 	body []byte,
 	piiDetected bool,
 ) error {
-	return s.serve(w, r, provider, model, prompt, body, piiDetected, openAIStreamOps{
+	return s.serve(w, r, provider, model, prompt, cachePrompt, body, piiDetected, openAIStreamOps{
 		url:     s.proxy.openAIURL,
 		setAuth: func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+s.proxy.openAIKey) },
 	})
@@ -47,10 +48,11 @@ func (s *StreamHandler) ServeAnthropic(
 	provider string,
 	model string,
 	prompt string,
+	cachePrompt string,
 	body []byte,
 	piiDetected bool,
 ) error {
-	return s.serve(w, r, provider, model, prompt, body, piiDetected, anthropicStreamOps{
+	return s.serve(w, r, provider, model, prompt, cachePrompt, body, piiDetected, anthropicStreamOps{
 		url: s.proxy.anthropicURL,
 		setAuth: func(req *http.Request) {
 			req.Header.Set("x-api-key", s.proxy.anthropicKey)
@@ -160,6 +162,7 @@ func (s *StreamHandler) serve(
 	provider string,
 	model string,
 	prompt string,
+	cachePrompt string,
 	body []byte,
 	piiDetected bool,
 	ops streamOps,
@@ -246,7 +249,9 @@ func (s *StreamHandler) serve(
 		}
 	}
 	if shouldCache {
-		s.proxy.storeCaches(storeCtx, provider, model, prompt, cached)
+		// Use the workspace-scoped prompt for the cache key so streamed
+		// responses respect tenant isolation just like buffered ones.
+		s.proxy.storeCaches(storeCtx, provider, model, cachePrompt, cached)
 	}
 	eventPrompt := prompt
 	if piiDetected && s.proxy.piiDetector != nil {

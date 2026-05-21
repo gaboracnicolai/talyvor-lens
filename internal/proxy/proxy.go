@@ -24,6 +24,7 @@ import (
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/templates"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 const (
@@ -31,6 +32,7 @@ const (
 	openAIChatURL       = "https://api.openai.com/v1/chat/completions"
 	anthropicMessageURL = "https://api.anthropic.com/v1/messages"
 	upstreamTimeout     = 120 * time.Second
+	defaultWorkspaceID  = "default"
 )
 
 type Proxy struct {
@@ -45,6 +47,7 @@ type Proxy struct {
 	scorer           *quality.Scorer
 	abTester         *ab.Tester
 	tracker          *attribution.Tracker
+	workspaceManager *workspace.Manager
 	httpClient       *http.Client
 	openAIKey        string
 	anthropicKey     string
@@ -71,6 +74,7 @@ func New(
 	scorer *quality.Scorer,
 	abTester *ab.Tester,
 	tracker *attribution.Tracker,
+	workspaceManager *workspace.Manager,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -87,6 +91,7 @@ func New(
 		scorer:           scorer,
 		abTester:         abTester,
 		tracker:          tracker,
+		workspaceManager: workspaceManager,
 		httpClient:       &http.Client{Timeout: upstreamTimeout},
 		openAIKey:        openAIKey,
 		anthropicKey:     anthropicKey,
@@ -146,6 +151,24 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
+	}
+
+	// Workspace gate. The workspace decision happens before any cache
+	// lookup so a blocked workspace can't even read someone else's
+	// cached response — the request returns 403 immediately. Cache
+	// isolation downstream is then achieved by prefixing the prompt
+	// with the workspace ID before it reaches the cache layer.
+	wsID := defaultWorkspaceID
+	cachePrompt := prompt
+	if p.workspaceManager != nil {
+		wsID = p.workspaceManager.ExtractWorkspaceID(r)
+		policy := p.workspaceManager.CheckPolicy(ctx, wsID, cfg.name, model, len(prompt)/4)
+		if !policy.Allowed {
+			writeError(w, http.StatusForbidden, policy.Violation)
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "workspace_blocked").Inc()
+			return
+		}
+		cachePrompt = wsID + ":" + prompt
 	}
 
 	// Team / feature attribution for cost accounting and circuit breakers.
@@ -212,12 +235,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	}
 
 	if !piiDetected {
-		if cached := p.tryExact(ctx, cfg.name, model, prompt); cached != nil {
+		if cached := p.tryExact(ctx, cfg.name, model, cachePrompt); cached != nil {
 			writeBytes(w, http.StatusOK, cached)
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_exact").Inc()
 			return
 		}
-		if cached := p.trySemantic(ctx, cfg.name, model, prompt); cached != nil {
+		if cached := p.trySemantic(ctx, cfg.name, model, cachePrompt); cached != nil {
 			writeBytes(w, http.StatusOK, cached)
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_semantic").Inc()
 			return
@@ -233,9 +256,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		sh := &StreamHandler{proxy: p}
 		var serr error
 		if cfg.name == "openai" {
-			serr = sh.ServeOpenAI(w, r, cfg.name, model, prompt, body, piiDetected)
+			serr = sh.ServeOpenAI(w, r, cfg.name, model, prompt, cachePrompt, body, piiDetected)
 		} else {
-			serr = sh.ServeAnthropic(w, r, cfg.name, model, prompt, body, piiDetected)
+			serr = sh.ServeAnthropic(w, r, cfg.name, model, prompt, cachePrompt, body, piiDetected)
 		}
 		if serr != nil {
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "stream_error").Inc()
@@ -338,9 +361,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			shouldCache = false
 		}
 		if shouldCache {
-			// Cache against the original (uncompressed) prompt + originally
-			// requested model so repeat callers get cache hits.
-			p.storeCaches(ctx, cfg.name, model, prompt, upstreamBody)
+			// Cache against the workspace-scoped (uncompressed) prompt +
+			// originally requested model so repeat callers in the same
+			// workspace get cache hits but other workspaces don't.
+			p.storeCaches(ctx, cfg.name, model, cachePrompt, upstreamBody)
 		}
 		eventPrompt := prompt
 		if piiDetected {

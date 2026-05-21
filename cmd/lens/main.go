@@ -37,6 +37,7 @@ import (
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/templates"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 func main() {
@@ -109,11 +110,20 @@ func run() error {
 	qualityScorer := quality.New(pool)
 	abTester := ab.New(pool, qualityScorer)
 	branchTracker := attribution.New(pool)
+	wsManager := workspace.New(pool)
+	if err := wsManager.LoadAll(ctx); err != nil {
+		logger.Warn("workspace: LoadAll failed", slog.String("err", err.Error()))
+	}
+	if err := wsManager.RegisterWorkspace(ctx, workspace.Workspace{
+		ID: "default", Name: "Default Workspace", Active: true,
+	}); err != nil {
+		logger.Warn("workspace: default registration failed", slog.String("err", err.Error()))
+	}
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -131,6 +141,39 @@ func run() error {
 
 	r.Post("/v1/proxy/openai/*", p.HandleOpenAI)
 	r.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
+
+	r.Post("/v1/workspaces", func(w http.ResponseWriter, req *http.Request) {
+		var in workspace.Workspace
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if err := wsManager.RegisterWorkspace(req.Context(), in); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": in.ID})
+	})
+
+	r.Get("/v1/workspaces/{wsID}", func(w http.ResponseWriter, req *http.Request) {
+		wsID := chi.URLParam(req, "wsID")
+		ws, ok := wsManager.GetWorkspace(wsID)
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "workspace not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(ws)
+	})
 
 	r.Get("/v1/attribution/branch", func(w http.ResponseWriter, req *http.Request) {
 		branch := req.URL.Query().Get("branch")
