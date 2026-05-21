@@ -25,6 +25,7 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
+	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/proxy"
@@ -90,7 +91,8 @@ func run() error {
 	defer nc.Close()
 
 	exactCache := cache.NewExactCache(redisClient, cfg.MaxCacheTTL)
-	semanticCache := cache.NewSemanticCache(pool, nil, cfg.SemanticThreshold, cfg.MaxCacheTTL)
+	openAIEmbedder := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingModel)
+	semanticCache := cache.NewSemanticCache(pool, openAIEmbedder, cfg.SemanticThreshold, cfg.MaxCacheTTL)
 	modelRouter := router.New()
 	promptCompressor := compressor.New()
 	patternLearner := learner.New(nc)

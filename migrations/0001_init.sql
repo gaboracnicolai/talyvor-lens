@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS prompt_embeddings (
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+ALTER TABLE prompt_embeddings
+  ADD CONSTRAINT uq_prompt_hash UNIQUE (prompt_hash);
+
 CREATE INDEX IF NOT EXISTS idx_embeddings_vector
   ON prompt_embeddings
   USING ivfflat (embedding vector_cosine_ops)
