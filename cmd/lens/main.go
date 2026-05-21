@@ -28,6 +28,7 @@ import (
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/router"
 )
@@ -95,11 +96,12 @@ func run() error {
 	semanticCache := cache.NewSemanticCache(pool, openAIEmbedder, cfg.SemanticThreshold, cfg.MaxCacheTTL)
 	promptCompressor := compressor.New()
 	modelRouter := router.New()
+	piiDetector := pii.New()
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)

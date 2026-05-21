@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/router"
 )
 
@@ -31,6 +33,7 @@ type Proxy struct {
 	embedder     cache.Embedder
 	compressor   *compressor.Compressor
 	router       *router.Router
+	piiDetector  *pii.Detector
 	httpClient   *http.Client
 	openAIKey    string
 	anthropicKey string
@@ -51,6 +54,7 @@ func New(
 	embedder cache.Embedder,
 	compressorImpl *compressor.Compressor,
 	routerImpl *router.Router,
+	piiDetector *pii.Detector,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -61,6 +65,7 @@ func New(
 		embedder:     embedder,
 		compressor:   compressorImpl,
 		router:       routerImpl,
+		piiDetector:  piiDetector,
 		httpClient:   &http.Client{Timeout: upstreamTimeout},
 		openAIKey:    openAIKey,
 		anthropicKey: anthropicKey,
@@ -122,16 +127,40 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
-	if cached := p.tryExact(ctx, cfg.name, model, prompt); cached != nil {
-		writeBytes(w, http.StatusOK, cached)
-		metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_exact").Inc()
-		return
+	// PII gate. When the prompt contains PII we never read from or write
+	// to the cache — one user's PII must never be served to another user.
+	// The original (unredacted) prompt is still forwarded to the LLM; only
+	// caching is skipped. The redacted form is what we expose in logs and
+	// in the token event.
+	piiDetected := false
+	var piiTypes []string
+	var redactedPrompt string
+	if p.piiDetector != nil {
+		piiResult := p.piiDetector.Detect(prompt)
+		if !p.piiDetector.IsSafeToCache(piiResult) {
+			piiDetected = true
+			piiTypes = piiResult.Types
+			redactedPrompt = piiResult.Redacted
+			w.Header().Set("X-Talyvor-PII-Detected", "true")
+			slog.Info("PII detected, skipping cache",
+				slog.String("provider", cfg.name),
+				slog.Any("types", piiTypes),
+			)
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "pii_skip_cache").Inc()
+		}
 	}
 
-	if cached := p.trySemantic(ctx, cfg.name, model, prompt); cached != nil {
-		writeBytes(w, http.StatusOK, cached)
-		metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_semantic").Inc()
-		return
+	if !piiDetected {
+		if cached := p.tryExact(ctx, cfg.name, model, prompt); cached != nil {
+			writeBytes(w, http.StatusOK, cached)
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_exact").Inc()
+			return
+		}
+		if cached := p.trySemantic(ctx, cfg.name, model, prompt); cached != nil {
+			writeBytes(w, http.StatusOK, cached)
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_semantic").Inc()
+			return
+		}
 	}
 
 	// Streaming path: detected by "stream": true in the request JSON. The
@@ -143,9 +172,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		sh := &StreamHandler{proxy: p}
 		var serr error
 		if cfg.name == "openai" {
-			serr = sh.ServeOpenAI(w, r, cfg.name, model, prompt, body)
+			serr = sh.ServeOpenAI(w, r, cfg.name, model, prompt, body, piiDetected)
 		} else {
-			serr = sh.ServeAnthropic(w, r, cfg.name, model, prompt, body)
+			serr = sh.ServeAnthropic(w, r, cfg.name, model, prompt, body, piiDetected)
 		}
 		if serr != nil {
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "stream_error").Inc()
@@ -208,10 +237,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	_, _ = w.Write(upstreamBody)
 
 	if upstreamResp.StatusCode == http.StatusOK {
-		// Cache against the original (uncompressed) prompt + originally
-		// requested model so repeat callers get cache hits.
-		p.storeCaches(ctx, cfg.name, model, prompt, upstreamBody)
-		p.recordTokenEvent(ctx, cfg.name, model, prompt, upstreamBody, savingsPct)
+		if !piiDetected {
+			// Cache against the original (uncompressed) prompt + originally
+			// requested model so repeat callers get cache hits.
+			p.storeCaches(ctx, cfg.name, model, prompt, upstreamBody)
+		}
+		eventPrompt := prompt
+		if piiDetected {
+			eventPrompt = redactedPrompt
+		}
+		p.recordTokenEvent(ctx, cfg.name, model, eventPrompt, upstreamBody, savingsPct, piiDetected)
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
 	} else {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "upstream_error").Inc()
@@ -233,7 +268,7 @@ func rebuildBody(originalBody []byte, model, prompt string) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte, savingsPct float64) {
+func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte, savingsPct float64, piiDetected bool) {
 	if p.learner == nil {
 		return
 	}
@@ -248,6 +283,7 @@ func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt st
 		Cached:       false,
 		Compressed:   savingsPct > 0,
 		SavingsPct:   savingsPct,
+		PIIDetected:  piiDetected,
 	})
 }
 

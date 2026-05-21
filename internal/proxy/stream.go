@@ -32,8 +32,9 @@ func (s *StreamHandler) ServeOpenAI(
 	model string,
 	prompt string,
 	body []byte,
+	piiDetected bool,
 ) error {
-	return s.serve(w, r, provider, model, prompt, body, openAIStreamOps{
+	return s.serve(w, r, provider, model, prompt, body, piiDetected, openAIStreamOps{
 		url:     s.proxy.openAIURL,
 		setAuth: func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+s.proxy.openAIKey) },
 	})
@@ -47,8 +48,9 @@ func (s *StreamHandler) ServeAnthropic(
 	model string,
 	prompt string,
 	body []byte,
+	piiDetected bool,
 ) error {
-	return s.serve(w, r, provider, model, prompt, body, anthropicStreamOps{
+	return s.serve(w, r, provider, model, prompt, body, piiDetected, anthropicStreamOps{
 		url: s.proxy.anthropicURL,
 		setAuth: func(req *http.Request) {
 			req.Header.Set("x-api-key", s.proxy.anthropicKey)
@@ -159,6 +161,7 @@ func (s *StreamHandler) serve(
 	model string,
 	prompt string,
 	body []byte,
+	piiDetected bool,
 	ops streamOps,
 ) error {
 	// Headers must be committed BEFORE the first write/flush.
@@ -233,7 +236,13 @@ func (s *StreamHandler) serve(
 	// we already paid for the upstream call, no reason to drop the result.
 	storeCtx := context.Background()
 	cached := ops.synthesizeCachePayload(accumulated.String())
-	s.proxy.storeCaches(storeCtx, provider, model, prompt, cached)
-	s.proxy.recordTokenEvent(storeCtx, provider, model, prompt, cached, 0)
+	if !piiDetected {
+		s.proxy.storeCaches(storeCtx, provider, model, prompt, cached)
+	}
+	eventPrompt := prompt
+	if piiDetected && s.proxy.piiDetector != nil {
+		eventPrompt = s.proxy.piiDetector.Detect(prompt).Redacted
+	}
+	s.proxy.recordTokenEvent(storeCtx, provider, model, eventPrompt, cached, 0, piiDetected)
 	return nil
 }

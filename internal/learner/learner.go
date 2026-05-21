@@ -46,6 +46,7 @@ type TokenEvent struct {
 	Cached       bool      `json:"cached"`
 	Compressed   bool      `json:"compressed"`
 	SavingsPct   float64   `json:"savings_pct"`
+	PIIDetected  bool      `json:"pii_detected,omitempty"`
 	Team         string    `json:"team,omitempty"`
 	Feature      string    `json:"feature,omitempty"`
 	UserID       string    `json:"user_id,omitempty"`
