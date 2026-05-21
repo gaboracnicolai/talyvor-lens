@@ -19,6 +19,7 @@ import (
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/router"
+	"github.com/talyvor/lens/internal/templates"
 )
 
 const (
@@ -29,17 +30,18 @@ const (
 )
 
 type Proxy struct {
-	exact        *cache.ExactCache
-	semantic     *cache.SemanticCache
-	embedder     cache.Embedder
-	compressor   *compressor.Compressor
-	router       *router.Router
-	piiDetector  *pii.Detector
-	alertManager *alerts.AlertManager
-	httpClient   *http.Client
-	openAIKey    string
-	anthropicKey string
-	learner      *learner.Learner
+	exact            *cache.ExactCache
+	semantic         *cache.SemanticCache
+	embedder         cache.Embedder
+	compressor       *compressor.Compressor
+	router           *router.Router
+	piiDetector      *pii.Detector
+	alertManager     *alerts.AlertManager
+	templateDetector *templates.TemplateDetector
+	httpClient       *http.Client
+	openAIKey        string
+	anthropicKey     string
+	learner          *learner.Learner
 
 	// Upstream URLs are unexported and defaulted so tests can swap them
 	// for an httptest server without leaking config to callers.
@@ -58,23 +60,25 @@ func New(
 	routerImpl *router.Router,
 	piiDetector *pii.Detector,
 	alertManager *alerts.AlertManager,
+	templateDetector *templates.TemplateDetector,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
 ) *Proxy {
 	p := &Proxy{
-		exact:        exactCache,
-		semantic:     semanticCache,
-		embedder:     embedder,
-		compressor:   compressorImpl,
-		router:       routerImpl,
-		piiDetector:  piiDetector,
-		alertManager: alertManager,
-		httpClient:   &http.Client{Timeout: upstreamTimeout},
-		openAIKey:    openAIKey,
-		anthropicKey: anthropicKey,
-		openAIURL:    openAIChatURL,
-		anthropicURL: anthropicMessageURL,
+		exact:            exactCache,
+		semantic:         semanticCache,
+		embedder:         embedder,
+		compressor:       compressorImpl,
+		router:           routerImpl,
+		piiDetector:      piiDetector,
+		alertManager:     alertManager,
+		templateDetector: templateDetector,
+		httpClient:       &http.Client{Timeout: upstreamTimeout},
+		openAIKey:        openAIKey,
+		anthropicKey:     anthropicKey,
+		openAIURL:        openAIChatURL,
+		anthropicURL:     anthropicMessageURL,
 	}
 	if len(learners) > 0 {
 		p.learner = learners[0]
@@ -136,6 +140,30 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// manager treats empty values as a distinct attribution bucket.
 	team := r.Header.Get("X-Talyvor-Team")
 	feature := r.Header.Get("X-Talyvor-Feature")
+
+	// Template detection runs BEFORE PII detection so we count hits against
+	// the actual system prompt the caller sent. When the system prompt
+	// contains PII we record only the hash + a redacted placeholder so we
+	// never persist the raw value to prompt_templates. Once a template
+	// crosses the pin threshold we rewrite the body to opt the upstream
+	// call into Anthropic's prompt-caching feature; OpenAI caches long
+	// system prompts automatically, so its hook is a no-op.
+	if p.templateDetector != nil {
+		if sysPrompt, found := p.templateDetector.ExtractSystemPrompt(body); found {
+			contentForRecord := sysPrompt
+			if p.piiDetector != nil {
+				if rr := p.piiDetector.Detect(sysPrompt); rr.WasRedacted {
+					contentForRecord = "[REDACTED-PII]"
+				}
+			}
+			tmpl, pinned := p.templateDetector.RecordAndPin(ctx, contentForRecord, cfg.name)
+			if pinned && cfg.name == "anthropic" {
+				if rewritten, err := p.templateDetector.ApplyAnthropicCaching(body, tmpl); err == nil {
+					body = rewritten
+				}
+			}
+		}
+	}
 
 	// PII gate. When the prompt contains PII we never read from or write
 	// to the cache — one user's PII must never be served to another user.

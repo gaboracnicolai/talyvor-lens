@@ -32,6 +32,7 @@ import (
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/router"
+	"github.com/talyvor/lens/internal/templates"
 )
 
 func main() {
@@ -100,11 +101,12 @@ func run() error {
 	piiDetector := pii.New()
 	alertManager := alerts.New(pool, nc, nil) // rules loaded from DB in a future iteration
 	alertManager.StartMonitor(ctx)
+	templateDetector := templates.New(pool)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
