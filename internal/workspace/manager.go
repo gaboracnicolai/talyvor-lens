@@ -105,6 +105,19 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	return nil
 }
 
+// ListWorkspaces returns copies of every registered workspace. Used by
+// admin endpoints to surface the full tenant list.
+func (m *Manager) ListWorkspaces() []*Workspace {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*Workspace, 0, len(m.workspaces))
+	for _, ws := range m.workspaces {
+		copy := *ws
+		out = append(out, &copy)
+	}
+	return out
+}
+
 func (m *Manager) GetWorkspace(id string) (*Workspace, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

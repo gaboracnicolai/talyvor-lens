@@ -25,6 +25,7 @@ import (
 
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
@@ -142,6 +143,13 @@ func run() error {
 	})
 
 	r.Handle("/metrics", metrics.Handler())
+
+	apiServer := api.NewServer(
+		pool, redisClient, nc, exactCache, l,
+		alertManager, abTester, branchTracker, wsManager, lr,
+		"0.1.0",
+	)
+	apiServer.Mount(r)
 
 	r.Post("/v1/proxy/openai/*", p.HandleOpenAI)
 	r.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)

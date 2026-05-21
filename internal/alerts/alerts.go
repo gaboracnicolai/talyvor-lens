@@ -282,6 +282,34 @@ func (a *AlertManager) openCircuitForTest(team, feature string) {
 	a.mu.Unlock()
 }
 
+// OpenCircuit lets callers (admin endpoints, ops tooling) trip a circuit
+// breaker without waiting for spend to cross the threshold.
+func (a *AlertManager) OpenCircuit(team, feature string) {
+	a.mu.Lock()
+	a.circuits[circuitKey(team, feature)] = CircuitOpen
+	a.mu.Unlock()
+}
+
+// CircuitStates returns a copy of the current circuit-breaker states,
+// keyed by "team:feature". Each value is the string form of CircuitState.
+func (a *AlertManager) CircuitStates() map[string]string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make(map[string]string, len(a.circuits))
+	for k, v := range a.circuits {
+		out[k] = string(v)
+	}
+	return out
+}
+
+// Rules returns a copy of the configured spend rules. Rules are
+// effectively immutable after construction so we don't need a lock here.
+func (a *AlertManager) Rules() []SpendRule {
+	out := make([]SpendRule, len(a.rules))
+	copy(out, a.rules)
+	return out
+}
+
 func circuitKey(team, feature string) string {
 	return team + ":" + feature
 }
