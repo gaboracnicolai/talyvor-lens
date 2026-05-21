@@ -134,7 +134,25 @@ func NewServer(
 	})
 }
 
+// Mount registers every API route on r. Tests and simple setups use this;
+// production mounts the auth-gated subset under an authenticated chi group
+// and the public subset on the bare router via MountAuthenticated /
+// MountUnauthenticated.
 func (s *Server) Mount(r chi.Router) {
+	s.MountUnauthenticated(r)
+	s.MountAuthenticated(r)
+}
+
+// MountUnauthenticated registers the routes that must NOT require an API
+// key: health probe and the Prometheus metrics passthrough.
+func (s *Server) MountUnauthenticated(r chi.Router) {
+	r.Get("/v1/api/health", s.handleHealth)
+	r.Handle("/v1/api/metrics/prometheus", metrics.Handler())
+}
+
+// MountAuthenticated registers the routes that should sit behind
+// AuthMiddleware: all analytics, model, workspace, and alerts endpoints.
+func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/spend/summary", s.handleSpendSummary)
 	r.Get("/v1/api/spend/by-model", s.handleSpendBy("model"))
 	r.Get("/v1/api/spend/by-team", s.handleSpendBy("team"))
@@ -147,8 +165,6 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/v1/api/alerts/circuits", s.handleAlertsCircuits)
 	r.Get("/v1/api/alerts/rules", s.handleAlertsRules)
 	r.Get("/v1/api/local/status", s.handleLocalStatus)
-	r.Get("/v1/api/health", s.handleHealth)
-	r.Handle("/v1/api/metrics/prometheus", metrics.Handler())
 }
 
 // -------------------------------------------------------------------------

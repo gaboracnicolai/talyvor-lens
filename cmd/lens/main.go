@@ -27,6 +27,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/attribution"
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
@@ -130,6 +131,11 @@ func run() error {
 
 	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
+	keyStore := auth.New(pool)
+	if err := keyStore.LoadAll(ctx); err != nil {
+		logger.Warn("auth: LoadAll failed", slog.String("err", err.Error()))
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -149,159 +155,171 @@ func run() error {
 		alertManager, abTester, branchTracker, wsManager, lr,
 		"0.1.0",
 	)
-	apiServer.Mount(r)
+	// Public: health probe and Prometheus passthrough never require a key.
+	apiServer.MountUnauthenticated(r)
 
-	r.Post("/v1/proxy/openai/*", p.HandleOpenAI)
-	r.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
+	// Everything else sits behind the API-key middleware. chi.Group inherits
+	// middleware only for routes registered inside its closure.
+	r.Group(func(authed chi.Router) {
+		authed.Use(auth.AuthMiddleware(keyStore))
 
-	r.Post("/v1/workspaces", func(w http.ResponseWriter, req *http.Request) {
-		var in workspace.Workspace
-		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
-			return
-		}
-		if err := wsManager.RegisterWorkspace(req.Context(), in); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]string{"id": in.ID})
-	})
+		apiServer.MountAuthenticated(authed)
 
-	r.Get("/v1/workspaces/{wsID}", func(w http.ResponseWriter, req *http.Request) {
-		wsID := chi.URLParam(req, "wsID")
-		ws, ok := wsManager.GetWorkspace(wsID)
-		if !ok {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "workspace not found"})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(ws)
-	})
+		authed.Post("/v1/proxy/openai/*", p.HandleOpenAI)
+		authed.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
 
-	r.Get("/v1/attribution/branch", func(w http.ResponseWriter, req *http.Request) {
-		branch := req.URL.Query().Get("branch")
-		repository := req.URL.Query().Get("repository")
-		if branch == "" || repository == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "branch and repository query params required"})
-			return
-		}
-		got, err := branchTracker.GetBranchSpend(req.Context(), branch, repository)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		if got == nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "branch not found"})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(got)
-	})
-
-	r.Get("/v1/attribution/top", func(w http.ResponseWriter, req *http.Request) {
-		repository := req.URL.Query().Get("repository")
-		if repository == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "repository query param required"})
-			return
-		}
-		limit := 10
-		if l := req.URL.Query().Get("limit"); l != "" {
-			if n, err := strconv.Atoi(l); err == nil && n > 0 {
-				limit = n
+		authed.Post("/v1/api/keys", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				WorkspaceID string     `json:"workspace_id"`
+				Team        string     `json:"team"`
+				Name        string     `json:"name"`
+				ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 			}
-		}
-		if limit > 50 {
-			limit = 50
-		}
-		top, err := branchTracker.GetTopBranches(req.Context(), repository, limit)
-		if err != nil {
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
+				return
+			}
+			if in.WorkspaceID == "" {
+				in.WorkspaceID = "default"
+			}
+			raw, apiKey, err := keyStore.GenerateKey(req.Context(), in.WorkspaceID, in.Team, in.Name, in.ExpiresAt)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(top)
-	})
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"key":     raw,
+				"id":      apiKey.ID,
+				"warning": "Store this key securely. It will not be shown again.",
+			})
+		})
 
-	r.Post("/v1/ab/tests", func(w http.ResponseWriter, req *http.Request) {
-		var in ab.ABTest
-		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+		authed.Delete("/v1/api/keys/{keyID}", func(w http.ResponseWriter, req *http.Request) {
+			keyID := chi.URLParam(req, "keyID")
+			if err := keyStore.Revoke(req.Context(), keyID); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
-			return
-		}
-		if err := abTester.RegisterTest(in); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]string{"id": in.ID})
-	})
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		})
 
-	r.Get("/v1/ab/tests/{testID}", func(w http.ResponseWriter, req *http.Request) {
-		testID := chi.URLParam(req, "testID")
-		got, ok := abTester.GetResults(testID)
-		if !ok {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "test not found"})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(got)
-	})
+		authed.Post("/v1/workspaces", func(w http.ResponseWriter, req *http.Request) {
+			var in workspace.Workspace
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := wsManager.RegisterWorkspace(req.Context(), in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, map[string]string{"id": in.ID})
+		})
 
-	r.Post("/v1/feedback", func(w http.ResponseWriter, req *http.Request) {
-		var in struct {
-			PromptHash string                `json:"prompt_hash"`
-			Signal     quality.FeedbackSignal `json:"signal"`
-		}
-		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
-			return
-		}
-		if in.PromptHash == "" || in.Signal == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "prompt_hash and signal are required"})
-			return
-		}
-		if err := qualityScorer.RecordFeedback(req.Context(), in.PromptHash, in.Signal); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		authed.Get("/v1/workspaces/{wsID}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			ws, ok := wsManager.GetWorkspace(wsID)
+			if !ok {
+				writeJSONErr(w, http.StatusNotFound, "workspace not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, ws)
+		})
+
+		authed.Get("/v1/attribution/branch", func(w http.ResponseWriter, req *http.Request) {
+			branch := req.URL.Query().Get("branch")
+			repository := req.URL.Query().Get("repository")
+			if branch == "" || repository == "" {
+				writeJSONErr(w, http.StatusBadRequest, "branch and repository query params required")
+				return
+			}
+			got, err := branchTracker.GetBranchSpend(req.Context(), branch, repository)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if got == nil {
+				writeJSONErr(w, http.StatusNotFound, "branch not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, got)
+		})
+
+		authed.Get("/v1/attribution/top", func(w http.ResponseWriter, req *http.Request) {
+			repository := req.URL.Query().Get("repository")
+			if repository == "" {
+				writeJSONErr(w, http.StatusBadRequest, "repository query param required")
+				return
+			}
+			limit := 10
+			if l := req.URL.Query().Get("limit"); l != "" {
+				if n, err := strconv.Atoi(l); err == nil && n > 0 {
+					limit = n
+				}
+			}
+			if limit > 50 {
+				limit = 50
+			}
+			top, err := branchTracker.GetTopBranches(req.Context(), repository, limit)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, top)
+		})
+
+		authed.Post("/v1/ab/tests", func(w http.ResponseWriter, req *http.Request) {
+			var in ab.ABTest
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := abTester.RegisterTest(in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, map[string]string{"id": in.ID})
+		})
+
+		authed.Get("/v1/ab/tests/{testID}", func(w http.ResponseWriter, req *http.Request) {
+			testID := chi.URLParam(req, "testID")
+			got, ok := abTester.GetResults(testID)
+			if !ok {
+				writeJSONErr(w, http.StatusNotFound, "test not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, got)
+		})
+
+		authed.Post("/v1/feedback", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				PromptHash string                 `json:"prompt_hash"`
+				Signal     quality.FeedbackSignal `json:"signal"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.PromptHash == "" || in.Signal == "" {
+				writeJSONErr(w, http.StatusBadRequest, "prompt_hash and signal are required")
+				return
+			}
+			if err := qualityScorer.RecordFeedback(req.Context(), in.PromptHash, in.Signal); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
 	})
 
 	srv := &http.Server{
@@ -335,6 +353,16 @@ func run() error {
 	}
 
 	return nil
+}
+
+func writeJSONOK(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeJSONErr(w http.ResponseWriter, status int, msg string) {
+	writeJSONOK(w, status, map[string]string{"error": msg})
 }
 
 func newLogger(level string) *slog.Logger {
