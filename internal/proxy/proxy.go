@@ -134,6 +134,27 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
+	// Streaming path: detected by "stream": true in the request JSON. The
+	// stream handler forwards SSE chunks unbuffered, then caches the
+	// assembled response after the upstream stream completes. We skip the
+	// compression + routing path for streams since that would rewrite the
+	// body and break wire-compatibility with the live SSE.
+	if streamRequested(body) {
+		sh := &StreamHandler{proxy: p}
+		var serr error
+		if cfg.name == "openai" {
+			serr = sh.ServeOpenAI(w, r, cfg.name, model, prompt, body)
+		} else {
+			serr = sh.ServeAnthropic(w, r, cfg.name, model, prompt, body)
+		}
+		if serr != nil {
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "stream_error").Inc()
+			return
+		}
+		metrics.RequestsTotal.WithLabelValues(cfg.name, "streamed").Inc()
+		return
+	}
+
 	// Compress the prompt before forwarding upstream. Cache lookups above
 	// still key on the uncompressed prompt so repeat callers hit cache.
 	compressedPrompt := prompt
@@ -328,6 +349,19 @@ func extractPrompt(body []byte) (model, prompt string, err error) {
 		}
 	}
 	return req.Model, sb.String(), nil
+}
+
+// streamRequested reports whether the JSON body has "stream": true. Parse
+// errors fall back to false — the request is treated as non-streaming and
+// downstream JSON validation in extractPrompt will surface real malformations.
+func streamRequested(body []byte) bool {
+	var m struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return false
+	}
+	return m.Stream
 }
 
 func writeBytes(w http.ResponseWriter, status int, body []byte) {
