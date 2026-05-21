@@ -38,3 +38,9 @@ CREATE TABLE IF NOT EXISTS token_events (
 
 CREATE INDEX IF NOT EXISTS idx_token_events_created
   ON token_events(created_at DESC);
+
+ALTER TABLE token_events
+  ADD COLUMN IF NOT EXISTS prompt_hash TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_token_events_prompt_hash
+  ON token_events(prompt_hash);

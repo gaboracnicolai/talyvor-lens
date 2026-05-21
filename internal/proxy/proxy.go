@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/metrics"
 )
 
@@ -29,6 +30,7 @@ type Proxy struct {
 	httpClient   *http.Client
 	openAIKey    string
 	anthropicKey string
+	learner      *learner.Learner
 
 	// Upstream URLs are unexported and defaulted so tests can swap them
 	// for an httptest server without leaking config to callers.
@@ -36,14 +38,18 @@ type Proxy struct {
 	anthropicURL string
 }
 
+// New constructs a Proxy. The learner is variadic so existing callers and
+// tests that don't need usage analytics still compile; production wires
+// a *learner.Learner as the last argument.
 func New(
 	exactCache *cache.ExactCache,
 	semanticCache *cache.SemanticCache,
 	embedder cache.Embedder,
 	openAIKey string,
 	anthropicKey string,
+	learners ...*learner.Learner,
 ) *Proxy {
-	return &Proxy{
+	p := &Proxy{
 		exact:        exactCache,
 		semantic:     semanticCache,
 		embedder:     embedder,
@@ -53,6 +59,10 @@ func New(
 		openAIURL:    openAIChatURL,
 		anthropicURL: anthropicMessageURL,
 	}
+	if len(learners) > 0 {
+		p.learner = learners[0]
+	}
+	return p
 }
 
 // providerConfig holds the per-provider knobs HandleOpenAI/HandleAnthropic
@@ -132,10 +142,28 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 
 	if upstreamResp.StatusCode == http.StatusOK {
 		p.storeCaches(ctx, cfg.name, model, prompt, upstreamBody)
+		p.recordTokenEvent(ctx, cfg.name, model, prompt, upstreamBody)
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
 	} else {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "upstream_error").Inc()
 	}
+}
+
+func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte) {
+	if p.learner == nil {
+		return
+	}
+	// len/4 is the same token approximation the router and compressor use.
+	_ = p.learner.Record(ctx, learner.TokenEvent{
+		Provider:     provider,
+		Model:        model,
+		Prompt:       prompt,
+		Response:     string(response),
+		InputTokens:  len(prompt) / 4,
+		OutputTokens: len(response) / 4,
+		Cached:       false,
+		Compressed:   false,
+	})
 }
 
 func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []byte {
