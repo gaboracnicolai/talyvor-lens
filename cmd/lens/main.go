@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
@@ -106,11 +108,12 @@ func run() error {
 	templateDetector := templates.New(pool)
 	qualityScorer := quality.New(pool)
 	abTester := ab.New(pool, qualityScorer)
+	branchTracker := attribution.New(pool)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -128,6 +131,62 @@ func run() error {
 
 	r.Post("/v1/proxy/openai/*", p.HandleOpenAI)
 	r.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
+
+	r.Get("/v1/attribution/branch", func(w http.ResponseWriter, req *http.Request) {
+		branch := req.URL.Query().Get("branch")
+		repository := req.URL.Query().Get("repository")
+		if branch == "" || repository == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "branch and repository query params required"})
+			return
+		}
+		got, err := branchTracker.GetBranchSpend(req.Context(), branch, repository)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if got == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "branch not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(got)
+	})
+
+	r.Get("/v1/attribution/top", func(w http.ResponseWriter, req *http.Request) {
+		repository := req.URL.Query().Get("repository")
+		if repository == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "repository query param required"})
+			return
+		}
+		limit := 10
+		if l := req.URL.Query().Get("limit"); l != "" {
+			if n, err := strconv.Atoi(l); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if limit > 50 {
+			limit = 50
+		}
+		top, err := branchTracker.GetTopBranches(req.Context(), repository, limit)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(top)
+	})
 
 	r.Post("/v1/ab/tests", func(w http.ResponseWriter, req *http.Request) {
 		var in ab.ABTest

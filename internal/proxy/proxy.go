@@ -15,6 +15,7 @@ import (
 
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/learner"
@@ -43,6 +44,7 @@ type Proxy struct {
 	templateDetector *templates.TemplateDetector
 	scorer           *quality.Scorer
 	abTester         *ab.Tester
+	tracker          *attribution.Tracker
 	httpClient       *http.Client
 	openAIKey        string
 	anthropicKey     string
@@ -68,6 +70,7 @@ func New(
 	templateDetector *templates.TemplateDetector,
 	scorer *quality.Scorer,
 	abTester *ab.Tester,
+	tracker *attribution.Tracker,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -83,6 +86,7 @@ func New(
 		templateDetector: templateDetector,
 		scorer:           scorer,
 		abTester:         abTester,
+		tracker:          tracker,
 		httpClient:       &http.Client{Timeout: upstreamTimeout},
 		openAIKey:        openAIKey,
 		anthropicKey:     anthropicKey,
@@ -149,6 +153,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// manager treats empty values as a distinct attribution bucket.
 	team := r.Header.Get("X-Talyvor-Team")
 	feature := r.Header.Get("X-Talyvor-Feature")
+
+	// Branch / PR / commit attribution. Extracted up front so we can set
+	// response headers before WriteHeader; the actual DB write happens
+	// after the response body is sent so a slow INSERT can't hold up the
+	// client.
+	var attr attribution.Attribution
+	if p.tracker != nil {
+		attr = p.tracker.ExtractAttribution(r)
+	}
+	willAttribute := p.tracker != nil && (attr.Branch != "" || attr.PRNumber != "")
 
 	// Template detection runs BEFORE PII detection so we count hits against
 	// the actual system prompt the caller sent. When the system prompt
@@ -303,6 +317,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if qualityScore != nil {
 		w.Header().Set("X-Talyvor-Quality-Score", strconv.FormatFloat(qualityScore.Score, 'f', 2, 64))
 	}
+	if attr.Branch != "" {
+		w.Header().Set("X-Talyvor-Branch", attr.Branch)
+	}
+	if willAttribute {
+		w.Header().Set("X-Talyvor-Attributed", "true")
+	}
 	if ct := upstreamResp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
@@ -331,10 +351,21 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// LLM (the upstream model, after any router or circuit override).
 		// Fire-and-forget — alert manager failures must never break a
 		// successful request.
+		inT, outT := len(prompt)/4, len(upstreamBody)/4
 		if p.alertManager != nil {
-			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel,
-				len(prompt)/4, len(upstreamBody)/4); err != nil {
+			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel, inT, outT); err != nil {
 				slog.Warn("alerts: RecordSpend failed",
+					slog.String("err", err.Error()),
+				)
+			}
+		}
+		// Branch / PR attribution is also best-effort: DB errors here must
+		// not propagate to the caller. The cost is computed against the
+		// upstream model so the same number lands in alerts and attribution.
+		if willAttribute {
+			cost := alerts.CostUSD(upstreamModel, inT, outT)
+			if err := p.tracker.Record(ctx, attr, upstreamModel, inT, outT, cost); err != nil {
+				slog.Warn("attribution: Record failed",
 					slog.String("err", err.Error()),
 				)
 			}
