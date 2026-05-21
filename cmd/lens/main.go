@@ -22,6 +22,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
+	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
@@ -104,11 +105,12 @@ func run() error {
 	alertManager.StartMonitor(ctx)
 	templateDetector := templates.New(pool)
 	qualityScorer := quality.New(pool)
+	abTester := ab.New(pool, qualityScorer)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -126,6 +128,39 @@ func run() error {
 
 	r.Post("/v1/proxy/openai/*", p.HandleOpenAI)
 	r.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
+
+	r.Post("/v1/ab/tests", func(w http.ResponseWriter, req *http.Request) {
+		var in ab.ABTest
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if err := abTester.RegisterTest(in); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": in.ID})
+	})
+
+	r.Get("/v1/ab/tests/{testID}", func(w http.ResponseWriter, req *http.Request) {
+		testID := chi.URLParam(req, "testID")
+		got, ok := abTester.GetResults(testID)
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "test not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(got)
+	})
 
 	r.Post("/v1/feedback", func(w http.ResponseWriter, req *http.Request) {
 		var in struct {

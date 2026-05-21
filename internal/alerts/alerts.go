@@ -106,6 +106,13 @@ func costUSD(model string, inputTokens, outputTokens int) float64 {
 	return (float64(inputTokens)*p.inputPerMillion + float64(outputTokens)*p.outputPerMillion) / 1_000_000
 }
 
+// CostUSD is the exported entry point on the per-million-token price table.
+// Other packages (e.g. the A/B tester) call this so there's a single source
+// of truth for model pricing across the system.
+func CostUSD(model string, inputTokens, outputTokens int) float64 {
+	return costUSD(model, inputTokens, outputTokens)
+}
+
 // providerForModel derives the provider name from the model name. Used so
 // the (provider, model) pair stays consistent in token_events even when the
 // caller only supplies the model.

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
@@ -41,6 +42,7 @@ type Proxy struct {
 	alertManager     *alerts.AlertManager
 	templateDetector *templates.TemplateDetector
 	scorer           *quality.Scorer
+	abTester         *ab.Tester
 	httpClient       *http.Client
 	openAIKey        string
 	anthropicKey     string
@@ -65,6 +67,7 @@ func New(
 	alertManager *alerts.AlertManager,
 	templateDetector *templates.TemplateDetector,
 	scorer *quality.Scorer,
+	abTester *ab.Tester,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -79,6 +82,7 @@ func New(
 		alertManager:     alertManager,
 		templateDetector: templateDetector,
 		scorer:           scorer,
+		abTester:         abTester,
 		httpClient:       &http.Client{Timeout: upstreamTimeout},
 		openAIKey:        openAIKey,
 		anthropicKey:     anthropicKey,
@@ -335,6 +339,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				)
 			}
 		}
+		p.launchABShadows(cfg.name, model, prompt, body)
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
 	} else {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "upstream_error").Inc()
@@ -354,6 +359,47 @@ func rebuildBody(originalBody []byte, model, prompt string) ([]byte, error) {
 		{"role": "user", "content": prompt},
 	}
 	return json.Marshal(m)
+}
+
+// launchABShadows fans out shadow probes for every active A/B test that
+// targets the (provider, requestedModel) pair. Each probe runs in its own
+// goroutine against a fresh background context — never blocks the main
+// response, never caches the result, never logs prompt content.
+func (p *Proxy) launchABShadows(provider, model, prompt string, body []byte) {
+	if p.abTester == nil {
+		return
+	}
+	matching := p.abTester.ActiveTestsFor(provider, model)
+	for _, test := range matching {
+		if !p.abTester.ShouldShadow(test.ID) {
+			continue
+		}
+		apiKey := p.openAIKey
+		if test.Provider == "anthropic" {
+			apiKey = p.anthropicKey
+		}
+		testID := test.ID
+		// Copy body so a concurrent rebuild upstream can't mutate what
+		// the goroutine reads.
+		bodyCopy := append([]byte(nil), body...)
+		go func() {
+			sctx := context.Background()
+			result, err := p.abTester.RunShadow(sctx, testID, prompt, bodyCopy, p.httpClient, apiKey)
+			if err != nil {
+				slog.Warn("ab: shadow probe failed",
+					slog.String("test_id", testID),
+					slog.String("err", err.Error()),
+				)
+				return
+			}
+			if err := p.abTester.RecordResult(sctx, testID, result.Model, *result); err != nil {
+				slog.Warn("ab: RecordResult failed",
+					slog.String("test_id", testID),
+					slog.String("err", err.Error()),
+				)
+			}
+		}()
+	}
 }
 
 func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte, savingsPct float64, piiDetected bool) {
