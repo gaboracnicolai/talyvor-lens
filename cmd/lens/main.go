@@ -32,6 +32,7 @@ import (
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/embedder"
+	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/metrics"
@@ -126,11 +127,12 @@ func run() error {
 
 	lr := localrouter.New(cfg.OllamaURL)
 	go lr.StartHealthCheck(ctx)
+	injectionDetector := injection.New(injection.DefaultPolicy())
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -203,6 +205,21 @@ func run() error {
 				"id":      apiKey.ID,
 				"warning": "Store this key securely. It will not be shown again.",
 			})
+		})
+
+		authed.Post("/v1/api/injection/patterns", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				Pattern string `json:"pattern"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := injectionDetector.AddPattern(in.Pattern); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, map[string]bool{"ok": true})
 		})
 
 		authed.Delete("/v1/api/keys/{keyID}", func(w http.ResponseWriter, req *http.Request) {

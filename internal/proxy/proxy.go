@@ -20,6 +20,7 @@ import (
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
+	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/metrics"
@@ -50,10 +51,11 @@ type Proxy struct {
 	templateDetector *templates.TemplateDetector
 	scorer           *quality.Scorer
 	abTester         *ab.Tester
-	tracker          *attribution.Tracker
-	workspaceManager *workspace.Manager
-	localRouter      *localrouter.LocalRouter
-	httpClient       *http.Client
+	tracker           *attribution.Tracker
+	workspaceManager  *workspace.Manager
+	localRouter       *localrouter.LocalRouter
+	injectionDetector *injection.Detector
+	httpClient        *http.Client
 	openAIKey        string
 	anthropicKey     string
 	learner          *learner.Learner
@@ -81,6 +83,7 @@ func New(
 	tracker *attribution.Tracker,
 	workspaceManager *workspace.Manager,
 	localRouter *localrouter.LocalRouter,
+	injectionDetector *injection.Detector,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -97,9 +100,10 @@ func New(
 		scorer:           scorer,
 		abTester:         abTester,
 		tracker:          tracker,
-		workspaceManager: workspaceManager,
-		localRouter:      localRouter,
-		httpClient:       &http.Client{Timeout: upstreamTimeout},
+		workspaceManager:  workspaceManager,
+		localRouter:       localRouter,
+		injectionDetector: injectionDetector,
+		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:        openAIKey,
 		anthropicKey:     anthropicKey,
 		openAIURL:        openAIChatURL,
@@ -238,6 +242,38 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				slog.Any("types", piiTypes),
 			)
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "pii_skip_cache").Inc()
+		}
+	}
+
+	// Prompt-injection check. Runs after PII (which may have edited the
+	// prompt for caching purposes) but on the ORIGINAL prompt the user
+	// sent — we want to detect attempted injections regardless of what
+	// the cache key looks like. Block stops the request before anything
+	// reaches the LLM; Warn just stamps a header and logs the patterns.
+	if p.injectionDetector != nil {
+		ir := p.injectionDetector.Detect(prompt)
+		switch ir.Action {
+		case injection.ActionBlock:
+			slog.Warn("proxy: injection blocked",
+				slog.String("provider", cfg.name),
+				slog.Any("patterns", ir.Patterns),
+				slog.Float64("risk_score", ir.RiskScore),
+			)
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "injection_blocked").Inc()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":      "prompt injection detected",
+				"risk_score": ir.RiskScore,
+			})
+			return
+		case injection.ActionWarn:
+			slog.Warn("proxy: injection warning",
+				slog.String("provider", cfg.name),
+				slog.Any("patterns", ir.Patterns),
+				slog.Float64("risk_score", ir.RiskScore),
+			)
+			w.Header().Set("X-Talyvor-Injection-Warning", "true")
 		}
 	}
 
