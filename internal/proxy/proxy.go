@@ -18,6 +18,7 @@ import (
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/attribution"
+	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/injection"
@@ -55,6 +56,7 @@ type Proxy struct {
 	workspaceManager  *workspace.Manager
 	localRouter       *localrouter.LocalRouter
 	injectionDetector *injection.Detector
+	budgetEnforcer    *budget.Enforcer
 	httpClient        *http.Client
 	openAIKey        string
 	anthropicKey     string
@@ -84,6 +86,7 @@ func New(
 	workspaceManager *workspace.Manager,
 	localRouter *localrouter.LocalRouter,
 	injectionDetector *injection.Detector,
+	budgetEnforcer *budget.Enforcer,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -103,6 +106,7 @@ func New(
 		workspaceManager:  workspaceManager,
 		localRouter:       localRouter,
 		injectionDetector: injectionDetector,
+		budgetEnforcer:    budgetEnforcer,
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:        openAIKey,
 		anthropicKey:     anthropicKey,
@@ -274,6 +278,21 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				slog.Float64("risk_score", ir.RiskScore),
 			)
 			w.Header().Set("X-Talyvor-Injection-Warning", "true")
+		}
+	}
+
+	// Token-budget enforcement: rewrite the body in place so max_tokens
+	// honours the workspace's policy before anything reaches the LLM.
+	// Parse errors leave the body untouched — extractPrompt below would
+	// have surfaced the same problem anyway.
+	if p.budgetEnforcer != nil {
+		if newBody, br, err := p.budgetEnforcer.EnforceOnBody(ctx, wsID, body); err == nil && br.Rewritten {
+			body = newBody
+			w.Header().Set("X-Talyvor-Budget-Applied", "true")
+			slog.Info("proxy: budget enforced",
+				slog.String("workspace_id", wsID),
+				slog.String("reason", br.Reason),
+			)
 		}
 	}
 

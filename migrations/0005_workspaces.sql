@@ -16,3 +16,9 @@ ALTER TABLE token_events
 
 CREATE INDEX IF NOT EXISTS idx_token_events_workspace
   ON token_events(workspace_id, created_at DESC);
+
+ALTER TABLE workspaces
+  ADD COLUMN IF NOT EXISTS max_output_tokens INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE workspaces
+  ADD COLUMN IF NOT EXISTS max_input_tokens INTEGER NOT NULL DEFAULT 0;

@@ -28,6 +28,7 @@ import (
 	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
@@ -128,11 +129,12 @@ func run() error {
 	lr := localrouter.New(cfg.OllamaURL)
 	go lr.StartHealthCheck(ctx)
 	injectionDetector := injection.New(injection.DefaultPolicy())
+	budgetEnforcer := budget.New(pool, budget.BudgetPolicy{MaxOutputTokens: 4096})
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {

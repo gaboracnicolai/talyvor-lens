@@ -39,6 +39,8 @@ type Workspace struct {
 	AllowedModels       []string  `json:"allowed_models"`
 	AllowedProviders    []string  `json:"allowed_providers"`
 	MaxTokensPerRequest int       `json:"max_tokens_per_request"`
+	MaxOutputTokens     int       `json:"max_output_tokens"`
+	MaxInputTokens      int       `json:"max_input_tokens"`
 	Active              bool      `json:"active"`
 	CreatedAt           time.Time `json:"created_at"`
 }
@@ -63,8 +65,9 @@ func New(pool *pgxpool.Pool) *Manager {
 
 const insertWorkspaceSQL = `INSERT INTO workspaces (
   id, name, cache_prefix, spend_limit_usd,
-  allowed_models, allowed_providers, max_tokens_per_request, active
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  allowed_models, allowed_providers, max_tokens_per_request,
+  max_output_tokens, max_input_tokens, active
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (id) DO UPDATE SET
   name                   = EXCLUDED.name,
   cache_prefix           = EXCLUDED.cache_prefix,
@@ -72,6 +75,8 @@ ON CONFLICT (id) DO UPDATE SET
   allowed_models         = EXCLUDED.allowed_models,
   allowed_providers      = EXCLUDED.allowed_providers,
   max_tokens_per_request = EXCLUDED.max_tokens_per_request,
+  max_output_tokens      = EXCLUDED.max_output_tokens,
+  max_input_tokens       = EXCLUDED.max_input_tokens,
   active                 = EXCLUDED.active,
   updated_at             = NOW()`
 
@@ -97,7 +102,8 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	if m.pool != nil {
 		if _, err := m.pool.Exec(ctx, insertWorkspaceSQL,
 			stored.ID, stored.Name, stored.CachePrefix, stored.SpendLimitUSD,
-			stored.AllowedModels, stored.AllowedProviders, stored.MaxTokensPerRequest, stored.Active,
+			stored.AllowedModels, stored.AllowedProviders, stored.MaxTokensPerRequest,
+			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active,
 		); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
 		}
@@ -237,7 +243,8 @@ func (m *Manager) ScopedCacheKey(wsID, baseKey string) string {
 }
 
 const loadAllSQL = `SELECT id, name, cache_prefix, spend_limit_usd,
-  allowed_models, allowed_providers, max_tokens_per_request, active, created_at
+  allowed_models, allowed_providers, max_tokens_per_request,
+  max_output_tokens, max_input_tokens, active, created_at
 FROM workspaces
 WHERE active = true`
 
@@ -257,7 +264,8 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 		var ws Workspace
 		if err := rows.Scan(
 			&ws.ID, &ws.Name, &ws.CachePrefix, &ws.SpendLimitUSD,
-			&ws.AllowedModels, &ws.AllowedProviders, &ws.MaxTokensPerRequest, &ws.Active, &ws.CreatedAt,
+			&ws.AllowedModels, &ws.AllowedProviders, &ws.MaxTokensPerRequest,
+			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &ws.CreatedAt,
 		); err != nil {
 			return fmt.Errorf("workspace: scan: %w", err)
 		}
