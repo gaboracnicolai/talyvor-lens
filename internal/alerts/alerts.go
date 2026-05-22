@@ -103,6 +103,12 @@ var modelPrices = map[string]modelPrice{
 	"claude-opus-4-6":   {15.00, 75.00},
 	"claude-sonnet-4-6": {3.00, 15.00},
 	"claude-haiku-4-6":  {0.80, 4.00},
+	// Google Gemini
+	"gemini-2.5-pro":   {1.25, 10.00},
+	"gemini-2.5-flash": {0.075, 0.30},
+	"gemini-2.0-flash": {0.10, 0.40},
+	"gemini-1.5-pro":   {1.25, 5.00},
+	"gemini-1.5-flash": {0.075, 0.30},
 }
 
 // costUSD returns the realized USD cost for the request. Unknown models
@@ -128,6 +134,9 @@ func CostUSD(model string, inputTokens, outputTokens int) float64 {
 func providerForModel(model string) string {
 	if strings.HasPrefix(model, "claude-") {
 		return "anthropic"
+	}
+	if strings.HasPrefix(model, "gemini-") {
+		return "google"
 	}
 	if _, ok := modelPrices[model]; ok {
 		return "openai"

@@ -15,6 +15,7 @@ type Config struct {
 	NatsURL           string
 	OpenAIAPIKey      string
 	AnthropicAPIKey   string
+	GoogleAPIKey      string
 	EmbeddingModel    string
 	SemanticThreshold float64
 	MaxCacheTTL       time.Duration
@@ -30,6 +31,7 @@ func Load() (*Config, error) {
 		NatsURL:           os.Getenv("LENS_NATS_URL"),
 		OpenAIAPIKey:      os.Getenv("LENS_OPENAI_API_KEY"),
 		AnthropicAPIKey:   os.Getenv("LENS_ANTHROPIC_API_KEY"),
+		GoogleAPIKey:      os.Getenv("LENS_GOOGLE_API_KEY"),
 		EmbeddingModel:    getEnv("LENS_EMBEDDING_MODEL", "text-embedding-3-small"),
 		SemanticThreshold: 0.92,
 		MaxCacheTTL:       24 * time.Hour,

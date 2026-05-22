@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -41,11 +42,12 @@ import (
 )
 
 const (
-	maxBodyBytes        = 4 << 20 // 4 MiB
-	openAIChatURL       = "https://api.openai.com/v1/chat/completions"
-	anthropicMessageURL = "https://api.anthropic.com/v1/messages"
-	upstreamTimeout     = 120 * time.Second
-	defaultWorkspaceID  = "default"
+	maxBodyBytes                  = 4 << 20 // 4 MiB
+	openAIChatURL                 = "https://api.openai.com/v1/chat/completions"
+	anthropicMessageURL           = "https://api.anthropic.com/v1/messages"
+	googleGenerativeLanguageURL   = "https://generativelanguage.googleapis.com"
+	upstreamTimeout               = 120 * time.Second
+	defaultWorkspaceID            = "default"
 )
 
 type Proxy struct {
@@ -66,14 +68,16 @@ type Proxy struct {
 	budgetEnforcer    *budget.Enforcer
 	batchRouter       *batch.BatchRouter
 	httpClient        *http.Client
-	openAIKey        string
-	anthropicKey     string
-	learner          *learner.Learner
+	openAIKey         string
+	anthropicKey      string
+	googleKey         string
+	learner           *learner.Learner
 
 	// Upstream URLs are unexported and defaulted so tests can swap them
 	// for an httptest server without leaking config to callers.
 	openAIURL    string
 	anthropicURL string
+	googleURL    string
 }
 
 // New constructs a Proxy. The learner is variadic so callers that don't
@@ -98,6 +102,7 @@ func New(
 	batchRouter *batch.BatchRouter,
 	openAIKey string,
 	anthropicKey string,
+	googleKey string,
 	learners ...*learner.Learner,
 ) *Proxy {
 	p := &Proxy{
@@ -118,10 +123,12 @@ func New(
 		budgetEnforcer:    budgetEnforcer,
 		batchRouter:       batchRouter,
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
-		openAIKey:        openAIKey,
-		anthropicKey:     anthropicKey,
-		openAIURL:        openAIChatURL,
-		anthropicURL:     anthropicMessageURL,
+		openAIKey:         openAIKey,
+		anthropicKey:      anthropicKey,
+		googleKey:         googleKey,
+		openAIURL:         openAIChatURL,
+		anthropicURL:      anthropicMessageURL,
+		googleURL:         googleGenerativeLanguageURL,
 	}
 	if len(learners) > 0 {
 		p.learner = learners[0]
@@ -129,18 +136,21 @@ func New(
 	return p
 }
 
-// providerConfig holds the per-provider knobs HandleOpenAI/HandleAnthropic
-// differ on. Everything else is shared in serve().
+// providerConfig holds the per-provider knobs HandleOpenAI/HandleAnthropic/
+// HandleGoogle differ on. Everything else is shared in serve(). The URL
+// is a function of the model so Gemini's path-style routing fits cleanly.
 type providerConfig struct {
-	name        string
-	upstreamURL string
-	setAuth     func(*http.Request)
+	name              string
+	upstreamURLFn     func(model string) string
+	setAuth           func(*http.Request)
+	translateRequest  func(body []byte) ([]byte, error)
+	translateResponse func(body []byte, model string) ([]byte, error)
 }
 
 func (p *Proxy) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 	p.serve(w, r, providerConfig{
-		name:        "openai",
-		upstreamURL: p.openAIURL,
+		name:          "openai",
+		upstreamURLFn: func(string) string { return p.openAIURL },
 		setAuth: func(req *http.Request) {
 			req.Header.Set("Authorization", "Bearer "+p.openAIKey)
 		},
@@ -149,12 +159,38 @@ func (p *Proxy) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 	p.serve(w, r, providerConfig{
-		name:        "anthropic",
-		upstreamURL: p.anthropicURL,
+		name:          "anthropic",
+		upstreamURLFn: func(string) string { return p.anthropicURL },
 		setAuth: func(req *http.Request) {
 			req.Header.Set("x-api-key", p.anthropicKey)
 			req.Header.Set("anthropic-version", "2023-06-01")
 		},
+	})
+}
+
+// HandleGoogle proxies an OpenAI-shaped request through to Gemini's
+// generateContent endpoint, translating the body in and the response
+// back out so downstream caching / scoring / cost-attribution code
+// treats the request indistinguishably from OpenAI or Anthropic.
+func (p *Proxy) HandleGoogle(w http.ResponseWriter, r *http.Request) {
+	if p.googleKey == "" {
+		writeError(w, http.StatusServiceUnavailable, "Google API key not configured")
+		return
+	}
+	p.serve(w, r, providerConfig{
+		name: "google",
+		upstreamURLFn: func(model string) string {
+			return p.googleURL + "/v1beta/models/" + model + ":generateContent?key=" + url.QueryEscape(p.googleKey)
+		},
+		// Gemini uses ?key=<value>; nothing to set on the request headers.
+		setAuth: func(*http.Request) {},
+		// Adapter drops the model return value — serve() already has the
+		// upstream model in scope; we only need the translated body here.
+		translateRequest: func(body []byte) ([]byte, error) {
+			out, _, err := translateToGemini(body)
+			return out, err
+		},
+		translateResponse: translateFromGemini,
 	})
 }
 
@@ -483,14 +519,44 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
+	// Per-provider request translation. For OpenAI/Anthropic this is a
+	// no-op; for Gemini it converts the OpenAI-shaped body into Gemini's
+	// generateContent payload. The translated body is only what hits the
+	// upstream — internal cache / scoring still see the original.
+	sendBody := upstreamBodyOut
+	if cfg.translateRequest != nil {
+		translated, err := cfg.translateRequest(upstreamBodyOut)
+		if err != nil {
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			writeError(w, http.StatusBadGateway, "request translation failed: "+err.Error())
+			return
+		}
+		sendBody = translated
+	}
+
 	span.AddEvent("llm.forward.start")
-	upstreamResp, upstreamBody, attempts, err := p.forward(ctx, r, upstreamBodyOut, cfg)
+	upstreamResp, upstreamBody, attempts, err := p.forward(ctx, r, sendBody, upstreamModel, cfg)
 	if err != nil {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+err.Error())
 		return
+	}
+	// Reverse-translate the response so everything downstream (cache,
+	// scoring, recordTokenEvent) operates on the OpenAI shape.
+	if cfg.translateResponse != nil && upstreamResp.StatusCode == http.StatusOK {
+		translated, terr := cfg.translateResponse(upstreamBody, upstreamModel)
+		if terr != nil {
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
+			span.RecordError(terr)
+			span.SetStatus(codes.Error, terr.Error())
+			writeError(w, http.StatusBadGateway, "response translation failed: "+terr.Error())
+			return
+		}
+		upstreamBody = translated
 	}
 
 	// Score the response so we can gate caching on quality. Scoring is
@@ -772,9 +838,10 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, prompt string,
 // up. The closure builds a fresh request each attempt (bytes.NewReader
 // keeps the body re-readable). Returns the final response, its body,
 // the attempt count, and any non-retryable error.
-func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, cfg providerConfig) (*http.Response, []byte, int, error) {
+func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model string, cfg providerConfig) (*http.Response, []byte, int, error) {
+	upstreamURL := cfg.upstreamURLFn(model)
 	result := retry.Do(ctx, retry.DefaultConfig(), func(c context.Context) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(c, http.MethodPost, cfg.upstreamURL, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(c, http.MethodPost, upstreamURL, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("build upstream request: %w", err)
 		}

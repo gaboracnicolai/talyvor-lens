@@ -51,6 +51,12 @@ var modelRanks = map[string]modelInfo{
 	"claude-sonnet-4-6": {"anthropic", 3},
 	"claude-opus-4-5":   {"anthropic", 4},
 	"claude-opus-4-6":   {"anthropic", 5},
+	// Google, cheapest first.
+	"gemini-1.5-flash": {"google", 0},
+	"gemini-2.0-flash": {"google", 1},
+	"gemini-2.5-flash": {"google", 2},
+	"gemini-1.5-pro":   {"google", 3},
+	"gemini-2.5-pro":   {"google", 4},
 }
 
 // explicitCheapModels is the fast-path set for "the caller asked for a
@@ -63,6 +69,9 @@ var explicitCheapModels = map[string]struct{}{
 	"gpt-5.4-mini":     {},
 	"claude-haiku-4-5": {},
 	"claude-haiku-4-6": {},
+	"gemini-2.5-flash": {},
+	"gemini-2.0-flash": {},
+	"gemini-1.5-flash": {},
 }
 
 func (r *Router) Route(_ context.Context, provider, requestedModel, prompt string) RoutingDecision {
@@ -75,7 +84,7 @@ func (r *Router) Route(_ context.Context, provider, requestedModel, prompt strin
 		}
 	}
 
-	if provider != "openai" && provider != "anthropic" {
+	if provider != "openai" && provider != "anthropic" && provider != "google" {
 		return RoutingDecision{
 			Provider: "openai",
 			Model:    "gpt-4o-mini",
@@ -102,9 +111,12 @@ func cheap(provider string) RoutingDecision {
 		Reason:   "Simple query — routed to cost-efficient model",
 		CostTier: "cheap",
 	}
-	if provider == "anthropic" {
+	switch provider {
+	case "anthropic":
 		d.Model = "claude-haiku-4-6"
-	} else {
+	case "google":
+		d.Model = "gemini-2.5-flash"
+	default:
 		d.Model = "gpt-4o-mini"
 	}
 	return d
@@ -116,9 +128,13 @@ func mid(provider string) RoutingDecision {
 		Reason:   "Moderate complexity — balanced model selected",
 		CostTier: "mid",
 	}
-	if provider == "anthropic" {
+	switch provider {
+	case "anthropic":
 		d.Model = "claude-sonnet-4-6"
-	} else {
+	case "google":
+		// No distinct mid tier on Gemini yet — flash handles it.
+		d.Model = "gemini-2.5-flash"
+	default:
 		d.Model = "gpt-4.1"
 	}
 	return d
@@ -130,9 +146,12 @@ func premium(provider string) RoutingDecision {
 		Reason:   "High complexity — premium model required",
 		CostTier: "premium",
 	}
-	if provider == "anthropic" {
+	switch provider {
+	case "anthropic":
 		d.Model = "claude-opus-4-6"
-	} else {
+	case "google":
+		d.Model = "gemini-2.5-pro"
+	default:
 		d.Model = "gpt-5.4"
 	}
 	return d

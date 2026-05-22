@@ -144,7 +144,7 @@ func run() error {
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -193,6 +193,7 @@ func run() error {
 
 		authed.Post("/v1/proxy/openai/*", p.HandleOpenAI)
 		authed.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
+		authed.Post("/v1/proxy/google/*", p.HandleGoogle)
 
 		authed.Post("/v1/api/keys", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
