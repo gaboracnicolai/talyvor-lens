@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+
+	"github.com/talyvor/lens/internal/retry"
 )
 
 const (
@@ -172,26 +175,30 @@ func (s *StreamHandler) serve(
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, ops.upstreamURL(), bytes.NewReader(body))
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "build upstream request: "+err.Error())
-		return err
-	}
-	for name, values := range r.Header {
-		if strings.EqualFold(name, "Host") {
-			continue
+	// Retry the initial upstream call on transient failures. Once we
+	// commit to streaming (after WriteHeader below) there's no second
+	// chance, so retries only cover the connection-establishment phase.
+	result := retry.Do(r.Context(), retry.DefaultConfig(), func(c context.Context) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(c, http.MethodPost, ops.upstreamURL(), bytes.NewReader(body))
+		if err != nil {
+			return nil, err
 		}
-		for _, v := range values {
-			upstreamReq.Header.Add(name, v)
+		for name, values := range r.Header {
+			if strings.EqualFold(name, "Host") {
+				continue
+			}
+			for _, v := range values {
+				req.Header.Add(name, v)
+			}
 		}
+		ops.applyAuth(req)
+		return s.proxy.httpClient.Do(req)
+	})
+	if result.LastError != nil {
+		writeError(w, http.StatusBadGateway, "upstream LLM error: "+result.LastError.Error())
+		return result.LastError
 	}
-	ops.applyAuth(upstreamReq)
-
-	resp, err := s.proxy.httpClient.Do(upstreamReq)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "upstream LLM error: "+err.Error())
-		return err
-	}
+	resp := result.Response
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -201,6 +208,9 @@ func (s *StreamHandler) serve(
 		return fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
 
+	if result.Attempts > 1 {
+		w.Header().Set("X-Talyvor-Attempts", strconv.Itoa(result.Attempts))
+	}
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 

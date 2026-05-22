@@ -23,6 +23,7 @@ import (
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/quality"
+	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/workspace"
@@ -320,7 +321,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
-	upstreamResp, upstreamBody, err := p.forward(ctx, r, upstreamBodyOut, cfg)
+	upstreamResp, upstreamBody, attempts, err := p.forward(ctx, r, upstreamBodyOut, cfg)
 	if err != nil {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+err.Error())
@@ -357,6 +358,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	}
 	if willAttribute {
 		w.Header().Set("X-Talyvor-Attributed", "true")
+	}
+	if attempts > 1 {
+		w.Header().Set("X-Talyvor-Attempts", strconv.Itoa(attempts))
 	}
 	if ct := upstreamResp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
@@ -580,33 +584,39 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, prompt string,
 	}
 }
 
-func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, cfg providerConfig) (*http.Response, []byte, error) {
-	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.upstreamURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, nil, fmt.Errorf("build upstream request: %w", err)
-	}
-
-	for name, values := range r.Header {
-		if strings.EqualFold(name, "Host") {
-			continue
+// forward wraps the upstream call in retry.Do so transient 429/5xx
+// responses are retried with exponential backoff before the proxy gives
+// up. The closure builds a fresh request each attempt (bytes.NewReader
+// keeps the body re-readable). Returns the final response, its body,
+// the attempt count, and any non-retryable error.
+func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, cfg providerConfig) (*http.Response, []byte, int, error) {
+	result := retry.Do(ctx, retry.DefaultConfig(), func(c context.Context) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(c, http.MethodPost, cfg.upstreamURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("build upstream request: %w", err)
 		}
-		for _, v := range values {
-			upstreamReq.Header.Add(name, v)
+		for name, values := range r.Header {
+			if strings.EqualFold(name, "Host") {
+				continue
+			}
+			for _, v := range values {
+				req.Header.Add(name, v)
+			}
 		}
+		cfg.setAuth(req)
+		return p.httpClient.Do(req)
+	})
+	if result.LastError != nil {
+		return nil, nil, result.Attempts, result.LastError
 	}
-	cfg.setAuth(upstreamReq)
-
-	resp, err := p.httpClient.Do(upstreamReq)
-	if err != nil {
-		return nil, nil, err
-	}
+	resp := result.Response
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read upstream response: %w", err)
+		return nil, nil, result.Attempts, fmt.Errorf("read upstream response: %w", err)
 	}
-	return resp, respBody, nil
+	return resp, respBody, result.Attempts, nil
 }
 
 func readLimitedBody(r *http.Request, limit int64) ([]byte, error) {
