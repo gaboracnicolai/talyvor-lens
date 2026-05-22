@@ -234,3 +234,21 @@ func TestCostUSD_KnownValues(t *testing.T) {
 		}
 	}
 }
+
+func TestCostUSD_ClaudeOpus46(t *testing.T) {
+	// claude-opus-4-6: input $15/M, output $75/M.
+	// 1M in + 1M out = 15.00 + 75.00 = 90.00
+	got := CostUSD("claude-opus-4-6", 1_000_000, 1_000_000)
+	if math.Abs(got-90.00) > 1e-9 {
+		t.Errorf("CostUSD(claude-opus-4-6, 1M, 1M) = %v, want 90.00", got)
+	}
+}
+
+func TestCostUSD_GPT54(t *testing.T) {
+	// gpt-5.4: input $5/M, output $20/M.
+	// 1M in + 1M out = 5.00 + 20.00 = 25.00
+	got := CostUSD("gpt-5.4", 1_000_000, 1_000_000)
+	if math.Abs(got-25.00) > 1e-9 {
+		t.Errorf("CostUSD(gpt-5.4, 1M, 1M) = %v, want 25.00", got)
+	}
+}

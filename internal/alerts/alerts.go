@@ -88,12 +88,21 @@ type modelPrice struct {
 // modelPrices is the per-model USD price table from the spec. Numbers here
 // are authoritative — tests assert exact arithmetic, so do not round.
 var modelPrices = map[string]modelPrice{
+	// OpenAI
 	"gpt-4o":            {2.50, 10.00},
 	"gpt-4o-mini":       {0.15, 0.60},
 	"gpt-4.1-nano":      {0.10, 0.40},
+	"gpt-5.4":           {5.00, 20.00},
+	"gpt-5.4-mini":      {0.50, 2.00},
+	"gpt-4.1":           {2.00, 8.00},
+	"gpt-4.1-mini":      {0.40, 1.60},
+	// Anthropic
 	"claude-opus-4-5":   {15.00, 75.00},
 	"claude-sonnet-4-5": {3.00, 15.00},
 	"claude-haiku-4-5":  {0.80, 4.00},
+	"claude-opus-4-6":   {15.00, 75.00},
+	"claude-sonnet-4-6": {3.00, 15.00},
+	"claude-haiku-4-6":  {0.80, 4.00},
 }
 
 // costUSD returns the realized USD cost for the request. Unknown models

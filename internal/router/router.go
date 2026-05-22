@@ -32,19 +32,37 @@ type modelInfo struct {
 	rank     int
 }
 
+// modelRanks maps each model name to its cost rank within the provider
+// family (0 = cheapest). Used by ShouldOverride to decide whether a
+// routing decision is a strict cost reduction.
 var modelRanks = map[string]modelInfo{
-	"gpt-4.1-nano":      {"openai", 0},
-	"gpt-4o-mini":       {"openai", 1},
-	"gpt-4o":            {"openai", 2},
+	// OpenAI, cheapest first.
+	"gpt-4.1-nano":  {"openai", 0},
+	"gpt-4o-mini":   {"openai", 1},
+	"gpt-4.1-mini":  {"openai", 2},
+	"gpt-4.1":       {"openai", 3},
+	"gpt-4o":        {"openai", 4},
+	"gpt-5.4-mini":  {"openai", 5},
+	"gpt-5.4":       {"openai", 6},
+	// Anthropic, cheapest first.
 	"claude-haiku-4-5":  {"anthropic", 0},
-	"claude-sonnet-4-5": {"anthropic", 1},
-	"claude-opus-4-5":   {"anthropic", 2},
+	"claude-haiku-4-6":  {"anthropic", 1},
+	"claude-sonnet-4-5": {"anthropic", 2},
+	"claude-sonnet-4-6": {"anthropic", 3},
+	"claude-opus-4-5":   {"anthropic", 4},
+	"claude-opus-4-6":   {"anthropic", 5},
 }
 
+// explicitCheapModels is the fast-path set for "the caller asked for a
+// cheap model on purpose, leave their choice alone." Includes every
+// mini / nano / haiku variant.
 var explicitCheapModels = map[string]struct{}{
 	"gpt-4o-mini":      {},
-	"claude-haiku-4-5": {},
 	"gpt-4.1-nano":     {},
+	"gpt-4.1-mini":     {},
+	"gpt-5.4-mini":     {},
+	"claude-haiku-4-5": {},
+	"claude-haiku-4-6": {},
 }
 
 func (r *Router) Route(_ context.Context, provider, requestedModel, prompt string) RoutingDecision {
@@ -85,7 +103,7 @@ func cheap(provider string) RoutingDecision {
 		CostTier: "cheap",
 	}
 	if provider == "anthropic" {
-		d.Model = "claude-haiku-4-5"
+		d.Model = "claude-haiku-4-6"
 	} else {
 		d.Model = "gpt-4o-mini"
 	}
@@ -99,9 +117,9 @@ func mid(provider string) RoutingDecision {
 		CostTier: "mid",
 	}
 	if provider == "anthropic" {
-		d.Model = "claude-sonnet-4-5"
+		d.Model = "claude-sonnet-4-6"
 	} else {
-		d.Model = "gpt-4o"
+		d.Model = "gpt-4.1"
 	}
 	return d
 }
@@ -113,9 +131,9 @@ func premium(provider string) RoutingDecision {
 		CostTier: "premium",
 	}
 	if provider == "anthropic" {
-		d.Model = "claude-opus-4-5"
+		d.Model = "claude-opus-4-6"
 	} else {
-		d.Model = "gpt-4o"
+		d.Model = "gpt-5.4"
 	}
 	return d
 }

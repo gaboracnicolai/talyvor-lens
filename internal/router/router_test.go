@@ -31,8 +31,8 @@ func TestRoute_SimplePromptCheapAnthropic(t *testing.T) {
 	if got.Provider != "anthropic" {
 		t.Errorf("Provider = %q, want %q", got.Provider, "anthropic")
 	}
-	if got.Model != "claude-haiku-4-5" {
-		t.Errorf("Model = %q, want %q", got.Model, "claude-haiku-4-5")
+	if got.Model != "claude-haiku-4-6" {
+		t.Errorf("Model = %q, want %q", got.Model, "claude-haiku-4-6")
 	}
 	if got.CostTier != "cheap" {
 		t.Errorf("CostTier = %q, want %q", got.CostTier, "cheap")
@@ -48,8 +48,8 @@ func TestRoute_CodeHeavyPromptMidTier(t *testing.T) {
 	if got.CostTier != "mid" {
 		t.Errorf("CostTier = %q, want %q (decision: %+v)", got.CostTier, "mid", got)
 	}
-	if got.Model != "gpt-4o" {
-		t.Errorf("Model = %q, want %q", got.Model, "gpt-4o")
+	if got.Model != "gpt-4.1" {
+		t.Errorf("Model = %q, want %q", got.Model, "gpt-4.1")
 	}
 }
 
@@ -69,8 +69,8 @@ func TestRoute_ComplexPromptPremiumTier(t *testing.T) {
 	if got.Provider != "anthropic" {
 		t.Errorf("Provider = %q, want %q", got.Provider, "anthropic")
 	}
-	if got.Model != "claude-opus-4-5" {
-		t.Errorf("Model = %q, want %q", got.Model, "claude-opus-4-5")
+	if got.Model != "claude-opus-4-6" {
+		t.Errorf("Model = %q, want %q", got.Model, "claude-opus-4-6")
 	}
 }
 
@@ -145,5 +145,53 @@ func TestShouldOverride_TrueWhenCheaper(t *testing.T) {
 				t.Errorf("ShouldOverride(%q, %+v) = false, want true", tc.requested, tc.decision)
 			}
 		})
+	}
+}
+
+func TestRoute_PremiumTierOpenAIReturnsGPT54(t *testing.T) {
+	r := New()
+	// Pile on enough signals to push the score into the premium tier.
+	prompt := "Calculate the integral step by step and explain why this derivation works. " +
+		"Show the proof in code:\n```python\n" +
+		strings.Repeat("def proof(): return True\n", 100) +
+		"\n```\nFinally, compare this approach to alternatives."
+
+	got := r.Route(context.Background(), "openai", "gpt-4o", prompt)
+	if got.CostTier != "premium" {
+		t.Fatalf("CostTier = %q, want premium (decision: %+v)", got.CostTier, got)
+	}
+	if got.Model != "gpt-5.4" {
+		t.Errorf("Model = %q, want gpt-5.4", got.Model)
+	}
+}
+
+func TestRoute_PremiumTierAnthropicReturnsClaudeOpus46(t *testing.T) {
+	r := New()
+	prompt := "Calculate step by step and explain why this works in detail. " +
+		"Provide a thorough proof:\n```python\n" +
+		strings.Repeat("def proof(): return True\n", 100) +
+		"\n```\nCompare with alternative approaches."
+
+	got := r.Route(context.Background(), "anthropic", "claude-sonnet-4-5", prompt)
+	if got.CostTier != "premium" {
+		t.Fatalf("CostTier = %q, want premium (decision: %+v)", got.CostTier, got)
+	}
+	if got.Model != "claude-opus-4-6" {
+		t.Errorf("Model = %q, want claude-opus-4-6", got.Model)
+	}
+}
+
+func TestRoute_ClaudeHaiku46RecognisedAsCheap(t *testing.T) {
+	r := New()
+	// Premium-looking prompt; an explicit cheap-model request must still
+	// win, proving claude-haiku-4-6 is in the explicit-cheap set.
+	prompt := "Calculate step by step and explain why with ```code``` proof"
+
+	got := r.Route(context.Background(), "anthropic", "claude-haiku-4-6", prompt)
+	if got.Model != "claude-haiku-4-6" {
+		t.Errorf("Model = %q, want claude-haiku-4-6 (explicit cheap model should be respected)", got.Model)
+	}
+	if got.CostTier != "cheap" {
+		t.Errorf("CostTier = %q, want cheap", got.CostTier)
 	}
 }
