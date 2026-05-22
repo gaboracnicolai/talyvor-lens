@@ -468,7 +468,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// successful request.
 		inT, outT := len(prompt)/4, len(upstreamBody)/4
 		if p.alertManager != nil {
-			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel, inT, outT); err != nil {
+			// Use eventPrompt (redacted form when PII was detected) so we
+			// never persist raw PII to token_events; the warmer will only
+			// see clean prompts when it joins this table later.
+			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel, inT, outT, eventPrompt); err != nil {
 				slog.Warn("alerts: RecordSpend failed",
 					slog.String("err", err.Error()),
 				)
@@ -560,7 +563,7 @@ func (p *Proxy) tryLocalRouting(
 	// cloud traffic.
 	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected)
 	if p.alertManager != nil {
-		_ = p.alertManager.RecordSpend(ctx, team, feature, decision.Model, len(prompt)/4, len(formatted)/4)
+		_ = p.alertManager.RecordSpend(ctx, team, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt)
 	}
 	metrics.RequestsTotal.WithLabelValues(provider, "local").Inc()
 	return true

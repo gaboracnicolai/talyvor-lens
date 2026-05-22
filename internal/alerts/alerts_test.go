@@ -61,10 +61,10 @@ func TestRecordSpend_CostForGPT4o(t *testing.T) {
 	const wantCost = 0.75
 
 	pool.ExpectExec(`INSERT INTO token_events`).
-		WithArgs("openai", "gpt-4o", 100000, 50000, "core", "search", wantCost).
+		WithArgs("openai", "gpt-4o", 100000, 50000, "core", "search", wantCost, "p").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 100000, 50000); err != nil {
+	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 100000, 50000, "p"); err != nil {
 		t.Fatalf("RecordSpend: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -80,10 +80,10 @@ func TestRecordSpend_CostForClaudeHaiku(t *testing.T) {
 	const wantCost = 4.80
 
 	pool.ExpectExec(`INSERT INTO token_events`).
-		WithArgs("anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "search", wantCost).
+		WithArgs("anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "search", wantCost, "p").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-	if err := mgr.RecordSpend(context.Background(), "core", "search", "claude-haiku-4-5", 1000000, 1000000); err != nil {
+	if err := mgr.RecordSpend(context.Background(), "core", "search", "claude-haiku-4-5", 1000000, 1000000, "p"); err != nil {
 		t.Fatalf("RecordSpend: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -109,7 +109,7 @@ func TestRecordSpend_FiresWarningAlertOverThreshold(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Spend is above warning ($1) but below critical ($10).
@@ -117,7 +117,7 @@ func TestRecordSpend_FiresWarningAlertOverThreshold(t *testing.T) {
 		WithArgs("core", "search").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(float64(2.5)))
 
-	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 1000, 1000); err != nil {
+	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 1000, 1000, ""); err != nil {
 		t.Fatalf("RecordSpend: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestRecordSpend_OpensCircuitOverThreshold(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Spend above CircuitUSD.
@@ -163,7 +163,7 @@ func TestRecordSpend_OpensCircuitOverThreshold(t *testing.T) {
 		t.Fatal("circuit should start closed")
 	}
 
-	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 1000, 1000); err != nil {
+	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 1000, 1000, ""); err != nil {
 		t.Fatalf("RecordSpend: %v", err)
 	}
 

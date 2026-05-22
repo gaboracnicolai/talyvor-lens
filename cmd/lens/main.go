@@ -43,6 +43,7 @@ import (
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/templates"
+	"github.com/talyvor/lens/internal/warmer"
 	"github.com/talyvor/lens/internal/workspace"
 )
 
@@ -133,6 +134,9 @@ func run() error {
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
+
+	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
+	go cacheWarmer.Start(ctx, 1*time.Hour)
 
 	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
