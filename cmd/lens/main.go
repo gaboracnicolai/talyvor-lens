@@ -40,6 +40,7 @@ import (
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
+	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/proxy"
@@ -183,6 +184,12 @@ func run() error {
 	)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
+
+	// MCP server is exposed without API-key auth — MCP clients (Claude
+	// Desktop, agent frameworks, etc.) bring their own auth model.
+	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, "0.1.0")
+	r.Post("/mcp", mcpServer.HandleRPC)
+	r.Get("/mcp/sse", mcpServer.HandleSSE)
 
 	// Everything else sits behind the API-key middleware. chi.Group inherits
 	// middleware only for routes registered inside its closure.
