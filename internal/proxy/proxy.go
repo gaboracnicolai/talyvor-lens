@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/attribution"
@@ -239,16 +241,34 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 	}
 
+	streaming := streamRequested(body)
 	if !piiDetected {
-		if cached := p.tryExact(ctx, cfg.name, model, cachePrompt); cached != nil {
-			writeBytes(w, http.StatusOK, cached)
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_exact").Inc()
-			return
+		var cached []byte
+		var layer string
+		if c := p.tryExact(ctx, cfg.name, model, cachePrompt); c != nil {
+			cached, layer = c, "cache_hit_exact"
+		} else if c := p.trySemantic(ctx, cfg.name, model, cachePrompt); c != nil {
+			cached, layer = c, "cache_hit_semantic"
 		}
-		if cached := p.trySemantic(ctx, cfg.name, model, cachePrompt); cached != nil {
-			writeBytes(w, http.StatusOK, cached)
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "cache_hit_semantic").Inc()
-			return
+		if cached != nil {
+			if streaming {
+				// SSE replay: synthesises the provider's streaming wire
+				// format from the cached JSON so strict SSE clients can
+				// consume cache hits the same way they consume live
+				// responses. On parse failure we fall through and let
+				// the regular streaming path call the LLM.
+				if err := replayAsSSE(w, cfg.name, cached); err == nil {
+					metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
+					return
+				}
+				slog.Warn("proxy: cached payload not replayable as SSE; falling through to LLM",
+					slog.String("provider", cfg.name),
+				)
+			} else {
+				writeBytes(w, http.StatusOK, cached)
+				metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
+				return
+			}
 		}
 	}
 
@@ -265,7 +285,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// assembled response after the upstream stream completes. We skip the
 	// compression + routing path for streams since that would rewrite the
 	// body and break wire-compatibility with the live SSE.
-	if streamRequested(body) {
+	if streaming {
 		sh := &StreamHandler{proxy: p}
 		var serr error
 		if cfg.name == "openai" {
@@ -680,4 +700,127 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// replayAsSSE re-emits a cached non-streaming response as the provider's
+// SSE wire format so strict streaming clients can consume cache hits.
+// Frames are computed before any header is committed: on parse failure
+// the function returns the error and w is left untouched so the caller
+// can fall through cleanly.
+func replayAsSSE(w http.ResponseWriter, provider string, cached []byte) error {
+	var frames [][]byte
+	var err error
+	switch provider {
+	case "openai":
+		frames, err = openAIReplayFrames(cached)
+	case "anthropic":
+		frames, err = anthropicReplayFrames(cached)
+	default:
+		return fmt.Errorf("replayAsSSE: unknown provider %q", provider)
+	}
+	if err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("X-Talyvor-Cache-Replay", "true")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	for _, frame := range frames {
+		_, _ = w.Write(frame)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	return nil
+}
+
+func openAIReplayFrames(cached []byte) ([][]byte, error) {
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(cached, &parsed); err != nil {
+		return nil, fmt.Errorf("replayAsSSE openai: decode: %w", err)
+	}
+	if len(parsed.Choices) == 0 {
+		return nil, fmt.Errorf("replayAsSSE openai: no choices in cached payload")
+	}
+	id := "cache-" + uuid.NewString()
+	content := parsed.Choices[0].Message.Content
+
+	deltaPayload, err := json.Marshal(map[string]any{
+		"id":     id,
+		"object": "chat.completion.chunk",
+		"choices": []map[string]any{{
+			"delta":         map[string]any{"content": content},
+			"finish_reason": nil,
+		}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	stopPayload, err := json.Marshal(map[string]any{
+		"id":     id,
+		"object": "chat.completion.chunk",
+		"choices": []map[string]any{{
+			"delta":         map[string]any{},
+			"finish_reason": "stop",
+		}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return [][]byte{
+		[]byte("data: " + string(deltaPayload) + "\n\n"),
+		[]byte("data: " + string(stopPayload) + "\n\n"),
+		[]byte("data: [DONE]\n\n"),
+	}, nil
+}
+
+func anthropicReplayFrames(cached []byte) ([][]byte, error) {
+	var parsed struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(cached, &parsed); err != nil {
+		return nil, fmt.Errorf("replayAsSSE anthropic: decode: %w", err)
+	}
+	if len(parsed.Content) == 0 {
+		return nil, fmt.Errorf("replayAsSSE anthropic: no content blocks in cached payload")
+	}
+	text := parsed.Content[0].Text
+
+	startPayload, _ := json.Marshal(map[string]any{
+		"type":          "content_block_start",
+		"index":         0,
+		"content_block": map[string]any{"type": "text", "text": ""},
+	})
+	deltaPayload, _ := json.Marshal(map[string]any{
+		"type":  "content_block_delta",
+		"index": 0,
+		"delta": map[string]any{"type": "text_delta", "text": text},
+	})
+	stopPayload, _ := json.Marshal(map[string]any{
+		"type":  "content_block_stop",
+		"index": 0,
+	})
+	messageStopPayload, _ := json.Marshal(map[string]any{
+		"type": "message_stop",
+	})
+
+	return [][]byte{
+		[]byte("event: content_block_start\ndata: " + string(startPayload) + "\n\n"),
+		[]byte("event: content_block_delta\ndata: " + string(deltaPayload) + "\n\n"),
+		[]byte("event: content_block_stop\ndata: " + string(stopPayload) + "\n\n"),
+		[]byte("event: message_stop\ndata: " + string(messageStopPayload) + "\n\n"),
+	}, nil
 }
