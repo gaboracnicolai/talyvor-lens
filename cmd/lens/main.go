@@ -46,6 +46,7 @@ import (
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/router"
+	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/warmer"
 	"github.com/talyvor/lens/internal/workspace"
@@ -137,6 +138,8 @@ func run() error {
 	budgetEnforcer := budget.New(pool, budget.BudgetPolicy{MaxOutputTokens: 4096})
 	batchRouter := batch.New(pool, cfg.AnthropicAPIKey)
 	go batchRouter.StartPoller(ctx)
+	sessionTracker := session.New(pool)
+	go sessionTracker.StartCleanup(ctx)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -144,7 +147,7 @@ func run() error {
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -341,6 +344,34 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, got)
+		})
+
+		authed.Get("/v1/sessions/{sessionID}", func(w http.ResponseWriter, req *http.Request) {
+			sessionID := chi.URLParam(req, "sessionID")
+			s, ok := sessionTracker.GetSession(sessionID)
+			if !ok {
+				writeJSONErr(w, http.StatusNotFound, "session not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, s)
+		})
+
+		authed.Get("/v1/sessions/{sessionID}/summary", func(w http.ResponseWriter, req *http.Request) {
+			sessionID := chi.URLParam(req, "sessionID")
+			summary := sessionTracker.SummariseSession(req.Context(), sessionID)
+			if summary.TurnCount == 0 && summary.StartedAt.IsZero() {
+				writeJSONErr(w, http.StatusNotFound, "session not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, summary)
+		})
+
+		authed.Get("/v1/sessions", func(w http.ResponseWriter, req *http.Request) {
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				wsID = "default"
+			}
+			writeJSONOK(w, http.StatusOK, sessionTracker.ListActiveByWorkspace(wsID))
 		})
 
 		authed.Post("/v1/batch/submit", func(w http.ResponseWriter, req *http.Request) {

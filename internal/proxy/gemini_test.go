@@ -158,7 +158,7 @@ func newGoogleProxy(t *testing.T, srvURL string) *Proxy {
 	p := New(
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		"openai-key", "anthropic-key", "google-key",
 	)
 	p.googleURL = srvURL

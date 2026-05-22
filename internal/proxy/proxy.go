@@ -37,6 +37,7 @@ import (
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/router"
+	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -67,6 +68,7 @@ type Proxy struct {
 	injectionDetector *injection.Detector
 	budgetEnforcer    *budget.Enforcer
 	batchRouter       *batch.BatchRouter
+	sessionTracker    *session.SessionTracker
 	httpClient        *http.Client
 	openAIKey         string
 	anthropicKey      string
@@ -100,6 +102,7 @@ func New(
 	injectionDetector *injection.Detector,
 	budgetEnforcer *budget.Enforcer,
 	batchRouter *batch.BatchRouter,
+	sessionTracker *session.SessionTracker,
 	openAIKey string,
 	anthropicKey string,
 	googleKey string,
@@ -122,6 +125,7 @@ func New(
 		injectionDetector: injectionDetector,
 		budgetEnforcer:    budgetEnforcer,
 		batchRouter:       batchRouter,
+		sessionTracker:    sessionTracker,
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:         openAIKey,
 		anthropicKey:      anthropicKey,
@@ -264,6 +268,18 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			return
 		}
 		cachePrompt = wsID + ":" + prompt
+	}
+
+	// Session pickup — header-driven, optional. Empty sessionID means
+	// the caller isn't tracking sessions; the entire feature is skipped.
+	sessionID := r.Header.Get("X-Talyvor-Session")
+	agentName := r.Header.Get("X-Talyvor-Agent")
+	if agentName == "" {
+		agentName = "default"
+	}
+	var sess *session.Session
+	if sessionID != "" && p.sessionTracker != nil {
+		sess = p.sessionTracker.GetOrCreate(ctx, sessionID, wsID, agentName)
 	}
 
 	// Extract any incoming W3C trace context BEFORE we start our own
@@ -419,6 +435,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			}
 		}
 		if cached != nil {
+			// Record the session turn first so the headers below reflect
+			// the count + cost AFTER this turn lands. Cache hits have
+			// zero cost.
+			if sess != nil {
+				p.recordSessionTurn(ctx, sessionID, prompt, string(cached), model, 0, true)
+				setSessionHeaders(w, p, sessionID)
+			}
 			if streaming {
 				// SSE replay: synthesises the provider's streaming wire
 				// format from the cached JSON so strict SSE clients can
@@ -601,6 +624,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	}
 	if attempts > 1 {
 		w.Header().Set("X-Talyvor-Attempts", strconv.Itoa(attempts))
+	}
+	// Record session turn here (BEFORE WriteHeader) so the headers we set
+	// next reflect the post-turn totals. Cost is computed against the
+	// actually-billed upstream model so it matches the alerts pipeline.
+	if sess != nil && upstreamResp.StatusCode == http.StatusOK {
+		turnCost := alerts.CostUSD(upstreamModel, len(prompt)/4, len(upstreamBody)/4)
+		p.recordSessionTurn(ctx, sessionID, prompt, string(upstreamBody), upstreamModel, turnCost, false)
+		setSessionHeaders(w, p, sessionID)
 	}
 	if ct := upstreamResp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
@@ -934,6 +965,41 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// recordSessionTurn is the per-request hook into SessionTracker. It
+// keeps the call sites concise: a single helper that captures all the
+// per-turn fields without spreading session.Turn construction across
+// the proxy. Errors are best-effort — session tracking must never
+// break the main response.
+func (p *Proxy) recordSessionTurn(ctx context.Context, sessionID, prompt, response, model string, cost float64, cached bool) {
+	if p.sessionTracker == nil || sessionID == "" {
+		return
+	}
+	_ = p.sessionTracker.RecordTurn(ctx, sessionID, session.Turn{
+		Role:         "user",
+		Prompt:       prompt,
+		Response:     response,
+		Model:        model,
+		InputTokens:  len(prompt) / 4,
+		OutputTokens: len(response) / 4,
+		CostUSD:      cost,
+		Cached:       cached,
+		CreatedAt:    time.Now().UTC(),
+	})
+}
+
+// setSessionHeaders stamps the post-turn totals onto the response. Call
+// AFTER recordSessionTurn but BEFORE any WriteHeader so the headers are
+// part of the committed response.
+func setSessionHeaders(w http.ResponseWriter, p *Proxy, sessionID string) {
+	if p.sessionTracker == nil || sessionID == "" {
+		return
+	}
+	if s, ok := p.sessionTracker.GetSession(sessionID); ok {
+		w.Header().Set("X-Talyvor-Session-Cost", strconv.FormatFloat(s.TotalCostUSD, 'f', 6, 64))
+		w.Header().Set("X-Talyvor-Session-Turns", strconv.Itoa(s.TurnCount))
+	}
 }
 
 // writeJSON is the structured-body equivalent of writeBytes — used by the
