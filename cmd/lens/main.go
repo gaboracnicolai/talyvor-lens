@@ -18,7 +18,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -147,6 +149,13 @@ func run() error {
 	rateLimiter := ratelimit.New(redisClient, ratelimit.DefaultRules())
 
 	r := chi.NewRouter()
+	// OTel HTTP middleware runs FIRST so every route — authenticated or
+	// not — is traced and any incoming W3C traceparent header is extracted
+	// into the request context before downstream middleware sees it.
+	r.Use(otelhttp.NewMiddleware("talyvor-lens",
+		otelhttp.WithTracerProvider(tp),
+		otelhttp.WithPropagators(otel.GetTextMapPropagator()),
+	))
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
@@ -420,5 +429,12 @@ func initTracing(ctx context.Context) (*sdktrace.TracerProvider, error) {
 	}
 	tp := sdktrace.NewTracerProvider(sdktrace.WithResource(res))
 	otel.SetTracerProvider(tp)
+	// Composite propagator extracts/injects both W3C traceparent (the
+	// trace ID we care about) and W3C baggage (key-value context that
+	// upstream apps may attach to requests).
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 	return tp, nil
 }

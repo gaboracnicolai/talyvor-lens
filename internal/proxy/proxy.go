@@ -15,6 +15,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/attribution"
@@ -186,6 +192,34 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		cachePrompt = wsID + ":" + prompt
 	}
 
+	// Extract any incoming W3C trace context BEFORE we start our own
+	// span. otelhttp middleware already does this in production, but
+	// extracting again here is idempotent and keeps tests + direct
+	// handler invocations correct.
+	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(r.Header))
+
+	// streaming flag is needed both for the cache replay branch below
+	// and for the OTel span attributes — compute it once here.
+	streaming := streamRequested(body)
+
+	// Start the proxy span. Attributes carry the safe metadata —
+	// provider/model/workspace/stream — and never the prompt content.
+	ctx, span := otel.Tracer("lens/proxy").Start(ctx, "proxy.serve",
+		trace.WithAttributes(
+			attribute.String("lens.provider", cfg.name),
+			attribute.String("lens.model", model),
+			attribute.String("lens.workspace", wsID),
+			attribute.Bool("lens.stream", streaming),
+		),
+	)
+	defer span.End()
+
+	// Set the response header right after the span is live so it persists
+	// even if a cache hit short-circuits the request below.
+	if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
+		w.Header().Set("X-Talyvor-Trace-ID", sc.TraceID().String())
+	}
+
 	// Team / feature attribution for cost accounting and circuit breakers.
 	// Both default to "" when callers don't supply the headers; the alert
 	// manager treats empty values as a distinct attribution bucket.
@@ -296,14 +330,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 	}
 
-	streaming := streamRequested(body)
 	if !piiDetected {
 		var cached []byte
 		var layer string
+		span.AddEvent("cache.check.exact")
 		if c := p.tryExact(ctx, cfg.name, model, cachePrompt); c != nil {
 			cached, layer = c, "cache_hit_exact"
-		} else if c := p.trySemantic(ctx, cfg.name, model, cachePrompt); c != nil {
-			cached, layer = c, "cache_hit_semantic"
+			span.AddEvent("cache.hit.exact")
+		} else {
+			span.AddEvent("cache.check.semantic")
+			if c := p.trySemantic(ctx, cfg.name, model, cachePrompt); c != nil {
+				cached, layer = c, "cache_hit_semantic"
+				span.AddEvent("cache.hit.semantic")
+			}
 		}
 		if cached != nil {
 			if streaming {
@@ -314,6 +353,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// the regular streaming path call the LLM.
 				if err := replayAsSSE(w, cfg.name, cached); err == nil {
 					metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
+					span.SetAttributes(
+						attribute.Bool("lens.cached", true),
+						attribute.Float64("lens.cost_usd", 0),
+					)
+					span.SetStatus(codes.Ok, "")
 					return
 				}
 				slog.Warn("proxy: cached payload not replayable as SSE; falling through to LLM",
@@ -322,6 +366,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			} else {
 				writeBytes(w, http.StatusOK, cached)
 				metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
+				span.SetAttributes(
+					attribute.Bool("lens.cached", true),
+					attribute.Float64("lens.cost_usd", 0),
+				)
+				span.SetStatus(codes.Ok, "")
 				return
 			}
 		}
@@ -396,9 +445,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
+	span.AddEvent("llm.forward.start")
 	upstreamResp, upstreamBody, attempts, err := p.forward(ctx, r, upstreamBodyOut, cfg)
 	if err != nil {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+err.Error())
 		return
 	}
@@ -412,6 +464,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		q := p.scorer.ScoreResponse(ctx, prompt, string(upstreamBody), cfg.name, model)
 		qualityScore = &q
 	}
+
+	scoreVal := 0.0
+	if qualityScore != nil {
+		scoreVal = qualityScore.Score
+	}
+	span.AddEvent("llm.forward.complete", trace.WithAttributes(
+		attribute.Int("lens.attempts", attempts),
+		attribute.Float64("lens.quality_score", scoreVal),
+	))
 
 	// Headers must be set BEFORE WriteHeader. X-Talyvor-* surface routing
 	// decisions to the client; all of these go on the response, never on
@@ -490,8 +551,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 		p.launchABShadows(cfg.name, model, prompt, body)
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
+		span.SetAttributes(
+			attribute.Bool("lens.cached", false),
+			attribute.Float64("lens.cost_usd", alerts.CostUSD(upstreamModel, inT, outT)),
+		)
+		span.SetStatus(codes.Ok, "")
 	} else {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "upstream_error").Inc()
+		span.SetStatus(codes.Error, fmt.Sprintf("upstream status %d", upstreamResp.StatusCode))
 	}
 }
 
@@ -682,6 +749,10 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, cfg p
 			}
 		}
 		cfg.setAuth(req)
+		// Inject our current span context as traceparent on the upstream
+		// request. If OpenAI / Anthropic ever surface OTel themselves the
+		// trace will stay continuous; until then this is harmless metadata.
+		otel.GetTextMapPropagator().Inject(c, propagation.HeaderCarrier(req.Header))
 		return p.httpClient.Do(req)
 	})
 	if result.LastError != nil {
