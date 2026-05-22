@@ -24,6 +24,7 @@ import (
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/attribution"
+	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
@@ -63,6 +64,7 @@ type Proxy struct {
 	localRouter       *localrouter.LocalRouter
 	injectionDetector *injection.Detector
 	budgetEnforcer    *budget.Enforcer
+	batchRouter       *batch.BatchRouter
 	httpClient        *http.Client
 	openAIKey        string
 	anthropicKey     string
@@ -93,6 +95,7 @@ func New(
 	localRouter *localrouter.LocalRouter,
 	injectionDetector *injection.Detector,
 	budgetEnforcer *budget.Enforcer,
+	batchRouter *batch.BatchRouter,
 	openAIKey string,
 	anthropicKey string,
 	learners ...*learner.Learner,
@@ -113,6 +116,7 @@ func New(
 		localRouter:       localRouter,
 		injectionDetector: injectionDetector,
 		budgetEnforcer:    budgetEnforcer,
+		batchRouter:       batchRouter,
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:        openAIKey,
 		anthropicKey:     anthropicKey,
@@ -172,6 +176,40 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
+	}
+
+	// Batch dispatch: when the caller flips X-Talyvor-Batch we route the
+	// whole request through Anthropic's async batches endpoint instead of
+	// the normal proxy flow. We deliberately run this BEFORE any workspace
+	// or cache work — the batch endpoint replies 202 immediately and the
+	// background poller picks up the response hours later.
+	if p.batchRouter != nil && r.Header.Get("X-Talyvor-Batch") == "true" {
+		batchBody := withBatchEligibleFlag(body)
+		preWsID := r.Header.Get("X-Talyvor-Workspace")
+		if preWsID == "" {
+			preWsID = defaultWorkspaceID
+		}
+		if elig := p.batchRouter.IsEligible(batchBody, preWsID); elig.Eligible {
+			job, err := p.batchRouter.Submit(ctx, preWsID, model, prompt, batchBody)
+			if err == nil {
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"request_id":           job.RequestID,
+					"batch_id":             job.ID,
+					"status":               string(job.Status),
+					"estimated_completion": "within 24 hours",
+					"cost_reduction":       "50%",
+				})
+				metrics.RequestsTotal.WithLabelValues(cfg.name, "batched").Inc()
+				return
+			}
+			slog.Warn("batch: Submit failed; falling through to live request",
+				slog.String("err", err.Error()),
+			)
+		} else {
+			slog.Info("batch: not eligible; falling through",
+				slog.String("reason", elig.Reason),
+			)
+		}
 	}
 
 	// Workspace gate. The workspace decision happens before any cache
@@ -829,6 +867,33 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// writeJSON is the structured-body equivalent of writeBytes — used by the
+// batch dispatch and any other endpoint that wants to emit JSON without
+// going through map[string]string.
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// withBatchEligibleFlag injects "batch_eligible": true into the body so
+// the BatchRouter's IsEligible — which is body-only by signature — can
+// see the trigger that was actually carried on the X-Talyvor-Batch HTTP
+// header. The downstream Anthropic submit ignores unknown fields, so
+// this extra key is harmless when the request does ultimately fly.
+func withBatchEligibleFlag(body []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	m["batch_eligible"] = true
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // replayAsSSE re-emits a cached non-streaming response as the provider's

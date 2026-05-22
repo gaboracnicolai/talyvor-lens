@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,6 +31,7 @@ import (
 	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
@@ -133,6 +135,8 @@ func run() error {
 	go lr.StartHealthCheck(ctx)
 	injectionDetector := injection.New(injection.DefaultPolicy())
 	budgetEnforcer := budget.New(pool, budget.BudgetPolicy{MaxOutputTokens: 4096})
+	batchRouter := batch.New(pool, cfg.AnthropicAPIKey)
+	go batchRouter.StartPoller(ctx)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -140,7 +144,7 @@ func run() error {
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -338,6 +342,68 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, got)
 		})
 
+		authed.Post("/v1/batch/submit", func(w http.ResponseWriter, req *http.Request) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "read body: "+err.Error())
+				return
+			}
+			wsID := req.Header.Get("X-Talyvor-Workspace")
+			if wsID == "" {
+				wsID = "default"
+			}
+			// Make sure IsEligible sees the batch trigger even when the
+			// header — not the body — set it.
+			body = ensureBatchFlag(body)
+			elig := batchRouter.IsEligible(body, wsID)
+			if !elig.Eligible {
+				writeJSONErr(w, http.StatusBadRequest, elig.Reason)
+				return
+			}
+			var parsed struct {
+				Model    string `json:"model"`
+				Messages []struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
+			}
+			_ = json.Unmarshal(body, &parsed)
+			prompt := ""
+			for _, m := range parsed.Messages {
+				var s string
+				if json.Unmarshal(m.Content, &s) == nil {
+					prompt += s
+				}
+			}
+			job, err := batchRouter.Submit(req.Context(), wsID, parsed.Model, prompt, body)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusAccepted, map[string]any{
+				"request_id":           job.RequestID,
+				"batch_id":             job.ID,
+				"status":               string(job.Status),
+				"estimated_completion": "within 24 hours",
+				"cost_reduction":       "50%",
+			})
+		})
+
+		authed.Get("/v1/batch/status/{requestID}", func(w http.ResponseWriter, req *http.Request) {
+			requestID := chi.URLParam(req, "requestID")
+			job := batchRouter.GetJobByRequestID(requestID)
+			if job == nil {
+				writeJSONErr(w, http.StatusNotFound, "batch job not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, job)
+		})
+
+		authed.Get("/v1/batch/jobs", func(w http.ResponseWriter, req *http.Request) {
+			// workspace_id filtering happens client-side for now — the
+			// in-memory list doesn't index by workspace.
+			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs())
+		})
+
 		authed.Post("/v1/feedback", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
 				PromptHash string                 `json:"prompt_hash"`
@@ -400,6 +466,22 @@ func writeJSONOK(w http.ResponseWriter, status int, body any) {
 
 func writeJSONErr(w http.ResponseWriter, status int, msg string) {
 	writeJSONOK(w, status, map[string]string{"error": msg})
+}
+
+// ensureBatchFlag stamps batch_eligible:true into the body so the
+// BatchRouter's body-only IsEligible sees the trigger that arrived via
+// the X-Talyvor-Batch header.
+func ensureBatchFlag(body []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	m["batch_eligible"] = true
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func newLogger(level string) *slog.Logger {
