@@ -38,6 +38,7 @@ import (
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/quality"
+	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/workspace"
@@ -135,6 +136,7 @@ func run() error {
 	if err := keyStore.LoadAll(ctx); err != nil {
 		logger.Warn("auth: LoadAll failed", slog.String("err", err.Error()))
 	}
+	rateLimiter := ratelimit.New(redisClient, ratelimit.DefaultRules())
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -161,7 +163,10 @@ func run() error {
 	// Everything else sits behind the API-key middleware. chi.Group inherits
 	// middleware only for routes registered inside its closure.
 	r.Group(func(authed chi.Router) {
+		// Auth must run first so the rate-limiter sees the key/workspace
+		// that AuthMiddleware just stamped onto the request.
 		authed.Use(auth.AuthMiddleware(keyStore))
+		authed.Use(ratelimit.RateLimitMiddleware(rateLimiter))
 
 		apiServer.MountAuthenticated(authed)
 
