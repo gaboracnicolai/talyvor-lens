@@ -56,6 +56,7 @@ import (
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/session"
+	"github.com/talyvor/lens/internal/status"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/warmer"
 	"github.com/talyvor/lens/internal/workspace"
@@ -157,6 +158,8 @@ func run() error {
 	evalPipeline := eval.New(pool, qualityScorer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey)
 	anomalyDetector := anomaly.New(pool)
 	go anomalyDetector.StartMonitor(ctx, nc, 1*time.Hour)
+	statusPage := status.New(pool, redisClient, nc, "0.1.0")
+	go statusPage.StartCacher(ctx, 60*time.Second)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -220,6 +223,12 @@ func run() error {
 	dashHandler := dashboard.New("0.1.0")
 	r.Get("/dashboard", dashHandler.ServeHTTP)
 	r.Get("/", dashHandler.RedirectRoot)
+
+	// Public status page. /status content-negotiates between HTML and
+	// JSON; /status.json is the unconditional-JSON convenience route
+	// uptime monitors and CI scripts use.
+	r.Get("/status", statusPage.ServeHTTP)
+	r.Get("/status.json", statusPage.ServeJSON)
 
 	// Everything else sits behind the API-key middleware. chi.Group inherits
 	// middleware only for routes registered inside its closure.
