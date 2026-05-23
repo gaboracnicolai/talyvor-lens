@@ -10,6 +10,8 @@ import (
 
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
+	"github.com/talyvor/lens/internal/guardrails"
+	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/router"
 )
@@ -153,7 +155,7 @@ func newBedrockProxy(t *testing.T, bedrockURL string, withCreds bool) *Proxy {
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		fallback.New(), nil, nil,
+		fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())),
 		"openai-key", "anthropic-key", "",
 	)
 	if withCreds {

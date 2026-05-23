@@ -31,6 +31,7 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
+	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/learner"
@@ -86,6 +87,7 @@ type Proxy struct {
 	fallbackRouter    *fallback.FallbackRouter
 	keyPool           *keypool.Pool
 	auditExporter     *audit.Exporter
+	guardrails        *guardrails.Engine
 	retryConfig       retry.Config
 	httpClient        *http.Client
 	openAIKey         string
@@ -132,6 +134,7 @@ func New(
 	fallbackRouter *fallback.FallbackRouter,
 	keyPool *keypool.Pool,
 	auditExporter *audit.Exporter,
+	guardrailsEngine *guardrails.Engine,
 	openAIKey string,
 	anthropicKey string,
 	googleKey string,
@@ -158,6 +161,7 @@ func New(
 		fallbackRouter:    fallbackRouter,
 		keyPool:           keyPool,
 		auditExporter:     auditExporter,
+		guardrails:        guardrailsEngine,
 		retryConfig:       retry.DefaultConfig(),
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:         openAIKey,
@@ -440,58 +444,46 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 	}
 
-	// PII gate. When the prompt contains PII we never read from or write
-	// to the cache — one user's PII must never be served to another user.
-	// The original (unredacted) prompt is still forwarded to the LLM; only
-	// caching is skipped. The redacted form is what we expose in logs and
-	// in the token event.
+	// Guardrails pipeline. One call subsumes the previous PII + injection
+	// blocks plus topic / word filter / custom-regex rules. Block-action
+	// violations short-circuit with a 400; redact-action results rewrite
+	// the prompt going forward. piiDetected is preserved as a downstream
+	// signal so the cache layer still refuses to persist PII responses.
 	piiDetected := false
-	var piiTypes []string
 	var redactedPrompt string
-	if p.piiDetector != nil {
-		piiResult := p.piiDetector.Detect(prompt)
-		if !p.piiDetector.IsSafeToCache(piiResult) {
-			piiDetected = true
-			piiTypes = piiResult.Types
-			redactedPrompt = piiResult.Redacted
-			w.Header().Set("X-Talyvor-PII-Detected", "true")
-			slog.Info("PII detected, skipping cache",
+	if p.guardrails != nil {
+		gr := p.guardrails.Check(ctx, wsID, prompt, body)
+		w.Header().Set("X-Talyvor-Risk-Score", strconv.FormatFloat(gr.RiskScore, 'f', 2, 64))
+		if !gr.Passed {
+			slog.Warn("proxy: guardrail blocked",
 				slog.String("provider", cfg.name),
-				slog.Any("types", piiTypes),
+				slog.String("workspace_id", wsID),
+				slog.Float64("risk_score", gr.RiskScore),
+				slog.Int("violation_count", len(gr.Violations)),
 			)
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "pii_skip_cache").Inc()
-		}
-	}
-
-	// Prompt-injection check. Runs after PII (which may have edited the
-	// prompt for caching purposes) but on the ORIGINAL prompt the user
-	// sent — we want to detect attempted injections regardless of what
-	// the cache key looks like. Block stops the request before anything
-	// reaches the LLM; Warn just stamps a header and logs the patterns.
-	if p.injectionDetector != nil {
-		ir := p.injectionDetector.Detect(prompt)
-		switch ir.Action {
-		case injection.ActionBlock:
-			slog.Warn("proxy: injection blocked",
-				slog.String("provider", cfg.name),
-				slog.Any("patterns", ir.Patterns),
-				slog.Float64("risk_score", ir.RiskScore),
-			)
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "injection_blocked").Inc()
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "guardrail_blocked").Inc()
+			w.Header().Set("X-Talyvor-Guardrail-Blocked", "true")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"error":      "prompt injection detected",
-				"risk_score": ir.RiskScore,
+				"error":      "guardrail violation",
+				"violations": gr.Violations,
+				"risk_score": gr.RiskScore,
 			})
 			return
-		case injection.ActionWarn:
-			slog.Warn("proxy: injection warning",
-				slog.String("provider", cfg.name),
-				slog.Any("patterns", ir.Patterns),
-				slog.Float64("risk_score", ir.RiskScore),
-			)
-			w.Header().Set("X-Talyvor-Injection-Warning", "true")
+		}
+		for _, v := range gr.Violations {
+			if v.Type == "pii" {
+				piiDetected = true
+				w.Header().Set("X-Talyvor-PII-Detected", "true")
+			}
+		}
+		if gr.RedactedPrompt != "" && gr.RedactedPrompt != prompt {
+			redactedPrompt = gr.RedactedPrompt
+			w.Header().Set("X-Talyvor-Guardrail-Redacted", "true")
+		}
+		if len(gr.Violations) > 0 && piiDetected {
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "pii_skip_cache").Inc()
 		}
 	}
 

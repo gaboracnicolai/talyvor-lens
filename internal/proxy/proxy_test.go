@@ -15,6 +15,8 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
+	"github.com/talyvor/lens/internal/guardrails"
+	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/router"
 )
@@ -49,7 +51,7 @@ func TestProxy_OpenAIExactCacheHit_LLMNeverCalled(t *testing.T) {
 	var llmHits int
 	upstream := mockUpstream(t, &llmHits, 200, `{"never":"called"}`)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())), "openai-key", "anthropic-key", "")
 	p.openAIURL = upstream.URL
 
 	cached := []byte(`{"cached":"response"}`)
@@ -80,7 +82,7 @@ func TestProxy_OpenAICacheMiss_ForwardsAndStores(t *testing.T) {
 	const upstreamBody = `{"id":"chatcmpl-xyz","choices":[{"message":{"role":"assistant","content":"hi"}}]}`
 	upstream := mockUpstream(t, &llmHits, 200, upstreamBody)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())), "openai-key", "anthropic-key", "")
 	p.openAIURL = upstream.URL
 
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`
@@ -113,7 +115,7 @@ func TestProxy_AnthropicExactCacheHit_LLMNeverCalled(t *testing.T) {
 	var llmHits int
 	upstream := mockUpstream(t, &llmHits, 200, `{"never":"called"}`)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())), "openai-key", "anthropic-key", "")
 	p.anthropicURL = upstream.URL
 
 	cached := []byte(`{"cached":"anthropic"}`)
@@ -154,7 +156,7 @@ func TestProxy_AnthropicCacheMiss_ForwardsAndStores(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())), "openai-key", "anthropic-key", "")
 	p.anthropicURL = srv.URL
 
 	body := `{"model":"claude-3-opus-20240229","messages":[{"role":"user","content":"hello"}]}`
@@ -193,7 +195,7 @@ func TestProxy_BodyTooLargeReturns413(t *testing.T) {
 	var llmHits int
 	upstream := mockUpstream(t, &llmHits, 200, `{}`)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())), "openai-key", "anthropic-key", "")
 	p.openAIURL = upstream.URL
 
 	// 5 MiB body, larger than the 4 MiB cap
@@ -216,7 +218,7 @@ func TestProxy_InvalidJSONReturns400(t *testing.T) {
 	var llmHits int
 	upstream := mockUpstream(t, &llmHits, 200, `{}`)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())), "openai-key", "anthropic-key", "")
 	p.openAIURL = upstream.URL
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/openai/v1/chat/completions", strings.NewReader(`{not valid json`))

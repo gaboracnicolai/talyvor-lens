@@ -43,6 +43,7 @@ import (
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/eval"
 	"github.com/talyvor/lens/internal/fallback"
+	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/learner"
@@ -160,6 +161,7 @@ func run() error {
 	go anomalyDetector.StartMonitor(ctx, nc, 1*time.Hour)
 	statusPage := status.New(pool, redisClient, nc, "0.1.0")
 	go statusPage.StartCacher(ctx, 60*time.Second)
+	guardrailsEngine := guardrails.New(piiDetector, injectionDetector)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -167,7 +169,7 @@ func run() error {
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, guardrailsEngine, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 	p.SetBedrockConfig(proxy.BedrockConfig{
 		Region:          cfg.AWSRegion,
 		AccessKeyID:     cfg.AWSAccessKeyID,
@@ -591,6 +593,46 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, runs)
+		})
+
+		// Guardrails: per-workspace safety policy + pre-flight check.
+		// Policy changes apply immediately; the engine reads on every
+		// proxy request and there is no per-request policy cache.
+		authed.Get("/v1/guardrails/policy", func(w http.ResponseWriter, req *http.Request) {
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				wsID = "default"
+			}
+			writeJSONOK(w, http.StatusOK, guardrailsEngine.GetPolicy(wsID))
+		})
+
+		authed.Put("/v1/guardrails/policy", func(w http.ResponseWriter, req *http.Request) {
+			var in guardrails.GuardrailPolicy
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.WorkspaceID == "" {
+				in.WorkspaceID = "default"
+			}
+			guardrailsEngine.SetPolicy(req.Context(), in.WorkspaceID, in)
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Post("/v1/guardrails/check", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				Prompt      string `json:"prompt"`
+				WorkspaceID string `json:"workspace_id"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.WorkspaceID == "" {
+				in.WorkspaceID = "default"
+			}
+			result := guardrailsEngine.Check(req.Context(), in.WorkspaceID, in.Prompt, nil)
+			writeJSONOK(w, http.StatusOK, result)
 		})
 
 		// Audit export — synchronous download. The exporter streams rows
