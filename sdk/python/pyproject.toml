@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talyvor-lens"
+version = "0.1.0"
+description = "Talyvor Lens SDK — AI token intelligence proxy"
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Talyvor" }]
+dependencies = [
+    "httpx>=0.27",
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.30"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["talyvor_lens*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
