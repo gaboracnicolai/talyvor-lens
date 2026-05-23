@@ -177,6 +177,12 @@ func run() error {
 		SecretAccessKey: cfg.AWSSecretAccessKey,
 		SessionToken:    cfg.AWSSessionToken,
 	})
+	p.SetExtraProviderConfig(proxy.ExtraProviderConfig{
+		MistralKey: cfg.MistralAPIKey,
+		GroqKey:    cfg.GroqAPIKey,
+		VLLMURL:    cfg.VLLMBaseURL,
+		VLLMKey:    cfg.VLLMAPIKey,
+	})
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -254,6 +260,9 @@ func run() error {
 		authed.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
 		authed.Post("/v1/proxy/google/*", p.HandleGoogle)
 		authed.Post("/v1/proxy/bedrock/*", p.HandleBedrock)
+		authed.Post("/v1/proxy/mistral/*", p.HandleExtraProvider("mistral"))
+		authed.Post("/v1/proxy/groq/*", p.HandleExtraProvider("groq"))
+		authed.Post("/v1/proxy/vllm/*", p.HandleExtraProvider("vllm"))
 
 		// Helicone-shape URL prefixes. First-class routes (not a
 		// deprecated alias) — migrating teams can keep these URLs

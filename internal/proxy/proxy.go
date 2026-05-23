@@ -107,6 +107,17 @@ type Proxy struct {
 	// already-long parameter list doesn't grow further.
 	bedrockConfig BedrockConfig
 	bedrockURL    string
+
+	// Extra OpenAI-compatible providers (Mistral, Groq, vLLM). Keys
+	// land here via SetExtraProviderConfig; URLs default to the real
+	// endpoints, tests override. vLLM has no public default — the
+	// operator runs the inference server somewhere.
+	mistralKey string
+	groqKey    string
+	vllmKey    string
+	mistralURL string
+	groqURL    string
+	vllmURL    string
 }
 
 // New constructs a Proxy. The learner is variadic so callers that don't
@@ -170,6 +181,9 @@ func New(
 		openAIURL:         openAIChatURL,
 		anthropicURL:      anthropicMessageURL,
 		googleURL:         googleGenerativeLanguageURL,
+		mistralURL:        "https://api.mistral.ai",
+		groqURL:           "https://api.groq.com",
+		// vllmURL stays empty by default — operator-supplied.
 	}
 	if len(learners) > 0 {
 		p.learner = learners[0]
@@ -1421,6 +1435,41 @@ func (p *Proxy) configForProvider(name string) providerConfig {
 				return out, err
 			},
 			translateResponse: translateFromGemini,
+		}
+	case "mistral":
+		base := p.mistralURL
+		key := p.mistralKey
+		return providerConfig{
+			name:          "mistral",
+			upstreamURLFn: func(string) string { return base + "/v1/chat/completions" },
+			setAuth: func(req *http.Request) {
+				req.Header.Set("Authorization", "Bearer "+key)
+			},
+		}
+	case "groq":
+		base := p.groqURL
+		key := p.groqKey
+		return providerConfig{
+			name:          "groq",
+			upstreamURLFn: func(string) string { return base + "/openai/v1/chat/completions" },
+			setAuth: func(req *http.Request) {
+				req.Header.Set("Authorization", "Bearer "+key)
+			},
+		}
+	case "vllm":
+		base := p.vllmURL
+		key := p.vllmKey
+		return providerConfig{
+			name:          "vllm",
+			upstreamURLFn: func(string) string { return base + "/v1/chat/completions" },
+			setAuth: func(req *http.Request) {
+				// vLLM commonly runs without auth on private networks;
+				// only attach the header when an operator-supplied key
+				// is configured.
+				if key != "" {
+					req.Header.Set("Authorization", "Bearer "+key)
+				}
+			},
 		}
 	case "bedrock":
 		// Snapshot the bedrock state at config-build time so the closures

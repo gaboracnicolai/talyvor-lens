@@ -115,6 +115,16 @@ var modelPrices = map[string]modelPrice{
 	"anthropic.claude-opus-4-6-20251101-v1:0":   {17.25, 86.25},
 	"anthropic.claude-sonnet-4-6-20251101-v1:0": {3.45, 17.25},
 	"anthropic.claude-haiku-4-6-20251103-v1:0":  {0.92, 4.60},
+	// Mistral — published prices per million tokens.
+	"mistral-large-latest": {2.00, 6.00},
+	"mistral-small-latest": {0.10, 0.30},
+	"mistral-nemo":         {0.015, 0.045},
+	"open-mistral-7b":      {0.025, 0.025},
+	// Groq — hardware-accelerated; published prices per million tokens.
+	"llama-3.3-70b-versatile": {0.59, 0.79},
+	"llama-3.1-8b-instant":    {0.05, 0.08},
+	"mixtral-8x7b-32768":      {0.24, 0.24},
+	"gemma2-9b-it":            {0.20, 0.20},
 }
 
 // costUSD returns the realized USD cost for the request. Unknown models
@@ -149,6 +159,22 @@ func providerForModel(model string) string {
 	}
 	if strings.HasPrefix(model, "gemini-") {
 		return "google"
+	}
+	// vLLM is self-hosted; the user-facing model name is whatever the
+	// operator loaded into vLLM and is namespaced with "vllm/" prefix
+	// to keep cache keys disjoint from the same model served elsewhere.
+	if strings.HasPrefix(model, "vllm/") {
+		return "vllm"
+	}
+	// Mistral first-party: mistral-* family + the open-mistral-* line.
+	if strings.HasPrefix(model, "mistral-") || strings.HasPrefix(model, "open-mistral-") {
+		return "mistral"
+	}
+	// Groq hosts open-weight models. Without further provider context
+	// these names map to Groq; if the same model is served through
+	// vLLM the operator should prefix the model name with "vllm/".
+	if strings.HasPrefix(model, "llama-") || strings.HasPrefix(model, "mixtral-") || strings.HasPrefix(model, "gemma") {
+		return "groq"
 	}
 	if _, ok := modelPrices[model]; ok {
 		return "openai"

@@ -57,6 +57,16 @@ var modelRanks = map[string]modelInfo{
 	"gemini-2.5-flash": {"google", 2},
 	"gemini-1.5-pro":   {"google", 3},
 	"gemini-2.5-pro":   {"google", 4},
+	// Mistral, cheapest first.
+	"mistral-nemo":         {"mistral", 0},
+	"open-mistral-7b":      {"mistral", 1},
+	"mistral-small-latest": {"mistral", 2},
+	"mistral-large-latest": {"mistral", 3},
+	// Groq (hardware-accelerated open models), cheapest first.
+	"gemma2-9b-it":            {"groq", 0},
+	"llama-3.1-8b-instant":    {"groq", 1},
+	"mixtral-8x7b-32768":      {"groq", 2},
+	"llama-3.3-70b-versatile": {"groq", 3},
 }
 
 // explicitCheapModels is the fast-path set for "the caller asked for a
@@ -84,7 +94,23 @@ func (r *Router) Route(_ context.Context, provider, requestedModel, prompt strin
 		}
 	}
 
-	if provider != "openai" && provider != "anthropic" && provider != "google" {
+	// vLLM serves whatever model the operator loaded; we never
+	// override the caller's choice — the alternative model probably
+	// isn't even available on the endpoint.
+	if provider == "vllm" {
+		return RoutingDecision{
+			Provider: "vllm",
+			Model:    requestedModel,
+			Reason:   "vLLM endpoint — caller's model preserved",
+			CostTier: "passthrough",
+		}
+	}
+
+	supported := map[string]struct{}{
+		"openai": {}, "anthropic": {}, "google": {},
+		"mistral": {}, "groq": {},
+	}
+	if _, ok := supported[provider]; !ok {
 		return RoutingDecision{
 			Provider: "openai",
 			Model:    "gpt-4o-mini",
@@ -116,6 +142,14 @@ func cheap(provider string) RoutingDecision {
 		d.Model = "claude-haiku-4-6"
 	case "google":
 		d.Model = "gemini-2.5-flash"
+	case "mistral":
+		d.Model = "mistral-small-latest"
+	case "groq":
+		d.Model = "llama-3.1-8b-instant"
+	case "vllm":
+		// vLLM serves whatever model the operator loaded — caller's
+		// model wins, no override on any tier.
+		d.Model = ""
 	default:
 		d.Model = "gpt-4o-mini"
 	}
@@ -134,6 +168,14 @@ func mid(provider string) RoutingDecision {
 	case "google":
 		// No distinct mid tier on Gemini yet — flash handles it.
 		d.Model = "gemini-2.5-flash"
+	case "mistral":
+		// Mistral's "small" is positioned as the mid-tier production
+		// workhorse; "large" is reserved for premium.
+		d.Model = "mistral-small-latest"
+	case "groq":
+		d.Model = "llama-3.3-70b-versatile"
+	case "vllm":
+		d.Model = ""
 	default:
 		d.Model = "gpt-4.1"
 	}
@@ -151,6 +193,12 @@ func premium(provider string) RoutingDecision {
 		d.Model = "claude-opus-4-6"
 	case "google":
 		d.Model = "gemini-2.5-pro"
+	case "mistral":
+		d.Model = "mistral-large-latest"
+	case "groq":
+		d.Model = "llama-3.3-70b-versatile"
+	case "vllm":
+		d.Model = ""
 	default:
 		d.Model = "gpt-5.4"
 	}

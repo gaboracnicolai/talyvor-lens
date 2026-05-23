@@ -42,6 +42,20 @@ func defaultChains() map[string][]FallbackTarget {
 			{Provider: "openai", Model: "gpt-4o", Priority: 1},
 			{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 2},
 		},
+		// Mistral failing → fastest open-weight host (Groq) → big-3 cloud.
+		"mistral": {
+			{Provider: "groq", Model: "llama-3.3-70b-versatile", Priority: 1},
+			{Provider: "openai", Model: "gpt-4o", Priority: 2},
+		},
+		// Groq failing → comparable European open model → big-3 cloud.
+		"groq": {
+			{Provider: "mistral", Model: "mistral-large-latest", Priority: 1},
+			{Provider: "openai", Model: "gpt-4o", Priority: 2},
+		},
+		// vLLM (self-hosted) failing → cheapest cloud as last resort.
+		"vllm": {
+			{Provider: "openai", Model: "gpt-4o-mini", Priority: 1},
+		},
 	}
 }
 

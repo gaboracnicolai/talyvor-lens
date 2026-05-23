@@ -29,6 +29,15 @@ type Config struct {
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	AWSSessionToken    string
+
+	// OpenAI-compatible providers: Mistral, Groq, vLLM. All optional.
+	// Empty mistral/groq key → 503 on those routes. Empty VLLMBaseURL
+	// → 503 on the vLLM route (vLLM has no default endpoint — the
+	// operator chooses where to run the inference server).
+	MistralAPIKey string
+	GroqAPIKey    string
+	VLLMBaseURL   string
+	VLLMAPIKey    string
 }
 
 func Load() (*Config, error) {
@@ -50,6 +59,11 @@ func Load() (*Config, error) {
 		AWSAccessKeyID:     os.Getenv("LENS_AWS_ACCESS_KEY_ID"),
 		AWSSecretAccessKey: os.Getenv("LENS_AWS_SECRET_ACCESS_KEY"),
 		AWSSessionToken:    os.Getenv("LENS_AWS_SESSION_TOKEN"),
+
+		MistralAPIKey: os.Getenv("LENS_MISTRAL_API_KEY"),
+		GroqAPIKey:    os.Getenv("LENS_GROQ_API_KEY"),
+		VLLMBaseURL:   os.Getenv("LENS_VLLM_BASE_URL"),
+		VLLMAPIKey:    os.Getenv("LENS_VLLM_API_KEY"),
 	}
 
 	if v := os.Getenv("LENS_SEMANTIC_THRESHOLD"); v != "" {

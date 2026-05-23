@@ -195,3 +195,68 @@ func TestRoute_ClaudeHaiku46RecognisedAsCheap(t *testing.T) {
 		t.Errorf("CostTier = %q, want cheap", got.CostTier)
 	}
 }
+
+func TestRoute_MistralCheapTier(t *testing.T) {
+	r := New()
+	got := r.Route(context.Background(), "mistral", "mistral-large-latest", "hi")
+
+	if got.Provider != "mistral" {
+		t.Errorf("Provider = %q, want mistral", got.Provider)
+	}
+	if got.Model != "mistral-small-latest" {
+		t.Errorf("cheap-tier model = %q, want mistral-small-latest", got.Model)
+	}
+	if got.CostTier != "cheap" {
+		t.Errorf("CostTier = %q, want cheap", got.CostTier)
+	}
+}
+
+func TestRoute_MistralPremiumTier(t *testing.T) {
+	r := New()
+	// Same prompt shape that drives TestRoute_ComplexPromptPremiumTier:
+	// code + math + multi-step + reasoning words → score > 3.
+	prompt := "Calculate the integral step by step and explain why this derivation works. " +
+		"Then show the proof in code:\n```python\n" +
+		strings.Repeat("def proof(): return True\n", 100) +
+		"\n```\nFinally, compare this approach to alternatives."
+
+	got := r.Route(context.Background(), "mistral", "mistral-large-latest", prompt)
+	if got.Model != "mistral-large-latest" {
+		t.Errorf("premium-tier mistral model = %q, want mistral-large-latest", got.Model)
+	}
+	if got.CostTier != "premium" {
+		t.Errorf("CostTier = %q, want premium", got.CostTier)
+	}
+}
+
+func TestRoute_GroqCheapAndMidTiers(t *testing.T) {
+	r := New()
+	// Cheap branch.
+	cheap := r.Route(context.Background(), "groq", "llama-3.3-70b-versatile", "hi")
+	if cheap.Model != "llama-3.1-8b-instant" {
+		t.Errorf("cheap-tier groq model = %q, want llama-3.1-8b-instant", cheap.Model)
+	}
+
+	// Mid branch — needs a complexity score of 2 or 3.
+	midPrompt := "```python\n" + strings.Repeat("def f(): pass\n", 200) + "\n```"
+	mid := r.Route(context.Background(), "groq", "llama-3.3-70b-versatile", midPrompt)
+	if mid.Model != "llama-3.3-70b-versatile" {
+		t.Errorf("mid-tier groq model = %q, want llama-3.3-70b-versatile", mid.Model)
+	}
+}
+
+func TestRoute_VLLMPreservesRequestedModel(t *testing.T) {
+	r := New()
+	// vLLM must NEVER override the caller's model — the alternative
+	// probably isn't loaded on the endpoint.
+	got := r.Route(context.Background(), "vllm", "vllm/llama-3-private", "hi")
+	if got.Provider != "vllm" {
+		t.Errorf("Provider = %q, want vllm", got.Provider)
+	}
+	if got.Model != "vllm/llama-3-private" {
+		t.Errorf("vLLM should preserve requestedModel; got %q", got.Model)
+	}
+	if got.CostTier != "passthrough" {
+		t.Errorf("CostTier = %q, want passthrough", got.CostTier)
+	}
+}
