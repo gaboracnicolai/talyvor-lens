@@ -109,6 +109,12 @@ var modelPrices = map[string]modelPrice{
 	"gemini-2.0-flash": {0.10, 0.40},
 	"gemini-1.5-pro":   {1.25, 5.00},
 	"gemini-1.5-flash": {0.075, 0.30},
+	// AWS Bedrock — Claude billed through Bedrock carries a ~15% markup
+	// over the direct Anthropic API. Keys use the raw Bedrock model IDs
+	// so RecordSpend prices the row that token_events actually carries.
+	"anthropic.claude-opus-4-6-20251101-v1:0":   {17.25, 86.25},
+	"anthropic.claude-sonnet-4-6-20251101-v1:0": {3.45, 17.25},
+	"anthropic.claude-haiku-4-6-20251103-v1:0":  {0.92, 4.60},
 }
 
 // costUSD returns the realized USD cost for the request. Unknown models
@@ -132,6 +138,12 @@ func CostUSD(model string, inputTokens, outputTokens int) float64 {
 // the (provider, model) pair stays consistent in token_events even when the
 // caller only supplies the model.
 func providerForModel(model string) string {
+	// Bedrock model IDs ("anthropic.claude-…") are checked before the
+	// generic claude- branch so a Bedrock-billed row never gets logged
+	// as a direct Anthropic call.
+	if strings.HasPrefix(model, "anthropic.") {
+		return "bedrock"
+	}
 	if strings.HasPrefix(model, "claude-") {
 		return "anthropic"
 	}

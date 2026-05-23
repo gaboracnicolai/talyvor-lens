@@ -89,6 +89,13 @@ type Proxy struct {
 	openAIURL    string
 	anthropicURL string
 	googleURL    string
+
+	// Bedrock-specific state. bedrockURL is empty in production (URL is
+	// computed from region); tests set it to an httptest base URL. The
+	// config is set via SetBedrockConfig after construction so New's
+	// already-long parameter list doesn't grow further.
+	bedrockConfig BedrockConfig
+	bedrockURL    string
 }
 
 // New constructs a Proxy. The learner is variadic so callers that don't
@@ -1367,6 +1374,32 @@ func (p *Proxy) configForProvider(name string) providerConfig {
 				return out, err
 			},
 			translateResponse: translateFromGemini,
+		}
+	case "bedrock":
+		// Snapshot the bedrock state at config-build time so the closures
+		// don't race with a concurrent SetBedrockConfig call.
+		bedCfg := p.bedrockConfig
+		if bedCfg.Region == "" {
+			bedCfg.Region = "us-east-1"
+		}
+		baseURL := p.bedrockURL
+		if baseURL == "" {
+			baseURL = "https://bedrock-runtime." + bedCfg.Region + ".amazonaws.com"
+		}
+		return providerConfig{
+			name: "bedrock",
+			upstreamURLFn: func(model string) string {
+				id, ok := modelToBedrockID(model)
+				if !ok {
+					id = model
+				}
+				return baseURL + "/model/" + id + "/invoke"
+			},
+			setAuth: func(req *http.Request) {
+				_ = signRequest(req, bedCfg)
+			},
+			translateRequest:  translateToBedrockFormat,
+			translateResponse: translateFromBedrockFormat,
 		}
 	}
 	return providerConfig{}

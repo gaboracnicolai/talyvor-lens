@@ -21,6 +21,14 @@ type Config struct {
 	MaxCacheTTL       time.Duration
 	LogLevel          string
 	OllamaURL         string
+
+	// AWS Bedrock — all four fields are optional; an empty AccessKeyID
+	// keeps HandleBedrock in 503 graceful-degradation mode. SessionToken
+	// is only set when the deployment uses STS / assumed-role creds.
+	AWSRegion          string
+	AWSAccessKeyID     string
+	AWSSecretAccessKey string
+	AWSSessionToken    string
 }
 
 func Load() (*Config, error) {
@@ -37,6 +45,11 @@ func Load() (*Config, error) {
 		MaxCacheTTL:       24 * time.Hour,
 		LogLevel:          getEnv("LENS_LOG_LEVEL", "info"),
 		OllamaURL:         getEnv("LENS_OLLAMA_URL", "http://localhost:11434"),
+
+		AWSRegion:          getEnv("LENS_AWS_REGION", "us-east-1"),
+		AWSAccessKeyID:     os.Getenv("LENS_AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey: os.Getenv("LENS_AWS_SECRET_ACCESS_KEY"),
+		AWSSessionToken:    os.Getenv("LENS_AWS_SESSION_TOKEN"),
 	}
 
 	if v := os.Getenv("LENS_SEMANTIC_THRESHOLD"); v != "" {

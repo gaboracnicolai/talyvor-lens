@@ -162,6 +162,12 @@ func run() error {
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
 	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	p.SetBedrockConfig(proxy.BedrockConfig{
+		Region:          cfg.AWSRegion,
+		AccessKeyID:     cfg.AWSAccessKeyID,
+		SecretAccessKey: cfg.AWSSecretAccessKey,
+		SessionToken:    cfg.AWSSessionToken,
+	})
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -224,6 +230,7 @@ func run() error {
 		authed.Post("/v1/proxy/openai/*", p.HandleOpenAI)
 		authed.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
 		authed.Post("/v1/proxy/google/*", p.HandleGoogle)
+		authed.Post("/v1/proxy/bedrock/*", p.HandleBedrock)
 
 		authed.Post("/v1/api/keys", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
