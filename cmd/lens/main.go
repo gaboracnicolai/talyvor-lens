@@ -36,6 +36,7 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
+	"github.com/talyvor/lens/internal/dashboard"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/learner"
@@ -190,6 +191,13 @@ func run() error {
 	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, "0.1.0")
 	r.Post("/mcp", mcpServer.HandleRPC)
 	r.Get("/mcp/sse", mcpServer.HandleSSE)
+
+	// Dashboard is public — same trust model as /healthz. The dashboard
+	// page itself is static; the live numbers come from /v1/api/* XHRs
+	// that the browser sends with the user's own API key.
+	dashHandler := dashboard.New("0.1.0")
+	r.Get("/dashboard", dashHandler.ServeHTTP)
+	r.Get("/", dashHandler.RedirectRoot)
 
 	// Everything else sits behind the API-key middleware. chi.Group inherits
 	// middleware only for routes registered inside its closure.
