@@ -17,6 +17,7 @@ import (
 
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/learner"
@@ -42,36 +43,38 @@ type Analyser interface {
 }
 
 type Server struct {
-	pool         pgxDB
-	redisClient  *redis.Client
-	natsConn     *nats.Conn
-	exactCache   *cache.ExactCache
-	analyser     Analyser
-	alertManager *alerts.AlertManager
-	abTester     *ab.Tester
-	tracker      *attribution.Tracker
-	wsManager    *workspace.Manager
-	localRouter  *localrouter.LocalRouter
-	version      string
-	startTime    time.Time
+	pool             pgxDB
+	redisClient      *redis.Client
+	natsConn         *nats.Conn
+	exactCache       *cache.ExactCache
+	analyser         Analyser
+	alertManager     *alerts.AlertManager
+	abTester         *ab.Tester
+	tracker          *attribution.Tracker
+	wsManager        *workspace.Manager
+	localRouter      *localrouter.LocalRouter
+	anomalyDetector  *anomaly.Detector
+	version          string
+	startTime        time.Time
 }
 
 // serverDeps is the test-friendly constructor input. Public NewServer
 // translates *pgxpool.Pool + *learner.Learner into the interface fields so
 // the typed-nil interface trap can't bite.
 type serverDeps struct {
-	pool         pgxDB
-	redisClient  *redis.Client
-	natsConn     *nats.Conn
-	exactCache   *cache.ExactCache
-	analyser     Analyser
-	alertManager *alerts.AlertManager
-	abTester     *ab.Tester
-	tracker      *attribution.Tracker
-	wsManager    *workspace.Manager
-	localRouter  *localrouter.LocalRouter
-	version      string
-	startTime    time.Time
+	pool             pgxDB
+	redisClient      *redis.Client
+	natsConn         *nats.Conn
+	exactCache       *cache.ExactCache
+	analyser         Analyser
+	alertManager     *alerts.AlertManager
+	abTester         *ab.Tester
+	tracker          *attribution.Tracker
+	wsManager        *workspace.Manager
+	localRouter      *localrouter.LocalRouter
+	anomalyDetector  *anomaly.Detector
+	version          string
+	startTime        time.Time
 }
 
 func newServer(d serverDeps) *Server {
@@ -82,18 +85,19 @@ func newServer(d serverDeps) *Server {
 		d.version = "dev"
 	}
 	return &Server{
-		pool:         d.pool,
-		redisClient:  d.redisClient,
-		natsConn:     d.natsConn,
-		exactCache:   d.exactCache,
-		analyser:     d.analyser,
-		alertManager: d.alertManager,
-		abTester:     d.abTester,
-		tracker:      d.tracker,
-		wsManager:    d.wsManager,
-		localRouter:  d.localRouter,
-		version:      d.version,
-		startTime:    d.startTime,
+		pool:            d.pool,
+		redisClient:     d.redisClient,
+		natsConn:        d.natsConn,
+		exactCache:      d.exactCache,
+		analyser:        d.analyser,
+		alertManager:    d.alertManager,
+		abTester:        d.abTester,
+		tracker:         d.tracker,
+		wsManager:       d.wsManager,
+		localRouter:     d.localRouter,
+		anomalyDetector: d.anomalyDetector,
+		version:         d.version,
+		startTime:       d.startTime,
 	}
 }
 
@@ -108,6 +112,7 @@ func NewServer(
 	tracker *attribution.Tracker,
 	wsManager *workspace.Manager,
 	localRouter *localrouter.LocalRouter,
+	anomalyDetector *anomaly.Detector,
 	version string,
 ) *Server {
 	var poolI pgxDB
@@ -119,18 +124,19 @@ func NewServer(
 		analyser = learnerImpl
 	}
 	return newServer(serverDeps{
-		pool:         poolI,
-		redisClient:  redisClient,
-		natsConn:     natsConn,
-		exactCache:   exactCache,
-		analyser:     analyser,
-		alertManager: alertManager,
-		abTester:     abTester,
-		tracker:      tracker,
-		wsManager:    wsManager,
-		localRouter:  localRouter,
-		version:      version,
-		startTime:    time.Now(),
+		pool:            poolI,
+		redisClient:     redisClient,
+		natsConn:        natsConn,
+		exactCache:      exactCache,
+		analyser:        analyser,
+		alertManager:    alertManager,
+		abTester:        abTester,
+		tracker:         tracker,
+		wsManager:       wsManager,
+		localRouter:     localRouter,
+		anomalyDetector: anomalyDetector,
+		version:         version,
+		startTime:       time.Now(),
 	})
 }
 
@@ -165,6 +171,50 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/alerts/circuits", s.handleAlertsCircuits)
 	r.Get("/v1/api/alerts/rules", s.handleAlertsRules)
 	r.Get("/v1/api/local/status", s.handleLocalStatus)
+	r.Get("/v1/api/anomalies", s.handleAnomalies)
+	r.Get("/v1/api/anomalies/scan", s.handleAnomaliesScan)
+}
+
+// handleAnomalies runs Detect for the dimension tuple supplied via query
+// params. Returns an empty array (not 204) when no anomalies fire so
+// dashboards can render "no anomalies" without a null check.
+func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
+	if s.anomalyDetector == nil {
+		writeJSON(w, http.StatusOK, []anomaly.Anomaly{})
+		return
+	}
+	q := r.URL.Query()
+	wsID := q.Get("workspace_id")
+	if wsID == "" {
+		wsID = "default"
+	}
+	anoms, err := s.anomalyDetector.Detect(r.Context(), wsID, q.Get("team"), q.Get("feature"), q.Get("provider"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if anoms == nil {
+		anoms = []anomaly.Anomaly{}
+	}
+	writeJSON(w, http.StatusOK, anoms)
+}
+
+// handleAnomaliesScan runs ScanAll across every active dimension. Used
+// by the dashboard and by ops dashboards for tenant-wide views.
+func (s *Server) handleAnomaliesScan(w http.ResponseWriter, r *http.Request) {
+	if s.anomalyDetector == nil {
+		writeJSON(w, http.StatusOK, []anomaly.Anomaly{})
+		return
+	}
+	anoms, err := s.anomalyDetector.ScanAll(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if anoms == nil {
+		anoms = []anomaly.Anomaly{}
+	}
+	writeJSON(w, http.StatusOK, anoms)
 }
 
 // -------------------------------------------------------------------------

@@ -29,6 +29,7 @@ import (
 
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/audit"
@@ -154,6 +155,8 @@ func run() error {
 	keyPool := keypool.New()
 	auditExporter := audit.New(pool)
 	evalPipeline := eval.New(pool, qualityScorer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey)
+	anomalyDetector := anomaly.New(pool)
+	go anomalyDetector.StartMonitor(ctx, nc, 1*time.Hour)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -199,6 +202,7 @@ func run() error {
 	apiServer := api.NewServer(
 		pool, redisClient, nc, exactCache, l,
 		alertManager, abTester, branchTracker, wsManager, lr,
+		anomalyDetector,
 		"0.1.0",
 	)
 	// Public: health probe and Prometheus passthrough never require a key.

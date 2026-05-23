@@ -304,6 +304,13 @@ const dashboardHTML = `<!DOCTYPE html>
         <span class="skeleton">Loading…</span>
       </div>
     </section>
+
+    <section>
+      <h2>Anomalies</h2>
+      <div id="anomalies">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
   </main>
 
   <footer>
@@ -440,6 +447,42 @@ const dashboardHTML = `<!DOCTYPE html>
       }
     }
 
+    // Anomaly type → visual treatment. spike is loudest (red ⚠);
+    // trend gets amber up-arrow; unusual is neutral yellow ~. Anything
+    // else (new type added server-side) renders as a generic warn pill.
+    function anomalyClass(type) {
+      switch ((type || '').toLowerCase()) {
+        case 'spike':   return 'bad';
+        case 'trend':   return 'warn';
+        case 'unusual': return 'warn';
+        default:        return 'warn';
+      }
+    }
+    function anomalyGlyph(type) {
+      switch ((type || '').toLowerCase()) {
+        case 'spike':   return '⚠';
+        case 'trend':   return '↑';
+        case 'unusual': return '~';
+        default:        return '!';
+      }
+    }
+
+    function applyAnomalies(list) {
+      const root = document.getElementById('anomalies');
+      if (!Array.isArray(list) || list.length === 0) {
+        root.innerHTML = '<span class="pill good">No anomalies detected ✓</span>';
+        return;
+      }
+      root.innerHTML = list.map(function (a) {
+        const dim = [a.team, a.feature, a.provider].filter(Boolean).join(' · ') || a.workspace_id || '—';
+        return '<div style="margin-bottom:10px;">' +
+          '<span class="pill ' + anomalyClass(a.type) + '">' + anomalyGlyph(a.type) + ' ' + (a.type || '').toUpperCase() + '</span> ' +
+          '<span style="margin-left:8px;color:var(--secondary)">' + dim + '</span>' +
+          '<div style="margin-top:4px;color:var(--text);font-family:var(--mono);font-size:0.92rem;">' + (a.message || '') + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
     function applyWorkspaces(list) {
       const root = document.getElementById('workspaces');
       if (!Array.isArray(list) || list.length === 0) {
@@ -470,6 +513,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/alerts/circuits',                                 applyCircuits],
         ['/v1/api/local/status',                                    applyLocal],
         ['/v1/api/workspaces',                                      applyWorkspaces],
+        ['/v1/api/anomalies/scan',                                  applyAnomalies],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];
