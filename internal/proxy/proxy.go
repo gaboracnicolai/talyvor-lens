@@ -55,6 +55,15 @@ const (
 	defaultWorkspaceID            = "default"
 )
 
+// alertSink is the subset of *alerts.AlertManager that proxy.serve()
+// touches. Defined locally so tests can drop in a counter mock without
+// pulling in the full pgxpool / NATS stack the real manager needs.
+type alertSink interface {
+	IsCircuitOpen(team, feature string) bool
+	GetDowngradeModel(provider, model string) string
+	RecordSpend(ctx context.Context, team, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID string) error
+}
+
 type Proxy struct {
 	exact            *cache.ExactCache
 	semantic         *cache.SemanticCache
@@ -62,7 +71,7 @@ type Proxy struct {
 	compressor       *compressor.Compressor
 	router           *router.Router
 	piiDetector      *pii.Detector
-	alertManager     *alerts.AlertManager
+	alertManager     alertSink
 	templateDetector *templates.TemplateDetector
 	scorer           *quality.Scorer
 	abTester         *ab.Tester
@@ -135,7 +144,6 @@ func New(
 		compressor:       compressorImpl,
 		router:           routerImpl,
 		piiDetector:      piiDetector,
-		alertManager:     alertManager,
 		templateDetector: templateDetector,
 		scorer:           scorer,
 		abTester:         abTester,
@@ -162,7 +170,19 @@ func New(
 	if len(learners) > 0 {
 		p.learner = learners[0]
 	}
+	// Guard the typed-nil interface trap: assign the concrete pointer
+	// only when it isn't nil so `p.alertManager != nil` keeps working.
+	if alertManager != nil {
+		p.alertManager = alertManager
+	}
 	return p
+}
+
+// SetAlertSink lets tests inject a counter mock implementing alertSink.
+// Production never calls this — main.go wires a real *alerts.AlertManager
+// through New(). Kept unexported in spirit (tests are in-package).
+func (p *Proxy) setAlertSink(sink alertSink) {
+	p.alertManager = sink
 }
 
 // providerConfig holds the per-provider knobs HandleOpenAI/HandleAnthropic/
@@ -277,22 +297,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 	}
 
-	// Workspace gate. The workspace decision happens before any cache
-	// lookup so a blocked workspace can't even read someone else's
-	// cached response — the request returns 403 immediately. Cache
-	// isolation downstream is then achieved by prefixing the prompt
-	// with the workspace ID before it reaches the cache layer.
+	// Workspace identification + logging policy come BEFORE the workspace
+	// policy gate so even a 403 response carries the X-Talyvor-Logging
+	// header. wsID resolution (ExtractWorkspaceID) is cheap and pure —
+	// header read with a "default" fallback — so doing it ahead of the
+	// CheckPolicy call has no downside.
 	wsID := defaultWorkspaceID
-	cachePrompt := prompt
 	if p.workspaceManager != nil {
 		wsID = p.workspaceManager.ExtractWorkspaceID(r)
-		policy := p.workspaceManager.CheckPolicy(ctx, wsID, cfg.name, model, len(prompt)/4)
-		if !policy.Allowed {
-			writeError(w, http.StatusForbidden, policy.Violation)
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "workspace_blocked").Inc()
-			return
-		}
-		cachePrompt = wsID + ":" + prompt
 	}
 
 	// Request ID stamped here so every downstream artefact — token_events
@@ -304,6 +316,36 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		requestID = uuid.NewString()
 	}
 	w.Header().Set("X-Talyvor-Request-ID", requestID)
+
+	// Per-workspace logging policy. Decided once per request and applied
+	// at each observability write below. Default (metadata) preserves
+	// costs/tokens but drops prompt text; `none` skips every DB write;
+	// `full` keeps the historic behaviour. Security checks (PII,
+	// injection) run regardless of policy. Header is set BEFORE every
+	// early-return path (workspace 403, injection 400, budget 400, cache
+	// hit, SSE replay) so downstream consumers always see the policy
+	// that governed the response.
+	loggingPolicy := workspace.LoggingMetadata
+	if p.workspaceManager != nil {
+		loggingPolicy = p.workspaceManager.GetLoggingPolicy(wsID)
+	}
+	w.Header().Set("X-Talyvor-Logging", string(loggingPolicy))
+
+	// Workspace policy gate. The workspace decision happens before any
+	// cache lookup so a blocked workspace can't even read someone else's
+	// cached response — the request returns 403 immediately. Cache
+	// isolation downstream is then achieved by prefixing the prompt with
+	// the workspace ID before it reaches the cache layer.
+	cachePrompt := prompt
+	if p.workspaceManager != nil {
+		policy := p.workspaceManager.CheckPolicy(ctx, wsID, cfg.name, model, len(prompt)/4)
+		if !policy.Allowed {
+			writeError(w, http.StatusForbidden, policy.Violation)
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "workspace_blocked").Inc()
+			return
+		}
+		cachePrompt = wsID + ":" + prompt
+	}
 
 	// Session pickup — header-driven, optional. Empty sessionID means
 	// the caller isn't tracking sessions; the entire feature is skipped.
@@ -654,7 +696,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// Record session turn here (BEFORE WriteHeader) so the headers we set
 	// next reflect the post-turn totals. Cost is computed against the
 	// actually-billed upstream model so it matches the alerts pipeline.
-	if sess != nil && statusCode == http.StatusOK {
+	// LoggingNone skips the turn write entirely (privacy mode); metadata
+	// and full both record it.
+	if sess != nil && statusCode == http.StatusOK && loggingPolicy != workspace.LoggingNone {
 		turnCost := alerts.CostUSD(upstreamModel, len(prompt)/4, len(upstreamBody)/4)
 		p.recordSessionTurn(ctx, sessionID, prompt, string(upstreamBody), upstreamModel, turnCost, false)
 		setSessionHeaders(w, p, sessionID)
@@ -686,26 +730,37 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		if piiDetected {
 			eventPrompt = redactedPrompt
 		}
-		p.recordTokenEvent(ctx, cfg.name, model, eventPrompt, upstreamBody, savingsPct, piiDetected)
+		// Logging policy gates the per-request observability writes. None
+		// is the privacy escape hatch — every DB and NATS sink is bypassed.
+		// Metadata keeps cost/token rows but strips prompt_text. Full keeps
+		// everything (the historic behaviour).
+		spendPrompt := eventPrompt
+		if loggingPolicy == workspace.LoggingMetadata {
+			spendPrompt = ""
+		}
+		if loggingPolicy == workspace.LoggingFull {
+			// Learner publishes to NATS — too verbose for metadata mode.
+			p.recordTokenEvent(ctx, cfg.name, model, eventPrompt, upstreamBody, savingsPct, piiDetected)
+		}
 		// RecordSpend prices the model that was actually billed by the
 		// LLM (the upstream model, after any router or circuit override).
 		// Fire-and-forget — alert manager failures must never break a
 		// successful request.
 		inT, outT := len(prompt)/4, len(upstreamBody)/4
-		if p.alertManager != nil {
-			// Use eventPrompt (redacted form when PII was detected) so we
-			// never persist raw PII to token_events; the warmer will only
-			// see clean prompts when it joins this table later.
-			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel, inT, outT, eventPrompt, sessionID, requestID); err != nil {
+		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
+			// spendPrompt is "" in metadata mode (no prompt text persisted)
+			// and the redacted form in full mode when PII was detected.
+			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID); err != nil {
 				slog.Warn("alerts: RecordSpend failed",
 					slog.String("err", err.Error()),
 				)
 			}
 		}
 		// Branch / PR attribution is also best-effort: DB errors here must
-		// not propagate to the caller. The cost is computed against the
+		// not propagate to the caller. LoggingNone skips it entirely; the
+		// other policies record it. The cost is computed against the
 		// upstream model so the same number lands in alerts and attribution.
-		if willAttribute {
+		if willAttribute && loggingPolicy != workspace.LoggingNone {
 			cost := alerts.CostUSD(upstreamModel, inT, outT)
 			if err := p.tracker.Record(ctx, attr, upstreamModel, inT, outT, cost); err != nil {
 				slog.Warn("attribution: Record failed",

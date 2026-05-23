@@ -16,6 +16,31 @@ import (
 
 const defaultWorkspaceID = "default"
 
+// LoggingPolicy controls how much of a request a workspace persists.
+// metadata is the safe default — costs/tokens land in token_events but
+// raw prompt text never does. full enables prompt_text capture for
+// compliance, and none disables every observability write entirely
+// (security checks still run on the hot path).
+type LoggingPolicy string
+
+const (
+	LoggingFull     LoggingPolicy = "full"
+	LoggingMetadata LoggingPolicy = "metadata"
+	LoggingNone     LoggingPolicy = "none"
+)
+
+// normalizeLoggingPolicy maps unknown strings (including "") to the
+// safe default so a misconfigured workspace never accidentally enables
+// "full" logging.
+func normalizeLoggingPolicy(p LoggingPolicy) LoggingPolicy {
+	switch p {
+	case LoggingFull, LoggingMetadata, LoggingNone:
+		return p
+	default:
+		return LoggingMetadata
+	}
+}
+
 // pgxDB is the subset of *pgxpool.Pool that Manager needs. Tests pass nil
 // pool — the in-memory map carries the entire policy decision for
 // model/provider/token checks.
@@ -40,9 +65,10 @@ type Workspace struct {
 	AllowedProviders    []string  `json:"allowed_providers"`
 	MaxTokensPerRequest int       `json:"max_tokens_per_request"`
 	MaxOutputTokens     int       `json:"max_output_tokens"`
-	MaxInputTokens      int       `json:"max_input_tokens"`
-	Active              bool      `json:"active"`
-	CreatedAt           time.Time `json:"created_at"`
+	MaxInputTokens      int           `json:"max_input_tokens"`
+	Active              bool          `json:"active"`
+	LoggingPolicy       LoggingPolicy `json:"logging_policy"`
+	CreatedAt           time.Time     `json:"created_at"`
 }
 
 type WorkspacePolicy struct {
@@ -66,8 +92,8 @@ func New(pool *pgxpool.Pool) *Manager {
 const insertWorkspaceSQL = `INSERT INTO workspaces (
   id, name, cache_prefix, spend_limit_usd,
   allowed_models, allowed_providers, max_tokens_per_request,
-  max_output_tokens, max_input_tokens, active
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  max_output_tokens, max_input_tokens, active, logging_policy
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (id) DO UPDATE SET
   name                   = EXCLUDED.name,
   cache_prefix           = EXCLUDED.cache_prefix,
@@ -78,7 +104,12 @@ ON CONFLICT (id) DO UPDATE SET
   max_output_tokens      = EXCLUDED.max_output_tokens,
   max_input_tokens       = EXCLUDED.max_input_tokens,
   active                 = EXCLUDED.active,
+  logging_policy         = EXCLUDED.logging_policy,
   updated_at             = NOW()`
+
+const updateLoggingPolicySQL = `UPDATE workspaces
+SET logging_policy = $2, updated_at = NOW()
+WHERE id = $1`
 
 func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	if ws.ID == "" {
@@ -93,6 +124,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	if ws.CreatedAt.IsZero() {
 		ws.CreatedAt = time.Now().UTC()
 	}
+	ws.LoggingPolicy = normalizeLoggingPolicy(ws.LoggingPolicy)
 
 	stored := ws
 	m.mu.Lock()
@@ -103,9 +135,44 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 		if _, err := m.pool.Exec(ctx, insertWorkspaceSQL,
 			stored.ID, stored.Name, stored.CachePrefix, stored.SpendLimitUSD,
 			stored.AllowedModels, stored.AllowedProviders, stored.MaxTokensPerRequest,
-			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active,
+			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active, string(stored.LoggingPolicy),
 		); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetLoggingPolicy returns the workspace's logging policy or the safe
+// metadata default when the workspace isn't registered. Hot-path code
+// (proxy.serve) calls this on every request — it must be lock-light
+// and never reach the DB.
+func (m *Manager) GetLoggingPolicy(wsID string) LoggingPolicy {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if ws, ok := m.workspaces[wsID]; ok {
+		return normalizeLoggingPolicy(ws.LoggingPolicy)
+	}
+	return LoggingMetadata
+}
+
+// SetLoggingPolicy updates the in-memory cache and the DB row. Policy
+// changes take effect on the very next request — there's no
+// per-request cache of the policy decision.
+func (m *Manager) SetLoggingPolicy(ctx context.Context, wsID string, policy LoggingPolicy) error {
+	policy = normalizeLoggingPolicy(policy)
+	m.mu.Lock()
+	ws, ok := m.workspaces[wsID]
+	if ok {
+		ws.LoggingPolicy = policy
+	}
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("workspace: %q not registered", wsID)
+	}
+	if m.pool != nil {
+		if _, err := m.pool.Exec(ctx, updateLoggingPolicySQL, wsID, string(policy)); err != nil {
+			return fmt.Errorf("workspace: update logging_policy: %w", err)
 		}
 	}
 	return nil
@@ -244,7 +311,7 @@ func (m *Manager) ScopedCacheKey(wsID, baseKey string) string {
 
 const loadAllSQL = `SELECT id, name, cache_prefix, spend_limit_usd,
   allowed_models, allowed_providers, max_tokens_per_request,
-  max_output_tokens, max_input_tokens, active, created_at
+  max_output_tokens, max_input_tokens, active, logging_policy, created_at
 FROM workspaces
 WHERE active = true`
 
@@ -262,13 +329,15 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 	defer m.mu.Unlock()
 	for rows.Next() {
 		var ws Workspace
+		var policy string
 		if err := rows.Scan(
 			&ws.ID, &ws.Name, &ws.CachePrefix, &ws.SpendLimitUSD,
 			&ws.AllowedModels, &ws.AllowedProviders, &ws.MaxTokensPerRequest,
-			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &ws.CreatedAt,
+			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &ws.CreatedAt,
 		); err != nil {
 			return fmt.Errorf("workspace: scan: %w", err)
 		}
+		ws.LoggingPolicy = normalizeLoggingPolicy(LoggingPolicy(policy))
 		stored := ws
 		m.workspaces[ws.ID] = &stored
 	}

@@ -297,6 +297,13 @@ const dashboardHTML = `<!DOCTYPE html>
         <span class="skeleton">Loading…</span>
       </div>
     </section>
+
+    <section>
+      <h2>Workspaces</h2>
+      <div id="workspaces">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
   </main>
 
   <footer>
@@ -421,6 +428,37 @@ const dashboardHTML = `<!DOCTYPE html>
       }
     }
 
+    // Logging policy → pill class + label. Three states are surfaced
+    // verbatim; anything else (legacy DB rows, schema drift) renders as
+    // a neutral grey pill so the dashboard never lies about the policy.
+    function loggingPolicyBadge(policy) {
+      switch ((policy || '').toLowerCase()) {
+        case 'full':     return '<span class="pill good">full</span>';
+        case 'metadata': return '<span class="pill warn">metadata</span>';
+        case 'none':     return '<span class="pill bad">Privacy mode</span>';
+        default:         return '<span class="pill">unknown</span>';
+      }
+    }
+
+    function applyWorkspaces(list) {
+      const root = document.getElementById('workspaces');
+      if (!Array.isArray(list) || list.length === 0) {
+        root.innerHTML = '<span style="color:var(--secondary)">No workspaces registered.</span>';
+        return;
+      }
+      root.innerHTML =
+        '<table><thead><tr><th>Workspace</th><th>Logging</th><th>Active</th><th>Cost (30d)</th></tr></thead><tbody>' +
+        list.map(function (ws) {
+          return '<tr>' +
+            '<td class="mono">' + (ws.name || ws.id) + '</td>' +
+            '<td>' + loggingPolicyBadge(ws.logging_policy) + '</td>' +
+            '<td>' + (ws.active ? '<span class="pill good">yes</span>' : '<span class="pill bad">no</span>') + '</td>' +
+            '<td class="mono">' + fmtUSD(ws.current_month_cost_usd) + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</tbody></table>';
+    }
+
     async function refresh() {
       const alertEl = document.getElementById('api-alert');
       let anyFail = false;
@@ -431,6 +469,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/cache/top-patterns?workspace_id=default&limit=10', applyTopPatterns],
         ['/v1/api/alerts/circuits',                                 applyCircuits],
         ['/v1/api/local/status',                                    applyLocal],
+        ['/v1/api/workspaces',                                      applyWorkspaces],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];

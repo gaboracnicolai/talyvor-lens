@@ -22,3 +22,6 @@ ALTER TABLE workspaces
 
 ALTER TABLE workspaces
   ADD COLUMN IF NOT EXISTS max_input_tokens INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE workspaces
+  ADD COLUMN IF NOT EXISTS logging_policy TEXT NOT NULL DEFAULT 'metadata';

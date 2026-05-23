@@ -315,6 +315,29 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, ws)
 		})
 
+		// Per-workspace logging policy toggle. Applies immediately —
+		// proxy.serve() reads via GetLoggingPolicy on every request and
+		// there's no per-request cache of the decision.
+		authed.Put("/v1/workspaces/{wsID}/logging", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				LoggingPolicy workspace.LoggingPolicy `json:"logging_policy"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := wsManager.SetLoggingPolicy(req.Context(), wsID, in.LoggingPolicy); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			ws, _ := wsManager.GetWorkspace(wsID)
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"ok":             true,
+				"logging_policy": ws.LoggingPolicy,
+			})
+		})
+
 		authed.Get("/v1/attribution/branch", func(w http.ResponseWriter, req *http.Request) {
 			branch := req.URL.Query().Get("branch")
 			repository := req.URL.Query().Get("repository")

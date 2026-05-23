@@ -429,6 +429,7 @@ func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 			"id":                     ws.ID,
 			"name":                   ws.Name,
 			"active":                 ws.Active,
+			"logging_policy":         string(ws.LoggingPolicy),
 			"current_month_cost_usd": 0.0,
 			"request_count":          0,
 		}
