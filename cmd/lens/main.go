@@ -37,6 +37,7 @@ import (
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/dashboard"
@@ -234,9 +235,16 @@ func run() error {
 
 	// Everything else sits behind the API-key middleware. chi.Group inherits
 	// middleware only for routes registered inside its closure.
+	heliconeCompat := compat.NewHeliconeCompat(keyStore)
+
 	r.Group(func(authed chi.Router) {
-		// Auth must run first so the rate-limiter sees the key/workspace
-		// that AuthMiddleware just stamped onto the request.
+		// Helicone-compat translates Helicone-* headers and rewrites
+		// /oai/* and /anthropic/* paths BEFORE auth runs. That order
+		// matters: Helicone-Auth becomes Authorization, which is what
+		// AuthMiddleware then validates.
+		authed.Use(heliconeCompat.Middleware())
+		// Auth must run before the rate-limiter so the limiter sees the
+		// key/workspace that AuthMiddleware just stamped onto the request.
 		authed.Use(auth.AuthMiddleware(keyStore))
 		authed.Use(ratelimit.RateLimitMiddleware(rateLimiter))
 
@@ -246,6 +254,14 @@ func run() error {
 		authed.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
 		authed.Post("/v1/proxy/google/*", p.HandleGoogle)
 		authed.Post("/v1/proxy/bedrock/*", p.HandleBedrock)
+
+		// Helicone-shape URL prefixes. First-class routes (not a
+		// deprecated alias) — migrating teams can keep these URLs
+		// indefinitely. The compat middleware above strips the
+		// Helicone-Auth / Helicone-Property-* headers before the
+		// proxy handler runs.
+		authed.Post("/oai/*", p.HandleOpenAI)
+		authed.Post("/anthropic/*", p.HandleAnthropic)
 
 		authed.Post("/v1/api/keys", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
