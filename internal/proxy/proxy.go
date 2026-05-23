@@ -31,6 +31,7 @@ import (
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/injection"
+	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/metrics"
@@ -73,6 +74,7 @@ type Proxy struct {
 	sessionTracker    *session.SessionTracker
 	promptManager     *prompts.Manager
 	fallbackRouter    *fallback.FallbackRouter
+	keyPool           *keypool.Pool
 	retryConfig       retry.Config
 	httpClient        *http.Client
 	openAIKey         string
@@ -110,6 +112,7 @@ func New(
 	sessionTracker *session.SessionTracker,
 	promptManager *prompts.Manager,
 	fallbackRouter *fallback.FallbackRouter,
+	keyPool *keypool.Pool,
 	openAIKey string,
 	anthropicKey string,
 	googleKey string,
@@ -135,6 +138,7 @@ func New(
 		sessionTracker:    sessionTracker,
 		promptManager:     promptManager,
 		fallbackRouter:    fallbackRouter,
+		keyPool:           keyPool,
 		retryConfig:       retry.DefaultConfig(),
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:         openAIKey,
@@ -1202,6 +1206,19 @@ func (p *Proxy) forwardWithFallback(
 			continue
 		}
 
+		// Key selection. When a pool is configured we pick a healthy key
+		// per attempt and override cfg's auth/url closures to use it; the
+		// per-attempt choice means a fallback retry doesn't reuse a key
+		// that just failed. When the pool is empty for this provider we
+		// silently fall back to the single configured key.
+		var poolKey *keypool.PoolKey
+		if p.keyPool != nil {
+			if pk, perr := p.keyPool.Get(a.provider); perr == nil && pk != nil {
+				cfg = p.applyKey(cfg, pk.Key)
+				poolKey = pk
+			}
+		}
+
 		// Non-original attempts: rewrite the body's model field so the
 		// fallback target sees the model it actually supports. The other
 		// fields (messages, temperature, tools…) carry through unchanged.
@@ -1214,6 +1231,9 @@ func (p *Proxy) forwardWithFallback(
 		if cfg.translateRequest != nil {
 			translated, terr := cfg.translateRequest(attemptBody)
 			if terr != nil {
+				if poolKey != nil {
+					p.keyPool.RecordError(poolKey.ID)
+				}
 				lastErr = terr
 				lastUsed = a
 				continue
@@ -1225,6 +1245,18 @@ func (p *Proxy) forwardWithFallback(
 		status := 0
 		if resp != nil {
 			status = resp.StatusCode
+		}
+
+		// Pool accounting: transport failure is the only signal the spec
+		// asks us to count against a key. Upstream 5xx/429s are tracked
+		// by the fallback router (which decides whether to switch
+		// providers), not against the individual key.
+		if poolKey != nil {
+			if ferr != nil {
+				p.keyPool.RecordError(poolKey.ID)
+			} else {
+				p.keyPool.RecordSuccess(poolKey.ID)
+			}
 		}
 
 		if p.fallbackRouter != nil && p.fallbackRouter.ShouldFallback(status, ferr) {
@@ -1324,6 +1356,31 @@ func (p *Proxy) configForProvider(name string) providerConfig {
 		}
 	}
 	return providerConfig{}
+}
+
+// applyKey returns a providerConfig identical to cfg except that the
+// auth and (for Google) URL closures use the supplied key instead of
+// the Proxy's single configured value. Used when keyPool.Get returns a
+// pooled credential; the original closures stay untouched in cfg's
+// source so each call gets a fresh closure capturing the right key.
+func (p *Proxy) applyKey(cfg providerConfig, key string) providerConfig {
+	switch cfg.name {
+	case "openai":
+		cfg.setAuth = func(req *http.Request) {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+	case "anthropic":
+		cfg.setAuth = func(req *http.Request) {
+			req.Header.Set("x-api-key", key)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		}
+	case "google":
+		base := p.googleURL
+		cfg.upstreamURLFn = func(model string) string {
+			return base + "/v1beta/models/" + model + ":generateContent?key=" + url.QueryEscape(key)
+		}
+	}
+	return cfg
 }
 
 // setModelInBody re-emits the JSON body with the model field swapped.

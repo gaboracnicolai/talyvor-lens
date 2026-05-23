@@ -51,7 +51,7 @@ func newProxyWithMockUpstream(t *testing.T, srvURL string, primeCache func(c *ca
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		fallback.New(),
+		fallback.New(), nil,
 		"openai-key", "anthropic-key", "",
 	)
 	if srvURL != "" {

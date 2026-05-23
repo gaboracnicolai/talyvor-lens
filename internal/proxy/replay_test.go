@@ -125,7 +125,7 @@ func TestServe_StreamTrueCacheHit_UsesSSEReplay(t *testing.T) {
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		fallback.New(),
+		fallback.New(), nil,
 		"openai-key", "anthropic-key", "",
 	)
 	cached := []byte(`{"choices":[{"message":{"role":"assistant","content":"cached hello"}}]}`)

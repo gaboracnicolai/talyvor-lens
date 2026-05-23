@@ -40,6 +40,7 @@ import (
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/injection"
+	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/mcp"
@@ -147,6 +148,7 @@ func run() error {
 
 	promptManager := prompts.New(pool)
 	fallbackRouter := fallback.New()
+	keyPool := keypool.New()
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -154,7 +156,7 @@ func run() error {
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -454,6 +456,45 @@ func run() error {
 			// workspace_id filtering happens client-side for now — the
 			// in-memory list doesn't index by workspace.
 			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs())
+		})
+
+		// API-key pool: enterprise customers attach multiple keys per
+		// provider to escape per-key rate limits. Raw key material is
+		// kept in memory only; the pool's Stats API never returns it.
+		authed.Post("/v1/api/keys/pool", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				Provider  string `json:"provider"`
+				Key       string `json:"key"`
+				Alias     string `json:"alias"`
+				RateLimit int    `json:"rate_limit"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			pk, err := keyPool.Add(in.Provider, in.Key, in.Alias, in.RateLimit)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, map[string]string{
+				"id":       pk.ID,
+				"provider": pk.Provider,
+				"alias":    pk.Alias,
+			})
+		})
+
+		authed.Get("/v1/api/keys/pool", func(w http.ResponseWriter, req *http.Request) {
+			writeJSONOK(w, http.StatusOK, keyPool.Stats())
+		})
+
+		authed.Delete("/v1/api/keys/pool/{keyID}", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "keyID")
+			if !keyPool.Remove(id) {
+				writeJSONErr(w, http.StatusNotFound, "key not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
 		// Fallback chain inspection and override. The router is in-memory;
