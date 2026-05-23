@@ -1,0 +1,112 @@
+# Talyvor Lens — production docker-compose
+#
+# One-command deploy: `cp .env.production.example .env && docker compose up -d`
+# Lens listens on :8080. The dashboard is at /dashboard, the public status
+# page is at /status, and the OpenAI-compatible proxy is at /v1/proxy/*.
+#
+# Image source: defaults to the public registry tag. `docker compose build`
+# rebuilds from the local Dockerfile if you want to run unreleased code.
+
+services:
+  lens:
+    image: ghcr.io/gaboracnicolai/talyvor-lens:latest
+    build:
+      context: .
+    ports:
+      - "8080:8080"
+    environment:
+      - LENS_DATABASE_URL=postgres://lens:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_lens?sslmode=disable
+      - LENS_REDIS_URL=redis://redis:6379
+      - LENS_NATS_URL=nats://nats:4222
+      - LENS_OPENAI_API_KEY=${LENS_OPENAI_API_KEY:-}
+      - LENS_ANTHROPIC_API_KEY=${LENS_ANTHROPIC_API_KEY:-}
+      - LENS_GOOGLE_API_KEY=${LENS_GOOGLE_API_KEY:-}
+      - LENS_MISTRAL_API_KEY=${LENS_MISTRAL_API_KEY:-}
+      - LENS_GROQ_API_KEY=${LENS_GROQ_API_KEY:-}
+      - LENS_VLLM_BASE_URL=${LENS_VLLM_BASE_URL:-}
+      - LENS_VLLM_API_KEY=${LENS_VLLM_API_KEY:-}
+      - LENS_AWS_REGION=${LENS_AWS_REGION:-us-east-1}
+      - LENS_AWS_ACCESS_KEY_ID=${LENS_AWS_ACCESS_KEY_ID:-}
+      - LENS_AWS_SECRET_ACCESS_KEY=${LENS_AWS_SECRET_ACCESS_KEY:-}
+      - LENS_OLLAMA_URL=${LENS_OLLAMA_URL:-}
+      - LENS_LOG_LEVEL=${LENS_LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Schema migrations run once per compose-up. Uses the postgres image
+  # (not the lens binary) since the lens CLI doesn't ship a migrate
+  # subcommand — every migration file is idempotent (IF NOT EXISTS),
+  # so re-applying on every `up` is safe and predictable.
+  migrate:
+    image: postgres:16-alpine
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        for f in /migrations/*.sql; do
+          echo "==> Applying $$f";
+          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$f" || exit 1;
+        done
+    environment:
+      DATABASE_URL: postgres://lens:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_lens?sslmode=disable
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: talyvor_lens
+      POSTGRES_USER: lens
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lens -d talyvor_lens"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

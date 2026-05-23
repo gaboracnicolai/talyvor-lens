@@ -1,4 +1,4 @@
-.PHONY: build test vet status bench bench-compare
+.PHONY: build test vet status bench bench-compare up down logs ps reset
 
 build:
 	go build ./...
@@ -25,3 +25,29 @@ bench:
 bench-compare:
 	cd benchmarks && go test -tags=bench -bench=. -benchmem \
 	  -benchtime=10s -count=5 ./...
+
+# ────────────────────────────────────────────────────────────
+# Docker compose lifecycle. Run `cp .env.production.example .env`
+# first; `make up` starts everything (Lens + Postgres + Redis + NATS).
+# ────────────────────────────────────────────────────────────
+
+# Bring the full stack up in the background.
+up:
+	docker compose up -d
+
+# Stop services; keep volumes (data survives).
+down:
+	docker compose down
+
+# Tail the Lens container logs.
+logs:
+	docker compose logs -f lens
+
+# Show the current state of every service in the compose project.
+ps:
+	docker compose ps
+
+# Nuke everything: stop services AND delete data volumes. Use when
+# you want a clean DB / cache state — destructive.
+reset:
+	docker compose down -v && docker compose up -d
