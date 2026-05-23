@@ -33,7 +33,7 @@ func newProxyWithFallback(t *testing.T, openAIURL, anthropicURL, googleURL strin
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		fallback.New(), nil,
+		fallback.New(), nil, nil,
 		"openai-key", "anthropic-key", "google-key",
 	)
 	p.openAIURL = openAIURL

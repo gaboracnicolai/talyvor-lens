@@ -25,6 +25,7 @@ import (
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/attribution"
+	"github.com/talyvor/lens/internal/audit"
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/cache"
@@ -75,6 +76,7 @@ type Proxy struct {
 	promptManager     *prompts.Manager
 	fallbackRouter    *fallback.FallbackRouter
 	keyPool           *keypool.Pool
+	auditExporter     *audit.Exporter
 	retryConfig       retry.Config
 	httpClient        *http.Client
 	openAIKey         string
@@ -113,6 +115,7 @@ func New(
 	promptManager *prompts.Manager,
 	fallbackRouter *fallback.FallbackRouter,
 	keyPool *keypool.Pool,
+	auditExporter *audit.Exporter,
 	openAIKey string,
 	anthropicKey string,
 	googleKey string,
@@ -139,6 +142,7 @@ func New(
 		promptManager:     promptManager,
 		fallbackRouter:    fallbackRouter,
 		keyPool:           keyPool,
+		auditExporter:     auditExporter,
 		retryConfig:       retry.DefaultConfig(),
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:         openAIKey,
@@ -283,6 +287,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 		cachePrompt = wsID + ":" + prompt
 	}
+
+	// Request ID stamped here so every downstream artefact — token_events
+	// row, structured log, span attribute — can be correlated back to
+	// the same HTTP call. Generated fresh per request; clients can also
+	// pass an X-Talyvor-Request-ID header to retain their own.
+	requestID := r.Header.Get("X-Talyvor-Request-ID")
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	w.Header().Set("X-Talyvor-Request-ID", requestID)
 
 	// Session pickup — header-driven, optional. Empty sessionID means
 	// the caller isn't tracking sessions; the entire feature is skipped.
@@ -504,7 +518,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// workspace can be served by a local Ollama instance for free. On
 	// any failure we fall through to the regular cloud path — local
 	// routing must never break the main request.
-	if p.tryLocalRouting(w, ctx, cfg.name, model, prompt, cachePrompt, wsID, team, feature, piiDetected, redactedPrompt) {
+	if p.tryLocalRouting(w, ctx, cfg.name, model, prompt, cachePrompt, wsID, team, feature, sessionID, requestID, piiDetected, redactedPrompt) {
 		return
 	}
 
@@ -675,7 +689,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// Use eventPrompt (redacted form when PII was detected) so we
 			// never persist raw PII to token_events; the warmer will only
 			// see clean prompts when it joins this table later.
-			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel, inT, outT, eventPrompt); err != nil {
+			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel, inT, outT, eventPrompt, sessionID, requestID); err != nil {
 				slog.Warn("alerts: RecordSpend failed",
 					slog.String("err", err.Error()),
 				)
@@ -727,7 +741,7 @@ func rebuildBody(originalBody []byte, model, prompt string) ([]byte, error) {
 func (p *Proxy) tryLocalRouting(
 	w http.ResponseWriter,
 	ctx context.Context,
-	provider, model, prompt, cachePrompt, wsID, team, feature string,
+	provider, model, prompt, cachePrompt, wsID, team, feature, sessionID, requestID string,
 	piiDetected bool,
 	redactedPrompt string,
 ) bool {
@@ -773,7 +787,7 @@ func (p *Proxy) tryLocalRouting(
 	// cloud traffic.
 	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected)
 	if p.alertManager != nil {
-		_ = p.alertManager.RecordSpend(ctx, team, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt)
+		_ = p.alertManager.RecordSpend(ctx, team, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt, sessionID, requestID)
 	}
 	metrics.RequestsTotal.WithLabelValues(provider, "local").Inc()
 	return true

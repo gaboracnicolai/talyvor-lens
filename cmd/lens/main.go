@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,6 +31,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/attribution"
+	"github.com/talyvor/lens/internal/audit"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
@@ -149,6 +151,7 @@ func run() error {
 	promptManager := prompts.New(pool)
 	fallbackRouter := fallback.New()
 	keyPool := keypool.New()
+	auditExporter := audit.New(pool)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -156,7 +159,7 @@ func run() error {
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -456,6 +459,84 @@ func run() error {
 			// workspace_id filtering happens client-side for now — the
 			// in-memory list doesn't index by workspace.
 			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs())
+		})
+
+		// Audit export — synchronous download. The exporter streams rows
+		// straight to the http.ResponseWriter so a 100k-record CSV never
+		// materialises in memory. Format defaults to JSON; query params
+		// drive the WHERE filters and the LIMIT cap.
+		authed.Get("/v1/audit/export", func(w http.ResponseWriter, req *http.Request) {
+			q := req.URL.Query()
+			format := audit.ExportFormat(q.Get("format"))
+			if format == "" {
+				format = audit.FormatJSON
+			}
+			filter := audit.ExportFilter{
+				WorkspaceID: q.Get("workspace_id"),
+				Team:        q.Get("team"),
+				Provider:    q.Get("provider"),
+			}
+			if v := q.Get("start"); v != "" {
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					filter.StartTime = t
+				}
+			}
+			if v := q.Get("end"); v != "" {
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					filter.EndTime = t
+				}
+			}
+			if v := q.Get("limit"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil {
+					filter.MaxRecords = n
+				}
+			}
+			// Pick MIME + filename extension up front so we can emit
+			// Content-Disposition before any body bytes are written.
+			var ct, ext string
+			switch format {
+			case audit.FormatCSV:
+				ct, ext = "text/csv", "csv"
+			case audit.FormatNDJSON:
+				ct, ext = "application/x-ndjson", "ndjson"
+			default:
+				ct, ext = "application/json", "json"
+			}
+			w.Header().Set("Content-Type", ct)
+			w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="audit-%s.%s"`, time.Now().UTC().Format("2006-01-02"), ext))
+			w.WriteHeader(http.StatusOK)
+			if _, err := auditExporter.Export(req.Context(), filter, format, w); err != nil {
+				// Headers are already committed; surface the failure in the
+				// structured log so compliance ops can correlate later.
+				logger.Warn("audit: export failed mid-stream", slog.String("err", err.Error()))
+			}
+		})
+
+		authed.Post("/v1/audit/webhook", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				WebhookURL string             `json:"webhook_url"`
+				Filter     audit.ExportFilter `json:"filter"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.WebhookURL == "" {
+				writeJSONErr(w, http.StatusBadRequest, "webhook_url required")
+				return
+			}
+			// Fire-and-forget so the caller doesn't block on a slow SIEM.
+			// Use a fresh context detached from the request so cancellation
+			// of the HTTP connection doesn't kill the export mid-flight.
+			go func(filter audit.ExportFilter, url string) {
+				if err := auditExporter.ExportWebhook(context.Background(), url, filter); err != nil {
+					logger.Warn("audit: webhook export failed",
+						slog.String("url", url),
+						slog.String("err", err.Error()),
+					)
+				}
+			}(in.Filter, in.WebhookURL)
+			writeJSONOK(w, http.StatusAccepted, map[string]any{"ok": true, "message": "export started"})
 		})
 
 		// API-key pool: enterprise customers attach multiple keys per

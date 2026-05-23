@@ -145,18 +145,20 @@ func providerForModel(model string) string {
 }
 
 const insertTokenEventSQL = `INSERT INTO token_events
-  (provider, model, input_tokens, output_tokens, team, feature, cost_usd, prompt_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+  (provider, model, input_tokens, output_tokens, team, feature, cost_usd, prompt_text, session_id, request_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 
 // RecordSpend takes a `prompt` (or already-redacted equivalent) so the
 // cache warmer can later JOIN prompt_embeddings against token_events to
-// recover the prompt text it needs to re-warm popular patterns.
-func (a *AlertManager) RecordSpend(ctx context.Context, team, feature, model string, inputTokens, outputTokens int, prompt string) error {
+// recover the prompt text it needs to re-warm popular patterns. The
+// session_id and request_id arguments are persisted so audit exports
+// can correlate spend rows back to a chat session and HTTP request.
+func (a *AlertManager) RecordSpend(ctx context.Context, team, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID string) error {
 	cost := costUSD(model, inputTokens, outputTokens)
 	provider := providerForModel(model)
 
 	if _, err := a.pool.Exec(ctx, insertTokenEventSQL,
-		provider, model, inputTokens, outputTokens, team, feature, cost, prompt,
+		provider, model, inputTokens, outputTokens, team, feature, cost, prompt, sessionID, requestID,
 	); err != nil {
 		return fmt.Errorf("alerts: insert token_event: %w", err)
 	}
