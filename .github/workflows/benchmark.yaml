@@ -1,0 +1,30 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Run benchmarks
+        run: |
+          cd benchmarks
+          go test -tags=bench -bench=. -benchmem -benchtime=5s \
+            ./... 2>&1 | tee benchmark-results.txt
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmarks/benchmark-results.txt
+          retention-days: 90
