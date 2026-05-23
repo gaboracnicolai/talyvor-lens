@@ -38,6 +38,7 @@ import (
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/dashboard"
 	"github.com/talyvor/lens/internal/embedder"
+	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
@@ -145,6 +146,7 @@ func run() error {
 	go sessionTracker.StartCleanup(ctx)
 
 	promptManager := prompts.New(pool)
+	fallbackRouter := fallback.New()
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -152,7 +154,7 @@ func run() error {
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -452,6 +454,24 @@ func run() error {
 			// workspace_id filtering happens client-side for now — the
 			// in-memory list doesn't index by workspace.
 			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs())
+		})
+
+		// Fallback chain inspection and override. The router is in-memory;
+		// updates here are not persisted — restarting the binary resets
+		// chains to the defaults.
+		authed.Get("/v1/api/fallback/chains", func(w http.ResponseWriter, req *http.Request) {
+			writeJSONOK(w, http.StatusOK, fallbackRouter.AllChains())
+		})
+
+		authed.Put("/v1/api/fallback/chains/{provider}", func(w http.ResponseWriter, req *http.Request) {
+			provider := chi.URLParam(req, "provider")
+			var targets []fallback.FallbackTarget
+			if err := json.NewDecoder(req.Body).Decode(&targets); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			fallbackRouter.SetChain(provider, targets)
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
 		// Prompt management — named, versioned prompts that teams edit

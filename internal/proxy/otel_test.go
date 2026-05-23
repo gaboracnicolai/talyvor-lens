@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/talyvor/lens/internal/compressor"
+	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/router"
 )
@@ -50,6 +51,7 @@ func newProxyWithMockUpstream(t *testing.T, srvURL string, primeCache func(c *ca
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		fallback.New(),
 		"openai-key", "anthropic-key", "",
 	)
 	if srvURL != "" {

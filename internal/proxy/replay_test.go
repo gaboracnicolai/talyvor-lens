@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/talyvor/lens/internal/compressor"
+	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/router"
 )
@@ -124,6 +125,7 @@ func TestServe_StreamTrueCacheHit_UsesSSEReplay(t *testing.T) {
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		fallback.New(),
 		"openai-key", "anthropic-key", "",
 	)
 	cached := []byte(`{"choices":[{"message":{"role":"assistant","content":"cached hello"}}]}`)

@@ -29,6 +29,7 @@ import (
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
+	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
@@ -71,6 +72,8 @@ type Proxy struct {
 	batchRouter       *batch.BatchRouter
 	sessionTracker    *session.SessionTracker
 	promptManager     *prompts.Manager
+	fallbackRouter    *fallback.FallbackRouter
+	retryConfig       retry.Config
 	httpClient        *http.Client
 	openAIKey         string
 	anthropicKey      string
@@ -106,6 +109,7 @@ func New(
 	batchRouter *batch.BatchRouter,
 	sessionTracker *session.SessionTracker,
 	promptManager *prompts.Manager,
+	fallbackRouter *fallback.FallbackRouter,
 	openAIKey string,
 	anthropicKey string,
 	googleKey string,
@@ -130,6 +134,8 @@ func New(
 		batchRouter:       batchRouter,
 		sessionTracker:    sessionTracker,
 		promptManager:     promptManager,
+		fallbackRouter:    fallbackRouter,
+		retryConfig:       retry.DefaultConfig(),
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:         openAIKey,
 		anthropicKey:      anthropicKey,
@@ -559,25 +565,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
-	// Per-provider request translation. For OpenAI/Anthropic this is a
-	// no-op; for Gemini it converts the OpenAI-shaped body into Gemini's
-	// generateContent payload. The translated body is only what hits the
-	// upstream — internal cache / scoring still see the original.
-	sendBody := upstreamBodyOut
-	if cfg.translateRequest != nil {
-		translated, err := cfg.translateRequest(upstreamBodyOut)
-		if err != nil {
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			writeError(w, http.StatusBadGateway, "request translation failed: "+err.Error())
-			return
-		}
-		sendBody = translated
-	}
-
+	// forwardWithFallback owns translation, retry, and provider switching.
+	// Input is the canonical OpenAI-shape body; output is also OpenAI-shape
+	// (Gemini etc. are reverse-translated internally) so all downstream
+	// caching / scoring / spend code operates on one schema regardless of
+	// which provider actually answered.
 	span.AddEvent("llm.forward.start")
-	upstreamResp, upstreamBody, attempts, err := p.forward(ctx, r, sendBody, upstreamModel, cfg)
+	upstreamBody, statusCode, fbResult, err := p.forwardWithFallback(
+		ctx, r, cfg.name, upstreamModel, wsID, upstreamBodyOut, w,
+	)
+	attempts := fbResult.Attempts
 	if err != nil {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
 		span.RecordError(err)
@@ -585,26 +582,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+err.Error())
 		return
 	}
-	// Reverse-translate the response so everything downstream (cache,
-	// scoring, recordTokenEvent) operates on the OpenAI shape.
-	if cfg.translateResponse != nil && upstreamResp.StatusCode == http.StatusOK {
-		translated, terr := cfg.translateResponse(upstreamBody, upstreamModel)
-		if terr != nil {
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
-			span.RecordError(terr)
-			span.SetStatus(codes.Error, terr.Error())
-			writeError(w, http.StatusBadGateway, "response translation failed: "+terr.Error())
-			return
-		}
-		upstreamBody = translated
-	}
 
 	// Score the response so we can gate caching on quality. Scoring is
 	// pure-Go heuristics — fast enough to do on the hot path. Score is
 	// only meaningful for a successful upstream (200); on errors we skip
 	// scoring entirely.
 	var qualityScore *quality.QualityScore
-	if p.scorer != nil && upstreamResp.StatusCode == http.StatusOK {
+	if p.scorer != nil && statusCode == http.StatusOK {
 		q := p.scorer.ScoreResponse(ctx, prompt, string(upstreamBody), cfg.name, model)
 		qualityScore = &q
 	}
@@ -645,18 +629,21 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// Record session turn here (BEFORE WriteHeader) so the headers we set
 	// next reflect the post-turn totals. Cost is computed against the
 	// actually-billed upstream model so it matches the alerts pipeline.
-	if sess != nil && upstreamResp.StatusCode == http.StatusOK {
+	if sess != nil && statusCode == http.StatusOK {
 		turnCost := alerts.CostUSD(upstreamModel, len(prompt)/4, len(upstreamBody)/4)
 		p.recordSessionTurn(ctx, sessionID, prompt, string(upstreamBody), upstreamModel, turnCost, false)
 		setSessionHeaders(w, p, sessionID)
 	}
-	if ct := upstreamResp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
+	// forwardWithFallback always returns OpenAI-shape JSON, so we default
+	// Content-Type to application/json. Streaming responses are handled in
+	// a different code path (stream.go) and don't pass through here.
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
 	}
-	w.WriteHeader(upstreamResp.StatusCode)
+	w.WriteHeader(statusCode)
 	_, _ = w.Write(upstreamBody)
 
-	if upstreamResp.StatusCode == http.StatusOK {
+	if statusCode == http.StatusOK {
 		// Cache iff the prompt has no PII AND the response is judged
 		// cacheable by the quality scorer. Low-quality responses are
 		// forwarded to the client but never persisted.
@@ -710,7 +697,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		span.SetStatus(codes.Ok, "")
 	} else {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "upstream_error").Inc()
-		span.SetStatus(codes.Error, fmt.Sprintf("upstream status %d", upstreamResp.StatusCode))
+		span.SetStatus(codes.Error, fmt.Sprintf("upstream status %d", statusCode))
 	}
 }
 
@@ -888,7 +875,7 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, prompt string,
 // the attempt count, and any non-retryable error.
 func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model string, cfg providerConfig) (*http.Response, []byte, int, error) {
 	upstreamURL := cfg.upstreamURLFn(model)
-	result := retry.Do(ctx, retry.DefaultConfig(), func(c context.Context) (*http.Response, error) {
+	result := retry.Do(ctx, p.retryConfig, func(c context.Context) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(c, http.MethodPost, upstreamURL, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("build upstream request: %w", err)
@@ -1167,4 +1154,197 @@ func anthropicReplayFrames(cached []byte) ([][]byte, error) {
 		[]byte("event: content_block_stop\ndata: " + string(stopPayload) + "\n\n"),
 		[]byte("event: message_stop\ndata: " + string(messageStopPayload) + "\n\n"),
 	}, nil
+}
+
+// fallbackAttempt describes one entry in the ordered list of (provider,
+// model) pairs forwardWithFallback walks until something succeeds.
+type fallbackAttempt struct {
+	provider string
+	model    string
+}
+
+// forwardWithFallback dispatches the request to the original provider
+// and, if that attempt is fallback-eligible (5xx, 429, or transport
+// error), walks the configured chain trying alternates. Input body is
+// canonical OpenAI shape; output is always reverse-translated to that
+// same shape so downstream cache + scoring + spend logic doesn't have
+// to know which provider actually replied.
+func (p *Proxy) forwardWithFallback(
+	ctx context.Context,
+	r *http.Request,
+	provider, model, wsID string,
+	body []byte,
+	w http.ResponseWriter,
+) ([]byte, int, fallback.FallbackResult, error) {
+	attempts := []fallbackAttempt{{provider: provider, model: model}}
+	if p.fallbackRouter != nil {
+		chain := p.fallbackRouter.GetChain(provider)
+		// Spec caps total to 3 attempts: original + 2 fallbacks.
+		for i, t := range chain {
+			if i >= 2 {
+				break
+			}
+			attempts = append(attempts, fallbackAttempt{provider: t.Provider, model: t.Model})
+		}
+	}
+
+	var (
+		lastBody   []byte
+		lastStatus int
+		lastErr    error
+		lastUsed   = attempts[0]
+	)
+
+	for i, a := range attempts {
+		cfg := p.configForProvider(a.provider)
+		if cfg.name == "" {
+			// Unknown provider name in the chain — treat as a no-op and move on.
+			continue
+		}
+
+		// Non-original attempts: rewrite the body's model field so the
+		// fallback target sees the model it actually supports. The other
+		// fields (messages, temperature, tools…) carry through unchanged.
+		attemptBody := body
+		if i > 0 {
+			attemptBody = setModelInBody(body, a.model)
+		}
+
+		sendBody := attemptBody
+		if cfg.translateRequest != nil {
+			translated, terr := cfg.translateRequest(attemptBody)
+			if terr != nil {
+				lastErr = terr
+				lastUsed = a
+				continue
+			}
+			sendBody = translated
+		}
+
+		resp, rb, _, ferr := p.forward(ctx, r, sendBody, a.model, cfg)
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+
+		if p.fallbackRouter != nil && p.fallbackRouter.ShouldFallback(status, ferr) {
+			// Record-and-continue. Logging here is metadata only — no
+			// prompt content, no response body.
+			slog.Warn("fallback: attempt failed",
+				slog.String("original_provider", provider),
+				slog.String("attempt_provider", a.provider),
+				slog.String("attempt_model", a.model),
+				slog.Int("attempt_index", i),
+				slog.Int("status", status),
+				slog.String("err", errString(ferr)),
+				slog.String("workspace_id", wsID),
+			)
+			lastBody = rb
+			lastStatus = status
+			lastErr = ferr
+			lastUsed = a
+			continue
+		}
+
+		// Non-fallbackable outcome (success, or 4xx that's the client's
+		// fault either way). Reverse-translate Gemini responses so the
+		// returned body is OpenAI-shaped for everyone downstream.
+		if ferr == nil && cfg.translateResponse != nil && status == http.StatusOK {
+			translated, terr := cfg.translateResponse(rb, a.model)
+			if terr == nil {
+				rb = translated
+			}
+		}
+
+		result := fallback.FallbackResult{
+			UsedProvider: a.provider,
+			UsedModel:    a.model,
+			Attempts:     i + 1,
+			FellBack:     i > 0,
+		}
+		if i > 0 {
+			w.Header().Set("X-Talyvor-Fallback-Provider", a.provider)
+			w.Header().Set("X-Talyvor-Fallback-Model", a.model)
+			slog.Info("fallback: succeeded",
+				slog.String("original_provider", provider),
+				slog.String("used_provider", a.provider),
+				slog.String("used_model", a.model),
+				slog.Int("attempts", i+1),
+				slog.String("workspace_id", wsID),
+			)
+		}
+		return rb, status, result, ferr
+	}
+
+	// Chain exhausted — return whatever the last attempt produced. The
+	// caller's serve() turns a non-nil err into a 502; otherwise the
+	// upstream's own 5xx body is forwarded to the client.
+	return lastBody, lastStatus, fallback.FallbackResult{
+		UsedProvider: lastUsed.provider,
+		UsedModel:    lastUsed.model,
+		Attempts:     len(attempts),
+		FellBack:     len(attempts) > 1,
+	}, lastErr
+}
+
+// configForProvider returns a providerConfig built fresh per call. The
+// closures capture the proxy's URL + key fields so test overrides of
+// openAIURL/anthropicURL/googleURL propagate naturally.
+func (p *Proxy) configForProvider(name string) providerConfig {
+	switch name {
+	case "openai":
+		return providerConfig{
+			name:          "openai",
+			upstreamURLFn: func(string) string { return p.openAIURL },
+			setAuth: func(req *http.Request) {
+				req.Header.Set("Authorization", "Bearer "+p.openAIKey)
+			},
+		}
+	case "anthropic":
+		return providerConfig{
+			name:          "anthropic",
+			upstreamURLFn: func(string) string { return p.anthropicURL },
+			setAuth: func(req *http.Request) {
+				req.Header.Set("x-api-key", p.anthropicKey)
+				req.Header.Set("anthropic-version", "2023-06-01")
+			},
+		}
+	case "google":
+		return providerConfig{
+			name: "google",
+			upstreamURLFn: func(model string) string {
+				return p.googleURL + "/v1beta/models/" + model + ":generateContent?key=" + url.QueryEscape(p.googleKey)
+			},
+			setAuth: func(*http.Request) {},
+			translateRequest: func(body []byte) ([]byte, error) {
+				out, _, err := translateToGemini(body)
+				return out, err
+			},
+			translateResponse: translateFromGemini,
+		}
+	}
+	return providerConfig{}
+}
+
+// setModelInBody re-emits the JSON body with the model field swapped.
+// Parse errors leave the body untouched — forward() will simply send
+// the original bytes upstream.
+func setModelInBody(body []byte, model string) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	m["model"] = model
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
