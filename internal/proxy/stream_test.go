@@ -53,7 +53,7 @@ func sseUpstream(t *testing.T, body string) *httptest.Server {
 func TestStream_OpenAIChunksForwardedToClient(t *testing.T) {
 	srv := sseUpstream(t, openAISSEBody)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
 	p.openAIURL = srv.URL
 
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}`
@@ -86,7 +86,7 @@ func TestStream_OpenAIChunksForwardedToClient(t *testing.T) {
 func TestStream_OpenAIFullResponseCachedAfterDone(t *testing.T) {
 	srv := sseUpstream(t, openAISSEBody)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
 	p.openAIURL = srv.URL
 
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}`
@@ -111,7 +111,7 @@ func TestStream_OpenAIFullResponseCachedAfterDone(t *testing.T) {
 func TestStream_AnthropicContentBlockDeltaAccumulated(t *testing.T) {
 	srv := sseUpstream(t, anthropicSSEBody)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
 	p.anthropicURL = srv.URL
 
 	body := `{"model":"claude-3-opus-20240229","messages":[{"role":"user","content":"hi"}],"stream":true}`
@@ -151,7 +151,7 @@ func TestStream_NonStreamingRequestUsesExistingPath(t *testing.T) {
 	t.Cleanup(upstream.Close)
 
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
 	p.openAIURL = upstream.URL
 
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}` // no stream flag
@@ -176,7 +176,7 @@ func TestStream_NonStreamingRequestUsesExistingPath(t *testing.T) {
 func TestStream_FlushCalledAfterEachChunk(t *testing.T) {
 	srv := sseUpstream(t, openAISSEBody)
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "openai-key", "anthropic-key", "")
 	p.openAIURL = srv.URL
 
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}`

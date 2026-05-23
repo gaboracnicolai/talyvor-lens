@@ -44,6 +44,7 @@ import (
 	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
+	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/ratelimit"
@@ -143,13 +144,15 @@ func run() error {
 	sessionTracker := session.New(pool)
 	go sessionTracker.StartCleanup(ctx)
 
+	promptManager := prompts.New(pool)
+
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 
 	keyStore := auth.New(pool)
 	if err := keyStore.LoadAll(ctx); err != nil {
@@ -449,6 +452,127 @@ func run() error {
 			// workspace_id filtering happens client-side for now — the
 			// in-memory list doesn't index by workspace.
 			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs())
+		})
+
+		// Prompt management — named, versioned prompts that teams edit
+		// without redeploys. Every write goes through the Manager so the
+		// in-memory cache stays consistent with the DB.
+		authed.Post("/v1/prompts", func(w http.ResponseWriter, req *http.Request) {
+			var in prompts.Prompt
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			created, err := promptManager.Create(req.Context(), in)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, created)
+		})
+
+		authed.Get("/v1/prompts", func(w http.ResponseWriter, req *http.Request) {
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				wsID = "default"
+			}
+			list, err := promptManager.List(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, list)
+		})
+
+		authed.Get("/v1/prompts/{name}", func(w http.ResponseWriter, req *http.Request) {
+			name := chi.URLParam(req, "name")
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				wsID = "default"
+			}
+			pr, err := promptManager.Get(req.Context(), name, wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusNotFound, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, pr)
+		})
+
+		authed.Put("/v1/prompts/{name}", func(w http.ResponseWriter, req *http.Request) {
+			name := chi.URLParam(req, "name")
+			var in struct {
+				Content     string `json:"content"`
+				Description string `json:"description"`
+				WorkspaceID string `json:"workspace_id"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.WorkspaceID == "" {
+				in.WorkspaceID = "default"
+			}
+			updated, err := promptManager.Update(req.Context(), name, in.WorkspaceID, in.Content, in.Description)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, updated)
+		})
+
+		authed.Get("/v1/prompts/{name}/history", func(w http.ResponseWriter, req *http.Request) {
+			name := chi.URLParam(req, "name")
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				wsID = "default"
+			}
+			hist, err := promptManager.History(req.Context(), name, wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, hist)
+		})
+
+		authed.Post("/v1/prompts/{name}/rollback", func(w http.ResponseWriter, req *http.Request) {
+			name := chi.URLParam(req, "name")
+			var in struct {
+				Version     int    `json:"version"`
+				WorkspaceID string `json:"workspace_id"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.WorkspaceID == "" {
+				in.WorkspaceID = "default"
+			}
+			rolled, err := promptManager.Rollback(req.Context(), name, in.WorkspaceID, in.Version)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, rolled)
+		})
+
+		authed.Get("/v1/prompts/{name}/diff", func(w http.ResponseWriter, req *http.Request) {
+			name := chi.URLParam(req, "name")
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				wsID = "default"
+			}
+			fromV, _ := strconv.Atoi(req.URL.Query().Get("from"))
+			toV, _ := strconv.Atoi(req.URL.Query().Get("to"))
+			if fromV <= 0 || toV <= 0 {
+				writeJSONErr(w, http.StatusBadRequest, "from and to query params required (positive integers)")
+				return
+			}
+			d, err := promptManager.Diff(req.Context(), name, wsID, fromV, toV)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, d)
 		})
 
 		authed.Post("/v1/feedback", func(w http.ResponseWriter, req *http.Request) {

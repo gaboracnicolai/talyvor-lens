@@ -34,6 +34,7 @@ import (
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/pii"
+	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/router"
@@ -69,6 +70,7 @@ type Proxy struct {
 	budgetEnforcer    *budget.Enforcer
 	batchRouter       *batch.BatchRouter
 	sessionTracker    *session.SessionTracker
+	promptManager     *prompts.Manager
 	httpClient        *http.Client
 	openAIKey         string
 	anthropicKey      string
@@ -103,6 +105,7 @@ func New(
 	budgetEnforcer *budget.Enforcer,
 	batchRouter *batch.BatchRouter,
 	sessionTracker *session.SessionTracker,
+	promptManager *prompts.Manager,
 	openAIKey string,
 	anthropicKey string,
 	googleKey string,
@@ -126,6 +129,7 @@ func New(
 		budgetEnforcer:    budgetEnforcer,
 		batchRouter:       batchRouter,
 		sessionTracker:    sessionTracker,
+		promptManager:     promptManager,
 		httpClient:        &http.Client{Timeout: upstreamTimeout},
 		openAIKey:         openAIKey,
 		anthropicKey:      anthropicKey,
@@ -347,6 +351,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					body = rewritten
 				}
 			}
+		}
+	}
+
+	// Named-prompt resolution. Swap any "lens:prompt:<name>" system
+	// message for the active prompt body stored under that name in this
+	// workspace. Runs after template detection (which already records a
+	// hash of the placeholder system prompt) and before PII detection so
+	// the PII gate scans the resolved content. Body is only mutated when
+	// Resolve actually found a match.
+	if p.promptManager != nil {
+		if resolved, err := p.promptManager.Resolve(ctx, body, wsID); err == nil && !bytes.Equal(resolved, body) {
+			body = resolved
+			w.Header().Set("X-Talyvor-Prompt-Resolved", "true")
 		}
 	}
 
