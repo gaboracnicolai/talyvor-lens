@@ -40,6 +40,7 @@ import (
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/dashboard"
 	"github.com/talyvor/lens/internal/embedder"
+	"github.com/talyvor/lens/internal/eval"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/keypool"
@@ -152,6 +153,7 @@ func run() error {
 	fallbackRouter := fallback.New()
 	keyPool := keypool.New()
 	auditExporter := audit.New(pool)
+	evalPipeline := eval.New(pool, qualityScorer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -459,6 +461,93 @@ func run() error {
 			// workspace_id filtering happens client-side for now — the
 			// in-memory list doesn't index by workspace.
 			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs())
+		})
+
+		// Eval pipeline — test cases, suite runs, and history. RunSuite
+		// is synchronous from the caller's perspective; up to 10 cases
+		// execute concurrently inside the handler.
+		authed.Post("/v1/eval/cases", func(w http.ResponseWriter, req *http.Request) {
+			var in eval.TestCase
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			created, err := evalPipeline.AddTestCase(req.Context(), in)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, created)
+		})
+
+		authed.Get("/v1/eval/cases", func(w http.ResponseWriter, req *http.Request) {
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				wsID = "default"
+			}
+			var tags []string
+			if t := req.URL.Query().Get("tags"); t != "" {
+				tags = strings.Split(t, ",")
+			}
+			cases, err := evalPipeline.ListTestCases(req.Context(), wsID, tags)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, cases)
+		})
+
+		authed.Post("/v1/eval/run", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				WorkspaceID string   `json:"workspace_id"`
+				Tags        []string `json:"tags"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.WorkspaceID == "" {
+				in.WorkspaceID = "default"
+			}
+			summary, err := evalPipeline.RunSuite(req.Context(), in.WorkspaceID, in.Tags)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, summary)
+		})
+
+		authed.Get("/v1/eval/runs/{runID}", func(w http.ResponseWriter, req *http.Request) {
+			runID := chi.URLParam(req, "runID")
+			summary, err := evalPipeline.GetRun(req.Context(), runID)
+			if err != nil {
+				writeJSONErr(w, http.StatusNotFound, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, summary)
+		})
+
+		authed.Get("/v1/eval/runs/{runID}/results", func(w http.ResponseWriter, req *http.Request) {
+			runID := chi.URLParam(req, "runID")
+			results, err := evalPipeline.GetResults(req.Context(), runID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, results)
+		})
+
+		authed.Get("/v1/eval/runs", func(w http.ResponseWriter, req *http.Request) {
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				wsID = "default"
+			}
+			runs, err := evalPipeline.ListRuns(req.Context(), wsID, 10)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, runs)
 		})
 
 		// Audit export — synchronous download. The exporter streams rows
