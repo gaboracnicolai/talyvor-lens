@@ -136,6 +136,7 @@ func run() error {
 	abEngine := ab.NewEngine(pool)
 	abEngine.RunAutoCompleteLoop(ctx, time.Hour)
 	branchTracker := attribution.New(pool)
+	attrStore := attribution.NewStore(pool)
 	wsManager := workspace.New(pool)
 	if err := wsManager.LoadAll(ctx); err != nil {
 		logger.Warn("workspace: LoadAll failed", slog.String("err", err.Error()))
@@ -173,6 +174,9 @@ func run() error {
 	go cacheWarmer.Start(ctx, 1*time.Hour)
 
 	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, guardrailsEngine, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	// Upgraded per-request attribution store (Upgrade Batch 1 / Item 3).
+	// Wired as a setter so the existing proxy.New signature stays put.
+	p.SetAttributionStore(attrStore)
 	p.SetBedrockConfig(proxy.BedrockConfig{
 		Region:          cfg.AWSRegion,
 		AccessKeyID:     cfg.AWSAccessKeyID,
@@ -430,6 +434,66 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, analysis.Variants)
+		})
+
+		// ─── Git attribution ────────────────────────────────
+		// Per-request rollups served from request_attribution
+		// (migration 0017). Complement the legacy /v1/branches
+		// endpoints which still serve branch_spend.
+		authed.Get("/v1/workspaces/{wsID}/attribution/branches", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			since := parseSinceParam(req.URL.Query().Get("since"))
+			limit := 20
+			if v := req.URL.Query().Get("limit"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+					limit = n
+				}
+			}
+			rows, err := attrStore.GetCostByBranch(req.Context(), wsID, since, limit)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, rows)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/attribution/branches/{branch}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			branch := chi.URLParam(req, "branch")
+			since := parseSinceParam(req.URL.Query().Get("since"))
+			stats, err := attrStore.GetBranchStats(req.Context(), wsID, branch, since)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/attribution/prs/{prNumber}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			prNumber := chi.URLParam(req, "prNumber")
+			stats, err := attrStore.GetPRStats(req.Context(), wsID, prNumber)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/attribution/summary", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			days := 30
+			if v := req.URL.Query().Get("days"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 365 {
+					days = n
+				}
+			}
+			sum, err := attrStore.GetSummary(req.Context(), wsID, days)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, sum)
 		})
 
 		// Quality stats for the per-workspace dashboard. `days`
@@ -1073,6 +1137,19 @@ func writeJSONOK(w http.ResponseWriter, status int, body any) {
 
 func writeJSONErr(w http.ResponseWriter, status int, msg string) {
 	writeJSONOK(w, status, map[string]string{"error": msg})
+}
+
+// parseSinceParam turns a `?since=<RFC3339>` query value into a
+// time.Time. Empty / unparseable input returns the zero value,
+// which the attribution store treats as "all time".
+func parseSinceParam(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // ensureBatchFlag stamps batch_eligible:true into the body so the

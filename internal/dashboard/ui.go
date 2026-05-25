@@ -41,6 +41,7 @@ const dashboardHTML = `<!DOCTYPE html>
     }
     .mono { font-family: 'IBM Plex Mono', 'SF Mono', monospace; }
     .accent { color: var(--accent); }
+    .muted { color: var(--secondary); }
 
     header {
       padding: 22px 32px;
@@ -310,6 +311,21 @@ const dashboardHTML = `<!DOCTYPE html>
       <div id="anomalies">
         <span class="skeleton">Loading…</span>
       </div>
+    </section>
+
+    <section>
+      <h2>Git attribution</h2>
+      <p class="muted">
+        Workspace-scoped Git rollups (branch, PR, commit, author, repo)
+        recorded automatically when callers send the X-Talyvor-* headers.
+        Per-workspace dashboards consume these endpoints directly:
+      </p>
+      <ul class="mono" style="font-size:12px;color:var(--secondary);line-height:1.8">
+        <li>GET <span class="accent">/v1/workspaces/&lt;wsID&gt;/attribution/branches</span><span class="muted"> ?since=…&amp;limit=20</span></li>
+        <li>GET <span class="accent">/v1/workspaces/&lt;wsID&gt;/attribution/branches/&lt;branch&gt;</span></li>
+        <li>GET <span class="accent">/v1/workspaces/&lt;wsID&gt;/attribution/prs/&lt;prNumber&gt;</span></li>
+        <li>GET <span class="accent">/v1/workspaces/&lt;wsID&gt;/attribution/summary</span><span class="muted"> ?days=30</span></li>
+      </ul>
     </section>
   </main>
 

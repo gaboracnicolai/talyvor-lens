@@ -77,6 +77,7 @@ type Proxy struct {
 	scorer           *quality.Scorer
 	abTester         *ab.Tester
 	tracker           *attribution.Tracker
+	attrStore         *attribution.Store
 	workspaceManager  *workspace.Manager
 	localRouter       *localrouter.LocalRouter
 	injectionDetector *injection.Detector
@@ -199,6 +200,15 @@ func New(
 // SetAlertSink lets tests inject a counter mock implementing alertSink.
 // Production never calls this — main.go wires a real *alerts.AlertManager
 // through New(). Kept unexported in spirit (tests are in-package).
+// SetAttributionStore wires the upgraded per-request
+// attribution store (Upgrade Batch 1 / Item 3). Keeping this
+// as a setter rather than a constructor arg avoids re-shuffling
+// the already-long proxy.New signature; main.go calls it right
+// after constructing the proxy.
+func (p *Proxy) SetAttributionStore(s *attribution.Store) {
+	p.attrStore = s
+}
+
 func (p *Proxy) setAlertSink(sink alertSink) {
 	p.alertManager = sink
 }
@@ -263,6 +273,12 @@ func (p *Proxy) HandleGoogle(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig) {
 	ctx := r.Context()
+	// requestStart is captured before any work so the per-request
+	// attribution row can report wall-clock latency for the IDE
+	// dashboard. The legacy alerts pipeline doesn't use it; this
+	// is a parallel signal recorded asynchronously after the
+	// response finishes.
+	requestStart := time.Now()
 
 	body, err := readLimitedBody(r, maxBodyBytes)
 	if err != nil {
@@ -773,6 +789,21 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					slog.String("err", err.Error()),
 				)
 			}
+		}
+		// Upgraded per-request attribution. Always fired (the
+		// store handles the empty-workspace case by skipping the
+		// insert) and always async so a slow Postgres can't slow
+		// the response. Cost + token figures are the same numbers
+		// the alerts pipeline records, keeping the dashboard
+		// reconciliation honest.
+		if p.attrStore != nil && loggingPolicy != workspace.LoggingNone {
+			cost := alerts.CostUSD(upstreamModel, inT, outT)
+			p.attrStore.RecordAsync(
+				attribution.ExtractFromRequest(r),
+				inT, outT, cost,
+				upstreamModel, cfg.name,
+				time.Since(requestStart),
+			)
 		}
 		p.launchABShadows(cfg.name, model, prompt, body)
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
