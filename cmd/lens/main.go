@@ -464,6 +464,9 @@ func run() error {
 	// that the browser sends with the user's own API key.
 	dashHandler := dashboard.New("0.1.0")
 	r.Get("/dashboard", dashHandler.ServeHTTP)
+	r.Get("/dashboard/tokens", dashHandler.ServeTokens)
+	r.Get("/dashboard/nodes", dashHandler.ServeNodes)
+	r.Get("/dashboard/economy", dashHandler.ServeEconomy)
 	r.Get("/", dashHandler.RedirectRoot)
 
 	// Public status page. /status content-negotiates between HTML and

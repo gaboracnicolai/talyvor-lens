@@ -9,8 +9,9 @@ import (
 // rendered once at construction time with the version baked in so each
 // request is just a memcpy.
 type Handler struct {
-	version string
-	html    []byte
+	version    string
+	html       []byte
+	tokenPages *tokenPages
 }
 
 func New(version string) *Handler {

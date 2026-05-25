@@ -206,13 +206,55 @@ const dashboardHTML = `<!DOCTYPE html>
     <h1>TALYVOR <span class="accent">LENS</span></h1>
     <span class="badge mono">v{{VERSION}}</span>
     <span class="tagline">AI token intelligence</span>
-    <span class="updated mono" id="updated">—</span>
+    <nav style="display:flex;gap:14px;font-size:12px;margin-left:24px">
+      <a href="/dashboard" style="color:var(--accent);text-decoration:none">Overview</a>
+      <a href="/dashboard/tokens" style="color:var(--secondary);text-decoration:none">Tokens &amp; Mining</a>
+      <a href="/dashboard/nodes" style="color:var(--secondary);text-decoration:none">Nodes</a>
+      <a href="/dashboard/economy" style="color:var(--secondary);text-decoration:none">Economy</a>
+    </nav>
+    <span class="updated mono" id="updated" style="margin-left:auto">—</span>
   </header>
 
   <main>
     <div class="alert" id="api-alert">
       ⚠ Unable to reach Lens API. Configure your API key (header <code class="mono">Authorization: Bearer &lt;key&gt;</code>) to view live data.
     </div>
+
+    <section id="lens-widget" style="display:none">
+      <h2>🪙 LENS Economy</h2>
+      <div class="cards">
+        <div class="card">
+          <div class="label">Total Supply</div>
+          <div class="value mono accent" id="lens-supply">—</div>
+          <div class="sub">all-time minted</div>
+        </div>
+        <div class="card">
+          <div class="label">Circulating</div>
+          <div class="value mono" id="lens-circulating">—</div>
+          <div class="sub">supply − burned</div>
+        </div>
+        <div class="card">
+          <div class="label">Avg Listing Price</div>
+          <div class="value mono" id="lens-price">—</div>
+          <div class="sub">marketplace</div>
+        </div>
+        <div class="card">
+          <div class="label">Active Listings</div>
+          <div class="value mono" id="lens-listings">—</div>
+          <div class="sub"><a href="/dashboard/economy" style="color:var(--accent)">view all →</a></div>
+        </div>
+      </div>
+      <script>
+      fetch('/v1/economy/stats').then(r => r.ok ? r.json() : null).then(s => {
+        if (!s) return;
+        document.getElementById('lens-widget').style.display = '';
+        document.getElementById('lens-supply').textContent = (s.total_supply || 0).toFixed(2) + ' LENS';
+        document.getElementById('lens-circulating').textContent = (s.circulating_supply || 0).toFixed(2) + ' LENS';
+        document.getElementById('lens-price').textContent = '$' + (s.avg_price_usd || 0).toFixed(4) + '/LENS';
+        document.getElementById('lens-listings').textContent = s.market_listings;
+      });
+      </script>
+    </section>
 
     <section>
       <h2>Summary</h2>
