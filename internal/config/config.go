@@ -50,6 +50,13 @@ type Config struct {
 	// Empty string means "no multi-endpoint local routing" —
 	// the legacy LENS_OLLAMA_URL single-endpoint path still works.
 	LocalEndpoints string
+
+	// JWT auth (Item 7). Secret must be ≥32 bytes; empty string
+	// disables JWT minting/validation entirely (the auth manager
+	// will reject any /v1/auth/token call but still accept API
+	// key authentication).
+	JWTSecret string
+	TokenTTL  time.Duration
 }
 
 func Load() (*Config, error) {
@@ -80,6 +87,24 @@ func Load() (*Config, error) {
 		QualityAutoRetry: parseBoolEnv("LENS_QUALITY_AUTO_RETRY"),
 
 		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
+
+		JWTSecret: os.Getenv("LENS_JWT_SECRET"),
+		TokenTTL:  24 * time.Hour,
+	}
+
+	if v := os.Getenv("LENS_TOKEN_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_TOKEN_TTL: %w", err)
+		}
+		c.TokenTTL = d
+	}
+
+	// Enforce minimum entropy for HS256 signing. Empty secret
+	// is allowed — it just disables the JWT mint path; only a
+	// *too-short* secret is a misconfiguration.
+	if c.JWTSecret != "" && len(c.JWTSecret) < 32 {
+		return nil, fmt.Errorf("LENS_JWT_SECRET must be at least 32 bytes (got %d)", len(c.JWTSecret))
 	}
 
 	if v := os.Getenv("LENS_SEMANTIC_THRESHOLD"); v != "" {

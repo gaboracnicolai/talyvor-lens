@@ -205,6 +205,12 @@ func run() error {
 	spendTracker := tenant.NewSpendTracker(tenantStore)
 	rateLimiter := ratelimit.New(redisClient, ratelimit.DefaultRules())
 
+	// Auth manager — unified JWT + workspace-key + global-key
+	// authenticator. Coexists with the legacy auth.AuthMiddleware
+	// (which is still mounted below for backward compat); new
+	// /v1/auth/* routes use authManager directly.
+	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), cfg.JWTSecret, keyStore, tenantStore)
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -395,6 +401,145 @@ func run() error {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		})
+
+		// ─── JWT auth endpoints ────────────────────────
+		// /v1/auth/token mints a JWT — admin-only because issuing
+		// a token for an arbitrary workspace/user is a privileged
+		// op. /refresh accepts any valid JWT and extends it.
+		// /me echoes the resolved AuthContext for the caller.
+		authed.Post("/v1/auth/token", func(w http.ResponseWriter, req *http.Request) {
+			if authManager.JWTSecret() == "" {
+				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing disabled (no LENS_JWT_SECRET configured)")
+				return
+			}
+			// Require global-admin auth via the unified manager.
+			actx, err := authManager.Authenticate(req)
+			if err != nil || !actx.IsAdmin {
+				writeJSONErr(w, http.StatusForbidden, "admin credentials required")
+				return
+			}
+			var in struct {
+				WorkspaceID string   `json:"workspace_id"`
+				UserID      string   `json:"user_id"`
+				Scopes      []string `json:"scopes"`
+				TTLHours    int      `json:"ttl_hours"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.WorkspaceID == "" {
+				writeJSONErr(w, http.StatusBadRequest, "workspace_id required")
+				return
+			}
+			ttl := auth.ClampTTL(time.Duration(in.TTLHours) * time.Hour)
+			tok, err := auth.GenerateToken(in.WorkspaceID, in.UserID, in.Scopes, authManager.JWTSecret(), ttl)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, map[string]any{
+				"token":      tok,
+				"expires_at": time.Now().Add(ttl).UTC().Format(time.RFC3339),
+			})
+		})
+
+		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
+			if authManager.JWTSecret() == "" {
+				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing disabled")
+				return
+			}
+			actx, err := authManager.Authenticate(req)
+			if err != nil || actx.AuthMethod != auth.MethodJWT {
+				writeJSONErr(w, http.StatusUnauthorized, "valid JWT required")
+				return
+			}
+			ttl := auth.ClampTTL(cfg.TokenTTL)
+			tok, err := auth.GenerateToken(actx.WorkspaceID, actx.UserID, actx.Scopes, authManager.JWTSecret(), ttl)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"token":      tok,
+				"expires_at": time.Now().Add(ttl).UTC().Format(time.RFC3339),
+			})
+		})
+
+		authed.Get("/v1/auth/me", func(w http.ResponseWriter, req *http.Request) {
+			actx, err := authManager.Authenticate(req)
+			if err != nil {
+				writeJSONErr(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, actx)
+		})
+
+		// ─── Key rotation + usage ──────────────────────
+		authed.Post("/v1/workspaces/{wsID}/api-keys/{keyID}/rotate", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			keyID := chi.URLParam(req, "keyID")
+			// Look up the old key to preserve its scopes + name.
+			keys, err := tenantStore.ListAPIKeys(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			var old *tenant.WorkspaceAPIKey
+			for i := range keys {
+				if keys[i].ID == keyID {
+					old = &keys[i]
+					break
+				}
+			}
+			if old == nil {
+				writeJSONErr(w, http.StatusNotFound, "key not found")
+				return
+			}
+			raw, fresh, err := tenantStore.CreateAPIKey(req.Context(), wsID, old.Name, old.Scopes, old.ExpiresAt)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			// Best-effort: delete the old key.
+			if err := tenantStore.RevokeAPIKey(req.Context(), old.ID); err != nil {
+				logger.Warn("auth: rotate revoke old failed",
+					slog.String("key_id", old.ID),
+					slog.String("err", err.Error()))
+			}
+			logger.Info("auth: key rotated",
+				slog.String("workspace_id", wsID),
+				slog.String("old_key_id", old.ID),
+				slog.String("new_key_id", fresh.ID),
+			)
+			writeJSONOK(w, http.StatusCreated, map[string]any{
+				"key":     raw,
+				"id":      fresh.ID,
+				"prefix":  fresh.KeyPrefix,
+				"warning": "Old key revoked. Store this new key securely — it will not be shown again.",
+			})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/api-keys/{keyID}/usage", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			keyID := chi.URLParam(req, "keyID")
+			keys, err := tenantStore.ListAPIKeys(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			for _, k := range keys {
+				if k.ID == keyID {
+					writeJSONOK(w, http.StatusOK, map[string]any{
+						"last_used_at":   k.LastUsedAt,
+						"total_requests": 0, // wired to token_events in a later upgrade
+						"total_cost":     0,
+					})
+					return
+				}
+			}
+			writeJSONErr(w, http.StatusNotFound, "key not found")
 		})
 
 		authed.Post("/v1/workspaces", func(w http.ResponseWriter, req *http.Request) {
