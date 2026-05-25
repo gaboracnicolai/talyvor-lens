@@ -218,11 +218,61 @@ func run() error {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	// Production-API middlewares — must run *after* the chi RequestID
+	// middleware so our X-Request-ID handler can honour an incoming
+	// header without colliding with chi's internal request-id field.
+	r.Use((&api.RequestIDMiddleware{}).Handler)
+	r.Use(api.APIVersionMiddleware)
+	r.Use(api.GzipMiddleware)
+	r.Use(api.RateLimitHeadersMiddleware)
+
+	// Detailed /healthz pings DB + Redis + the multi-endpoint local
+	// router. Each checker has a 100ms budget so the rollup stays fast.
+	healthHandler := api.NewHealthHandler("0.1.0", map[string]api.HealthChecker{
+		"database": api.HealthCheckFunc(func(ctx context.Context) (bool, int64, string) {
+			if pool == nil {
+				return false, 0, "no pool configured"
+			}
+			start := time.Now()
+			if err := pool.Ping(ctx); err != nil {
+				return false, time.Since(start).Milliseconds(), err.Error()
+			}
+			return true, time.Since(start).Milliseconds(), ""
+		}),
+		"redis": api.HealthCheckFunc(func(ctx context.Context) (bool, int64, string) {
+			if redisClient == nil {
+				return false, 0, "no redis client"
+			}
+			start := time.Now()
+			if err := redisClient.Ping(ctx).Err(); err != nil {
+				return false, time.Since(start).Milliseconds(), err.Error()
+			}
+			return true, time.Since(start).Milliseconds(), ""
+		}),
+		"local_models": api.HealthCheckFunc(func(_ context.Context) (bool, int64, string) {
+			eps := localRouterMulti.List()
+			if len(eps) == 0 {
+				return true, 0, ""
+			}
+			healthy := 0
+			for _, e := range eps {
+				if e.Healthy {
+					healthy++
+				}
+			}
+			if healthy == 0 {
+				return false, 0, "0/" + strconv.Itoa(len(eps)) + " endpoints healthy"
+			}
+			if healthy < len(eps) {
+				return true, 0, strconv.Itoa(len(eps)-healthy) + "/" + strconv.Itoa(len(eps)) + " endpoints unhealthy"
+			}
+			return true, 0, ""
+		}),
 	})
+	r.Get("/healthz", healthHandler.ServeHTTP)
+
+	// OpenAPI spec — public, no auth, no version path prefix.
+	r.Get("/openapi.json", api.ServeOpenAPI)
 
 	r.Handle("/metrics", metrics.Handler())
 
