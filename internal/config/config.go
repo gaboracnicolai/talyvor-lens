@@ -38,6 +38,11 @@ type Config struct {
 	GroqAPIKey    string
 	VLLMBaseURL   string
 	VLLMAPIKey    string
+
+	// QualityAutoRetry enables a one-shot retry when a response
+	// scores below quality.AutoRetryThreshold. Off by default;
+	// the operator opts in via LENS_QUALITY_AUTO_RETRY=true.
+	QualityAutoRetry bool
 }
 
 func Load() (*Config, error) {
@@ -64,6 +69,8 @@ func Load() (*Config, error) {
 		GroqAPIKey:    os.Getenv("LENS_GROQ_API_KEY"),
 		VLLMBaseURL:   os.Getenv("LENS_VLLM_BASE_URL"),
 		VLLMAPIKey:    os.Getenv("LENS_VLLM_API_KEY"),
+
+		QualityAutoRetry: parseBoolEnv("LENS_QUALITY_AUTO_RETRY"),
 	}
 
 	if v := os.Getenv("LENS_SEMANTIC_THRESHOLD"); v != "" {
@@ -112,4 +119,19 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// parseBoolEnv recognises the common "true" forms (1, true, yes,
+// on) case-insensitively. Anything else (including empty) is
+// false so the feature stays opt-in by default.
+func parseBoolEnv(key string) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return false
+	}
+	switch v {
+	case "1", "true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON", "On":
+		return true
+	}
+	return false
 }

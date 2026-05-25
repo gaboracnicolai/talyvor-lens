@@ -355,6 +355,24 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, ws)
 		})
 
+		// Quality stats for the per-workspace dashboard. `days`
+		// query param caps the rolling window (default 30).
+		authed.Get("/v1/workspaces/{wsID}/quality/stats", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			days := 30
+			if v := req.URL.Query().Get("days"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 365 {
+					days = n
+				}
+			}
+			stats, err := qualityScorer.StatsForWorkspace(req.Context(), wsID, days)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
+		})
+
 		// Per-workspace logging policy toggle. Applies immediately —
 		// proxy.serve() reads via GetLoggingPolicy on every request and
 		// there's no per-request cache of the decision.
