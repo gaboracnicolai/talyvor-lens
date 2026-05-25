@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -305,14 +306,19 @@ func TestBreakerRegistry_PerProvider(t *testing.T) {
 
 func TestBreakerRegistry_StateChangeHook(t *testing.T) {
 	r := NewBreakerRegistry(1, time.Minute, 1)
+	var mu sync.Mutex
 	var changes []string
 	r.SetOnStateChange(func(name string, from, to CBState) {
+		mu.Lock()
 		changes = append(changes, name+":"+string(from)+"→"+string(to))
+		mu.Unlock()
 	})
 	b := r.GetOrCreate("openai")
 	b.RecordFailure()
 	// hook fires in a goroutine — give it a beat
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
 	if len(changes) == 0 || !strings.Contains(changes[0], "closed→open") {
 		t.Fatalf("expected closed→open hook, got %v", changes)
 	}
