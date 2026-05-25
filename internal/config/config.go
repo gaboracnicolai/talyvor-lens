@@ -57,6 +57,12 @@ type Config struct {
 	// key authentication).
 	JWTSecret string
 	TokenTTL  time.Duration
+
+	// Global rate limits (Item 8). Zero = no global cap; the
+	// per-workspace tier in MultiTierLimiter still applies.
+	GlobalRPM        int
+	GlobalTPM        int
+	BurstMultiplier  float64
 }
 
 func Load() (*Config, error) {
@@ -105,6 +111,29 @@ func Load() (*Config, error) {
 	// *too-short* secret is a misconfiguration.
 	if c.JWTSecret != "" && len(c.JWTSecret) < 32 {
 		return nil, fmt.Errorf("LENS_JWT_SECRET must be at least 32 bytes (got %d)", len(c.JWTSecret))
+	}
+
+	if v := os.Getenv("LENS_GLOBAL_RPM"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_GLOBAL_RPM: %s", v)
+		}
+		c.GlobalRPM = n
+	}
+	if v := os.Getenv("LENS_GLOBAL_TPM"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_GLOBAL_TPM: %s", v)
+		}
+		c.GlobalTPM = n
+	}
+	c.BurstMultiplier = 1.5
+	if v := os.Getenv("LENS_BURST_MULTIPLIER"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 1.0 {
+			return nil, fmt.Errorf("invalid LENS_BURST_MULTIPLIER (must be ≥ 1.0): %s", v)
+		}
+		c.BurstMultiplier = f
 	}
 
 	if v := os.Getenv("LENS_SEMANTIC_THRESHOLD"); v != "" {

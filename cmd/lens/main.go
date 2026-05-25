@@ -205,6 +205,21 @@ func run() error {
 	spendTracker := tenant.NewSpendTracker(tenantStore)
 	rateLimiter := ratelimit.New(redisClient, ratelimit.DefaultRules())
 
+	// Token-bucket multi-tier limiter (Item 8). Global tier is
+	// configured from env; per-workspace tiers are layered on at
+	// request time by callers that build a per-request limiter
+	// from tenant.WorkspaceConfig. Coexists with the legacy
+	// sliding-window limiter above.
+	multiTierLimiter := ratelimit.NewMultiTierLimiter(redisClient,
+		ratelimit.LimitTier{
+			Name: "global",
+			Key:  "global",
+			RPM:  cfg.GlobalRPM,
+			TPM:  cfg.GlobalTPM,
+		},
+	)
+	_ = multiTierLimiter // exposed for future per-request wiring
+
 	// Auth manager — unified JWT + workspace-key + global-key
 	// authenticator. Coexists with the legacy auth.AuthMiddleware
 	// (which is still mounted below for backward compat); new
