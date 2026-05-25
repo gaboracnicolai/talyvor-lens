@@ -41,6 +41,7 @@ import (
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/dashboard"
+	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/eval"
 	"github.com/talyvor/lens/internal/fallback"
@@ -283,6 +284,9 @@ func run() error {
 	// opt-in before earnings fire (RecordPattern's optedIn arg).
 	patternMiner := mining.NewPatternMiner(tokenLedger, pool)
 
+	// Token marketplace + staking (Batch 3 Phase 1).
+	marketplace := economy.NewMarketplaceStore(tokenLedger, pool)
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -370,6 +374,28 @@ func run() error {
 			"annotation": mining.AnnotationRates(),
 			"pattern":    mining.PatternRates(),
 		})
+	})
+
+	// Public economy stats (Batch 3 Phase 1).
+	r.Get("/v1/economy/stats", func(w http.ResponseWriter, req *http.Request) {
+		stats, err := marketplace.GetEconomyStats(req.Context())
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, stats)
+	})
+
+	// Public marketplace listings (read-only — no auth needed
+	// to browse; buying requires auth).
+	r.Get("/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
+		limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+		listings, err := marketplace.GetListings(req.Context(), limit)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, listings)
 	})
 
 	// Public insights endpoint — aggregated patterns across all
@@ -1091,6 +1117,160 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, c)
+		})
+
+		// ─── Token transfers + marketplace + staking ────
+		authed.Post("/v1/workspaces/{wsID}/tokens/transfer", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				ToWorkspace string  `json:"to_workspace"`
+				Amount      float64 `json:"amount"`
+				Description string  `json:"description"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := tokenLedger.Transfer(req.Context(), wsID, in.ToWorkspace, in.Amount, in.Description); err != nil {
+				if errors.Is(err, mining.ErrInsufficientBalance) {
+					writeJSONErr(w, http.StatusPaymentRequired, err.Error())
+					return
+				}
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Post("/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
+			var in economy.MarketplaceListing
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.SellerID == "" {
+				writeJSONErr(w, http.StatusBadRequest, "seller_id required")
+				return
+			}
+			out, err := marketplace.CreateListing(req.Context(), in)
+			if err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, economy.ErrInsufficientBalance) {
+					status = http.StatusPaymentRequired
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, out)
+		})
+
+		authed.Post("/v1/marketplace/listings/{id}/buy", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			var in struct {
+				BuyerWorkspace string  `json:"buyer_workspace"`
+				AmountUSD      float64 `json:"amount_usd"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			trade, err := marketplace.ExecuteTrade(req.Context(), id, in.BuyerWorkspace, in.AmountUSD)
+			if err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, economy.ErrListingNotFound) {
+					status = http.StatusNotFound
+				} else if errors.Is(err, economy.ErrListingNotActive) {
+					status = http.StatusGone
+				} else if errors.Is(err, economy.ErrInsufficientBalance) {
+					status = http.StatusPaymentRequired
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, trade)
+		})
+
+		authed.Delete("/v1/marketplace/listings/{id}", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				writeJSONErr(w, http.StatusBadRequest, "workspace_id query param required")
+				return
+			}
+			if err := marketplace.CancelListing(req.Context(), id, wsID); err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, economy.ErrListingNotFound) {
+					status = http.StatusNotFound
+				} else if errors.Is(err, economy.ErrNotSeller) {
+					status = http.StatusForbidden
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Get("/v1/marketplace/trades", func(w http.ResponseWriter, req *http.Request) {
+			wsID := req.URL.Query().Get("workspace_id")
+			if wsID == "" {
+				writeJSONErr(w, http.StatusBadRequest, "workspace_id query param required")
+				return
+			}
+			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+			trades, err := marketplace.GetTrades(req.Context(), wsID, limit)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, trades)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/tokens/stake", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				Amount   float64 `json:"amount"`
+				LockDays int     `json:"lock_days"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			pos, err := marketplace.Stake(req.Context(), wsID, in.Amount, in.LockDays)
+			if err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, economy.ErrInsufficientBalance) {
+					status = http.StatusPaymentRequired
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, pos)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/tokens/stake/{positionID}/unstake", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			positionID := chi.URLParam(req, "positionID")
+			if err := marketplace.Unstake(req.Context(), positionID, wsID); err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, economy.ErrPositionNotFound) {
+					status = http.StatusNotFound
+				} else if errors.Is(err, economy.ErrStakeLocked) {
+					status = http.StatusForbidden
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/tokens/stakes", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			positions, err := marketplace.GetStakePositions(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, positions)
 		})
 
 		authed.Get("/v1/workspaces/{wsID}/spend/current-month", func(w http.ResponseWriter, req *http.Request) {

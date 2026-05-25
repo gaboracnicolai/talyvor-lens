@@ -117,6 +117,20 @@ func newLedgerStore(db pgxDB) *LedgerStore {
 	return &LedgerStore{pool: db}
 }
 
+// PgxDB is the public alias for the internal pgx interface. Lets
+// sister packages (e.g. internal/economy) build a LedgerStore
+// against a pgxmock pool in tests without exporting unrelated
+// internals.
+type PgxDB = pgxDB
+
+// NewLedgerStoreForTesting wraps an arbitrary pgxDB-shaped pool
+// (typically a pgxmock.PgxPoolIface) so tests in other packages
+// can construct a LedgerStore without owning a real
+// *pgxpool.Pool. Production code should use NewLedgerStore.
+func NewLedgerStoreForTesting(db PgxDB) *LedgerStore {
+	return newLedgerStore(db)
+}
+
 // Credit adds `amount` LENS to a workspace. Append-only — no row
 // is ever updated, only inserted. The balance table is upserted
 // inside the same tx so reads always see a consistent snapshot.
@@ -264,6 +278,220 @@ func (s *LedgerStore) GetSnapshot(ctx context.Context, workspaceID string) (Bala
 		return BalanceSnapshot{}, fmt.Errorf("mining: read snapshot: %w", err)
 	}
 	return s2, nil
+}
+
+// ─── Transfer / Burn (Batch 3) ──────────────────
+
+// MinTransferAmount is the floor for Transfer. Spec-mandated —
+// below this we risk dust attacks polluting the ledger.
+const MinTransferAmount = 0.001
+
+// TypeTransfer / TypeBurn are the ledger row types for the
+// Batch-3 economy primitives.
+const (
+	TypeTransferOut = "transfer_out"
+	TypeTransferIn  = "transfer_in"
+	TypeBurn        = "burn"
+)
+
+// Transfer atomically debits `from` and credits `to`. Both
+// ledger rows + both balance updates happen inside one
+// transaction so a partial failure can't drop or duplicate LENS.
+func (s *LedgerStore) Transfer(
+	ctx context.Context,
+	fromWorkspace, toWorkspace string,
+	amount float64,
+	description string,
+) error {
+	if amount < MinTransferAmount {
+		return fmt.Errorf("mining: transfer amount must be ≥ %v", MinTransferAmount)
+	}
+	if fromWorkspace == "" || toWorkspace == "" {
+		return errors.New("mining: from / to workspace required")
+	}
+	if fromWorkspace == toWorkspace {
+		return errors.New("mining: cannot transfer to self")
+	}
+	if s.pool == nil {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mining: begin transfer: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Debit `from`.
+	fromBal, fromEarned, fromSpent, err := readBalance(ctx, tx, fromWorkspace)
+	if err != nil {
+		return err
+	}
+	if fromBal < amount {
+		return ErrInsufficientBalance
+	}
+	fromBalNew := fromBal - amount
+	fromSpentNew := fromSpent + amount
+	meta := map[string]interface{}{"counterparty": toWorkspace}
+	if err := insertLedgerRow(ctx, tx, fromWorkspace, -amount, fromBalNew,
+		TypeTransferOut, description, meta); err != nil {
+		return err
+	}
+	if err := writeBalance(ctx, tx, fromWorkspace, fromBalNew, fromEarned, fromSpentNew); err != nil {
+		return err
+	}
+
+	// Credit `to`.
+	toBal, toEarned, toSpent, err := readBalance(ctx, tx, toWorkspace)
+	if err != nil {
+		return err
+	}
+	toBalNew := toBal + amount
+	toEarnedNew := toEarned + amount
+	metaIn := map[string]interface{}{"counterparty": fromWorkspace}
+	if err := insertLedgerRow(ctx, tx, toWorkspace, amount, toBalNew,
+		TypeTransferIn, description, metaIn); err != nil {
+		return err
+	}
+	if err := writeBalance(ctx, tx, toWorkspace, toBalNew, toEarnedNew, toSpent); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// Burn removes LENS from a workspace's balance and from
+// circulating supply. Used when a workspace spends LENS on
+// upstream AI calls (LENS-paid mode). Burns are irreversible.
+func (s *LedgerStore) Burn(ctx context.Context, workspaceID string, amount float64, description string) error {
+	if amount <= 0 {
+		return errors.New("mining: burn amount must be positive")
+	}
+	if s.pool == nil {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mining: begin burn: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	bal, earned, spent, err := readBalance(ctx, tx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if bal < amount {
+		return ErrInsufficientBalance
+	}
+	balNew := bal - amount
+	spentNew := spent + amount
+	if err := insertLedgerRow(ctx, tx, workspaceID, -amount, balNew, TypeBurn, description, nil); err != nil {
+		return err
+	}
+	if err := writeBalance(ctx, tx, workspaceID, balNew, earned, spentNew); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// GetTotalSupply returns the all-time minted LENS — the sum of
+// every credit-side ledger row that came from a mining track.
+// (Transfers don't mint new LENS so they're excluded.)
+func (s *LedgerStore) GetTotalSupply(ctx context.Context) (float64, error) {
+	if s.pool == nil {
+		return 0, nil
+	}
+	row := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount), 0)
+		FROM lens_token_ledger
+		WHERE amount > 0 AND type IN ($1, $2, $3, $4, $5)`,
+		TypeCacheMine, TypeComputeMine, TypeEmbeddingMine,
+		TypeAnnotationMine, TypePatternMine)
+	var n float64
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("mining: total supply: %w", err)
+	}
+	return n, nil
+}
+
+// GetCirculatingSupply = total minted - total burned. The
+// difference is what's currently in workspace wallets + staked.
+func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (float64, error) {
+	total, err := s.GetTotalSupply(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if s.pool == nil {
+		return total, nil
+	}
+	row := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = $1`, TypeBurn)
+	var burned float64
+	if err := row.Scan(&burned); err != nil {
+		return 0, fmt.Errorf("mining: burned: %w", err)
+	}
+	return total - burned, nil
+}
+
+// GetTotalBurned returns the cumulative LENS removed via Burn.
+// Useful for the public economy stats.
+func (s *LedgerStore) GetTotalBurned(ctx context.Context) (float64, error) {
+	if s.pool == nil {
+		return 0, nil
+	}
+	row := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = $1`, TypeBurn)
+	var n float64
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("mining: total burned: %w", err)
+	}
+	return n, nil
+}
+
+// ─── tx helpers shared by Transfer + Burn ───────
+
+// readBalance + writeBalance + insertLedgerRow factor out the SQL
+// the Transfer / Burn flows share. They take a pgx.Tx so the
+// caller controls transactional semantics.
+
+func readBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, earned, spent float64, err error) {
+	row := tx.QueryRow(ctx, `
+		INSERT INTO lens_token_balances (workspace_id, balance, lifetime_earned, lifetime_spent)
+		VALUES ($1, 0, 0, 0)
+		ON CONFLICT (workspace_id) DO UPDATE SET updated_at = NOW()
+		RETURNING balance, lifetime_earned, lifetime_spent`, workspaceID)
+	if err := row.Scan(&bal, &earned, &spent); err != nil {
+		return 0, 0, 0, fmt.Errorf("mining: read balance: %w", err)
+	}
+	return
+}
+
+func writeBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, earned, spent float64) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE lens_token_balances
+		SET balance = $2, lifetime_earned = $3, lifetime_spent = $4, updated_at = NOW()
+		WHERE workspace_id = $1`, workspaceID, bal, earned, spent)
+	if err != nil {
+		return fmt.Errorf("mining: update balance: %w", err)
+	}
+	return nil
+}
+
+func insertLedgerRow(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter float64,
+	txType, description string, metadata map[string]interface{}) error {
+	metaBuf, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("mining: marshal metadata: %w", err)
+	}
+	if string(metaBuf) == "null" {
+		metaBuf = []byte("{}")
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO lens_token_ledger
+			(workspace_id, amount, balance_after, type, description, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, workspaceID, delta, balanceAfter, txType, description, metaBuf); err != nil {
+		return fmt.Errorf("mining: insert ledger row: %w", err)
+	}
+	return nil
 }
 
 // GetHistory returns the ledger entries for a workspace, newest

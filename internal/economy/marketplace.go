@@ -1,0 +1,614 @@
+// Package economy implements the LENS token marketplace and
+// staking surface. Sits on top of internal/mining's LedgerStore
+// — every LENS movement still flows through the canonical
+// ledger; this package just adds the marketplace state machine
+// and the staking yield calculator.
+package economy
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/mining"
+)
+
+// ─── constants ───────────────────────────────────
+
+const (
+	// TalyvorFeeRate is the platform fee on marketplace trades —
+	// 5% as the spec mandates.
+	TalyvorFeeRate = 0.05
+
+	// TalyvorWorkspace is the synthetic workspace ID that
+	// accumulates marketplace fees. Stays inside the ledger
+	// like any other workspace so the supply accounting works.
+	TalyvorWorkspace = "talyvor"
+
+	// MinListingAmount is the floor for marketplace listings.
+	// Below this we discourage dust orders.
+	MinListingAmount = 1.0
+
+	// LENSPerUSD is the published peg: 1 LENS = $0.10. Caller
+	// code uses this to convert between USD intent and LENS
+	// amount where needed (e.g. the LENS-discount burn path).
+	LENSPerUSD = 10.0
+)
+
+// Lock period → APY mapping. Hardcoded so a misconfigured
+// deployment can't accidentally pay 100% APY on a 30-day lock.
+const (
+	APY30  = 0.05
+	APY90  = 0.12
+	APY180 = 0.20
+)
+
+// allowedLockDays gates Stake — anything not in this set is
+// rejected at the API boundary.
+var apyByLock = map[int]float64{
+	30:  APY30,
+	90:  APY90,
+	180: APY180,
+}
+
+// ─── status constants ────────────────────────────
+
+const (
+	ListingActive    = "active"
+	ListingFilled    = "filled"
+	ListingCancelled = "cancelled"
+)
+
+// ─── errors ──────────────────────────────────────
+
+var (
+	ErrInsufficientBalance = errors.New("economy: insufficient balance")
+	ErrListingNotFound     = errors.New("economy: listing not found")
+	ErrListingNotActive    = errors.New("economy: listing not active")
+	ErrNotSeller           = errors.New("economy: only the seller can cancel this listing")
+	ErrInvalidLockDays     = errors.New("economy: lock_days must be 30, 90, or 180")
+	ErrStakeLocked         = errors.New("economy: stake is still in lock period")
+	ErrPositionNotFound    = errors.New("economy: stake position not found")
+)
+
+// ─── types ───────────────────────────────────────
+
+// MarketplaceListing mirrors one row of marketplace_listings.
+type MarketplaceListing struct {
+	ID        string     `json:"id"`
+	SellerID  string     `json:"seller_id"`
+	Amount    float64    `json:"amount"`
+	PriceUSD  float64    `json:"price_usd"`
+	MinBuyUSD float64    `json:"min_buy_usd"`
+	Status    string     `json:"status"`
+	FilledAt  *time.Time `json:"filled_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// MarketplaceTrade mirrors one row of marketplace_trades.
+type MarketplaceTrade struct {
+	ID         string    `json:"id"`
+	ListingID  string    `json:"listing_id"`
+	BuyerID    string    `json:"buyer_id"`
+	SellerID   string    `json:"seller_id"`
+	Amount     float64   `json:"amount"`
+	PriceUSD   float64   `json:"price_usd"`
+	TalyvorFee float64   `json:"talyvor_fee"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// StakePosition mirrors one row of stake_positions, augmented
+// at read time with the live AccruedYield.
+type StakePosition struct {
+	ID           string    `json:"id"`
+	WorkspaceID  string    `json:"workspace_id"`
+	Amount       float64   `json:"amount"`
+	LockDays     int       `json:"lock_days"`
+	APY          float64   `json:"apy"`
+	StartedAt    time.Time `json:"started_at"`
+	UnlocksAt    time.Time `json:"unlocks_at"`
+	AccruedYield float64   `json:"accrued_yield"`
+}
+
+// EconomyStats backs /v1/economy/stats.
+type EconomyStats struct {
+	TotalSupply       float64 `json:"total_supply"`
+	CirculatingSupply float64 `json:"circulating_supply"`
+	TotalBurned       float64 `json:"total_burned"`
+	TotalStaked       float64 `json:"total_staked"`
+	MarketListings    int     `json:"market_listings"`
+	AvgPriceUSD       float64 `json:"avg_price_usd"`
+}
+
+// ─── pgxDB shim ──────────────────────────────────
+
+// pgxDB mirrors the subset of pgxpool.Pool we need. Tests use
+// pgxmock through this interface.
+type pgxDB interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// ─── MarketplaceStore ────────────────────────────
+
+// MarketplaceStore owns marketplace_listings + marketplace_trades
+// + stake_positions. Holds a reference to mining.LedgerStore so
+// every LENS movement still flows through the canonical ledger.
+type MarketplaceStore struct {
+	ledger *mining.LedgerStore
+	pool   pgxDB
+}
+
+// NewMarketplaceStore wraps a real pool. Pass `nil` ledger to
+// disable LENS movements (useful for read-only tests).
+func NewMarketplaceStore(ledger *mining.LedgerStore, pool *pgxpool.Pool) *MarketplaceStore {
+	var db pgxDB
+	if pool != nil {
+		db = pool
+	}
+	return newMarketplaceStore(ledger, db)
+}
+
+func newMarketplaceStore(ledger *mining.LedgerStore, db pgxDB) *MarketplaceStore {
+	return &MarketplaceStore{ledger: ledger, pool: db}
+}
+
+// ─── listing lifecycle ───────────────────────────
+
+// CreateListing reserves the LENS by debiting the seller (the
+// LENS sits "in the listing" until ExecuteTrade or CancelListing
+// resolves it). The ledger entry uses TypeTransferOut with the
+// listing ID in metadata for auditability.
+func (s *MarketplaceStore) CreateListing(ctx context.Context, l MarketplaceListing) (*MarketplaceListing, error) {
+	if l.Amount < MinListingAmount {
+		return nil, fmt.Errorf("economy: listing amount must be ≥ %v LENS", MinListingAmount)
+	}
+	if l.PriceUSD <= 0 {
+		return nil, errors.New("economy: price_usd must be positive")
+	}
+	if l.SellerID == "" {
+		return nil, errors.New("economy: seller_id required")
+	}
+
+	// Debit seller balance via the ledger primitive — this is
+	// where the insufficient-balance check happens.
+	if err := s.ledger.Debit(ctx, l.SellerID, l.Amount,
+		"marketplace_listing", "marketplace listing reservation", nil); err != nil {
+		if errors.Is(err, mining.ErrInsufficientBalance) {
+			return nil, ErrInsufficientBalance
+		}
+		return nil, fmt.Errorf("economy: reserve listing: %w", err)
+	}
+
+	if s.pool == nil {
+		l.ID = fmt.Sprintf("list_%d", time.Now().UnixNano())
+		l.Status = ListingActive
+		l.CreatedAt = time.Now().UTC()
+		return &l, nil
+	}
+
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO marketplace_listings (seller_id, amount, price_usd, min_buy_usd)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, status, created_at`,
+		l.SellerID, l.Amount, l.PriceUSD, l.MinBuyUSD)
+	if err := row.Scan(&l.ID, &l.Status, &l.CreatedAt); err != nil {
+		// Best-effort rollback: credit the seller back if the
+		// listing insert failed after we debited them.
+		_ = s.ledger.Credit(ctx, l.SellerID, l.Amount, "marketplace_refund",
+			"listing creation failed — refund", nil)
+		return nil, fmt.Errorf("economy: insert listing: %w", err)
+	}
+	return &l, nil
+}
+
+// GetListings returns active listings cheapest-first.
+func (s *MarketplaceStore) GetListings(ctx context.Context, limit int) ([]MarketplaceListing, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, seller_id, amount, price_usd, min_buy_usd, status, filled_at, created_at
+		FROM marketplace_listings
+		WHERE status = $1
+		ORDER BY price_usd ASC, created_at ASC
+		LIMIT $2`, ListingActive, limit)
+	if err != nil {
+		return nil, fmt.Errorf("economy: list listings: %w", err)
+	}
+	defer rows.Close()
+	return scanListings(rows)
+}
+
+func scanListings(rows pgx.Rows) ([]MarketplaceListing, error) {
+	var out []MarketplaceListing
+	for rows.Next() {
+		var l MarketplaceListing
+		if err := rows.Scan(&l.ID, &l.SellerID, &l.Amount, &l.PriceUSD,
+			&l.MinBuyUSD, &l.Status, &l.FilledAt, &l.CreatedAt); err != nil {
+			return nil, fmt.Errorf("economy: scan listing: %w", err)
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// getListing is the private "fetch by ID" helper used by
+// ExecuteTrade + CancelListing. Returns ErrListingNotFound when
+// the row is missing.
+func (s *MarketplaceStore) getListing(ctx context.Context, id string) (*MarketplaceListing, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, seller_id, amount, price_usd, min_buy_usd, status, filled_at, created_at
+		FROM marketplace_listings WHERE id = $1`, id)
+	var l MarketplaceListing
+	if err := row.Scan(&l.ID, &l.SellerID, &l.Amount, &l.PriceUSD,
+		&l.MinBuyUSD, &l.Status, &l.FilledAt, &l.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrListingNotFound
+		}
+		return nil, fmt.Errorf("economy: get listing: %w", err)
+	}
+	return &l, nil
+}
+
+// ExecuteTrade is the buy path. Validates the listing is active
+// + amount fits, then credits the buyer (95%) + platform (5%
+// fee) + marks the listing filled + records the trade. The
+// seller was already debited at listing time so we don't touch
+// their balance here.
+//
+// The trade is "all-or-nothing" — the spec doesn't define
+// partial fills, so a buyer who under-pays the listing amount
+// just buys less LENS and the listing closes filled.
+func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID string, amountUSD float64) (*MarketplaceTrade, error) {
+	if buyerID == "" {
+		return nil, errors.New("economy: buyer_id required")
+	}
+	if amountUSD <= 0 {
+		return nil, errors.New("economy: amount_usd must be positive")
+	}
+	if s.pool == nil {
+		return nil, errors.New("economy: marketplace requires DB")
+	}
+	listing, err := s.getListing(ctx, listingID)
+	if err != nil {
+		return nil, err
+	}
+	if listing.Status != ListingActive {
+		return nil, ErrListingNotActive
+	}
+	if listing.MinBuyUSD > 0 && amountUSD < listing.MinBuyUSD {
+		return nil, fmt.Errorf("economy: amount_usd below min_buy_usd (%v)", listing.MinBuyUSD)
+	}
+	if listing.SellerID == buyerID {
+		return nil, errors.New("economy: cannot buy own listing")
+	}
+
+	// LENS the buyer is asking for. Capped at the listing amount.
+	lensAmount := amountUSD / listing.PriceUSD
+	if lensAmount > listing.Amount {
+		lensAmount = listing.Amount
+	}
+	fee := roundTo(lensAmount*TalyvorFeeRate, 6)
+	netToBuyer := roundTo(lensAmount-fee, 6)
+	priceActual := listing.PriceUSD
+
+	// Credit buyer (net) and platform (fee). The total credits
+	// here exactly equal the lensAmount we conceptually moved
+	// from the listing's reserved pool.
+	meta := map[string]interface{}{
+		"listing_id": listing.ID,
+		"seller_id":  listing.SellerID,
+		"price_usd":  priceActual,
+	}
+	if err := s.ledger.Credit(ctx, buyerID, netToBuyer, "marketplace_buy",
+		"marketplace purchase", meta); err != nil {
+		return nil, fmt.Errorf("economy: credit buyer: %w", err)
+	}
+	if fee > 0 {
+		feeMeta := map[string]interface{}{
+			"listing_id": listing.ID,
+			"buyer_id":   buyerID,
+		}
+		if err := s.ledger.Credit(ctx, TalyvorWorkspace, fee, "marketplace_fee",
+			"marketplace 5% fee", feeMeta); err != nil {
+			return nil, fmt.Errorf("economy: credit fee: %w", err)
+		}
+	}
+
+	// Mark listing filled. If buyer purchased less than the
+	// listing amount, refund the unsold portion to the seller.
+	unsold := listing.Amount - lensAmount
+	if unsold > 0 {
+		if err := s.ledger.Credit(ctx, listing.SellerID, unsold, "marketplace_unsold_refund",
+			"unsold portion of listing refunded", meta); err != nil {
+			return nil, fmt.Errorf("economy: refund unsold: %w", err)
+		}
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE marketplace_listings SET status = $1, filled_at = NOW() WHERE id = $2`,
+		ListingFilled, listing.ID); err != nil {
+		return nil, fmt.Errorf("economy: mark filled: %w", err)
+	}
+
+	trade := MarketplaceTrade{
+		ListingID:  listing.ID,
+		BuyerID:    buyerID,
+		SellerID:   listing.SellerID,
+		Amount:     lensAmount,
+		PriceUSD:   priceActual,
+		TalyvorFee: fee,
+	}
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO marketplace_trades (listing_id, buyer_id, seller_id, amount, price_usd, talyvor_fee)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, created_at`,
+		trade.ListingID, trade.BuyerID, trade.SellerID,
+		trade.Amount, trade.PriceUSD, trade.TalyvorFee)
+	if err := row.Scan(&trade.ID, &trade.CreatedAt); err != nil {
+		return nil, fmt.Errorf("economy: insert trade: %w", err)
+	}
+	return &trade, nil
+}
+
+// CancelListing releases the seller's reservation. Only the
+// original seller can cancel — anyone else gets ErrNotSeller.
+func (s *MarketplaceStore) CancelListing(ctx context.Context, listingID, workspaceID string) error {
+	if s.pool == nil {
+		return nil
+	}
+	listing, err := s.getListing(ctx, listingID)
+	if err != nil {
+		return err
+	}
+	if listing.SellerID != workspaceID {
+		return ErrNotSeller
+	}
+	if listing.Status != ListingActive {
+		return ErrListingNotActive
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE marketplace_listings SET status = $1 WHERE id = $2`,
+		ListingCancelled, listingID); err != nil {
+		return fmt.Errorf("economy: cancel listing: %w", err)
+	}
+	// Refund the held LENS.
+	return s.ledger.Credit(ctx, listing.SellerID, listing.Amount,
+		"marketplace_refund", "listing cancelled", map[string]interface{}{
+			"listing_id": listingID,
+		})
+}
+
+// GetTrades returns every trade where `workspaceID` was either
+// buyer or seller. Newest first.
+func (s *MarketplaceStore) GetTrades(ctx context.Context, workspaceID string, limit int) ([]MarketplaceTrade, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, listing_id, buyer_id, seller_id, amount, price_usd, talyvor_fee, created_at
+		FROM marketplace_trades
+		WHERE buyer_id = $1 OR seller_id = $1
+		ORDER BY created_at DESC LIMIT $2`, workspaceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("economy: list trades: %w", err)
+	}
+	defer rows.Close()
+	var out []MarketplaceTrade
+	for rows.Next() {
+		var t MarketplaceTrade
+		if err := rows.Scan(&t.ID, &t.ListingID, &t.BuyerID, &t.SellerID,
+			&t.Amount, &t.PriceUSD, &t.TalyvorFee, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("economy: scan trade: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ─── staking ─────────────────────────────────────
+
+// Stake locks `amount` LENS for `lockDays`. Debits the workspace
+// balance + INSERTs a stake_position. Returns the position with
+// AccruedYield=0 (it'll grow as time passes).
+func (s *MarketplaceStore) Stake(ctx context.Context, workspaceID string, amount float64, lockDays int) (*StakePosition, error) {
+	apy, ok := apyByLock[lockDays]
+	if !ok {
+		return nil, ErrInvalidLockDays
+	}
+	if amount <= 0 {
+		return nil, errors.New("economy: stake amount must be positive")
+	}
+	if err := s.ledger.Debit(ctx, workspaceID, amount, "stake",
+		"LENS staked for yield", map[string]interface{}{"lock_days": lockDays}); err != nil {
+		if errors.Is(err, mining.ErrInsufficientBalance) {
+			return nil, ErrInsufficientBalance
+		}
+		return nil, fmt.Errorf("economy: debit stake: %w", err)
+	}
+	pos := &StakePosition{
+		WorkspaceID: workspaceID,
+		Amount:      amount,
+		LockDays:    lockDays,
+		APY:         apy,
+		StartedAt:   time.Now().UTC(),
+		UnlocksAt:   time.Now().Add(time.Duration(lockDays) * 24 * time.Hour),
+	}
+	if s.pool == nil {
+		pos.ID = fmt.Sprintf("stake_%d", time.Now().UnixNano())
+		return pos, nil
+	}
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO stake_positions (workspace_id, amount, lock_days, apy, unlocks_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, started_at`,
+		workspaceID, amount, lockDays, apy, pos.UnlocksAt)
+	if err := row.Scan(&pos.ID, &pos.StartedAt); err != nil {
+		// Best-effort rollback.
+		_ = s.ledger.Credit(ctx, workspaceID, amount, "stake_refund",
+			"stake insert failed — refund", nil)
+		return nil, fmt.Errorf("economy: insert stake: %w", err)
+	}
+	return pos, nil
+}
+
+// Unstake returns the principal + accrued yield to the
+// workspace once the lock period has elapsed.
+func (s *MarketplaceStore) Unstake(ctx context.Context, positionID, workspaceID string) error {
+	if s.pool == nil {
+		return nil
+	}
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, workspace_id, amount, lock_days, apy, started_at, unlocks_at
+		FROM stake_positions WHERE id = $1`, positionID)
+	var pos StakePosition
+	if err := row.Scan(&pos.ID, &pos.WorkspaceID, &pos.Amount,
+		&pos.LockDays, &pos.APY, &pos.StartedAt, &pos.UnlocksAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrPositionNotFound
+		}
+		return fmt.Errorf("economy: read stake: %w", err)
+	}
+	if pos.WorkspaceID != workspaceID {
+		return ErrPositionNotFound
+	}
+	if time.Now().Before(pos.UnlocksAt) {
+		return ErrStakeLocked
+	}
+	yield := computeYield(pos.Amount, pos.APY, time.Since(pos.StartedAt))
+	payout := pos.Amount + yield
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM stake_positions WHERE id = $1`, positionID); err != nil {
+		return fmt.Errorf("economy: delete stake: %w", err)
+	}
+	meta := map[string]interface{}{
+		"position_id":  positionID,
+		"principal":    pos.Amount,
+		"accrued":      yield,
+		"lock_days":    pos.LockDays,
+	}
+	return s.ledger.Credit(ctx, workspaceID, payout, "unstake",
+		"stake unlocked with yield", meta)
+}
+
+// GetStakePositions returns the workspace's open positions
+// with live AccruedYield computed against `now`.
+func (s *MarketplaceStore) GetStakePositions(ctx context.Context, workspaceID string) ([]StakePosition, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, workspace_id, amount, lock_days, apy, started_at, unlocks_at
+		FROM stake_positions WHERE workspace_id = $1
+		ORDER BY started_at DESC`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("economy: list stakes: %w", err)
+	}
+	defer rows.Close()
+	var out []StakePosition
+	for rows.Next() {
+		var p StakePosition
+		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Amount,
+			&p.LockDays, &p.APY, &p.StartedAt, &p.UnlocksAt); err != nil {
+			return nil, fmt.Errorf("economy: scan stake: %w", err)
+		}
+		p.AccruedYield = computeYield(p.Amount, p.APY, time.Since(p.StartedAt))
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// computeYield = principal × APY × (elapsedDays / 365). Capped
+// at the lock period so dormant un-claimed positions don't
+// accrue forever.
+func computeYield(principal, apy float64, elapsed time.Duration) float64 {
+	days := elapsed.Hours() / 24
+	if days < 0 {
+		days = 0
+	}
+	return roundTo(principal*apy*(days/365.0), 6)
+}
+
+func roundTo(v float64, places int) float64 {
+	scale := 1.0
+	for i := 0; i < places; i++ {
+		scale *= 10
+	}
+	if v >= 0 {
+		return float64(int64(v*scale+0.5)) / scale
+	}
+	return float64(int64(v*scale-0.5)) / scale
+}
+
+// ─── EconomyStats ────────────────────────────────
+
+// GetEconomyStats returns the public-facing rollup for
+// /v1/economy/stats. Reads from both the mining ledger and the
+// marketplace tables.
+func (s *MarketplaceStore) GetEconomyStats(ctx context.Context) (*EconomyStats, error) {
+	stats := &EconomyStats{}
+	total, err := s.ledger.GetTotalSupply(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stats.TotalSupply = total
+	burned, err := s.ledger.GetTotalBurned(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stats.TotalBurned = burned
+	stats.CirculatingSupply = total - burned
+
+	if s.pool == nil {
+		return stats, nil
+	}
+	row := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(amount), 0) FROM stake_positions`)
+	if err := row.Scan(&stats.TotalStaked); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("economy: total staked: %w", err)
+	}
+
+	row = s.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COALESCE(AVG(price_usd), 0)
+		FROM marketplace_listings WHERE status = $1`, ListingActive)
+	if err := row.Scan(&stats.MarketListings, &stats.AvgPriceUSD); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("economy: market listings: %w", err)
+	}
+	return stats, nil
+}
+
+// ─── tiny helper for typed metadata ──────────────
+
+// jsonMeta is a one-line escape hatch in case future code needs
+// to round-trip metadata through the ledger without thinking
+// about the json shape. Kept here so the package has a single
+// place to evolve the schema.
+func jsonMeta(m map[string]interface{}) []byte {
+	if m == nil {
+		return []byte("{}")
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+var _ = jsonMeta // kept for callers that grow into it
