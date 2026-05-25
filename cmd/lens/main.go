@@ -962,6 +962,106 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
+		// ─── Cache node registry (Batch 3 Phase 3) ──────
+		// Cache nodes register themselves so Lens can route
+		// cache reads/writes through their Redis. Earnings flow
+		// via the existing CacheMiner pipeline; this endpoint
+		// pair just covers registration + heartbeat.
+		authed.Post("/v1/workspaces/{wsID}/cache-nodes", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				URL        string  `json:"url"`
+				MaxSizeGB  float64 `json:"max_size_gb"`
+				NodeSecret string  `json:"node_secret"`
+				Share      bool    `json:"share"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.URL == "" {
+				writeJSONErr(w, http.StatusBadRequest, "url required")
+				return
+			}
+			if in.MaxSizeGB <= 0 {
+				in.MaxSizeGB = 10
+			}
+			if pool == nil {
+				writeJSONErr(w, http.StatusServiceUnavailable, "DB unavailable")
+				return
+			}
+			row := pool.QueryRow(req.Context(), `
+				INSERT INTO cache_nodes (workspace_id, url, max_size_gb, node_secret_hash)
+				VALUES ($1, $2, $3, $4)
+				RETURNING id, created_at`,
+				wsID, strings.TrimRight(in.URL, "/"), in.MaxSizeGB, in.NodeSecret)
+			var id string
+			var createdAt time.Time
+			if err := row.Scan(&id, &createdAt); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			// Seed metrics row so heartbeat UPDATEs have a target.
+			_, _ = pool.Exec(req.Context(),
+				`INSERT INTO cache_node_metrics (node_id) VALUES ($1) ON CONFLICT (node_id) DO NOTHING`, id)
+			writeJSONOK(w, http.StatusCreated, map[string]any{
+				"id":          id,
+				"workspace_id": wsID,
+				"url":         in.URL,
+				"max_size_gb": in.MaxSizeGB,
+				"created_at":  createdAt,
+			})
+		})
+
+		authed.Delete("/v1/workspaces/{wsID}/cache-nodes/{nodeID}", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			if pool == nil {
+				writeJSONErr(w, http.StatusServiceUnavailable, "DB unavailable")
+				return
+			}
+			tag, err := pool.Exec(req.Context(),
+				`UPDATE cache_nodes SET active = FALSE WHERE id = $1`, nodeID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if tag.RowsAffected() == 0 {
+				writeJSONErr(w, http.StatusNotFound, "cache node not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/cache-nodes/{nodeID}/heartbeat", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			var in struct {
+				Entries int     `json:"entries"`
+				SizeMB  float64 `json:"size_mb"`
+				HitRate float64 `json:"hit_rate"`
+			}
+			_ = json.NewDecoder(req.Body).Decode(&in)
+			if pool != nil {
+				if _, err := pool.Exec(req.Context(), `
+					UPDATE cache_nodes SET last_seen_at = NOW() WHERE id = $1`, nodeID); err != nil {
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if _, err := pool.Exec(req.Context(), `
+					INSERT INTO cache_node_metrics (node_id, entries, size_mb, hit_rate, last_updated)
+					VALUES ($1, $2, $3, $4, NOW())
+					ON CONFLICT (node_id) DO UPDATE
+					SET entries = EXCLUDED.entries,
+					    size_mb = EXCLUDED.size_mb,
+					    hit_rate = EXCLUDED.hit_rate,
+					    last_updated = NOW()`,
+					nodeID, in.Entries, in.SizeMB, in.HitRate); err != nil {
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
 		// ─── Embedding node CRUD (embedding mining) ────
 		authed.Post("/v1/workspaces/{wsID}/embedding-nodes", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
