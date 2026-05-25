@@ -273,6 +273,11 @@ func run() error {
 	embeddingMiner := mining.NewEmbeddingMiner(tokenLedger, pool)
 	_ = embeddingMiner
 
+	// Annotation mining (Batch 2 Item 4). Proof-of-useful-work
+	// — annotators stake LENS, review pairs of responses, and
+	// earn per validated annotation.
+	annotationMiner := mining.NewAnnotationMiner(tokenLedger, pool)
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -356,7 +361,8 @@ func run() error {
 				"multiplier_a100":    mining.GPUMultiplierA100,
 				"multiplier_h100":    mining.GPUMultiplierH100,
 			},
-			"embedding": mining.EmbeddingRates(),
+			"embedding":  mining.EmbeddingRates(),
+			"annotation": mining.AnnotationRates(),
 		})
 	})
 
@@ -931,6 +937,102 @@ func run() error {
 		authed.Get("/v1/workspaces/{wsID}/tokens/mining/embeddings", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			stats, err := embeddingMiner.GetStats(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
+		})
+
+		// ─── Annotation mining (Batch 2 Item 4) ─────────
+		authed.Post("/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				Amount float64 `json:"amount"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := annotationMiner.Stake(req.Context(), wsID, in.Amount); err != nil {
+				if errors.Is(err, mining.ErrInsufficientBalance) {
+					writeJSONErr(w, http.StatusPaymentRequired, err.Error())
+					return
+				}
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			staked, _ := annotationMiner.GetStake(req.Context(), wsID)
+			writeJSONOK(w, http.StatusOK, map[string]float64{"staked": staked})
+		})
+
+		authed.Delete("/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			if err := annotationMiner.Unstake(req.Context(), wsID); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/annotate/task", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			task, err := annotationMiner.GetPendingTask(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if task == nil {
+				writeJSONErr(w, http.StatusNotFound, "no pending tasks")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, task)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/annotate/task/{taskID}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			taskID := chi.URLParam(req, "taskID")
+			var in struct {
+				Decision    string `json:"decision"`
+				Confidence  int    `json:"confidence"`
+				TimeSpentMs int    `json:"time_spent_ms"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			err := annotationMiner.SubmitAnnotation(req.Context(), mining.Annotation{
+				TaskID: taskID, AnnotatorID: wsID,
+				Decision: in.Decision, Confidence: in.Confidence, TimeSpentMs: in.TimeSpentMs,
+			})
+			if err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, mining.ErrDuplicateAnnotation) {
+					status = http.StatusConflict
+				} else if errors.Is(err, mining.ErrTaskExpired) {
+					status = http.StatusGone
+				} else if errors.Is(err, mining.ErrInsufficientStake) {
+					status = http.StatusPaymentRequired
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, map[string]bool{"ok": true})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/tokens/mining/annotations", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			stats, err := annotationMiner.GetAnnotatorStats(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/annotate/stats", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			stats, err := annotationMiner.GetAnnotatorStats(req.Context(), wsID)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
