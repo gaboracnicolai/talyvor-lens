@@ -278,6 +278,11 @@ func run() error {
 	// earn per validated annotation.
 	annotationMiner := mining.NewAnnotationMiner(tokenLedger, pool)
 
+	// Pattern mining (Batch 2 Item 5). The deployment-level
+	// PatternMiningEnabled flag ANDs with the per-workspace
+	// opt-in before earnings fire (RecordPattern's optedIn arg).
+	patternMiner := mining.NewPatternMiner(tokenLedger, pool)
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -363,7 +368,21 @@ func run() error {
 			},
 			"embedding":  mining.EmbeddingRates(),
 			"annotation": mining.AnnotationRates(),
+			"pattern":    mining.PatternRates(),
 		})
+	})
+
+	// Public insights endpoint — aggregated patterns across all
+	// opted-in workspaces. Filters supported via query params.
+	r.Get("/v1/insights/routing", func(w http.ResponseWriter, req *http.Request) {
+		q := req.URL.Query()
+		insights, err := patternMiner.GetInsights(req.Context(),
+			q.Get("model"), q.Get("provider"), q.Get("feature"))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, insights)
 	})
 
 	// Public discovery: embedding nodes available for a model.
@@ -1038,6 +1057,40 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, stats)
+		})
+
+		// ─── Pattern mining (Batch 2 Item 5) ────────────
+		authed.Post("/v1/workspaces/{wsID}/pattern-mining/opt-in", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			if !cfg.PatternMiningEnabled {
+				writeJSONErr(w, http.StatusServiceUnavailable,
+					"pattern mining disabled (set LENS_PATTERN_MINING_ENABLED=true)")
+				return
+			}
+			if err := patternMiner.OptIn(req.Context(), wsID); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"opted_in": true})
+		})
+
+		authed.Delete("/v1/workspaces/{wsID}/pattern-mining/opt-in", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			if err := patternMiner.OptOut(req.Context(), wsID); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"opted_in": false})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/tokens/mining/patterns", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			c, err := patternMiner.GetContribution(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, c)
 		})
 
 		authed.Get("/v1/workspaces/{wsID}/spend/current-month", func(w http.ResponseWriter, req *http.Request) {

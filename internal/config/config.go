@@ -77,6 +77,10 @@ type Config struct {
 	// same-workspace tiny reward (effectively "no sharing
 	// economy", but mining still runs for own-cache hits).
 	CacheSharingEnabled bool
+
+	// Pattern mining (Batch 2 Item 5). Deployment-level gate;
+	// must AND with per-workspace opt-in for earnings to fire.
+	PatternMiningEnabled bool
 }
 
 func Load() (*Config, error) {
@@ -106,7 +110,8 @@ func Load() (*Config, error) {
 
 		QualityAutoRetry: parseBoolEnv("LENS_QUALITY_AUTO_RETRY"),
 
-		CacheSharingEnabled: parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
+		CacheSharingEnabled:  parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
+		PatternMiningEnabled: parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
 
 		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
 
