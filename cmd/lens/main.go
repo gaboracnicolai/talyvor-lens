@@ -133,6 +133,8 @@ func run() error {
 	templateDetector := templates.New(pool)
 	qualityScorer := quality.New(pool)
 	abTester := ab.New(pool, qualityScorer)
+	abEngine := ab.NewEngine(pool)
+	abEngine.RunAutoCompleteLoop(ctx, time.Hour)
 	branchTracker := attribution.New(pool)
 	wsManager := workspace.New(pool)
 	if err := wsManager.LoadAll(ctx); err != nil {
@@ -353,6 +355,81 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, ws)
+		})
+
+		// ─── A/B experiments ────────────────────────────────
+		// New experiment system (engine.go). Coexists with the
+		// legacy /v1/ab/tests shadow endpoints.
+		authed.Post("/v1/workspaces/{wsID}/experiments", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in ab.Experiment
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			in.WorkspaceID = wsID
+			if err := abEngine.CreateExperiment(req.Context(), &in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, in)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/experiments", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			writeJSONOK(w, http.StatusOK, abEngine.ListExperiments(wsID))
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/experiments/{id}", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			exp, ok := abEngine.GetExperiment(id)
+			if !ok {
+				writeJSONErr(w, http.StatusNotFound, "experiment not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, exp)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/experiments/{id}/start", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			if err := abEngine.StartExperiment(req.Context(), id); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]string{"status": "running"})
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/experiments/{id}/stop", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			if err := abEngine.StopExperiment(req.Context(), id); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]string{"status": "completed"})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/experiments/{id}/analysis", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			analysis, err := abEngine.AnalyzeExperiment(req.Context(), id)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, analysis)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/experiments/{id}/results", func(w http.ResponseWriter, req *http.Request) {
+			// Results live in Postgres directly; the dashboard
+			// typically wants `analysis`. We expose the raw stream
+			// for ad-hoc debugging — same analysis aggregation but
+			// returned per variant.
+			id := chi.URLParam(req, "id")
+			analysis, err := abEngine.AnalyzeExperiment(req.Context(), id)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, analysis.Variants)
 		})
 
 		// Quality stats for the per-workspace dashboard. `days`
