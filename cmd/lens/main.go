@@ -256,6 +256,17 @@ func run() error {
 	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
 	_ = cacheMiner // hooks into the cache-hit path in a follow-up wire-up
 
+	// Compute mining (Batch 2 Item 2). Wires its hook into the
+	// localrouter so any verified GPU node that serves a
+	// cross-workspace request gets credited automatically.
+	computeMiner := mining.NewComputeMiner(tokenLedger, pool)
+	localRouterMulti.SetOnRequestServed(func(nodeID, requesterWS string, tokens int, latencyMs int64) {
+		if err := computeMiner.RecordServedRequest(ctx, nodeID, requesterWS, tokens, latencyMs); err != nil {
+			logger.Warn("compute mining: record served request failed",
+				slog.String("node_id", nodeID), slog.String("err", err.Error()))
+		}
+	})
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -330,7 +341,31 @@ func run() error {
 	r.Get("/v1/tokens/rates", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(mining.Rates())
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"cache":   mining.Rates(),
+			"compute": map[string]float64{
+				"base_per_1k_tokens":  mining.ComputeMineBaseRate,
+				"multiplier_cpu":      mining.GPUMultiplierCPU,
+				"multiplier_rtx4090":  mining.GPUMultiplierRTX4090,
+				"multiplier_a100":     mining.GPUMultiplierA100,
+				"multiplier_h100":     mining.GPUMultiplierH100,
+			},
+		})
+	})
+
+	// Public discovery: GPU nodes available for a model.
+	r.Get("/v1/nodes/available", func(w http.ResponseWriter, req *http.Request) {
+		model := req.URL.Query().Get("model")
+		if model == "" {
+			writeJSONErr(w, http.StatusBadRequest, "model query param required")
+			return
+		}
+		nodes, err := computeMiner.ListAvailableNodes(req.Context(), model)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, nodes)
 	})
 
 	r.Handle("/metrics", metrics.Handler())
@@ -778,6 +813,56 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, stats)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/tokens/mining/compute", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			stats, err := computeMiner.GetWorkspaceStats(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
+		})
+
+		// ─── Inference node CRUD (compute mining) ──────
+		authed.Post("/v1/workspaces/{wsID}/nodes", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in mining.InferenceNode
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			in.WorkspaceID = wsID
+			created, err := computeMiner.RegisterNode(req.Context(), in)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, created)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/nodes", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			nodes, err := computeMiner.ListNodes(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, nodes)
+		})
+
+		authed.Delete("/v1/workspaces/{wsID}/nodes/{nodeID}", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			if err := computeMiner.DeactivateNode(req.Context(), nodeID); err != nil {
+				if errors.Is(err, mining.ErrNodeNotFound) {
+					writeJSONErr(w, http.StatusNotFound, "node not found")
+					return
+				}
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
 		authed.Get("/v1/workspaces/{wsID}/spend/current-month", func(w http.ResponseWriter, req *http.Request) {

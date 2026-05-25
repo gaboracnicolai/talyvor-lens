@@ -71,6 +71,7 @@ const (
 // guarded by Router.mu — never touched outside the router.
 type LocalEndpoint struct {
 	ID            string    `json:"id"`
+	WorkspaceID   string    `json:"workspace_id,omitempty"` // mining ownership (Batch 2 Item 2)
 	URL           string    `json:"url"`
 	Provider      string    `json:"provider"`
 	Models        []string  `json:"models"`
@@ -98,6 +99,35 @@ type Router struct {
 	// rrCursor is the round-robin index. Atomic so we don't
 	// take a write lock just to advance the counter.
 	rrCursor uint64
+
+	// onRequestServed is the compute-mining hook the proxy
+	// invokes after a successful served request. Stays nil
+	// until SetOnRequestServed wires it (Batch 2 Item 2).
+	onRequestServed func(nodeID, requestingWorkspace string, tokens int, latencyMs int64)
+}
+
+// SetOnRequestServed installs the mining hook. main.go wires it
+// to ComputeMiner.RecordServedRequest. The hook fires from
+// NotifyServed below — keeping the router free of a hard
+// dependency on the mining package.
+func (r *Router) SetOnRequestServed(fn func(nodeID, requestingWorkspace string, tokens int, latencyMs int64)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onRequestServed = fn
+}
+
+// NotifyServed is the proxy-side entry point: "this endpoint
+// just served `tokens` tokens to `requestingWorkspace` in
+// `latencyMs`". When a mining hook is wired it's invoked
+// synchronously so the proxy can `defer` it and not lose the
+// accounting on early returns.
+func (r *Router) NotifyServed(nodeID, requestingWorkspace string, tokens int, latencyMs int64) {
+	r.mu.RLock()
+	fn := r.onRequestServed
+	r.mu.RUnlock()
+	if fn != nil {
+		fn(nodeID, requestingWorkspace, tokens, latencyMs)
+	}
 }
 
 // ─── errors ──────────────────────────────────────
