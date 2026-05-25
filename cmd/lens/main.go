@@ -56,6 +56,7 @@ import (
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/ratelimit"
+	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/status"
@@ -225,6 +226,29 @@ func run() error {
 	// (which is still mounted below for backward compat); new
 	// /v1/auth/* routes use authManager directly.
 	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), cfg.JWTSecret, keyStore, tenantStore)
+
+	// Retry policy + per-provider circuit breaker registry (Item 9).
+	// Coexists with the legacy retry.Do helper.
+	retryPolicy := retry.DefaultPolicy
+	if cfg.RetryMaxAttempts > 0 {
+		retryPolicy.MaxAttempts = cfg.RetryMaxAttempts
+	}
+	if cfg.RetryInitialDelay > 0 {
+		retryPolicy.InitialDelay = cfg.RetryInitialDelay
+	}
+	if cfg.RetryMaxDelay > 0 {
+		retryPolicy.MaxDelay = cfg.RetryMaxDelay
+	}
+	breakerRegistry := retry.NewBreakerRegistry(cfg.CBThreshold, cfg.CBResetTimeout, 2)
+	breakerRegistry.SetOnStateChange(func(name string, from, to retry.CBState) {
+		logger.Info("retry: circuit state change",
+			slog.String("provider", name),
+			slog.String("from", string(from)),
+			slog.String("to", string(to)),
+		)
+	})
+	retryExecutor := retry.NewExecutor(&retryPolicy, breakerRegistry)
+	_ = retryExecutor // wired into proxy paths in a follow-up
 
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or

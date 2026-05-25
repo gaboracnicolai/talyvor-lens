@@ -63,6 +63,14 @@ type Config struct {
 	GlobalRPM        int
 	GlobalTPM        int
 	BurstMultiplier  float64
+
+	// Retry / circuit-breaker tuning (Item 9). Zero values fall
+	// back to the library defaults in internal/retry/policy.go.
+	RetryMaxAttempts int
+	RetryInitialDelay time.Duration
+	RetryMaxDelay     time.Duration
+	CBThreshold       int
+	CBResetTimeout    time.Duration
 }
 
 func Load() (*Config, error) {
@@ -134,6 +142,42 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_BURST_MULTIPLIER (must be ≥ 1.0): %s", v)
 		}
 		c.BurstMultiplier = f
+	}
+
+	if v := os.Getenv("LENS_RETRY_MAX_ATTEMPTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("invalid LENS_RETRY_MAX_ATTEMPTS (must be ≥ 1): %s", v)
+		}
+		c.RetryMaxAttempts = n
+	}
+	if v := os.Getenv("LENS_RETRY_INITIAL_DELAY"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_RETRY_INITIAL_DELAY: %w", err)
+		}
+		c.RetryInitialDelay = d
+	}
+	if v := os.Getenv("LENS_RETRY_MAX_DELAY"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_RETRY_MAX_DELAY: %w", err)
+		}
+		c.RetryMaxDelay = d
+	}
+	if v := os.Getenv("LENS_CB_THRESHOLD"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("invalid LENS_CB_THRESHOLD: %s", v)
+		}
+		c.CBThreshold = n
+	}
+	if v := os.Getenv("LENS_CB_RESET_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_CB_RESET_TIMEOUT: %w", err)
+		}
+		c.CBResetTimeout = d
 	}
 
 	if v := os.Getenv("LENS_SEMANTIC_THRESHOLD"); v != "" {
