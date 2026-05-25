@@ -267,6 +267,12 @@ func run() error {
 		}
 	})
 
+	// Embedding mining (Batch 2 Item 3). Shares the ledger;
+	// proxy wires RecordEmbeddingsServed in the semantic-cache
+	// path in a follow-up.
+	embeddingMiner := mining.NewEmbeddingMiner(tokenLedger, pool)
+	_ = embeddingMiner
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -342,15 +348,32 @@ func run() error {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"cache":   mining.Rates(),
+			"cache": mining.Rates(),
 			"compute": map[string]float64{
-				"base_per_1k_tokens":  mining.ComputeMineBaseRate,
-				"multiplier_cpu":      mining.GPUMultiplierCPU,
-				"multiplier_rtx4090":  mining.GPUMultiplierRTX4090,
-				"multiplier_a100":     mining.GPUMultiplierA100,
-				"multiplier_h100":     mining.GPUMultiplierH100,
+				"base_per_1k_tokens": mining.ComputeMineBaseRate,
+				"multiplier_cpu":     mining.GPUMultiplierCPU,
+				"multiplier_rtx4090": mining.GPUMultiplierRTX4090,
+				"multiplier_a100":    mining.GPUMultiplierA100,
+				"multiplier_h100":    mining.GPUMultiplierH100,
 			},
+			"embedding": mining.EmbeddingRates(),
 		})
+	})
+
+	// Public discovery: embedding nodes available for a model.
+	r.Get("/v1/embedding-nodes/available", func(w http.ResponseWriter, req *http.Request) {
+		model := req.URL.Query().Get("model")
+		if model == "" {
+			writeJSONErr(w, http.StatusBadRequest, "model query param required")
+			return
+		}
+		minDim, _ := strconv.Atoi(req.URL.Query().Get("min_dimensions"))
+		nodes, err := embeddingMiner.ListAvailableNodes(req.Context(), model, minDim)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, nodes)
 	})
 
 	// Public discovery: GPU nodes available for a model.
@@ -863,6 +886,56 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		// ─── Embedding node CRUD (embedding mining) ────
+		authed.Post("/v1/workspaces/{wsID}/embedding-nodes", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in mining.EmbeddingNode
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			in.WorkspaceID = wsID
+			created, err := embeddingMiner.RegisterNode(req.Context(), in)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, created)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/embedding-nodes", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			nodes, err := embeddingMiner.ListNodes(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, nodes)
+		})
+
+		authed.Delete("/v1/workspaces/{wsID}/embedding-nodes/{nodeID}", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			if err := embeddingMiner.DeactivateEmbeddingNode(req.Context(), nodeID); err != nil {
+				if errors.Is(err, mining.ErrNodeNotFound) {
+					writeJSONErr(w, http.StatusNotFound, "node not found")
+					return
+				}
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/tokens/mining/embeddings", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			stats, err := embeddingMiner.GetStats(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
 		})
 
 		authed.Get("/v1/workspaces/{wsID}/spend/current-month", func(w http.ResponseWriter, req *http.Request) {
