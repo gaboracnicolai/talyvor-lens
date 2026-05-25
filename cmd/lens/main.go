@@ -60,6 +60,7 @@ import (
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/status"
 	"github.com/talyvor/lens/internal/templates"
+	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/warmer"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -194,6 +195,8 @@ func run() error {
 	if err := keyStore.LoadAll(ctx); err != nil {
 		logger.Warn("auth: LoadAll failed", slog.String("err", err.Error()))
 	}
+	tenantStore := tenant.NewStore(pool)
+	spendTracker := tenant.NewSpendTracker(tenantStore)
 	rateLimiter := ratelimit.New(redisClient, ratelimit.DefaultRules())
 
 	r := chi.NewRouter()
@@ -359,6 +362,101 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, ws)
+		})
+
+		// ─── Workspace tenant config + keys ─────────────────
+		// Per-workspace policy bundle (spend cap, model + provider
+		// allowlists, retention) and workspace-scoped API keys.
+		// These sit alongside the Lens-admin key routes above —
+		// admin keys authenticate the call, then operate on
+		// workspace-scoped credentials.
+		authed.Get("/v1/workspaces/{wsID}/config", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			cfg, err := tenantStore.GetConfig(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if cfg == nil {
+				writeJSONErr(w, http.StatusNotFound, "no workspace config")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, cfg)
+		})
+
+		authed.Put("/v1/workspaces/{wsID}/config", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in tenant.WorkspaceConfig
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			in.ID = wsID
+			if err := tenantStore.UpsertConfig(req.Context(), in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			// Drop any cached spend snapshot so the new cap kicks
+			// in on the next request instead of waiting for the TTL.
+			spendTracker.InvalidateCache(wsID)
+			writeJSONOK(w, http.StatusOK, in)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/api-keys", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				Name      string     `json:"name"`
+				Scopes    []string   `json:"scopes"`
+				ExpiresAt *time.Time `json:"expires_at,omitempty"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			raw, key, err := tenantStore.CreateAPIKey(req.Context(), wsID, in.Name, in.Scopes, in.ExpiresAt)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, map[string]any{
+				"key":     raw,
+				"id":      key.ID,
+				"prefix":  key.KeyPrefix,
+				"name":    key.Name,
+				"scopes":  key.Scopes,
+				"warning": "Store this key securely. It will not be shown again.",
+			})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/api-keys", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			keys, err := tenantStore.ListAPIKeys(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, keys)
+		})
+
+		authed.Delete("/v1/workspaces/{wsID}/api-keys/{keyID}", func(w http.ResponseWriter, req *http.Request) {
+			keyID := chi.URLParam(req, "keyID")
+			if err := tenantStore.RevokeAPIKey(req.Context(), keyID); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/spend/current-month", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			spent, err := spendTracker.CurrentSpend(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]float64{
+				"current_month_usd": spent,
+			})
 		})
 
 		// ─── A/B experiments ────────────────────────────────
