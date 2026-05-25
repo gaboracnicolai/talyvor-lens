@@ -926,6 +926,29 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, nodes)
 		})
 
+		// Node heartbeat (Batch 3 Phase 2). Best-effort UPDATE
+		// of last_seen_at + uptime — no auth beyond the
+		// already-applied workspace key.
+		authed.Post("/v1/workspaces/{wsID}/nodes/{nodeID}/heartbeat", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			var in struct {
+				ActiveRequests int64    `json:"active_requests"`
+				UptimeSeconds  int64    `json:"uptime_seconds"`
+				ModelsLoaded   []string `json:"models_loaded"`
+			}
+			_ = json.NewDecoder(req.Body).Decode(&in)
+			if pool != nil {
+				if _, err := pool.Exec(req.Context(), `
+					UPDATE inference_nodes
+					SET last_seen_at = NOW(), uptime_seconds = $2
+					WHERE id = $1`, nodeID, in.UptimeSeconds); err != nil {
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
 		authed.Delete("/v1/workspaces/{wsID}/nodes/{nodeID}", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
 			if err := computeMiner.DeactivateNode(req.Context(), nodeID); err != nil {
