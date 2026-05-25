@@ -300,6 +300,23 @@ const dashboardHTML = `<!DOCTYPE html>
     </section>
 
     <section>
+      <h2>Local model endpoints</h2>
+      <p class="muted">
+        Multi-endpoint registry powered by <code>internal/localrouter</code>.
+        Health checks run every 30 seconds; load + latency stats feed the
+        routing strategies (round-robin, least-loaded, lowest-latency,
+        priority). Configure at boot via <code>LENS_LOCAL_ENDPOINTS</code>
+        or manage at runtime:
+      </p>
+      <ul class="mono" style="font-size:12px;color:var(--secondary);line-height:1.8">
+        <li>GET    <span class="accent">/v1/local/endpoints</span> — list registered endpoints with health + EMA latency + error rate</li>
+        <li>POST   <span class="accent">/v1/local/endpoints</span> — register a new endpoint dynamically</li>
+        <li>DELETE <span class="accent">/v1/local/endpoints/&lt;id&gt;</span> — remove an endpoint</li>
+        <li>POST   <span class="accent">/v1/local/endpoints/&lt;id&gt;/check</span> — trigger an immediate health probe</li>
+      </ul>
+    </section>
+
+    <section>
       <h2>Workspaces</h2>
       <div id="workspaces">
         <span class="skeleton">Loading…</span>

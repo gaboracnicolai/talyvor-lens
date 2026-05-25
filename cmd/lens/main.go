@@ -150,6 +150,12 @@ func run() error {
 
 	lr := localrouter.New(cfg.OllamaURL)
 	go lr.StartHealthCheck(ctx)
+
+	// Multi-endpoint local router (additive, see internal/localrouter/multi.go).
+	// Parses LENS_LOCAL_ENDPOINTS; if empty, the registry stays empty and
+	// the admin API can register endpoints dynamically at runtime.
+	localRouterMulti := localrouter.NewRouterFromConfig(pool, cfg.LocalEndpoints)
+	localRouterMulti.StartHealthChecks(ctx, localrouter.DefaultHealthCheckInterval)
 	injectionDetector := injection.New(injection.DefaultPolicy())
 	budgetEnforcer := budget.New(pool, budget.BudgetPolicy{MaxOutputTokens: 4096})
 	batchRouter := batch.New(pool, cfg.AnthropicAPIKey)
@@ -445,6 +451,52 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		// ─── Local endpoint registry ───────────────────
+		// Admin surface for the multi-endpoint Router. Listing
+		// is read-only; the other three routes mutate the
+		// in-process registry (no persistence — restarts re-read
+		// LENS_LOCAL_ENDPOINTS).
+		authed.Get("/v1/local/endpoints", func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONOK(w, http.StatusOK, localRouterMulti.List())
+		})
+
+		authed.Post("/v1/local/endpoints", func(w http.ResponseWriter, req *http.Request) {
+			var in localrouter.LocalEndpoint
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.URL == "" || in.Provider == "" {
+				writeJSONErr(w, http.StatusBadRequest, "url and provider required")
+				return
+			}
+			localRouterMulti.Register(&in)
+			// Fire an immediate health check so the new endpoint
+			// is usable on the next request rather than after the
+			// 30s tick.
+			go localRouterMulti.CheckHealth(ctx, &in)
+			writeJSONOK(w, http.StatusCreated, &in)
+		})
+
+		authed.Delete("/v1/local/endpoints/{id}", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			if !localRouterMulti.Remove(id) {
+				writeJSONErr(w, http.StatusNotFound, "endpoint not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		authed.Post("/v1/local/endpoints/{id}/check", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			ep, err := localRouterMulti.CheckHealthByID(req.Context(), id)
+			if err != nil {
+				writeJSONErr(w, http.StatusNotFound, "endpoint not found")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, ep)
 		})
 
 		authed.Get("/v1/workspaces/{wsID}/spend/current-month", func(w http.ResponseWriter, req *http.Request) {

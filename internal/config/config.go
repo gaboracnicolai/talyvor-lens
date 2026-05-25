@@ -43,6 +43,13 @@ type Config struct {
 	// scores below quality.AutoRetryThreshold. Off by default;
 	// the operator opts in via LENS_QUALITY_AUTO_RETRY=true.
 	QualityAutoRetry bool
+
+	// LocalEndpoints holds the LENS_LOCAL_ENDPOINTS env value,
+	// in the format consumed by localrouter.ParseEndpointsConfig:
+	//   provider:url:model1,model2;provider:url:model3
+	// Empty string means "no multi-endpoint local routing" —
+	// the legacy LENS_OLLAMA_URL single-endpoint path still works.
+	LocalEndpoints string
 }
 
 func Load() (*Config, error) {
@@ -71,6 +78,8 @@ func Load() (*Config, error) {
 		VLLMAPIKey:    os.Getenv("LENS_VLLM_API_KEY"),
 
 		QualityAutoRetry: parseBoolEnv("LENS_QUALITY_AUTO_RETRY"),
+
+		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
 	}
 
 	if v := os.Getenv("LENS_SEMANTIC_THRESHOLD"); v != "" {
