@@ -51,6 +51,7 @@ import (
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/proxy"
@@ -250,6 +251,11 @@ func run() error {
 	retryExecutor := retry.NewExecutor(&retryPolicy, breakerRegistry)
 	_ = retryExecutor // wired into proxy paths in a follow-up
 
+	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
+	tokenLedger := mining.NewLedgerStore(pool)
+	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
+	_ = cacheMiner // hooks into the cache-hit path in a follow-up wire-up
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -318,6 +324,14 @@ func run() error {
 
 	// OpenAPI spec — public, no auth, no version path prefix.
 	r.Get("/openapi.json", api.ServeOpenAPI)
+
+	// Public token-rate endpoint — no auth needed; rates are
+	// part of Lens's public economic surface.
+	r.Get("/v1/tokens/rates", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(mining.Rates())
+	})
 
 	r.Handle("/metrics", metrics.Handler())
 
@@ -731,6 +745,39 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, ep)
+		})
+
+		// ─── LENS token endpoints (Batch 2 Item 1) ─────
+		authed.Get("/v1/workspaces/{wsID}/tokens/balance", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			snap, err := tokenLedger.GetSnapshot(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, snap)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/tokens/history", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+			offset, _ := strconv.Atoi(req.URL.Query().Get("offset"))
+			entries, err := tokenLedger.GetHistory(req.Context(), wsID, limit, offset)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, entries)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/tokens/mining/cache", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			stats, err := cacheMiner.GetMiningStats(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
 		})
 
 		authed.Get("/v1/workspaces/{wsID}/spend/current-month", func(w http.ResponseWriter, req *http.Request) {

@@ -71,6 +71,12 @@ type Config struct {
 	RetryMaxDelay     time.Duration
 	CBThreshold       int
 	CBResetTimeout    time.Duration
+
+	// Cache contribution mining (Batch 2 Item 1). Opt-in —
+	// when false, cross-workspace cache hits earn only the
+	// same-workspace tiny reward (effectively "no sharing
+	// economy", but mining still runs for own-cache hits).
+	CacheSharingEnabled bool
 }
 
 func Load() (*Config, error) {
@@ -99,6 +105,8 @@ func Load() (*Config, error) {
 		VLLMAPIKey:    os.Getenv("LENS_VLLM_API_KEY"),
 
 		QualityAutoRetry: parseBoolEnv("LENS_QUALITY_AUTO_RETRY"),
+
+		CacheSharingEnabled: parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
 
 		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
 
