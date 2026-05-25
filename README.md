@@ -124,6 +124,85 @@ Single Go binary, no Python or Node runtime. PostgreSQL (with pgvector) for stat
 
 Test coverage: 37 Go packages, all green. Python SDK: 15/15. TypeScript SDK: 15/15.
 
+## LENS Token Economy
+
+LENS is a compute-backed utility token: **1 LENS = $0.10 of AI compute credit**. You earn LENS by contributing infrastructure to the network and spend it on LLM API calls through Talyvor Lens (with a 20% discount vs. paying fiat).
+
+### Mining Types
+
+| # | Track | What you contribute | Earn rate |
+|---|---|---|---|
+| 1 | **Cache mining** | Shared cache hits served to other workspaces | 0.001–0.010 LENS / hit |
+| 2 | **Compute mining** | GPU inference capacity (Ollama / vLLM / llama.cpp) | 0.025–0.150 LENS / 1k tokens (by GPU class) |
+| 3 | **Embedding mining** | CPU-friendly embedding generation | 0.002–0.004 LENS / 1k embeddings |
+| 4 | **Quality oracle** | Stake-gated annotation of LLM responses | 0.100 LENS / annotation + agreement bonus |
+| 5 | **Pattern mining** | Anonymised routing patterns (opt-in) | Rarity-weighted: 0.001 LENS × (1 + rarity × 4) [+ unique bonus] |
+
+### Node Software
+
+| Binary | Default port | Purpose |
+|---|---|---|
+| `talyvor-lens` | 8080 | The Lens proxy itself |
+| `talyvor-node` | 9090 | GPU inference mining |
+| `talyvor-cachenode` | 9091 | Cache contribution mining |
+| `talyvor-embednode` | 9092 | Embedding farm mining |
+
+Build all four: `make binaries` (drops them into `./bin/`).
+
+### Token Economics
+
+- **1 LENS = $0.10 USD** (compute-backed peg)
+- **Burn mechanism**: spend LENS for a 20% discount on AI calls (burned LENS leaves circulation forever)
+- **Staking**: 5% / 12% / 20% APY for 30 / 90 / 180-day locks
+- **Marketplace**: peer-to-peer LENS trading with a 5% platform fee
+- **Quality oracle stake**: 10 LENS minimum to annotate (Sybil-resistant)
+
+### Quick start (GPU miner)
+
+```bash
+export LENS_URL=https://lens.talyvor.com
+export LENS_API_KEY=tlv_...
+export LENS_WORKSPACE_ID=your-workspace
+export NODE_URL=https://your-server.com
+export NODE_PROVIDER=ollama
+export NODE_MODELS=llama3.1,mistral
+export NODE_GPU_TYPE=rtx4090
+./bin/talyvor-node start
+```
+
+### Quick start (cache miner)
+
+```bash
+export LENS_URL=https://lens.talyvor.com
+export LENS_API_KEY=tlv_...
+export LENS_WORKSPACE_ID=your-workspace
+export CACHE_NODE_URL=https://your-cache.example.com
+export CACHE_NODE_REDIS_URL=redis://localhost:6379/0
+export CACHE_NODE_MAX_GB=100
+./bin/talyvor-cachenode start
+```
+
+### Quick start (embedding miner — CPU-friendly)
+
+```bash
+export LENS_URL=https://lens.talyvor.com
+export LENS_API_KEY=tlv_...
+export LENS_WORKSPACE_ID=your-workspace
+export EMBED_NODE_URL=https://your-embed.example.com
+export EMBED_NODE_MODEL=nomic-embed-text
+export EMBED_NODE_DIMENSIONS=768
+./bin/talyvor-embednode start
+```
+
+### Dashboard
+
+The Lens dashboard at `/dashboard` includes per-workspace token views:
+
+- `/dashboard/tokens` — balance, mining activity, staking, marketplace
+- `/dashboard/nodes` — your registered inference + embedding nodes
+- `/dashboard/oracle` — quality-oracle queue + annotation UI
+- `/dashboard/economy` — global supply, circulation, listings
+
 ## License
 
 Open core. The proxy and every package under `internal/` is MIT-licensed. SSO, compliance exports, and SLA support are available commercially — contact `hello@talyvor.com`.

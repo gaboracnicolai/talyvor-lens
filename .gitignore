@@ -1,4 +1,5 @@
 /lens
+/bin/
 /dist/
 /out/
 *.test

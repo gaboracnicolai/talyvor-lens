@@ -49,11 +49,12 @@ type tokenPages struct {
 	tokensHTML  []byte
 	nodesHTML   []byte
 	economyHTML []byte
+	oracleHTML  []byte
 }
 
-// initTokenPages computes the three byte slices once. The main
-// `New` constructor in handler.go calls this after the legacy
-// page is rendered.
+// initTokenPages computes the byte slices once. The main `New`
+// constructor in handler.go calls this after the legacy page is
+// rendered.
 func (h *Handler) initTokenPages() {
 	if h.tokenPages != nil {
 		return
@@ -62,7 +63,15 @@ func (h *Handler) initTokenPages() {
 		tokensHTML:  renderTemplate(tokensDashboardHTML, h.version),
 		nodesHTML:   renderTemplate(nodesDashboardHTML, h.version),
 		economyHTML: renderTemplate(economyDashboardHTML, h.version),
+		oracleHTML:  renderTemplate(oracleDashboardHTML, h.version),
 	}
+}
+
+// ServeOracle is GET /dashboard/oracle. Renders the quality-
+// oracle queue + annotator interface.
+func (h *Handler) ServeOracle(w http.ResponseWriter, _ *http.Request) {
+	h.initTokenPages()
+	renderPage(w, h.tokenPages.oracleHTML)
 }
 
 // ServeTokens is the GET /dashboard/tokens route.
@@ -233,6 +242,7 @@ const commonHeader = `<header>
     <a href="/dashboard">Overview</a>
     <a href="/dashboard/tokens">Tokens &amp; Mining</a>
     <a href="/dashboard/nodes">Nodes</a>
+    <a href="/dashboard/oracle">Oracle</a>
     <a href="/dashboard/economy">Economy</a>
   </nav>
   <span class="muted mono" style="margin-left:auto;font-size:12px">v{{VERSION}}</span>
@@ -702,6 +712,210 @@ document.addEventListener('DOMContentLoaded', () => {
   loadStats();
   loadListings();
   loadRates();
+});
+</script>
+</body></html>`
+
+// ─── /dashboard/oracle ──────────────────────────
+
+const oracleDashboardHTML = commonHead + `<body>` + commonHeader + `
+<main>
+  <p class="muted" style="margin: 0 0 16px 0">
+    Quality Oracle — earn LENS by annotating LLM responses. Stake ≥ 10 LENS to participate.
+  </p>
+
+  <section>
+    <h2>🔮 Oracle Queue</h2>
+    <div class="grid">
+      <div class="stat">
+        <div class="label">Pending tasks</div>
+        <div class="value" id="o-pending">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Completed</div>
+        <div class="value" id="o-completed">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Active annotators</div>
+        <div class="value" id="o-active">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Avg agreement</div>
+        <div class="value" id="o-agreement">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">LENS distributed</div>
+        <div class="value lens" id="o-distributed">—</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>👤 Your Stats (Workspace)</h2>
+    <div class="form-row">
+      <label>Workspace ID</label>
+      <input id="ws-input" type="text" placeholder="ws_..." style="flex:1">
+      <button onclick="setWorkspace()">Load</button>
+    </div>
+    <div class="grid">
+      <div class="stat">
+        <div class="label">Annotations</div>
+        <div class="value" id="my-count">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Agreement</div>
+        <div class="value" id="my-agreement">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Staked</div>
+        <div class="value lens" id="my-staked">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Earned</div>
+        <div class="value lens" id="my-earned">—</div>
+      </div>
+    </div>
+    <div class="form-row" style="margin-top:16px">
+      <label>Stake amount</label>
+      <input id="stake-amount" type="number" step="0.01" placeholder="10">
+      <button onclick="stake()">Stake LENS</button>
+      <button class="secondary" onclick="unstake()">Unstake</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>📝 Annotate next task</h2>
+    <div id="task-container">
+      <p class="muted">Loading next task…</p>
+    </div>
+  </section>
+
+  <div id="toast" class="toast"></div>
+</main>
+<footer>Talyvor Lens v{{VERSION}}</footer>
+<script>
+const LENS_USD = 0.10;
+function getWS() {
+  return new URL(window.location.href).searchParams.get('ws')
+    || localStorage.getItem('talyvor_ws') || '';
+}
+function setWorkspace() {
+  const v = document.getElementById('ws-input').value.trim();
+  if (!v) return;
+  const u = new URL(window.location.href);
+  u.searchParams.set('ws', v);
+  window.location.href = u.toString();
+}
+function fmt(n) { return (n || 0).toFixed(2); }
+function toast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'good' : 'bad');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3500);
+}
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+async function loadStats() {
+  try {
+    const s = await api('/v1/oracle/stats');
+    document.getElementById('o-pending').textContent = s.pending_tasks;
+    document.getElementById('o-completed').textContent = s.completed_tasks;
+    document.getElementById('o-active').textContent = s.active_oracles;
+    document.getElementById('o-agreement').textContent = (s.avg_agreement * 100).toFixed(1) + '%';
+    document.getElementById('o-distributed').textContent = fmt(s.tokens_distributed) + ' LENS';
+  } catch (e) { console.warn(e); }
+}
+async function loadMyStats(ws) {
+  try {
+    const s = await api('/v1/workspaces/' + ws + '/tokens/mining/annotations');
+    document.getElementById('my-count').textContent = s.annotations || 0;
+    document.getElementById('my-agreement').textContent = ((s.agreement || 0) * 100).toFixed(1) + '%';
+    document.getElementById('my-staked').textContent = fmt(s.staked_tokens) + ' LENS';
+    document.getElementById('my-earned').textContent = fmt(s.earned_tokens) + ' LENS';
+  } catch (e) { console.warn(e); }
+}
+let currentTask = null;
+let taskStart = 0;
+async function loadNextTask(ws) {
+  const container = document.getElementById('task-container');
+  try {
+    const task = await api('/v1/workspaces/' + ws + '/annotate/task');
+    currentTask = task;
+    taskStart = Date.now();
+    container.innerHTML =
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">' +
+      '<div><h3 style="color:var(--secondary);font-size:13px">Response A</h3>' +
+      '<pre style="background:var(--bg);padding:12px;border-radius:6px;white-space:pre-wrap;font-size:12px;max-height:240px;overflow:auto">' + escapeHTML(task.response_a) + '</pre></div>' +
+      '<div><h3 style="color:var(--secondary);font-size:13px">Response B</h3>' +
+      '<pre style="background:var(--bg);padding:12px;border-radius:6px;white-space:pre-wrap;font-size:12px;max-height:240px;overflow:auto">' + escapeHTML(task.response_b) + '</pre></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+      '<button onclick="submitAnnotation(\'a_better\')">A is better</button>' +
+      '<button onclick="submitAnnotation(\'tie\')" class="secondary">Tie</button>' +
+      '<button onclick="submitAnnotation(\'b_better\')">B is better</button>' +
+      '<button onclick="submitAnnotation(\'both_bad\')" class="secondary">Both bad</button>' +
+      '<label style="margin-left:auto">Confidence</label>' +
+      '<input id="confidence" type="range" min="1" max="5" value="3">' +
+      '</div>';
+  } catch (e) {
+    container.innerHTML = '<p class="muted">No pending tasks. Try again later.</p>';
+  }
+}
+function escapeHTML(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+async function submitAnnotation(decision) {
+  const ws = getWS();
+  if (!ws || !currentTask) return;
+  const confidence = parseInt(document.getElementById('confidence').value || '3');
+  const timeSpentMs = Date.now() - taskStart;
+  try {
+    await api('/v1/workspaces/' + ws + '/annotate/task/' + currentTask.id, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({decision, confidence, time_spent_ms: timeSpentMs}),
+    });
+    toast('Annotation submitted', true);
+    loadMyStats(ws);
+    loadStats();
+    loadNextTask(ws);
+  } catch (e) { toast('Submission failed: ' + e.message, false); }
+}
+async function stake() {
+  const ws = getWS();
+  if (!ws) return toast('Set a workspace ID first', false);
+  const amount = parseFloat(document.getElementById('stake-amount').value);
+  if (!amount) return toast('Amount required', false);
+  try {
+    await api('/v1/workspaces/' + ws + '/annotate/stake', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({amount}),
+    });
+    toast('Staked ' + amount + ' LENS', true);
+    loadMyStats(ws); loadNextTask(ws);
+  } catch (e) { toast('Stake failed: ' + e.message, false); }
+}
+async function unstake() {
+  const ws = getWS();
+  if (!ws) return;
+  try {
+    await api('/v1/workspaces/' + ws + '/annotate/stake', {method: 'DELETE'});
+    toast('Unstaked', true);
+    loadMyStats(ws);
+  } catch (e) { toast('Unstake failed: ' + e.message, false); }
+}
+document.addEventListener('DOMContentLoaded', () => {
+  loadStats();
+  const ws = getWS();
+  if (ws) {
+    document.getElementById('ws-input').value = ws;
+    localStorage.setItem('talyvor_ws', ws);
+    loadMyStats(ws);
+    loadNextTask(ws);
+  }
 });
 </script>
 </body></html>`

@@ -1,7 +1,31 @@
-.PHONY: build test vet status bench bench-compare up down logs ps reset
+.PHONY: build test vet status bench bench-compare up down logs ps reset \
+        binaries lens node cachenode embednode
 
 build:
 	go build ./...
+
+# ────────────────────────────────────────────────────────────
+# Mining binaries — one go-build per cmd/ subdirectory. The
+# Lens server itself is the same binary as `make build` (the
+# default builds every cmd/), but we keep a named target so the
+# release process can `make lens node cachenode embednode` in
+# parallel.
+# ────────────────────────────────────────────────────────────
+
+# Build all four binaries to ./bin/.
+binaries: lens node cachenode embednode
+
+lens:
+	go build -o bin/talyvor-lens ./cmd/lens
+
+node:
+	go build -o bin/talyvor-node ./cmd/node
+
+cachenode:
+	go build -o bin/talyvor-cachenode ./cmd/cachenode
+
+embednode:
+	go build -o bin/talyvor-embednode ./cmd/embednode
 
 test:
 	go test ./...

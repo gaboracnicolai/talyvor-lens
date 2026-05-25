@@ -53,6 +53,7 @@ import (
 	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
+	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/proxy"
@@ -287,6 +288,11 @@ func run() error {
 	// Token marketplace + staking (Batch 3 Phase 1).
 	marketplace := economy.NewMarketplaceStore(tokenLedger, pool)
 
+	// Quality Oracle (Batch 3 Phase 5). Wraps the existing
+	// annotation miner with a 1% request sampler + the
+	// dashboard rollup query.
+	oracleEngine := oracle.New(annotationMiner, tokenLedger, pool)
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -466,8 +472,19 @@ func run() error {
 	r.Get("/dashboard", dashHandler.ServeHTTP)
 	r.Get("/dashboard/tokens", dashHandler.ServeTokens)
 	r.Get("/dashboard/nodes", dashHandler.ServeNodes)
+	r.Get("/dashboard/oracle", dashHandler.ServeOracle)
 	r.Get("/dashboard/economy", dashHandler.ServeEconomy)
 	r.Get("/", dashHandler.RedirectRoot)
+
+	// Public oracle stats — no auth, no PII, just rollup counters.
+	r.Get("/v1/oracle/stats", func(w http.ResponseWriter, req *http.Request) {
+		stats, err := oracleEngine.GetOracleStats(req.Context())
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, stats)
+	})
 
 	// Public status page. /status content-negotiates between HTML and
 	// JSON; /status.json is the unconditional-JSON convenience route
