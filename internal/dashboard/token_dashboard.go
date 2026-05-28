@@ -653,6 +653,53 @@ const economyDashboardHTML = commonHead + `<body>` + commonHeader + `
   </section>
 
   <section>
+    <h2>🔁 LENS → LXC Conversion</h2>
+    <p class="muted" style="margin-top:0">
+      LXC is the USD-pegged, one-way compute credit. <strong class="accent">1 LXC = $0.10</strong> (fixed peg).
+      Mining pays LENS; LENS converts to LXC at the admin-approved rate; LXC pays for AI calls.
+      The rate is <em>derived</em> from backing value &times; supply — the admin can only approve the algorithm's output.
+    </p>
+    <div class="grid">
+      <div class="stat">
+        <div class="label">Conversion Rate</div>
+        <div class="value accent" id="conv-rate">—</div>
+        <div class="usd">LENS per 1 LXC</div>
+      </div>
+      <div class="stat">
+        <div class="label">LXC Peg</div>
+        <div class="value">$0.10</div>
+        <div class="usd">fixed, never computed</div>
+      </div>
+      <div class="stat">
+        <div class="label">Fair Rate</div>
+        <div class="value" id="conv-fair">—</div>
+        <div class="usd">before spread</div>
+      </div>
+      <div class="stat">
+        <div class="label">Backing / LENS</div>
+        <div class="value" id="conv-backing">—</div>
+        <div class="usd">USD of verified work</div>
+      </div>
+      <div class="stat">
+        <div class="label">Spread</div>
+        <div class="value" id="conv-spread">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Guard status</div>
+        <div class="value" id="conv-guard">—</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>🕑 Rate History (last 10)</h2>
+    <table>
+      <thead><tr><th>When</th><th>Rate</th><th>Fair</th><th>Backing</th><th>Circulating</th><th>By</th></tr></thead>
+      <tbody id="rate-history-body"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
     <h2>📊 Active Marketplace Listings</h2>
     <table>
       <thead><tr><th>Seller</th><th>Amount</th><th>Price</th><th>Total Value</th></tr></thead>
@@ -685,6 +732,37 @@ async function loadStats() {
     document.getElementById('avg-price').textContent = '$' + (s.avg_price_usd || 0).toFixed(4) + '/LENS';
   } catch (e) { console.warn(e); }
 }
+async function loadConversionRate() {
+  try {
+    const r = await api('/v1/economy/conversion-rate');
+    document.getElementById('conv-rate').textContent = (r.rate || 0).toFixed(4);
+  } catch (e) { console.warn(e); }
+  try {
+    const hist = await api('/v1/economy/conversion-rate/history?limit=10');
+    const body = document.getElementById('rate-history-body');
+    if (!hist || hist.length === 0) {
+      body.innerHTML = '<tr><td colspan="6" class="muted">No rate approved yet — Phase 1 floor of 1.00 in effect.</td></tr>';
+      document.getElementById('conv-fair').textContent = '—';
+      document.getElementById('conv-backing').textContent = '—';
+      document.getElementById('conv-spread').textContent = '5%';
+      document.getElementById('conv-guard').textContent = 'floor';
+      return;
+    }
+    const latest = hist[0];
+    document.getElementById('conv-fair').textContent = (latest.fair_rate || 0).toFixed(4);
+    document.getElementById('conv-backing').textContent = '$' + (latest.backing_value || 0).toFixed(4);
+    document.getElementById('conv-spread').textContent = ((latest.spread || 0) * 100).toFixed(0) + '%';
+    body.innerHTML = hist.map(h => {
+      const when = new Date(h.created_at).toLocaleString();
+      return '<tr><td>' + when + '</td>' +
+             '<td class="accent">' + (h.rate || 0).toFixed(4) + '</td>' +
+             '<td>' + (h.fair_rate || 0).toFixed(4) + '</td>' +
+             '<td>$' + (h.backing_value || 0).toFixed(4) + '</td>' +
+             '<td>' + fmt(h.circulating) + '</td>' +
+             '<td>' + (h.approved_by || '—') + '</td></tr>';
+    }).join('');
+  } catch (e) { console.warn(e); }
+}
 async function loadListings() {
   try {
     const listings = await api('/v1/marketplace/listings?limit=20');
@@ -710,6 +788,7 @@ async function loadRates() {
 }
 document.addEventListener('DOMContentLoaded', () => {
   loadStats();
+  loadConversionRate();
   loadListings();
   loadRates();
 });

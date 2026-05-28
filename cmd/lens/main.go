@@ -293,6 +293,13 @@ func run() error {
 	// dashboard rollup query.
 	oracleEngine := oracle.New(annotationMiner, tokenLedger, pool)
 
+	// Two-token split (Master Plan Upgrade 1). RateEngine derives
+	// the LENS->LXC conversion rate from backing + supply; the
+	// admin can only approve its output. DualTokenStore owns the
+	// one-way LENS->LXC conversion + LXC spend path.
+	rateEngine := economy.NewRateEngine(tokenLedger, pool)
+	dualToken := economy.NewDualTokenStore(tokenLedger, pool, rateEngine)
+
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
@@ -486,6 +493,31 @@ func run() error {
 		writeJSONOK(w, http.StatusOK, stats)
 	})
 
+	// Public conversion-rate surface (two-token split). The rate +
+	// its full derivation are public economic signal; no auth.
+	r.Get("/v1/economy/conversion-rate", func(w http.ResponseWriter, req *http.Request) {
+		rate, err := rateEngine.CurrentRate(req.Context())
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{
+			"rate":        rate,
+			"usd_per_lxc": economy.LXCUSDValue,
+			"lens_per_lxc": rate,
+		})
+	})
+
+	r.Get("/v1/economy/conversion-rate/history", func(w http.ResponseWriter, req *http.Request) {
+		limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+		hist, err := rateEngine.RateHistory(req.Context(), limit)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, hist)
+	})
+
 	// Public status page. /status content-negotiates between HTML and
 	// JSON; /status.json is the unconditional-JSON convenience route
 	// uptime monitors and CI scripts use.
@@ -625,6 +657,28 @@ func run() error {
 				"token":      tok,
 				"expires_at": time.Now().Add(ttl).UTC().Format(time.RFC3339),
 			})
+		})
+
+		// Admin-only: approve the LENS->LXC conversion rate. The
+		// admin can ONLY approve the algorithm's output (within
+		// band + floor) — there is no way to set an arbitrary rate.
+		// The full computation (all inputs) is returned + persisted.
+		authed.Post("/v1/admin/conversion-rate/approve", func(w http.ResponseWriter, req *http.Request) {
+			actx, err := authManager.Authenticate(req)
+			if err != nil || !actx.IsAdmin {
+				writeJSONErr(w, http.StatusForbidden, "admin credentials required")
+				return
+			}
+			approvedBy := actx.UserID
+			if approvedBy == "" {
+				approvedBy = "global_key"
+			}
+			comp, err := rateEngine.ApproveRate(req.Context(), approvedBy)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, comp)
 		})
 
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
@@ -897,6 +951,38 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, entries)
+		})
+
+		// ─── LXC compute credit (two-token split) ──────
+		authed.Get("/v1/workspaces/{wsID}/lxc/balance", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			snap, err := dualToken.GetLXCSnapshot(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, snap)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				LXCAmount float64 `json:"lxc_amount"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			res, err := dualToken.ConvertLENStoLXC(req.Context(), wsID, in.LXCAmount)
+			if err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, economy.ErrInsufficientLENSFor) {
+					status = http.StatusPaymentRequired
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, res)
 		})
 
 		authed.Get("/v1/workspaces/{wsID}/tokens/mining/cache", func(w http.ResponseWriter, req *http.Request) {

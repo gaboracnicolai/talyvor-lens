@@ -130,6 +130,26 @@ func TestServeEconomy_Returns200(t *testing.T) {
 	}
 }
 
+func TestServeEconomy_ContainsConversionSection(t *testing.T) {
+	rec := dispatchTokenPage(t, "/dashboard/economy")
+	body := rec.Body.String()
+	for _, want := range []string{
+		"LENS → LXC Conversion",
+		"1 LXC = $0.10",
+		"Conversion Rate",
+		"Fair Rate",
+		"Backing / LENS",
+		"Rate History",
+		"/v1/economy/conversion-rate",
+		"/v1/economy/conversion-rate/history",
+		"conv-rate", "conv-fair", "conv-backing",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in /dashboard/economy conversion section", want)
+		}
+	}
+}
+
 func TestMainDashboard_ContainsEconomyWidget(t *testing.T) {
 	h := New("99.0.0")
 	rec := httptest.NewRecorder()
