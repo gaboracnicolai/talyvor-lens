@@ -105,6 +105,24 @@
         "resources": { "type": "object" }
       }
     },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" },
+            "interval": { "type": "string" },
+            "scrapeTimeout": { "type": "string" },
+            "path": { "type": "string", "pattern": "^/" },
+            "labels": { "type": "object" }
+          }
+        }
+      }
+    },
     "autoscaling": {
       "type": "object",
       "additionalProperties": false,

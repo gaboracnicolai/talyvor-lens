@@ -179,6 +179,28 @@ enable `autoscaling`/`podDisruptionBudget`. See `examples/values-ha.yaml`.
 part of a standard gateway deploy and each needs its **own published image**
 (the default gateway image contains only the gateway binary). Off by default.
 
+## Metrics & scraping
+
+The gateway always serves Prometheus metrics at **`/metrics`** (port 8080). Two
+ways to scrape:
+
+- **Prometheus Operator:** set `metrics.serviceMonitor.enabled=true` to render a
+  `ServiceMonitor` (`monitoring.coreos.com/v1`). Off by default so the chart
+  installs on clusters without the Operator CRDs. Add `metrics.serviceMonitor.labels`
+  (e.g. `{ release: kube-prometheus-stack }`) so your Prometheus selects it:
+
+  ```sh
+  helm install lens deploy/helm/lens \
+    --set metrics.serviceMonitor.enabled=true \
+    --set metrics.serviceMonitor.labels.release=kube-prometheus-stack
+  ```
+
+- **Plain Prometheus (no Operator):** use the example scrape config at
+  `deploy/observability/prometheus/scrape-config.example.yaml`.
+
+Alerting + recording rules and Grafana dashboards live in
+[`deploy/observability/`](../../observability/).
+
 ## Raw manifests (no Helm)
 
 [`deploy/k8s/`](../../k8s/) holds plain YAML (a kustomize base) rendered from

@@ -149,6 +149,26 @@ redis:
   # -- Use an in-cluster Bitnami Redis subchart. DEV/TEST ONLY. NOT for production.
   embedded: false
 
+# Prometheus metrics. The gateway ALWAYS exposes /metrics; this section only
+# controls the optional ServiceMonitor for Prometheus Operator users. Non-
+# Operator users scrape /metrics directly — see
+# deploy/observability/prometheus/scrape-config.example.yaml.
+metrics:
+  serviceMonitor:
+    # -- Create a ServiceMonitor (requires the Prometheus Operator CRD
+    # monitoring.coreos.com/v1). Off by default.
+    enabled: false
+    # -- Namespace for the ServiceMonitor; empty = the release namespace.
+    namespace: ""
+    # -- Scrape interval + timeout.
+    interval: 30s
+    scrapeTimeout: 10s
+    # -- Path the gateway serves Prometheus metrics on.
+    path: /metrics
+    # -- Extra labels so your Prometheus selects this ServiceMonitor, e.g.
+    # { release: kube-prometheus-stack }.
+    labels: {}
+
 # Database migrations. A pre-install/pre-upgrade Helm hook Job runs BEFORE the
 # new gateway pods roll out, so schema is ready before traffic hits new code.
 migrations:
