@@ -372,6 +372,19 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="budgets-panel" style="display:none">
+      <h2>Budgets</h2>
+      <p class="muted">
+        Per-workspace / team / sprint spend governance. Enforcement is
+        <code>off</code> (track only), <code>alert</code> (default), or
+        <code>hard_block</code> (reject over the limit). Manage via
+        <span class="accent">/v1/workspaces/&lt;id&gt;/budgets</span>.
+      </p>
+      <div id="budgets">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section>
       <h2>Anomalies</h2>
       <div id="anomalies">
@@ -625,6 +638,34 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyBudgets(list) {
+      const panel = document.getElementById('budgets-panel');
+      // The panel hides itself entirely when no budgets are configured.
+      if (!Array.isArray(list) || list.length === 0) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      document.getElementById('budgets').innerHTML =
+        '<table><thead><tr><th>Scope</th><th>ID</th><th>Period</th><th>Spent / Limit</th><th>Utilization</th><th>Enforcement</th></tr></thead><tbody>' +
+        list.map(function (b) {
+          const limit = b.limit_usd || 0;
+          const spent = b.spent_usd || 0;
+          const ratio = limit > 0 ? spent / limit : 0;
+          const cls = ratio >= 1 ? 'bad' : 'good';
+          const pct = limit > 0 ? (ratio * 100).toFixed(0) + '%' : '—';
+          return '<tr>' +
+            '<td>' + b.scope + '</td>' +
+            '<td class="mono">' + (b.scope_id || '—') + '</td>' +
+            '<td>' + b.period + '</td>' +
+            '<td class="mono">' + fmtUSD(spent) + ' / ' + fmtUSD(limit) + '</td>' +
+            '<td><span class="pill ' + cls + '">' + pct + '</span></td>' +
+            '<td>' + b.enforcement + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</tbody></table>';
+    }
+
     async function refresh() {
       const alertEl = document.getElementById('api-alert');
       let anyFail = false;
@@ -638,6 +679,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/local/status',                                    applyLocal],
         ['/v1/api/workspaces',                                      applyWorkspaces],
         ['/v1/api/anomalies/scan',                                  applyAnomalies],
+        ['/v1/api/budgets?workspace_id=default',                    applyBudgets],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];

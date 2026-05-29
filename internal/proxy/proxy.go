@@ -28,6 +28,7 @@ import (
 	"github.com/talyvor/lens/internal/audit"
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
+	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
@@ -62,7 +63,17 @@ const (
 type alertSink interface {
 	IsCircuitOpen(team, feature string) bool
 	GetDowngradeModel(provider, model string) string
-	RecordSpend(ctx context.Context, team, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID string) error
+	RecordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID string) error
+}
+
+// budgetGate is the subset of *budgets.Service the proxy hot path touches.
+// Defined locally so the proxy can be exercised without a DB-backed
+// service. CheckBudget is the spend gate (most-restrictive across the
+// workspace/team/sprint budgets); RecordSpend feeds the in-memory running
+// totals after a request bills.
+type budgetGate interface {
+	CheckBudget(ctx context.Context, workspace, team, sprint string, estCost float64) budgets.Decision
+	RecordSpend(ctx context.Context, workspace, team, sprint string, cost float64)
 }
 
 type Proxy struct {
@@ -78,6 +89,7 @@ type Proxy struct {
 	abTester         *ab.Tester
 	tracker           *attribution.Tracker
 	attrStore         *attribution.Store
+	budgetService     budgetGate
 	workspaceManager  *workspace.Manager
 	localRouter       *localrouter.LocalRouter
 	injectionDetector *injection.Detector
@@ -207,6 +219,17 @@ func New(
 // after constructing the proxy.
 func (p *Proxy) SetAttributionStore(s *attribution.Store) {
 	p.attrStore = s
+}
+
+// SetBudgetService wires the per-team / per-sprint budget governor
+// (Upgrade 19). A setter, like SetAttributionStore, so proxy.New's
+// signature stays put. A nil service disables the budget gate entirely —
+// the workspace spend cap continues to enforce on its own.
+func (p *Proxy) SetBudgetService(s *budgets.Service) {
+	// Guard the typed-nil interface trap so `p.budgetService != nil` holds.
+	if s != nil {
+		p.budgetService = s
+	}
 }
 
 func (p *Proxy) setAlertSink(sink alertSink) {
@@ -426,6 +449,25 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// manager treats empty values as a distinct attribution bucket.
 	team := r.Header.Get("X-Talyvor-Team")
 	feature := r.Header.Get("X-Talyvor-Feature")
+	// Sprint follows the issue convention — a client-supplied header, not
+	// derived from the API key. Empty when the caller isn't tracking sprints.
+	sprint := r.Header.Get("X-Talyvor-Sprint")
+
+	// Budget gate (Upgrade 19). Sits alongside the workspace spend cap but
+	// governs workspace / team / sprint budgets with most-restrictive-wins.
+	// Reads the in-memory budget snapshot only — no per-request DB hit. A
+	// hard_block budget already over its limit rejects with 402; alert and
+	// off budgets never reject here (they notify on the recording path). The
+	// estimate uses input tokens only (output is unknown pre-call), so the
+	// gate under- rather than over-blocks; the true cost is booked later.
+	if p.budgetService != nil {
+		estCost := alerts.CostUSD(model, len(prompt)/4, 0)
+		if p.budgetService.CheckBudget(ctx, wsID, team, sprint, estCost) == budgets.DecisionBlock {
+			writeError(w, http.StatusPaymentRequired, "budget exceeded for workspace/team/sprint")
+			metrics.RequestsTotal.WithLabelValues(cfg.name, "budget_blocked").Inc()
+			return
+		}
+	}
 
 	// Branch / PR / commit attribution. Extracted up front so we can set
 	// response headers before WriteHeader; the actual DB write happens
@@ -591,7 +633,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// workspace can be served by a local Ollama instance for free. On
 	// any failure we fall through to the regular cloud path — local
 	// routing must never break the main request.
-	if p.tryLocalRouting(w, ctx, cfg.name, model, prompt, cachePrompt, wsID, team, feature, sessionID, requestID, piiDetected, redactedPrompt) {
+	if p.tryLocalRouting(w, ctx, cfg.name, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt) {
 		return
 	}
 
@@ -774,11 +816,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
 			// spendPrompt is "" in metadata mode (no prompt text persisted)
 			// and the redacted form in full mode when PII was detected.
-			if err := p.alertManager.RecordSpend(ctx, team, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID); err != nil {
+			// wsID + sprint travel on this single billing write so spend is
+			// attributable per workspace / team / sprint (see migration 0028).
+			if err := p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID); err != nil {
 				slog.Warn("alerts: RecordSpend failed",
 					slog.String("err", err.Error()),
 				)
 			}
+		}
+		// Feed the in-memory budget totals from the SAME billed cost. This is
+		// a memory update (+ threshold checks), not a second hot-path DB
+		// write — token_events above is the durable record.
+		if p.budgetService != nil {
+			p.budgetService.RecordSpend(ctx, wsID, team, sprint, alerts.CostUSD(upstreamModel, inT, outT))
 		}
 		// Branch / PR attribution is also best-effort: DB errors here must
 		// not propagate to the caller. LoggingNone skips it entirely; the
@@ -842,7 +892,7 @@ func rebuildBody(originalBody []byte, model, prompt string) ([]byte, error) {
 func (p *Proxy) tryLocalRouting(
 	w http.ResponseWriter,
 	ctx context.Context,
-	provider, model, prompt, cachePrompt, wsID, team, feature, sessionID, requestID string,
+	provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID string,
 	piiDetected bool,
 	redactedPrompt string,
 ) bool {
@@ -888,7 +938,7 @@ func (p *Proxy) tryLocalRouting(
 	// cloud traffic.
 	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected)
 	if p.alertManager != nil {
-		_ = p.alertManager.RecordSpend(ctx, team, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt, sessionID, requestID)
+		_ = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt, sessionID, requestID)
 	}
 	metrics.RequestsTotal.WithLabelValues(provider, "local").Inc()
 	return true

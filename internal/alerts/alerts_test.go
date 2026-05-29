@@ -60,11 +60,13 @@ func TestRecordSpend_CostForGPT4o(t *testing.T) {
 	// 100_000 in + 50_000 out = 0.25 + 0.50 = $0.75
 	const wantCost = 0.75
 
+	// Column order: workspace_id, provider, model, in, out, team, sprint_id,
+	// feature, cost, prompt, session, request.
 	pool.ExpectExec(`INSERT INTO token_events`).
-		WithArgs("openai", "gpt-4o", 100000, 50000, "core", "search", wantCost, "p", "", "").
+		WithArgs("ws-test", "openai", "gpt-4o", 100000, 50000, "core", "sprint-1", "search", wantCost, "p", "", "").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 100000, 50000, "p", "", ""); err != nil {
+	if err := mgr.RecordSpend(context.Background(), "ws-test", "core", "sprint-1", "search", "gpt-4o", 100000, 50000, "p", "", ""); err != nil {
 		t.Fatalf("RecordSpend: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -80,14 +82,41 @@ func TestRecordSpend_CostForClaudeHaiku(t *testing.T) {
 	const wantCost = 4.80
 
 	pool.ExpectExec(`INSERT INTO token_events`).
-		WithArgs("anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "search", wantCost, "p", "", "").
+		WithArgs("ws-test", "anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "", "search", wantCost, "p", "", "").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-	if err := mgr.RecordSpend(context.Background(), "core", "search", "claude-haiku-4-5", 1000000, 1000000, "p", "", ""); err != nil {
+	if err := mgr.RecordSpend(context.Background(), "ws-test", "core", "", "search", "claude-haiku-4-5", 1000000, 1000000, "p", "", ""); err != nil {
 		t.Fatalf("RecordSpend: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet pgxmock expectations: %v", err)
+	}
+}
+
+// TestRecordSpend_PersistsWorkspaceID is the regression guard for the
+// per-workspace spend-cap correctness fix. alerts.RecordSpend historically
+// omitted workspace_id, so every token_events row fell back to the column
+// default 'default' and the cap query (SUM(cost_usd) WHERE workspace_id=$1)
+// summed ALL workspaces together. RecordSpend must now write the caller's
+// real workspace_id as the FIRST token_events column so the cap — and the
+// new workspace-scoped budgets — aggregate per workspace.
+func TestRecordSpend_PersistsWorkspaceID(t *testing.T) {
+	for _, ws := range []string{"alpha", "beta"} {
+		mgr, _, pool := newTestManager(t, nil)
+		// First positional arg MUST be the caller's workspace id, never 'default'.
+		pool.ExpectExec(`INSERT INTO token_events`).
+			WithArgs(ws,
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+		if err := mgr.RecordSpend(context.Background(), ws, "core", "", "search", "gpt-4o", 10, 10, "", "", ""); err != nil {
+			t.Fatalf("ws=%s RecordSpend: %v", ws, err)
+		}
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Fatalf("ws=%s: real workspace_id not persisted as first token_events column: %v", ws, err)
+		}
 	}
 }
 
@@ -109,6 +138,7 @@ func TestRecordSpend_FiresWarningAlertOverThreshold(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Spend is above warning ($1) but below critical ($10).
@@ -116,7 +146,7 @@ func TestRecordSpend_FiresWarningAlertOverThreshold(t *testing.T) {
 		WithArgs("core", "search").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(float64(2.5)))
 
-	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 1000, 1000, "", "", ""); err != nil {
+	if err := mgr.RecordSpend(context.Background(), "ws1", "core", "", "search", "gpt-4o", 1000, 1000, "", "", ""); err != nil {
 		t.Fatalf("RecordSpend: %v", err)
 	}
 
@@ -150,6 +180,7 @@ func TestRecordSpend_OpensCircuitOverThreshold(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Spend above CircuitUSD.
@@ -161,7 +192,7 @@ func TestRecordSpend_OpensCircuitOverThreshold(t *testing.T) {
 		t.Fatal("circuit should start closed")
 	}
 
-	if err := mgr.RecordSpend(context.Background(), "core", "search", "gpt-4o", 1000, 1000, "", "", ""); err != nil {
+	if err := mgr.RecordSpend(context.Background(), "ws1", "core", "", "search", "gpt-4o", 1000, 1000, "", "", ""); err != nil {
 		t.Fatalf("RecordSpend: %v", err)
 	}
 
