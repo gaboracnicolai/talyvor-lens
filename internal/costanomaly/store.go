@@ -41,44 +41,49 @@ func newStore(db pgxDB) *Store { return &Store{db: db} }
 
 // issueCostsSQL sums realized cost per issue from the attribution detail
 // table. Only issues with positive spend over the window are returned, so
-// the baseline is a distribution of real costs (median is always > 0).
-const issueCostsSQL = `SELECT issue_id, SUM(cost_usd)
-FROM request_attribution
-WHERE workspace_id = $1
-  AND issue_id <> ''
-  AND created_at >= $2
-GROUP BY issue_id
-HAVING SUM(cost_usd) > 0`
-
-// UnitCosts returns per-unit summed cost since `since`. unitKind is one of
-// "issue", "team", "sprint". Team/sprint read token_events using the shared
-// budgets.ScopeColumn mapping (team → "team", sprint → "sprint_id") so the
-// scope→column rule isn't duplicated.
+// UnitCosts returns per-unit summed cost since `since`, with no upper time
+// bound (i.e. up to now). Thin wrapper over UnitCostsWindow — the detector
+// calls this.
 func (s *Store) UnitCosts(ctx context.Context, ws, unitKind string, since time.Time) ([]UnitCost, error) {
+	return s.UnitCostsWindow(ctx, ws, unitKind, since, time.Time{})
+}
+
+// UnitCostsWindow returns per-unit summed cost over [since, until). A zero
+// `until` means "no upper bound" (up to now), preserving UnitCosts'
+// behaviour exactly (same SQL, same args). The bounded form exists so the
+// ROI report can take period-over-period and monthly-trend windows without
+// duplicating this scope→column aggregation.
+//
+// unitKind is "issue" (request_attribution / issue_id) or "team"/"sprint"
+// (token_events, via the shared budgets.ScopeColumn mapping). Only units
+// with positive spend are returned, so a baseline median is always > 0.
+func (s *Store) UnitCostsWindow(ctx context.Context, ws, unitKind string, since, until time.Time) ([]UnitCost, error) {
 	if s.db == nil {
 		return nil, nil
 	}
-	var sql string
+	var table, col string
 	switch unitKind {
 	case UnitIssue:
-		sql = issueCostsSQL
+		table, col = "request_attribution", "issue_id"
 	case UnitTeam, UnitSprint:
-		col := budgets.ScopeColumn(budgets.Scope(unitKind))
+		col = budgets.ScopeColumn(budgets.Scope(unitKind))
 		if col == "" {
 			return nil, fmt.Errorf("costanomaly: no token_events column for unit %q", unitKind)
 		}
-		sql = fmt.Sprintf(`SELECT %s, SUM(cost_usd)
-FROM token_events
-WHERE workspace_id = $1
-  AND %s <> ''
-  AND created_at >= $2
-GROUP BY %s
-HAVING SUM(cost_usd) > 0`, col, col, col)
+		table = "token_events"
 	default:
 		return nil, fmt.Errorf("costanomaly: unknown unit kind %q", unitKind)
 	}
 
-	rows, err := s.db.Query(ctx, sql, ws, since)
+	where := fmt.Sprintf("workspace_id = $1 AND %s <> '' AND created_at >= $2", col)
+	args := []any{ws, since}
+	if !until.IsZero() {
+		where += " AND created_at < $3"
+		args = append(args, until)
+	}
+	sql := fmt.Sprintf("SELECT %s, SUM(cost_usd) FROM %s WHERE %s GROUP BY %s HAVING SUM(cost_usd) > 0", col, table, where, col)
+
+	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("costanomaly: unit costs (%s): %w", unitKind, err)
 	}

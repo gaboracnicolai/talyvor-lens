@@ -148,6 +148,16 @@ var (
 		prometheus.GaugeOpts{Name: "lens_anomaly_max_factor", Help: "Largest cost factor over baseline median observed in the most recent scan, by scope."},
 		[]string{"scope"},
 	)
+
+	// ─── executive ROI reporting (Upgrade 24) ───
+	// Bounded label: period (monthly/weekly/total). No workspace/unit labels.
+	ROIReportsGeneratedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_roi_report_generated_total", Help: "Executive ROI reports generated, by period."},
+		[]string{"period"},
+	)
+	ROIReportDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{Name: "lens_roi_report_generation_duration_seconds", Help: "ROI report generation latency (an expensive aggregation).", Buckets: latencyBuckets},
+	)
 )
 
 func init() {
@@ -165,6 +175,7 @@ func init() {
 		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
 		ForecastProjectedUSD, ForecastWillExceedTotal,
 		AnomaliesDetectedTotal, AnomalyMaxFactor,
+		ROIReportsGeneratedTotal, ROIReportDuration,
 	)
 }
 
@@ -245,4 +256,12 @@ func AnomalyDetected(scope, severity string) {
 }
 func SetAnomalyMaxFactor(scope string, v float64) {
 	AnomalyMaxFactor.WithLabelValues(scope).Set(v)
+}
+
+// ─── ROI reporting helpers ───
+// Bounded {period} label only.
+
+func ROIReportGenerated(period string) { ROIReportsGeneratedTotal.WithLabelValues(period).Inc() }
+func ObserveROIReportDuration(d time.Duration) {
+	ROIReportDuration.Observe(d.Seconds())
 }

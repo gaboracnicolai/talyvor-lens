@@ -419,6 +419,19 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="roi-panel" style="display:none">
+      <h2>Executive summary <span class="pill" style="background:#3b3b52;color:#cfcfe6">CFO-ready</span></h2>
+      <p class="muted">
+        Headline AI-cost summary for the budget-holder. Engineer-level
+        breakdown is hidden unless explicitly enabled (it's a cost
+        attribution, not a performance judgment).
+        <a id="roi-fullreport" href="#" target="_blank">View full report (HTML)</a>.
+      </p>
+      <div id="roi-summary">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section>
       <h2>Git attribution</h2>
       <p class="muted">
@@ -765,6 +778,33 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyROISummary(s) {
+      const panel = document.getElementById('roi-panel');
+      if (!s || s.insufficient_data) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      // Point the "full report" link at the HTML format for this period.
+      const link = document.getElementById('roi-fullreport');
+      link.setAttribute('href', '/v1/workspaces/' + (s.workspace_id || 'default') + '/roi/report?format=html&period=' + (s.period || 'monthly'));
+      const teams = (s.top_teams || []).map(function (t) {
+        return '<span class="pill good" style="margin-right:6px">' + t.team + ' ' + fmtUSD(t.cost_usd) + '</span>';
+      }).join('');
+      const proj = s.forecast_will_exceed
+        ? '<span class="pill bad">≈ ' + fmtUSD(s.projected_total_usd) + ' (over budget)</span>'
+        : '<span class="pill good">≈ ' + fmtUSD(s.projected_total_usd) + '</span>';
+      document.getElementById('roi-summary').innerHTML =
+        '<div class="grid">' +
+        '<div class="stat"><div class="label">Total spend (' + (s.period || '') + ')</div><div class="value">' + fmtUSD(s.total_spend_usd) + '</div></div>' +
+        '<div class="stat"><div class="label">vs previous</div><div class="value">' + (s.pct_change_vs_prev >= 0 ? '+' : '') + (s.pct_change_vs_prev || 0).toFixed(1) + '%</div></div>' +
+        '<div class="stat"><div class="label">Projected period total</div><div class="value">' + proj + '</div></div>' +
+        '<div class="stat"><div class="label">Budgets over</div><div class="value">' + (s.budgets_over_count || 0) + '</div></div>' +
+        '<div class="stat"><div class="label">Cost outliers</div><div class="value">' + (s.anomaly_count || 0) + '</div></div>' +
+        '</div>' +
+        '<p class="muted" style="margin-top:8px">Top teams: ' + (teams || '—') + '</p>';
+    }
+
     async function refresh() {
       const alertEl = document.getElementById('api-alert');
       let anyFail = false;
@@ -781,6 +821,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/budgets?workspace_id=default',                    applyBudgets],
         ['/v1/api/forecast/summary?workspace_id=default',           applyForecast],
         ['/v1/api/costanomalies?workspace_id=default',              applyCostOutliers],
+        ['/v1/api/roi/summary?workspace_id=default',                applyROISummary],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];

@@ -82,6 +82,14 @@ type Config struct {
 	// must AND with per-workspace opt-in for earnings to fire.
 	PatternMiningEnabled bool
 
+	// ROIIncludeEngineerBreakdown gates the per-engineer (author) cost
+	// section of the executive ROI report (Upgrade 24). OFF by default:
+	// attributing cost to named people is SENSITIVE and easily misread as a
+	// productivity/surveillance metric. It is a cost ATTRIBUTION, not a
+	// performance judgment. Operators opt in explicitly via
+	// LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN=true.
+	ROIIncludeEngineerBreakdown bool
+
 	// High Availability (Upgrade 7). HA is strictly opt-in via
 	// LENS_HA_ENABLED; when false (the default) the process runs as a
 	// single instance exactly as it did before HA existed. Enabling HA
@@ -126,6 +134,8 @@ func Load() (*Config, error) {
 
 		CacheSharingEnabled:  parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
 		PatternMiningEnabled: parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
+
+		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 
 		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
 
