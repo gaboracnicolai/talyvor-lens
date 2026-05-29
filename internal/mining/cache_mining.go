@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/metrics"
 )
 
 // ─── constants ───────────────────────────────────
@@ -144,7 +146,13 @@ func (s *LedgerStore) Credit(
 	if amount <= 0 {
 		return errors.New("mining: credit amount must be positive")
 	}
-	return s.apply(ctx, workspaceID, amount, txType, description, metadata, true)
+	if err := s.apply(ctx, workspaceID, amount, txType, description, metadata, true); err != nil {
+		return err
+	}
+	// A credit is LENS entering circulation (mining rewards). Transfers move
+	// between workspaces via Transfer (not Credit), so this doesn't double-count.
+	metrics.MintedTokens(amount)
+	return nil
 }
 
 // Debit removes `amount` LENS from a workspace. Returns
@@ -179,6 +187,10 @@ func (s *LedgerStore) apply(
 		// path can still exercise higher-level mining logic.
 		return nil
 	}
+	// Observe the ledger-write hot path (begin→commit). This is the latency
+	// the LensTokenLedgerSlow alert guards.
+	start := time.Now()
+	defer func() { metrics.ObserveLedgerWrite(time.Since(start)) }()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("mining: begin tx: %w", err)

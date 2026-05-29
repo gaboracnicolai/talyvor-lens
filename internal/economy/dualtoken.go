@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
 )
 
@@ -381,6 +382,7 @@ func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID strin
 	if err := tx.Commit(ctx); err != nil {
 		return ConvertResult{}, fmt.Errorf("economy: commit conversion: %w", err)
 	}
+	metrics.ConvertedLXC(lxcAmount) // LXC minted via LENS→LXC conversion
 	return ConvertResult{
 		LXCMinted:      lxcAmount,
 		LENSSpent:      lensCost,

@@ -1,0 +1,74 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource scraping Lens",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "Lens — Economy",
+  "uid": "lens-economy",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-24h", "to": "now" },
+  "templating": {
+    "list": [
+      { "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "query": "prometheus", "hide": 0, "current": {} }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "LENS minted (tokens/s)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "rate(lens_tokens_minted_total[5m])", "legendFormat": "minted/s" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "LXC converted (lxc/s)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "rate(lens_lxc_converted_total[5m])", "legendFormat": "converted/s" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Token-ledger write p99 (hot path)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 0.1 }
+          ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "lens:token_ledger_write_duration:p99", "legendFormat": "ledger write p99" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rate-limit rejections by workspace (req/s)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum by (workspace) (rate(lens_rate_limit_rejections_total[5m]))", "legendFormat": "{{workspace}}" }
+      ]
+    }
+  ]
+}
