@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/retry"
 )
 
@@ -178,6 +180,10 @@ func (s *StreamHandler) serve(
 	// Retry the initial upstream call on transient failures. Once we
 	// commit to streaming (after WriteHeader below) there's no second
 	// chance, so retries only cover the connection-establishment phase.
+	// Measure the upstream connection/initial-response latency (the
+	// retry.Do block), NOT the whole stream forward. Record on every outcome
+	// with a bounded provider+status label; never alters control flow/errors.
+	upstreamStart := time.Now()
 	result := retry.Do(r.Context(), retry.DefaultConfig(), func(c context.Context) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(c, http.MethodPost, ops.upstreamURL(), bytes.NewReader(body))
 		if err != nil {
@@ -195,11 +201,13 @@ func (s *StreamHandler) serve(
 		return s.proxy.httpClient.Do(req)
 	})
 	if result.LastError != nil {
+		metrics.RecordUpstream(upstreamProviderLabel(provider), "error", time.Since(upstreamStart))
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+result.LastError.Error())
 		return result.LastError
 	}
 	resp := result.Response
 	defer resp.Body.Close()
+	metrics.RecordUpstream(upstreamProviderLabel(provider), upstreamStatusClass(resp, nil), time.Since(upstreamStart))
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(resp.Body)
