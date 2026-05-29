@@ -45,11 +45,11 @@ const (
 
 // LimitTier is one tier in the multi-tier stack.
 type LimitTier struct {
-	Name     string  // "global" / "workspace" / "key"
-	Key      string  // Redis key prefix
-	RPM      int     // requests per minute
-	TPM      int     // tokens per minute (LLM tokens, not HTTP)
-	BurstRPM int     // burst capacity (zero → DefaultBurstMultiplier × RPM)
+	Name     string // "global" / "workspace" / "key"
+	Key      string // Redis key prefix
+	RPM      int    // requests per minute
+	TPM      int    // tokens per minute (LLM tokens, not HTTP)
+	BurstRPM int    // burst capacity (zero → DefaultBurstMultiplier × RPM)
 }
 
 // LimitResult is what CheckAndConsume returns.
@@ -65,13 +65,17 @@ type LimitResult struct {
 // bucketScript implements the classic token-bucket algorithm
 // atomically in Redis. KEYS[1] holds the bucket state as a
 // hash with two fields:
-//   tokens     — current count (float)
-//   last       — unix-millis of last refill
+//
+//	tokens     — current count (float)
+//	last       — unix-millis of last refill
+//
 // ARGV order:
-//   1: capacity
-//   2: refill_per_sec
-//   3: cost
-//   4: now_unix_ms
+//
+//	1: capacity
+//	2: refill_per_sec
+//	3: cost
+//	4: now_unix_ms
+//
 // Returns: { allowed (0|1), remaining (float), reset_ms }
 var bucketScript = redis.NewScript(`
 local capacity = tonumber(ARGV[1])

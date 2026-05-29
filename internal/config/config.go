@@ -60,13 +60,13 @@ type Config struct {
 
 	// Global rate limits (Item 8). Zero = no global cap; the
 	// per-workspace tier in MultiTierLimiter still applies.
-	GlobalRPM        int
-	GlobalTPM        int
-	BurstMultiplier  float64
+	GlobalRPM       int
+	GlobalTPM       int
+	BurstMultiplier float64
 
 	// Retry / circuit-breaker tuning (Item 9). Zero values fall
 	// back to the library defaults in internal/retry/policy.go.
-	RetryMaxAttempts int
+	RetryMaxAttempts  int
 	RetryInitialDelay time.Duration
 	RetryMaxDelay     time.Duration
 	CBThreshold       int
@@ -81,6 +81,20 @@ type Config struct {
 	// Pattern mining (Batch 2 Item 5). Deployment-level gate;
 	// must AND with per-workspace opt-in for earnings to fire.
 	PatternMiningEnabled bool
+
+	// High Availability (Upgrade 7). HA is strictly opt-in via
+	// LENS_HA_ENABLED; when false (the default) the process runs as a
+	// single instance exactly as it did before HA existed. Enabling HA
+	// requires Redis (LENS_REDIS_URL) — which Lens already requires — for
+	// the instance registry, shared rate limiter, and breaker gossip.
+	HAEnabled bool
+	// HAHeartbeat is how often this instance refreshes its registry key.
+	// HAInstanceTTL is the TTL on that key, so a crashed instance
+	// disappears after a few missed heartbeats. HADrainTimeout bounds
+	// graceful shutdown — in-flight requests get this long to finish.
+	HAHeartbeat    time.Duration
+	HAInstanceTTL  time.Duration
+	HADrainTimeout time.Duration
 }
 
 func Load() (*Config, error) {
@@ -117,6 +131,30 @@ func Load() (*Config, error) {
 
 		JWTSecret: os.Getenv("LENS_JWT_SECRET"),
 		TokenTTL:  24 * time.Hour,
+
+		HAEnabled: parseBoolEnv("LENS_HA_ENABLED"),
+	}
+
+	// HA timers, expressed in whole seconds. Defaults match the
+	// documented values; a non-positive override is a misconfiguration.
+	c.HAHeartbeat = 5 * time.Second
+	c.HAInstanceTTL = 15 * time.Second
+	c.HADrainTimeout = 30 * time.Second
+	for _, hf := range []struct {
+		env string
+		dst *time.Duration
+	}{
+		{"LENS_HA_HEARTBEAT_SEC", &c.HAHeartbeat},
+		{"LENS_HA_INSTANCE_TTL_SEC", &c.HAInstanceTTL},
+		{"LENS_HA_DRAIN_TIMEOUT_SEC", &c.HADrainTimeout},
+	} {
+		if v := os.Getenv(hf.env); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				return nil, fmt.Errorf("invalid %s (must be ≥ 1): %s", hf.env, v)
+			}
+			*hf.dst = time.Duration(n) * time.Second
+		}
 	}
 
 	if v := os.Getenv("LENS_TOKEN_TTL"); v != "" {

@@ -327,6 +327,13 @@ const dashboardHTML = `<!DOCTYPE html>
       </table>
     </section>
 
+    <section id="cluster-panel" style="display:none">
+      <h2>Cluster <span class="muted" style="font-size:12px">· high availability</span></h2>
+      <div id="cluster">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section>
       <h2>Circuit Breakers</h2>
       <div id="circuits">
@@ -500,6 +507,47 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function fmtDur(ms) {
+      if (ms < 0) ms = 0;
+      var s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's';
+      var m = Math.floor(s / 60);
+      if (m < 60) return m + 'm';
+      var h = Math.floor(m / 60);
+      if (h < 24) return h + 'h';
+      return Math.floor(h / 24) + 'd';
+    }
+
+    // applyCluster renders the HA cluster panel from /ha/status. The panel is
+    // hidden entirely when HA is disabled (status.enabled === false).
+    function applyCluster(d) {
+      var panel = document.getElementById('cluster-panel');
+      if (!d || !d.enabled) { panel.style.display = 'none'; return; }
+      panel.style.display = '';
+      var root = document.getElementById('cluster');
+      var insts = d.instances || [];
+      if (insts.length === 0) {
+        root.innerHTML = '<span class="pill warn">No instances registered</span>';
+        return;
+      }
+      var now = Date.now();
+      root.innerHTML =
+        '<table><thead><tr><th>Instance</th><th>Host</th><th>Status</th><th>Version</th><th>Uptime</th><th>Last seen</th></tr></thead><tbody>' +
+        insts.map(function (it) {
+          var st = String(it.status || '');
+          var cls = st === 'active' ? 'good' : (st === 'draining' ? 'warn' : 'bad');
+          var started = it.started_at ? new Date(it.started_at).getTime() : now;
+          var seen = it.last_seen ? new Date(it.last_seen).getTime() : now;
+          return '<tr><td class="mono">' + String(it.id || '').slice(0, 8) +
+            '</td><td class="mono">' + (it.host || '&mdash;') +
+            '</td><td><span class="pill ' + cls + '">' + st.toUpperCase() + '</span></td>' +
+            '<td class="mono">' + (it.version || '&mdash;') + '</td>' +
+            '<td class="mono">' + fmtDur(now - started) + '</td>' +
+            '<td class="mono">' + fmtDur(now - seen) + ' ago</td></tr>';
+        }).join('') +
+        '</tbody></table>';
+    }
+
     function applyLocal(d) {
       const root = document.getElementById('local');
       if (d && d.available) {
@@ -586,6 +634,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/cache/stats?workspace_id=default',               applyCacheStats],
         ['/v1/api/cache/top-patterns?workspace_id=default&limit=10', applyTopPatterns],
         ['/v1/api/alerts/circuits',                                 applyCircuits],
+        ['/ha/status',                                              applyCluster],
         ['/v1/api/local/status',                                    applyLocal],
         ['/v1/api/workspaces',                                      applyWorkspaces],
         ['/v1/api/anomalies/scan',                                  applyAnomalies],

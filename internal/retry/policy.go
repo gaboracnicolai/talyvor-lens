@@ -112,10 +112,10 @@ var retryableStatuses = map[int]bool{
 // status code that doesn't match the retryable set — these
 // codes mean "fix your request" and must never retry.
 var nonRetryableStatuses = map[int]bool{
-	http.StatusBadRequest:    true, // 400
-	http.StatusUnauthorized:  true, // 401
-	http.StatusForbidden:     true, // 403
-	http.StatusNotFound:      true, // 404
+	http.StatusBadRequest:          true, // 400
+	http.StatusUnauthorized:        true, // 401
+	http.StatusForbidden:           true, // 403
+	http.StatusNotFound:            true, // 404
 	http.StatusUnprocessableEntity: true, // 422
 }
 
@@ -281,9 +281,12 @@ func (cb *CircuitBreaker) State() CBState {
 // Allow reports whether the next request should be attempted.
 // Closed → always true.
 // Open → true once ResetTimeout has elapsed (and transitions
-//        the breaker into HalfOpen as a side effect).
+//
+//	the breaker into HalfOpen as a side effect).
+//
 // HalfOpen → true exactly once per call until RecordSuccess /
-//            RecordFailure resolves the trial.
+//
+//	RecordFailure resolves the trial.
 func (cb *CircuitBreaker) Allow() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -342,6 +345,27 @@ func (cb *CircuitBreaker) RecordFailure() {
 	case CBHalfOpen:
 		// Single failure in half-open re-opens the breaker.
 		cb.transition(CBOpen)
+	}
+}
+
+// ApplyRemoteState forces the breaker into `to` because a peer instance
+// gossiped that transition over the HA bus. It deliberately does NOT fire
+// onStateChange: that hook is the publish path, and re-firing it on a mirrored
+// transition would echo the event back onto the bus indefinitely. Counters are
+// reset so the local breaker behaves sensibly from the new state, and an
+// open mirror stamps lastFailAt so this instance honours ResetTimeout before
+// probing half-open — exactly as if it had tripped locally.
+func (cb *CircuitBreaker) ApplyRemoteState(to CBState) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.state == to {
+		return
+	}
+	cb.state = to
+	cb.failures = 0
+	cb.successes = 0
+	if to == CBOpen {
+		cb.lastFailAt = time.Now()
 	}
 }
 
@@ -414,6 +438,14 @@ func (r *BreakerRegistry) GetOrCreate(provider string) *CircuitBreaker {
 	}
 	r.breakers[provider] = b
 	return b
+}
+
+// ApplyRemoteState mirrors a peer instance's breaker transition into this
+// registry, lazily creating the breaker if this instance hasn't served the
+// provider yet. Used by the HA breaker-gossip layer so a trip on one instance
+// propagates to all of them.
+func (r *BreakerRegistry) ApplyRemoteState(provider string, to CBState) {
+	r.GetOrCreate(provider).ApplyRemoteState(to)
 }
 
 // States returns a snapshot of every breaker's state. Useful

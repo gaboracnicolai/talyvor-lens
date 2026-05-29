@@ -10,9 +10,28 @@ import (
 )
 
 type Limiter struct {
-	redis *redis.Client
-	mu    sync.RWMutex
-	rules []RateRule
+	redis  *redis.Client
+	mu     sync.RWMutex
+	rules  []RateRule
+	shared SharedChecker
+}
+
+// SharedChecker is an optional authoritative cross-instance limiter (the HA
+// shared limiter) that Check consults AFTER the local windows pass. It may only
+// further restrict — never loosen — so attaching one can never let a request
+// through that the local windows would have rejected. When nil (the default,
+// and whenever HA is disabled) Check behaves exactly as it did before.
+type SharedChecker interface {
+	Allow(ctx context.Context, wsID, keyID string, rule RateRule) bool
+}
+
+// AttachShared installs the authoritative cross-instance limiter. Wired only
+// when HA is enabled; leaving it unset keeps single-instance behaviour
+// byte-for-byte unchanged.
+func (l *Limiter) AttachShared(s SharedChecker) {
+	l.mu.Lock()
+	l.shared = s
+	l.mu.Unlock()
 }
 
 type RateRule struct {
@@ -174,5 +193,20 @@ func (l *Limiter) Check(ctx context.Context, wsID, keyID string) RateLimitResult
 	if minRemaining < 0 {
 		minRemaining = 0
 	}
+
+	// Authoritative cross-instance check (HA only). Consulted last, and only
+	// able to reject — never to loosen the local decision above.
+	l.mu.RLock()
+	shared := l.shared
+	l.mu.RUnlock()
+	if shared != nil && !shared.Allow(ctx, wsID, keyID, rule) {
+		return RateLimitResult{
+			Allowed:        false,
+			LimitType:      "shared",
+			RetryAfterSecs: 60, // shared cap is a per-minute window
+			Remaining:      0,
+		}
+	}
+
 	return RateLimitResult{Allowed: true, Remaining: minRemaining}
 }
