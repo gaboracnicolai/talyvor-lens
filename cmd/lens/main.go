@@ -63,6 +63,7 @@ import (
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/retry"
+	"github.com/talyvor/lens/internal/roi"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/status"
@@ -152,7 +153,14 @@ func run() error {
 	forecaster := forecast.New(forecast.NewStore(pool))
 	// Cross-sectional cost anomaly detection (Upgrade 21). Read-only,
 	// cached, off the hot path. Distinct from the temporal anomaly.Detector.
-	costAnomalyDetector := costanomaly.New(costanomaly.NewStore(pool))
+	costAnomalyStore := costanomaly.NewStore(pool)
+	costAnomalyDetector := costanomaly.New(costAnomalyStore)
+	// Executive ROI reporting (Upgrade 24). Read-only orchestration of
+	// budgets + forecast + costanomaly + attribution; cached, off the hot
+	// path. Per-engineer breakdown is opt-in (sensitive — see config).
+	roiReporter := roi.New(costAnomalyStore, budgetStore, budgetStore, forecaster, costAnomalyDetector, attrStore, roi.Config{
+		IncludeEngineerBreakdown: cfg.ROIIncludeEngineerBreakdown,
+	})
 	wsManager := workspace.New(pool)
 	if err := wsManager.LoadAll(ctx); err != nil {
 		logger.Warn("workspace: LoadAll failed", slog.String("err", err.Error()))
@@ -503,6 +511,8 @@ func run() error {
 	apiServer.SetForecaster(forecaster)
 	// Cost-anomaly detector powers the dashboard's Cost outliers panel.
 	apiServer.SetCostAnomalyDetector(costAnomalyDetector)
+	// ROI reporter powers the dashboard's Executive summary panel.
+	apiServer.SetROIReporter(roiReporter)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -1068,6 +1078,44 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, a)
+		})
+
+		// ─── executive ROI reporting (Upgrade 24) ───
+		// Read-only, cached. format=json (default) | html | md. The HTML is
+		// self-contained + print-to-PDF-able; emailing it is Track's job.
+		authed.Get("/v1/workspaces/{wsID}/roi/report", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			q := req.URL.Query()
+			rep, err := roiReporter.GenerateReport(req.Context(), wsID, q.Get("period"))
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			switch q.Get("format") {
+			case "html":
+				html, err := roi.RenderHTML(rep)
+				if err != nil {
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = w.Write([]byte(html))
+			case "md", "markdown":
+				w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+				_, _ = w.Write([]byte(roi.RenderMarkdown(rep)))
+			default:
+				writeJSONOK(w, http.StatusOK, rep)
+			}
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/roi/report/summary", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			summary, err := roiReporter.GenerateSummary(req.Context(), wsID, req.URL.Query().Get("period"))
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, summary)
 		})
 
 		// ─── Local endpoint registry ───────────────────

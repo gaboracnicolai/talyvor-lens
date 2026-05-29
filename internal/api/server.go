@@ -25,6 +25,7 @@ import (
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
+	"github.com/talyvor/lens/internal/roi"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -60,6 +61,7 @@ type Server struct {
 	budgetStore      *budgets.Store
 	forecaster       *forecast.Forecaster
 	costAnomaly      *costanomaly.Detector
+	roiReporter      *roi.Reporter
 	version          string
 	startTime        time.Time
 }
@@ -182,6 +184,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/budgets", s.handleBudgets)
 	r.Get("/v1/api/forecast/summary", s.handleForecastSummary)
 	r.Get("/v1/api/costanomalies", s.handleCostAnomalies)
+	r.Get("/v1/api/roi/summary", s.handleROISummary)
 }
 
 // SetBudgetStore wires the budgets store used by the dashboard's Budgets
@@ -268,6 +271,30 @@ func (s *Server) handleCostAnomalies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// SetROIReporter wires the executive ROI reporter used by the dashboard's
+// Executive summary panel. A setter so NewServer's signature stays put; a
+// nil reporter makes handleROISummary return an empty summary.
+func (s *Server) SetROIReporter(r *roi.Reporter) { s.roiReporter = r }
+
+// handleROISummary returns the compact executive ROI summary for the
+// dashboard. Read-only + cached in the reporter.
+func (s *Server) handleROISummary(w http.ResponseWriter, r *http.Request) {
+	wsID := r.URL.Query().Get("workspace_id")
+	if wsID == "" {
+		wsID = "default"
+	}
+	if s.roiReporter == nil {
+		writeJSON(w, http.StatusOK, roi.ReportSummary{WorkspaceID: wsID, InsufficientData: true})
+		return
+	}
+	summary, err := s.roiReporter.GenerateSummary(r.Context(), wsID, r.URL.Query().Get("period"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // handleAnomalies runs Detect for the dimension tuple supplied via query
