@@ -21,6 +21,7 @@ import (
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/costanomaly"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
@@ -58,6 +59,7 @@ type Server struct {
 	anomalyDetector  *anomaly.Detector
 	budgetStore      *budgets.Store
 	forecaster       *forecast.Forecaster
+	costAnomaly      *costanomaly.Detector
 	version          string
 	startTime        time.Time
 }
@@ -179,6 +181,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/anomalies/scan", s.handleAnomaliesScan)
 	r.Get("/v1/api/budgets", s.handleBudgets)
 	r.Get("/v1/api/forecast/summary", s.handleForecastSummary)
+	r.Get("/v1/api/costanomalies", s.handleCostAnomalies)
 }
 
 // SetBudgetStore wires the budgets store used by the dashboard's Budgets
@@ -235,6 +238,36 @@ func (s *Server) handleForecastSummary(w http.ResponseWriter, r *http.Request) {
 		list = []forecast.Forecast{}
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// SetCostAnomalyDetector wires the cross-sectional cost-anomaly detector
+// used by the dashboard's Cost outliers panel. A setter so NewServer's
+// signature stays put; a nil detector makes handleCostAnomalies return an
+// empty scan.
+func (s *Server) SetCostAnomalyDetector(d *costanomaly.Detector) { s.costAnomaly = d }
+
+// handleCostAnomalies returns the issue-scope anomaly scan for a workspace
+// (the dashboard's default view). These are statistical flags, not
+// judgments. Read-only + cached in the detector.
+func (s *Server) handleCostAnomalies(w http.ResponseWriter, r *http.Request) {
+	wsID := r.URL.Query().Get("workspace_id")
+	if wsID == "" {
+		wsID = "default"
+	}
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = costanomaly.UnitIssue
+	}
+	if s.costAnomaly == nil {
+		writeJSON(w, http.StatusOK, costanomaly.ScanResult{WorkspaceID: wsID, Scope: scope, Anomalies: []costanomaly.Anomaly{}})
+		return
+	}
+	res, err := s.costAnomaly.ScanScope(r.Context(), wsID, scope)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // handleAnomalies runs Detect for the dimension tuple supplied via query
