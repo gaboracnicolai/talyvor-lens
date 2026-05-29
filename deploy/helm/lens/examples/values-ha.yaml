@@ -1,0 +1,34 @@
+# Example HA override for the Lens chart. Proves the HA conditionals.
+#   helm template lens deploy/helm/lens -f deploy/helm/lens/examples/values-ha.yaml
+#
+# HA requires reachable Redis (already a Lens dependency) for the shared
+# instance registry. Pair with a Secret that has LENS_REDIS_URL et al.
+replicaCount: 3
+
+config:
+  ha:
+    enabled: true
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# Run the mining nodes in-cluster too (advanced/optional).
+nodes:
+  enabled: true
+
+# Dev-only: create the env Secret from values so the example renders a complete
+# stack. NEVER do this with real secrets in production.
+secret:
+  create: true
+  data:
+    LENS_DATABASE_URL: "postgres://lens:lens@postgres:5432/lens?sslmode=disable"
+    LENS_REDIS_URL: "redis://redis:6379/0"
+    LENS_NATS_URL: "nats://nats:4222"
+    LENS_OPENAI_API_KEY: "sk-example-not-real"
+    LENS_ANTHROPIC_API_KEY: "sk-ant-example-not-real"

@@ -1,0 +1,19 @@
+{{- if .Values.podDisruptionBudget.enabled -}}
+# Keeps a quorum of gateway pods up during voluntary disruptions (node drains).
+# Meaningful in the HA case where you run multiple replicas.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "lens.fullname" . }}
+  labels:
+    {{- include "lens.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lens.componentSelectorLabels" (list . "gateway") | nindent 6 }}
+{{- end }}

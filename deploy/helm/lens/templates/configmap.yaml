@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lens.fullname" . }}-config
+  labels:
+    {{- include "lens.labels" . | nindent 4 }}
+data:
+  # Non-secret gateway configuration. Connection strings + API keys live in the
+  # Secret (see secret.yaml / secret.existingSecret), NOT here.
+  LENS_LISTEN_ADDR: {{ .Values.config.listenAddr | quote }}
+  LENS_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  LENS_HA_ENABLED: {{ .Values.config.ha.enabled | quote }}
+  LENS_HA_HEARTBEAT_SEC: {{ .Values.config.ha.heartbeatSec | quote }}
+  LENS_HA_INSTANCE_TTL_SEC: {{ .Values.config.ha.instanceTtlSec | quote }}
+  LENS_HA_DRAIN_TIMEOUT_SEC: {{ .Values.config.ha.drainTimeoutSec | quote }}
+  {{- range $k, $v := .Values.config.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

@@ -1,0 +1,220 @@
+# Default values for the Talyvor Lens chart.
+# Default install = ONE gateway replica, EXTERNAL Postgres/Redis/NATS, secrets
+# by reference, migration hook on. Everything advanced is opt-in below.
+
+# -- Number of gateway replicas. Keep at 1 unless HA is enabled (ha.enabled)
+# and the deployment is backed by shared Redis (see the HA upgrade).
+replicaCount: 1
+
+image:
+  # -- Gateway image repository. Published by .github/workflows/images.yaml.
+  repository: ghcr.io/talyvor/talyvor-lens
+  # -- Image tag. Empty string defaults to the chart appVersion.
+  tag: ""
+  # -- imagePullPolicy.
+  pullPolicy: IfNotPresent
+
+# -- Secrets for pulling private images (list of {name: ...}).
+imagePullSecrets: []
+
+# -- Override the chart name / full name if needed.
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a dedicated ServiceAccount for the gateway.
+  create: true
+  # -- Name to use; defaults to the fullname when create is true.
+  name: ""
+  # -- Annotations (e.g. IRSA / Workload Identity for cloud secret access).
+  annotations: {}
+
+# -- Container port the gateway listens on. Must match LENS_LISTEN_ADDR's port.
+containerPort: 8080
+
+service:
+  # -- Service type. ClusterIP is correct for a gateway behind an Ingress/LB.
+  type: ClusterIP
+  # -- Service port.
+  port: 8080
+  # -- Extra service annotations.
+  annotations: {}
+
+# -- Resource requests/limits. Sane starting points; tune to your traffic.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# -- Pod-level security context. Runs as the non-root uid baked into the image.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. Read-only root FS (a writable /tmp
+# emptyDir is mounted), no privilege escalation, all capabilities dropped.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+# Liveness/readiness probes. These target the endpoints added by the Lens HA
+# work: /livez (pure liveness, always 200 while serving) and /readyz
+# (drain-aware readiness). The HA endpoints must be present in the deployed
+# image (Lens HA upgrade) for these to succeed.
+probes:
+  liveness:
+    enabled: true
+    path: /livez
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+# -- Extra pod annotations / labels, node selection, affinity, tolerations.
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# -- Topology spread (useful with HA + multiple replicas).
+topologySpreadConstraints: []
+
+# Non-secret configuration → rendered into a ConfigMap and injected via envFrom.
+# ONLY non-sensitive values belong here; connection strings + keys go in the
+# Secret below.
+config:
+  # -- Address:port the gateway binds (LENS_LISTEN_ADDR). Port must match
+  # containerPort.
+  listenAddr: "0.0.0.0:8080"
+  # -- Log level (LENS_LOG_LEVEL): debug | info | warn | error.
+  logLevel: "info"
+  # High Availability (LENS_HA_ENABLED + timers). Enabling HA requires Redis
+  # (already a Lens dependency) and is what makes >1 replica safe.
+  ha:
+    enabled: false
+    heartbeatSec: 5
+    instanceTtlSec: 15
+    drainTimeoutSec: 30
+  # -- Arbitrary extra NON-SECRET env (map of LENS_* name → value).
+  extraEnv: {}
+
+# Secrets. PRODUCTION DEFAULT: reference an existing Secret you created out of
+# band (or via External Secrets Operator / Sealed Secrets — see README).
+# The Secret must contain these keys (all consumed via envFrom):
+#   LENS_DATABASE_URL, LENS_REDIS_URL, LENS_NATS_URL,
+#   LENS_OPENAI_API_KEY, LENS_ANTHROPIC_API_KEY
+# and optionally: LENS_JWT_SECRET, LENS_GOOGLE_API_KEY, provider keys, etc.
+secret:
+  # -- Name of a pre-existing Secret to read env from. RECOMMENDED.
+  # When empty, the gateway reads from "<release>-lens-env" (which you must
+  # create yourself unless secret.create is true).
+  existingSecret: ""
+  # -- DEV/TEST ONLY: create a Secret from the data below. Never commit real
+  # secrets to values. Leave false in production.
+  create: false
+  # -- DEV/TEST ONLY: key/value pairs to put in the created Secret.
+  data: {}
+    # LENS_DATABASE_URL: "postgres://lens:lens@postgres:5432/lens?sslmode=disable"
+    # LENS_REDIS_URL: "redis://redis:6379/0"
+    # LENS_NATS_URL: "nats://nats:4222"
+    # LENS_OPENAI_API_KEY: "sk-..."
+    # LENS_ANTHROPIC_API_KEY: "sk-ant-..."
+
+# External datastore configuration. Lens does NOT bundle production databases.
+# These flags document the embedded (dev-only) option; see README for how to
+# enable the Bitnami subcharts. Connection details live in the Secret above.
+postgres:
+  # -- Use an in-cluster Bitnami Postgres subchart. DEV/TEST ONLY — not wired
+  # by default (see README "Embedded databases"). NOT for production.
+  embedded: false
+redis:
+  # -- Use an in-cluster Bitnami Redis subchart. DEV/TEST ONLY. NOT for production.
+  embedded: false
+
+# Database migrations. A pre-install/pre-upgrade Helm hook Job runs BEFORE the
+# new gateway pods roll out, so schema is ready before traffic hits new code.
+migrations:
+  # -- Run the migration hook Job.
+  enabled: true
+  # -- Image that performs migrations. Empty = the gateway image. NOTE: the
+  # default gateway image does not bundle SQL or a `migrate` subcommand, so you
+  # MUST point this at a migration mechanism (see README "Migrations").
+  image: ""
+  # -- Command/args for the migration container.
+  command: []
+  args: []
+  # -- Hook weight (lower runs earlier).
+  hookWeight: -5
+  # -- Resources for the migration Job.
+  resources: {}
+
+autoscaling:
+  # -- HorizontalPodAutoscaler. Only meaningful with config.ha.enabled=true
+  # (otherwise scaling replicas of a non-HA gateway over-counts limits, etc.).
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # -- Set to 0 to disable the memory target.
+  targetMemoryUtilizationPercentage: 80
+
+podDisruptionBudget:
+  # -- PodDisruptionBudget for the HA case (keeps a quorum during node drains).
+  enabled: false
+  # -- Use one of minAvailable / maxUnavailable.
+  minAvailable: 1
+  maxUnavailable: 0
+
+# Optional in-cluster mining nodes. These are OPERATOR-RUN mining binaries
+# (talyvor-node / -cachenode / -embednode), NOT part of a standard gateway
+# deploy. Off by default. Each needs its own published image (the default
+# gateway image contains only the gateway binary).
+nodes:
+  # -- Master switch for all node workloads.
+  enabled: false
+  node:
+    enabled: true
+    # -- Deployment or DaemonSet.
+    kind: Deployment
+    replicas: 1
+    image:
+      repository: ghcr.io/talyvor/talyvor-node
+      tag: ""
+      pullPolicy: IfNotPresent
+    resources: {}
+  cachenode:
+    enabled: true
+    kind: Deployment
+    replicas: 1
+    image:
+      repository: ghcr.io/talyvor/talyvor-cachenode
+      tag: ""
+      pullPolicy: IfNotPresent
+    resources: {}
+  embednode:
+    enabled: true
+    kind: Deployment
+    replicas: 1
+    image:
+      repository: ghcr.io/talyvor/talyvor-embednode
+      tag: ""
+      pullPolicy: IfNotPresent
+    resources: {}

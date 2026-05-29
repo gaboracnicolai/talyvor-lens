@@ -1,0 +1,27 @@
+Talyvor Lens ({{ .Chart.AppVersion }}) — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Gateway Service:
+  {{ include "lens.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Port-forward to try it locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lens.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl localhost:{{ .Values.service.port }}/livez    # liveness
+  curl localhost:{{ .Values.service.port }}/readyz    # readiness
+
+{{ if not .Values.secret.existingSecret }}{{ if not .Values.secret.create }}
+⚠  No secret configured. The gateway reads required env (LENS_DATABASE_URL,
+   LENS_REDIS_URL, LENS_NATS_URL, LENS_OPENAI_API_KEY, LENS_ANTHROPIC_API_KEY)
+   from the Secret "{{ include "lens.secretName" . }}", which does NOT exist yet.
+   Create it before the pods can start, or set secret.existingSecret /
+   secret.create. See the chart README.
+{{ end }}{{ end }}
+{{- if .Values.config.ha.enabled }}
+HA is ENABLED (LENS_HA_ENABLED=true) — requires reachable Redis for the shared
+registry. Safe to run replicaCount > 1 / autoscaling.
+{{- else }}
+HA is disabled — keep replicaCount at 1 (set config.ha.enabled=true for HA).
+{{- end }}
+
+Reminder: this chart is STATIC-VALIDATED ONLY (lint/template/kubeconform). A
+real `helm install` on a live cluster has not been exercised — verify on a
+kind/minikube/staging cluster before production.

@@ -1,0 +1,64 @@
+{{- if .Values.nodes.enabled -}}
+{{- $root := . -}}
+{{- /*
+Optional in-cluster mining nodes. These are advanced/operator-run workloads,
+NOT part of a standard gateway deploy. Each needs its own published image (the
+default gateway image contains only the gateway binary). Iterated over an
+explicit ordered list so rendered output is deterministic.
+*/ -}}
+{{- range $item := (list
+    (dict "type" "node" "cfg" .Values.nodes.node)
+    (dict "type" "cachenode" "cfg" .Values.nodes.cachenode)
+    (dict "type" "embednode" "cfg" .Values.nodes.embednode)) }}
+{{- $type := $item.type }}
+{{- $cfg := $item.cfg }}
+{{- if $cfg.enabled }}
+---
+apiVersion: apps/v1
+kind: {{ $cfg.kind }}
+metadata:
+  name: {{ include "lens.fullname" $root }}-{{ $type }}
+  labels:
+    {{- include "lens.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $type }}
+spec:
+  {{- if eq $cfg.kind "Deployment" }}
+  replicas: {{ $cfg.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lens.componentSelectorLabels" (list $root $type) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lens.componentSelectorLabels" (list $root $type) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "lens.serviceAccountName" $root }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $type }}
+          image: "{{ $cfg.image.repository }}:{{ $cfg.image.tag | default $root.Chart.AppVersion }}"
+          imagePullPolicy: {{ $cfg.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $root.Values.securityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "lens.fullname" $root }}-config
+            - secretRef:
+                name: {{ include "lens.secretName" $root }}
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
+{{- end }}
+{{- end }}
