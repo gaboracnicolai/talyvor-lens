@@ -37,6 +37,7 @@ import (
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
+	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compressor"
@@ -145,6 +146,9 @@ func run() error {
 	attrStore := attribution.NewStore(pool)
 	budgetStore := budgets.NewStore(pool)
 	budgetService := budgets.NewService(budgetStore)
+	// Predictive cost forecasting (Upgrade 20). Read-only analytics over
+	// token_events + budgets; cached, off the request hot path.
+	forecaster := forecast.New(forecast.NewStore(pool))
 	wsManager := workspace.New(pool)
 	if err := wsManager.LoadAll(ctx); err != nil {
 		logger.Warn("workspace: LoadAll failed", slog.String("err", err.Error()))
@@ -491,6 +495,8 @@ func run() error {
 	)
 	// Budgets store powers the dashboard's read-only Budgets panel.
 	apiServer.SetBudgetStore(budgetStore)
+	// Forecaster powers the dashboard's projection columns.
+	apiServer.SetForecaster(forecaster)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -999,6 +1005,34 @@ func run() error {
 			}
 			_ = budgetService.Reload(req.Context())
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		// ─── cost forecasting (Upgrade 20) ───
+		// Read-only, cached projections. scope defaults to workspace,
+		// scope_id to the workspace id, period to monthly.
+		authed.Get("/v1/workspaces/{wsID}/forecast", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			q := req.URL.Query()
+			scope := budgets.Scope(q.Get("scope"))
+			if scope == "" {
+				scope = budgets.ScopeWorkspace
+			}
+			fc, err := forecaster.ProjectScope(req.Context(), wsID, scope, q.Get("scope_id"), q.Get("period"))
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, fc)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/forecast/summary", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			list, err := forecaster.SummarizeWorkspace(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, list)
 		})
 
 		// ─── Local endpoint registry ───────────────────

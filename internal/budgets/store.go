@@ -280,9 +280,29 @@ func (s *Store) UpdateSpent(ctx context.Context, id string, spent float64) error
 	return nil
 }
 
+// ScopeColumn returns the token_events column that identifies a scope for
+// spend aggregation: "" for workspace (no predicate beyond workspace_id),
+// "team" for team, "sprint_id" for sprint. Centralized so reconciliation
+// here and the forecasting reads (internal/forecast) agree on the mapping
+// rather than each hard-coding the switch.
+func ScopeColumn(scope Scope) string {
+	switch scope {
+	case ScopeTeam:
+		return "team"
+	case ScopeSprint:
+		return "sprint_id"
+	default:
+		return ""
+	}
+}
+
 // periodWindow returns the SQL predicate restricting token_events to the
 // budget's period. monthly/weekly use calendar boundaries; total uses the
 // budget's [starts_at, ends_at) window when set, otherwise all time.
+//
+// The calendar definitions here (monthly = date_trunc('month'), weekly =
+// date_trunc('week') = Monday) are mirrored in Go by PeriodBounds; keep the
+// two in sync.
 func periodWindow(b Budget) string {
 	switch b.Period {
 	case "weekly":
@@ -304,12 +324,8 @@ func (s *Store) ReconcileSpent(ctx context.Context, b Budget) (float64, error) {
 	}
 	where := "workspace_id = $1"
 	args := []any{b.WorkspaceID}
-	switch b.Scope {
-	case ScopeTeam:
-		where += " AND team = $2"
-		args = append(args, b.ScopeID)
-	case ScopeSprint:
-		where += " AND sprint_id = $2"
+	if col := ScopeColumn(b.Scope); col != "" {
+		where += fmt.Sprintf(" AND %s = $%d", col, len(args)+1)
 		args = append(args, b.ScopeID)
 	}
 	if b.Period == "total" && b.StartsAt != nil {
