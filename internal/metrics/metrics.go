@@ -99,6 +99,29 @@ var (
 	HAInstanceCount = prometheus.NewGauge(
 		prometheus.GaugeOpts{Name: "lens_ha_instance_count", Help: "Active Lens instances seen in the HA registry (0 when HA disabled)."},
 	)
+
+	// ─── budget governance (Upgrade 19) ───
+	// scope is bounded (workspace/team/sprint). scope_id is potentially
+	// unbounded (team / sprint ids), so the budgets service gates these two
+	// gauges behind a cardinality guard before calling the setters below —
+	// never emit a scope_id label without that guard. The two counters use
+	// only the bounded {scope} label and are safe to emit unguarded.
+	BudgetSpentUSD = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "lens_budget_spent_usd", Help: "Current spend (USD) per budget, by scope and scope_id."},
+		[]string{"scope", "scope_id"},
+	)
+	BudgetUtilizationRatio = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "lens_budget_utilization_ratio", Help: "Spend / limit ratio per budget, by scope and scope_id."},
+		[]string{"scope", "scope_id"},
+	)
+	BudgetThresholdCrossedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_budget_threshold_crossed_total", Help: "Alert thresholds crossed, by scope."},
+		[]string{"scope"},
+	)
+	BudgetBlocksTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_budget_blocks_total", Help: "Requests blocked by a hard_block budget, by scope."},
+		[]string{"scope"},
+	)
 )
 
 func init() {
@@ -112,6 +135,8 @@ func init() {
 		TokenLedgerWriteDuration,
 		TokensMintedTotal, LXCConvertedTotal,
 		HAInstanceCount,
+		BudgetSpentUSD, BudgetUtilizationRatio,
+		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
 	)
 }
 
@@ -159,3 +184,19 @@ func ConvertedLXC(n float64) {
 
 // SetHAInstanceCount publishes the current active-instance count.
 func SetHAInstanceCount(n int) { HAInstanceCount.Set(float64(n)) }
+
+// ─── budget governance helpers ───
+// SetBudgetSpent / SetBudgetUtilization carry the unbounded scope_id label;
+// callers MUST apply the budgets cardinality guard before invoking them.
+
+func SetBudgetSpent(scope, scopeID string, v float64) {
+	BudgetSpentUSD.WithLabelValues(scope, scopeID).Set(v)
+}
+
+func SetBudgetUtilization(scope, scopeID string, v float64) {
+	BudgetUtilizationRatio.WithLabelValues(scope, scopeID).Set(v)
+}
+
+// BudgetThresholdCrossed / BudgetBlocked use only the bounded {scope} label.
+func BudgetThresholdCrossed(scope string) { BudgetThresholdCrossedTotal.WithLabelValues(scope).Inc() }
+func BudgetBlocked(scope string)          { BudgetBlocksTotal.WithLabelValues(scope).Inc() }

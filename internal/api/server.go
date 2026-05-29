@@ -19,6 +19,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/attribution"
+	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
@@ -54,6 +55,7 @@ type Server struct {
 	wsManager        *workspace.Manager
 	localRouter      *localrouter.LocalRouter
 	anomalyDetector  *anomaly.Detector
+	budgetStore      *budgets.Store
 	version          string
 	startTime        time.Time
 }
@@ -173,6 +175,35 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/local/status", s.handleLocalStatus)
 	r.Get("/v1/api/anomalies", s.handleAnomalies)
 	r.Get("/v1/api/anomalies/scan", s.handleAnomaliesScan)
+	r.Get("/v1/api/budgets", s.handleBudgets)
+}
+
+// SetBudgetStore wires the budgets store used by the dashboard's Budgets
+// panel. A setter so NewServer's signature stays put; a nil store makes
+// handleBudgets return an empty list (panel stays hidden).
+func (s *Server) SetBudgetStore(st *budgets.Store) { s.budgetStore = st }
+
+// handleBudgets lists a workspace's budgets (defaulting to "default") for
+// the ops dashboard. Always returns an array — never null — so the panel
+// can hide itself when there are none.
+func (s *Server) handleBudgets(w http.ResponseWriter, r *http.Request) {
+	if s.budgetStore == nil {
+		writeJSON(w, http.StatusOK, []budgets.Budget{})
+		return
+	}
+	wsID := r.URL.Query().Get("workspace_id")
+	if wsID == "" {
+		wsID = "default"
+	}
+	list, err := s.budgetStore.List(r.Context(), wsID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []budgets.Budget{}
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 // handleAnomalies runs Detect for the dimension tuple supplied via query

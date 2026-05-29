@@ -36,6 +36,7 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
+	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compressor"
@@ -142,6 +143,8 @@ func run() error {
 	abEngine.RunAutoCompleteLoop(ctx, time.Hour)
 	branchTracker := attribution.New(pool)
 	attrStore := attribution.NewStore(pool)
+	budgetStore := budgets.NewStore(pool)
+	budgetService := budgets.NewService(budgetStore)
 	wsManager := workspace.New(pool)
 	if err := wsManager.LoadAll(ctx); err != nil {
 		logger.Warn("workspace: LoadAll failed", slog.String("err", err.Error()))
@@ -188,6 +191,15 @@ func run() error {
 	// Upgraded per-request attribution store (Upgrade Batch 1 / Item 3).
 	// Wired as a setter so the existing proxy.New signature stays put.
 	p.SetAttributionStore(attrStore)
+	// Per-team / per-sprint budget governance (Upgrade 19). Seed the
+	// in-memory snapshot from token_events, refresh it periodically, then
+	// wire the gate into the proxy hot path. Load is best-effort — a cold
+	// start simply begins with zero budgets until the first refresh.
+	if err := budgetService.Load(ctx); err != nil {
+		logger.Warn("budgets: initial load failed", slog.String("err", err.Error()))
+	}
+	budgetService.StartRefresh(ctx)
+	p.SetBudgetService(budgetService)
 	p.SetBedrockConfig(proxy.BedrockConfig{
 		Region:          cfg.AWSRegion,
 		AccessKeyID:     cfg.AWSAccessKeyID,
@@ -477,6 +489,8 @@ func run() error {
 		anomalyDetector,
 		"0.1.0",
 	)
+	// Budgets store powers the dashboard's read-only Budgets panel.
+	apiServer.SetBudgetStore(budgetStore)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -895,6 +909,95 @@ func run() error {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		// ─── per-team / per-sprint budgets (Upgrade 19) ───
+		// CRUD + a live status endpoint. Every mutation reloads the budget
+		// service's in-memory snapshot so edits take effect on the next
+		// request without waiting for the periodic refresh.
+
+		authed.Post("/v1/workspaces/{wsID}/budgets", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in budgets.Budget
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			in.WorkspaceID = wsID
+			created, err := budgetStore.Create(req.Context(), in)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			_ = budgetService.Reload(req.Context())
+			writeJSONOK(w, http.StatusCreated, created)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/budgets", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			list, err := budgetStore.List(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, list)
+		})
+
+		// status MUST be registered before the {id} route so the literal
+		// segment wins; chi matches static paths ahead of wildcards anyway,
+		// but keeping them adjacent documents the intent.
+		authed.Get("/v1/workspaces/{wsID}/budgets/status", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			team := req.URL.Query().Get("team")
+			sprint := req.URL.Query().Get("sprint")
+			writeJSONOK(w, http.StatusOK, budgetService.Status(wsID, team, sprint))
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/budgets/{id}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			id := chi.URLParam(req, "id")
+			b, err := budgetStore.Get(req.Context(), wsID, id)
+			if errors.Is(err, budgets.ErrNotFound) {
+				writeJSONErr(w, http.StatusNotFound, "budget not found")
+				return
+			}
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, b)
+		})
+
+		authed.Patch("/v1/workspaces/{wsID}/budgets/{id}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			id := chi.URLParam(req, "id")
+			var in budgets.Budget
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			updated, err := budgetStore.Update(req.Context(), wsID, id, in)
+			if errors.Is(err, budgets.ErrNotFound) {
+				writeJSONErr(w, http.StatusNotFound, "budget not found")
+				return
+			}
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			_ = budgetService.Reload(req.Context())
+			writeJSONOK(w, http.StatusOK, updated)
+		})
+
+		authed.Delete("/v1/workspaces/{wsID}/budgets/{id}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			id := chi.URLParam(req, "id")
+			if err := budgetStore.Delete(req.Context(), wsID, id); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			_ = budgetService.Reload(req.Context())
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 

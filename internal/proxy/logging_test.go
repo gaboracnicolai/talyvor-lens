@@ -31,7 +31,7 @@ func (r *recordingAlertSink) IsCircuitOpen(string, string) bool { return false }
 func (r *recordingAlertSink) GetDowngradeModel(_ string, model string) string {
 	return model
 }
-func (r *recordingAlertSink) RecordSpend(_ context.Context, _, _, _ string, _, _ int, prompt, _, _ string) error {
+func (r *recordingAlertSink) RecordSpend(_ context.Context, _, _, _, _, _ string, _, _ int, prompt, _, _ string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
