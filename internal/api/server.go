@@ -21,6 +21,7 @@ import (
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/metrics"
@@ -56,6 +57,7 @@ type Server struct {
 	localRouter      *localrouter.LocalRouter
 	anomalyDetector  *anomaly.Detector
 	budgetStore      *budgets.Store
+	forecaster       *forecast.Forecaster
 	version          string
 	startTime        time.Time
 }
@@ -176,6 +178,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/anomalies", s.handleAnomalies)
 	r.Get("/v1/api/anomalies/scan", s.handleAnomaliesScan)
 	r.Get("/v1/api/budgets", s.handleBudgets)
+	r.Get("/v1/api/forecast/summary", s.handleForecastSummary)
 }
 
 // SetBudgetStore wires the budgets store used by the dashboard's Budgets
@@ -202,6 +205,34 @@ func (s *Server) handleBudgets(w http.ResponseWriter, r *http.Request) {
 	}
 	if list == nil {
 		list = []budgets.Budget{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// SetForecaster wires the cost forecaster used by the dashboard's
+// projection columns. A setter so NewServer's signature stays put; a nil
+// forecaster makes handleForecastSummary return an empty list.
+func (s *Server) SetForecaster(f *forecast.Forecaster) { s.forecaster = f }
+
+// handleForecastSummary returns a projection for every budget in the
+// workspace. Always an array — never null — so the dashboard can hide the
+// projections when there are none. Read-only + cached in the forecaster.
+func (s *Server) handleForecastSummary(w http.ResponseWriter, r *http.Request) {
+	if s.forecaster == nil {
+		writeJSON(w, http.StatusOK, []forecast.Forecast{})
+		return
+	}
+	wsID := r.URL.Query().Get("workspace_id")
+	if wsID == "" {
+		wsID = "default"
+	}
+	list, err := s.forecaster.SummarizeWorkspace(r.Context(), wsID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []forecast.Forecast{}
 	}
 	writeJSON(w, http.StatusOK, list)
 }

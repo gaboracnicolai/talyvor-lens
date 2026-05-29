@@ -218,6 +218,33 @@ func stateKey(workspace string, scope Scope, scopeID string) string {
 	return workspace + "|" + string(scope) + "|" + scopeID
 }
 
+// PeriodBounds returns the [start, end) calendar window for a budget period
+// relative to now, in UTC. ok is false for the open-ended "total" period
+// (callers handle that case themselves — there is no period total to
+// project toward).
+//
+// The calendar definitions mirror store.go's periodWindow exactly so
+// forecasting's elapsed-fraction math lines up with reconciliation's spend
+// window: monthly = first of the month, weekly = Monday (matching Postgres
+// date_trunc('week')). Bounds are computed in UTC; at a month/week boundary
+// this can differ from a non-UTC database NOW() by the offset, which is
+// immaterial for an elapsed-fraction estimate.
+func PeriodBounds(period string, now time.Time) (start, end time.Time, ok bool) {
+	now = now.UTC()
+	switch period {
+	case "weekly":
+		// ISO week starts Monday. Go's Weekday has Sunday=0; shift so Mon=0.
+		offset := (int(now.Weekday()) + 6) % 7
+		start = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -offset)
+		return start, start.AddDate(0, 0, 7), true
+	case "total":
+		return time.Time{}, time.Time{}, false
+	default: // monthly
+		start = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), true
+	}
+}
+
 // candidates returns the keys of the up-to-three budgets that govern a
 // request. The workspace budget is always a candidate; team / sprint are
 // included only when their id is present.

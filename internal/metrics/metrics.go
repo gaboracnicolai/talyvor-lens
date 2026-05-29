@@ -122,6 +122,19 @@ var (
 		prometheus.CounterOpts{Name: "lens_budget_blocks_total", Help: "Requests blocked by a hard_block budget, by scope."},
 		[]string{"scope"},
 	)
+
+	// ─── cost forecasting (Upgrade 20) ───
+	// Both carry only the bounded {scope} label (workspace/team/sprint).
+	// scope_id is deliberately OMITTED to keep cardinality bounded by
+	// construction — same discipline as budgets, no unbounded id labels.
+	ForecastProjectedUSD = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "lens_forecast_projected_usd", Help: "Most recent projected period-total spend (USD), by scope. A projection, not actual spend."},
+		[]string{"scope"},
+	)
+	ForecastWillExceedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_forecast_will_exceed_budget_total", Help: "Times a forecast projected a budget would be exceeded, by scope."},
+		[]string{"scope"},
+	)
 )
 
 func init() {
@@ -137,6 +150,7 @@ func init() {
 		HAInstanceCount,
 		BudgetSpentUSD, BudgetUtilizationRatio,
 		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
+		ForecastProjectedUSD, ForecastWillExceedTotal,
 	)
 }
 
@@ -200,3 +214,11 @@ func SetBudgetUtilization(scope, scopeID string, v float64) {
 // BudgetThresholdCrossed / BudgetBlocked use only the bounded {scope} label.
 func BudgetThresholdCrossed(scope string) { BudgetThresholdCrossedTotal.WithLabelValues(scope).Inc() }
 func BudgetBlocked(scope string)          { BudgetBlocksTotal.WithLabelValues(scope).Inc() }
+
+// ─── cost forecasting helpers ───
+// Bounded {scope} label only — no scope_id, so no cardinality guard needed.
+
+func SetForecastProjected(scope string, v float64) {
+	ForecastProjectedUSD.WithLabelValues(scope).Set(v)
+}
+func ForecastWillExceed(scope string) { ForecastWillExceedTotal.WithLabelValues(scope).Inc() }

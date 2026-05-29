@@ -385,6 +385,19 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="forecast-panel" style="display:none">
+      <h2>Cost forecast <span class="pill" style="background:#3b3b52;color:#cfcfe6">projection</span></h2>
+      <p class="muted">
+        Projected period spend at the current pace — <em>estimates, not
+        actual spend</em>. Linear run-rate (spend-so-far ÷ elapsed fraction)
+        with a trailing-window daily rate + trend. Low-data periods are
+        flagged. Projected figures shown in <em>italic</em> with “≈”.
+      </p>
+      <div id="forecast">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section>
       <h2>Anomalies</h2>
       <div id="anomalies">
@@ -666,6 +679,52 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyForecast(list) {
+      const panel = document.getElementById('forecast-panel');
+      // Hidden when there are no budgets to project (or no data).
+      if (!Array.isArray(list) || list.length === 0) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      document.getElementById('forecast').innerHTML =
+        '<table><thead><tr><th>Scope</th><th>ID</th><th>Period</th><th>Spent so far</th><th>Projected total</th><th>vs Limit</th><th>Trend</th><th>Est. exhaustion</th><th>Confidence</th></tr></thead><tbody>' +
+        list.map(function (f) {
+          const vb = f.vs_budget || {};
+          // Projections are italic + "≈" so they never read as actual spend.
+          const projCell = f.insufficient_data
+            ? '<em class="muted">insufficient data</em>'
+            : '<em>≈ ' + fmtUSD(f.projected_total_usd) + '</em>';
+          let limitCell;
+          if (vb.limit_usd) {
+            if (f.insufficient_data) {
+              limitCell = '<span class="muted">' + fmtUSD(vb.limit_usd) + ' limit</span>';
+            } else if (vb.will_exceed) {
+              limitCell = '<span class="pill bad">over by ' + fmtUSD(vb.projected_overage_usd) + '</span>';
+            } else {
+              limitCell = '<span class="pill good">' + ((vb.projected_utilization || 0) * 100).toFixed(0) + '% of ' + fmtUSD(vb.limit_usd) + '</span>';
+            }
+          } else {
+            limitCell = '<span class="muted">no budget</span>';
+          }
+          const exhaustCell = (vb.est_exhaustion_date && !f.insufficient_data)
+            ? '<em>' + new Date(vb.est_exhaustion_date).toLocaleDateString() + '</em>'
+            : '—';
+          return '<tr>' +
+            '<td>' + f.scope + '</td>' +
+            '<td class="mono">' + (f.scope_id || '—') + '</td>' +
+            '<td>' + f.period + '</td>' +
+            '<td class="mono">' + fmtUSD(f.spent_so_far_usd) + '</td>' +
+            '<td class="mono">' + projCell + '</td>' +
+            '<td>' + limitCell + '</td>' +
+            '<td>' + (f.trend_label || 'unknown') + '</td>' +
+            '<td class="mono">' + exhaustCell + '</td>' +
+            '<td class="muted" style="font-size:12px">' + (f.confidence_note || '') + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</tbody></table>';
+    }
+
     async function refresh() {
       const alertEl = document.getElementById('api-alert');
       let anyFail = false;
@@ -680,6 +739,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/workspaces',                                      applyWorkspaces],
         ['/v1/api/anomalies/scan',                                  applyAnomalies],
         ['/v1/api/budgets?workspace_id=default',                    applyBudgets],
+        ['/v1/api/forecast/summary?workspace_id=default',           applyForecast],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];
