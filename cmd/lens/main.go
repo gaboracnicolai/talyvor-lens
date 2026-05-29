@@ -243,15 +243,17 @@ func run() error {
 		retryPolicy.MaxDelay = cfg.RetryMaxDelay
 	}
 	breakerRegistry := retry.NewBreakerRegistry(cfg.CBThreshold, cfg.CBResetTimeout, 2)
-	breakerRegistry.SetOnStateChange(func(name string, from, to retry.CBState) {
-		logger.Info("retry: circuit state change",
-			slog.String("provider", name),
-			slog.String("from", string(from)),
-			slog.String("to", string(to)),
-		)
-	})
+	// The circuit state-change hook (structured logging + HA gossip publish) is
+	// installed by setupHA below, so the two compose in one place and behave
+	// identically whether or not HA is enabled.
 	retryExecutor := retry.NewExecutor(&retryPolicy, breakerRegistry)
 	_ = retryExecutor // wired into proxy paths in a follow-up
+
+	// High-Availability layer (Upgrade 7). Strictly opt-in via LENS_HA_ENABLED;
+	// a no-op / in-process fallback when disabled, so single-instance behaviour
+	// is unchanged. Built here so its health handlers are mountable below and
+	// its registry/breaker drive graceful drain on shutdown.
+	haComps := setupHA(ctx, cfg, redisClient, pool, breakerRegistry, rateLimiter, logger)
 
 	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
 	tokenLedger := mining.NewLedgerStore(pool)
@@ -365,6 +367,15 @@ func run() error {
 		}),
 	})
 	r.Get("/healthz", healthHandler.ServeHTTP)
+
+	// HA endpoints (Upgrade 7). The existing /healthz above is intentionally
+	// left unchanged for backward-compat; these are additive:
+	//   /livez     — pure liveness, always 200 while the process serves
+	//   /readyz    — drain-aware readiness; 503 while draining or a dep is down
+	//   /ha/status — cluster view (this instance + peers) for ops + dashboard
+	r.Get("/livez", haComps.health.Live)
+	r.Get("/readyz", haComps.health.Ready)
+	r.Get("/ha/status", haComps.health.Status)
 
 	// OpenAPI spec — public, no auth, no version path prefix.
 	r.Get("/openapi.json", api.ServeOpenAPI)
@@ -2273,10 +2284,39 @@ func run() error {
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Graceful drain (Upgrade 7): mark this instance draining so /readyz starts
+	// returning 503 and the load balancer pulls it from rotation; let in-flight
+	// requests finish via srv.Shutdown; then deregister and close the gossip
+	// subscription. When HA is disabled the registry/breaker calls are no-ops
+	// and the drain timeout stays at the original 15s, so shutdown is unchanged.
+	drainTimeout := 15 * time.Second
+	if cfg.HAEnabled {
+		drainTimeout = cfg.HADrainTimeout
+	}
+	drainCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+
+	if err := haComps.registry.SetDraining(drainCtx); err != nil {
+		logger.Warn("ha: set draining failed", slog.String("err", err.Error()))
+	}
+	if cfg.HAEnabled {
+		// Give the load balancer a moment to observe the 503 from /readyz
+		// before we stop accepting connections, so no new request is dropped.
+		select {
+		case <-time.After(2 * time.Second):
+		case <-drainCtx.Done():
+		}
+	}
+
+	if err := srv.Shutdown(drainCtx); err != nil {
 		return err
+	}
+
+	if err := haComps.registry.Deregister(context.Background()); err != nil {
+		logger.Warn("ha: deregister failed", slog.String("err", err.Error()))
+	}
+	if err := haComps.breaker.Close(); err != nil {
+		logger.Warn("ha: breaker close failed", slog.String("err", err.Error()))
 	}
 
 	return nil
