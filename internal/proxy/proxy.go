@@ -562,6 +562,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// the regular streaming path call the LLM.
 				if err := replayAsSSE(w, cfg.name, cached); err == nil {
 					metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
+					metrics.RecordCacheHit(layer)
 					span.SetAttributes(
 						attribute.Bool("lens.cached", true),
 						attribute.Float64("lens.cost_usd", 0),
@@ -575,6 +576,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			} else {
 				writeBytes(w, http.StatusOK, cached)
 				metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
+				metrics.RecordCacheHit(layer)
 				span.SetAttributes(
 					attribute.Bool("lens.cached", true),
 					attribute.Float64("lens.cost_usd", 0),

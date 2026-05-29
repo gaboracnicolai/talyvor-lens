@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/metrics"
 )
 
 // RateLimitMiddleware fronts a Limiter on the request path. The wsID is
@@ -26,6 +27,7 @@ func RateLimitMiddleware(l *Limiter) func(http.Handler) http.Handler {
 			}
 			result := l.Check(r.Context(), wsID, keyID)
 			if !result.Allowed {
+				metrics.RateLimitRejected(wsID)
 				w.Header().Set("Retry-After", strconv.Itoa(result.RetryAfterSecs))
 				w.Header().Set("X-RateLimit-Remaining", "0")
 				w.Header().Set("Content-Type", "application/json")

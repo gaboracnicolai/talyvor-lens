@@ -1,0 +1,23 @@
+# Example standalone Prometheus config for Lens (non-Operator users). This is a
+# complete, minimal prometheus.yml: it scrapes the Lens gateway's /metrics and
+# loads the Lens recording + alerting rules. Operator users should instead use
+# the ServiceMonitor (helm value metrics.serviceMonitor.enabled=true).
+#
+# Validate with: promtool check config scrape-config.example.yaml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - recording-rules.yaml
+  - alerts.yaml
+
+scrape_configs:
+  - job_name: lens
+    metrics_path: /metrics
+    static_configs:
+      # Point at the Lens gateway Service (default port 8080). Adjust the host
+      # for your namespace / release name, or use Kubernetes SD.
+      - targets: ["lens.default.svc.cluster.local:8080"]
+        labels:
+          service: lens

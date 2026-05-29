@@ -13,9 +13,23 @@ import (
 
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/ha"
+	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/retry"
 )
+
+// breakerStateValue maps a circuit-breaker state to the gauge encoding used by
+// lens_circuit_breaker_state: 0 closed, 1 open, 2 half-open.
+func breakerStateValue(s retry.CBState) float64 {
+	switch s {
+	case retry.CBOpen:
+		return 1
+	case retry.CBHalfOpen:
+		return 2
+	default:
+		return 0
+	}
+}
 
 const lensVersion = "0.1.0"
 
@@ -77,10 +91,29 @@ func setupHA(
 			slog.String("from", string(from)),
 			slog.String("to", string(to)),
 		)
-		breaker.Publish(name, to) // no-op when HA disabled
+		metrics.SetBreakerState(name, breakerStateValue(to)) // observability gauge
+		breaker.Publish(name, to)                            // no-op when HA disabled
 	})
 	if err := breaker.Start(ctx); err != nil {
 		logger.Warn("ha: breaker gossip subscribe failed", slog.String("err", err.Error()))
+	}
+
+	// Publish the active-instance count as a gauge while HA is enabled.
+	if cfg.HAEnabled {
+		go func() {
+			t := time.NewTicker(cfg.HAHeartbeat)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if insts, err := registry.ActiveInstances(ctx); err == nil {
+						metrics.SetHAInstanceCount(len(insts))
+					}
+				}
+			}
+		}()
 	}
 
 	// Readiness dependencies: the database always; Redis additionally when HA is

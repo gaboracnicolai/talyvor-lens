@@ -322,6 +322,9 @@ func run() error {
 	r.Use(api.APIVersionMiddleware)
 	r.Use(api.GzipMiddleware)
 	r.Use(api.RateLimitHeadersMiddleware)
+	// HTTP request metrics (Upgrade 11): request count, latency histogram, and
+	// in-flight gauge — labelled by chi route pattern (bounded cardinality).
+	r.Use(metrics.HTTPMiddleware)
 
 	// Detailed /healthz pings DB + Redis + the multi-endpoint local
 	// router. Each checker has a 100ms budget so the rollup stays fast.

@@ -1,0 +1,41 @@
+# Recording rules for Lens. Precompute the p50/p95/p99 latency, error-rate, and
+# cache-hit-ratio expressions the dashboards + alerts read, so heavy
+# histogram_quantile evaluation happens once here instead of per dashboard
+# refresh. Naming follows the level:metric:operation convention.
+groups:
+  - name: lens-recording
+    interval: 30s
+    rules:
+      # ── HTTP traffic ──
+      - record: lens:http_requests:rate5m
+        expr: sum(rate(lens_http_requests_total[5m]))
+
+      - record: lens:http_error_rate:ratio5m
+        expr: |
+          sum(rate(lens_http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(lens_http_requests_total[5m])), 1)
+
+      - record: lens:http_request_duration:p50
+        expr: histogram_quantile(0.50, sum by (le) (rate(lens_http_request_duration_seconds_bucket[5m])))
+
+      - record: lens:http_request_duration:p95
+        expr: histogram_quantile(0.95, sum by (le) (rate(lens_http_request_duration_seconds_bucket[5m])))
+
+      - record: lens:http_request_duration:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(lens_http_request_duration_seconds_bucket[5m])))
+
+      # ── upstream providers (per provider) ──
+      - record: lens:upstream_provider_duration:p99
+        expr: histogram_quantile(0.99, sum by (le, provider) (rate(lens_upstream_provider_duration_seconds_bucket[5m])))
+
+      # ── token-ledger write hot path ──
+      - record: lens:token_ledger_write_duration:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(lens_token_ledger_write_duration_seconds_bucket[5m])))
+
+      # ── cache effectiveness ──
+      - record: lens:cache_hit_ratio:ratio5m
+        expr: |
+          sum(rate(lens_cache_hits_total[5m]))
+          /
+          clamp_min(sum(rate(lens_cache_hits_total[5m])) + sum(rate(lens_cache_misses_total[5m])), 1)
