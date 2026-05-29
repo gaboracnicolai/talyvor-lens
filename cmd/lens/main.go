@@ -37,6 +37,7 @@ import (
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
+	"github.com/talyvor/lens/internal/costanomaly"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compat"
@@ -149,6 +150,9 @@ func run() error {
 	// Predictive cost forecasting (Upgrade 20). Read-only analytics over
 	// token_events + budgets; cached, off the request hot path.
 	forecaster := forecast.New(forecast.NewStore(pool))
+	// Cross-sectional cost anomaly detection (Upgrade 21). Read-only,
+	// cached, off the hot path. Distinct from the temporal anomaly.Detector.
+	costAnomalyDetector := costanomaly.New(costanomaly.NewStore(pool))
 	wsManager := workspace.New(pool)
 	if err := wsManager.LoadAll(ctx); err != nil {
 		logger.Warn("workspace: LoadAll failed", slog.String("err", err.Error()))
@@ -497,6 +501,8 @@ func run() error {
 	apiServer.SetBudgetStore(budgetStore)
 	// Forecaster powers the dashboard's projection columns.
 	apiServer.SetForecaster(forecaster)
+	// Cost-anomaly detector powers the dashboard's Cost outliers panel.
+	apiServer.SetCostAnomalyDetector(costAnomalyDetector)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -1033,6 +1039,35 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, list)
+		})
+
+		// ─── cost anomaly detection (Upgrade 21) ───
+		// Read-only, cached cross-sectional outlier flags. scope is the unit
+		// kind (issue/team/sprint); default issue. These are statistical
+		// flags, not judgments.
+		authed.Get("/v1/workspaces/{wsID}/anomalies", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			scope := req.URL.Query().Get("scope")
+			if scope == "" {
+				scope = costanomaly.UnitIssue
+			}
+			res, err := costAnomalyDetector.ScanScope(req.Context(), wsID, scope)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, res)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/anomalies/issue/{issueID}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			issueID := chi.URLParam(req, "issueID")
+			a, err := costAnomalyDetector.CheckIssue(req.Context(), wsID, issueID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, a)
 		})
 
 		// ─── Local endpoint registry ───────────────────

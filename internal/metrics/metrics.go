@@ -135,6 +135,19 @@ var (
 		prometheus.CounterOpts{Name: "lens_forecast_will_exceed_budget_total", Help: "Times a forecast projected a budget would be exceeded, by scope."},
 		[]string{"scope"},
 	)
+
+	// ─── cost anomaly detection (Upgrade 21) ───
+	// Bounded labels only: scope (issue/team/sprint) and severity
+	// (low/warn/high). unit_id / issue_id are deliberately OMITTED — they're
+	// unbounded, so they never become label values.
+	AnomaliesDetectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_anomalies_detected_total", Help: "Cost anomalies detected (deduped per unit+period), by scope and severity."},
+		[]string{"scope", "severity"},
+	)
+	AnomalyMaxFactor = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "lens_anomaly_max_factor", Help: "Largest cost factor over baseline median observed in the most recent scan, by scope."},
+		[]string{"scope"},
+	)
 )
 
 func init() {
@@ -151,6 +164,7 @@ func init() {
 		BudgetSpentUSD, BudgetUtilizationRatio,
 		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
 		ForecastProjectedUSD, ForecastWillExceedTotal,
+		AnomaliesDetectedTotal, AnomalyMaxFactor,
 	)
 }
 
@@ -222,3 +236,13 @@ func SetForecastProjected(scope string, v float64) {
 	ForecastProjectedUSD.WithLabelValues(scope).Set(v)
 }
 func ForecastWillExceed(scope string) { ForecastWillExceedTotal.WithLabelValues(scope).Inc() }
+
+// ─── cost anomaly helpers ───
+// Bounded {scope, severity} labels only — no unit_id, so no guard needed.
+
+func AnomalyDetected(scope, severity string) {
+	AnomaliesDetectedTotal.WithLabelValues(scope, severity).Inc()
+}
+func SetAnomalyMaxFactor(scope string, v float64) {
+	AnomalyMaxFactor.WithLabelValues(scope).Set(v)
+}

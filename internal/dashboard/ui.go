@@ -405,6 +405,20 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="costoutliers-panel" style="display:none">
+      <h2>Cost outliers <span class="pill" style="background:#3b3b52;color:#cfcfe6">statistical flag</span></h2>
+      <p class="muted">
+        Units of work whose cost is far above the median of comparable units
+        (same workspace, trailing window) by robust statistics (median +
+        MAD). These are <em>statistical flags, not judgments</em> — "4× the
+        median" is a fact, not a verdict that anything is wrong. Hidden when
+        the baseline is too small to judge.
+      </p>
+      <div id="costoutliers">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section>
       <h2>Git attribution</h2>
       <p class="muted">
@@ -725,6 +739,32 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyCostOutliers(res) {
+      const panel = document.getElementById('costoutliers-panel');
+      const anomalies = res && res.anomalies;
+      // Hidden when the baseline is insufficient or nothing is flagged.
+      if (!res || res.insufficient_baseline || !Array.isArray(anomalies) || anomalies.length === 0) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      document.getElementById('costoutliers').innerHTML =
+        '<p class="muted" style="font-size:12px">Baseline median ' + fmtUSD(res.baseline_median) +
+        ' · threshold ' + fmtUSD(res.threshold_usd) + ' · ' + res.sample_size + ' comparable ' + res.scope + 's · method ' + res.method + '</p>' +
+        '<table><thead><tr><th>Unit</th><th>Cost</th><th>× median</th><th>Severity</th><th>Flag</th></tr></thead><tbody>' +
+        anomalies.map(function (a) {
+          const cls = a.severity === 'high' ? 'bad' : (a.severity === 'warn' ? 'warn' : 'good');
+          return '<tr>' +
+            '<td class="mono">' + a.unit_id + '</td>' +
+            '<td class="mono">' + fmtUSD(a.cost_usd) + '</td>' +
+            '<td class="mono">' + (a.factor || 0).toFixed(1) + '×</td>' +
+            '<td><span class="pill ' + cls + '">' + a.severity + '</span></td>' +
+            '<td class="muted" style="font-size:12px">' + (a.explanation || '') + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</tbody></table>';
+    }
+
     async function refresh() {
       const alertEl = document.getElementById('api-alert');
       let anyFail = false;
@@ -740,6 +780,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/anomalies/scan',                                  applyAnomalies],
         ['/v1/api/budgets?workspace_id=default',                    applyBudgets],
         ['/v1/api/forecast/summary?workspace_id=default',           applyForecast],
+        ['/v1/api/costanomalies?workspace_id=default',              applyCostOutliers],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];
