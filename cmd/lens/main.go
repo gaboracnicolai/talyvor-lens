@@ -198,6 +198,9 @@ func run() error {
 	statusPage := status.New(pool, redisClient, nc, "0.1.0")
 	go statusPage.StartCacher(ctx, 60*time.Second)
 	guardrailsEngine := guardrails.New(piiDetector, injectionDetector)
+	// Output-stage guardrails (Upgrade 13) are OFF by default; when off the
+	// input guardrails behave exactly as today and no output guardrails run.
+	guardrailsEngine.SetOutputEnabled(cfg.GuardrailsEnabled)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -530,6 +533,8 @@ func run() error {
 	apiServer.SetROIReporter(roiReporter)
 	// Routing advisor powers the dashboard's Routing intelligence panel.
 	apiServer.SetRoutingAdvisor(routingAdvisor)
+	// Guardrails engine powers the dashboard's Guardrails panel.
+	apiServer.SetGuardrailsEngine(guardrailsEngine)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -2257,6 +2262,43 @@ func run() error {
 			}
 			result := guardrailsEngine.Check(req.Context(), in.WorkspaceID, in.Prompt, nil)
 			writeJSONOK(w, http.StatusOK, result)
+		})
+
+		// ─── workspace-scoped guardrails config (Upgrade 13) ───
+		// REST surface per workspace. POST/PATCH replace the policy; DELETE
+		// reverts to the default. The /test dry-run previews input + output
+		// triggers without affecting traffic (output preview runs even when
+		// the output stage is off).
+		authed.Get("/v1/workspaces/{wsID}/guardrails", func(w http.ResponseWriter, req *http.Request) {
+			writeJSONOK(w, http.StatusOK, guardrailsEngine.GetPolicy(chi.URLParam(req, "wsID")))
+		})
+		setGuardrails := func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in guardrails.GuardrailPolicy
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			guardrailsEngine.SetPolicy(req.Context(), wsID, in)
+			writeJSONOK(w, http.StatusOK, guardrailsEngine.GetPolicy(wsID))
+		}
+		authed.Post("/v1/workspaces/{wsID}/guardrails", setGuardrails)
+		authed.Patch("/v1/workspaces/{wsID}/guardrails", setGuardrails)
+		authed.Delete("/v1/workspaces/{wsID}/guardrails", func(w http.ResponseWriter, req *http.Request) {
+			guardrailsEngine.DeletePolicy(chi.URLParam(req, "wsID"))
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+		authed.Get("/v1/workspaces/{wsID}/guardrails/test", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			q := req.URL.Query()
+			out := map[string]any{}
+			if p := q.Get("prompt"); p != "" {
+				out["input"] = guardrailsEngine.Check(req.Context(), wsID, p, nil)
+			}
+			if c := q.Get("content"); c != "" {
+				out["output"] = guardrailsEngine.CheckOutputPreview(wsID, c)
+			}
+			writeJSONOK(w, http.StatusOK, out)
 		})
 
 		// Audit export — synchronous download. The exporter streams rows

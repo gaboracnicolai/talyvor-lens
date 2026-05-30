@@ -10,10 +10,12 @@ package guardrails
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/pii"
@@ -51,6 +53,18 @@ type GuardrailPolicy struct {
 	PIIAction        GuardrailAction `json:"pii_action"`
 	InjectionAction  GuardrailAction `json:"injection_action"`
 	CustomRules      []CustomRule    `json:"custom_rules"`
+
+	// ─── output-stage guardrails (Upgrade 13) ───
+	// All default off (zero value): a workspace with no output config
+	// behaves exactly as before. These run only when the engine's output
+	// stage is enabled (LENS_GUARDRAILS_ENABLED) — see CheckOutput.
+	OutputPIIAction       GuardrailAction `json:"output_pii_action,omitempty"`        // redact | block | "" (off)
+	OutputValidateJSON    bool            `json:"output_validate_json,omitempty"`     // response content must be valid JSON
+	OutputMaxLength       int             `json:"output_max_length,omitempty"`        // 0 = no limit (chars)
+	OutputMustMatch       string          `json:"output_must_match,omitempty"`        // regex the response MUST match
+	OutputMustNotMatch    string          `json:"output_must_not_match,omitempty"`    // regex the response must NOT match
+	OutputValidationBlock bool            `json:"output_validation_block,omitempty"`  // validation failures block (else flag)
+	BufferStreamForOutput bool            `json:"buffer_stream_for_output,omitempty"` // opt-in: buffer streamed responses so output guardrails can run (trades streaming for safety)
 }
 
 type Violation struct {
@@ -84,6 +98,11 @@ type Engine struct {
 	mu       sync.RWMutex
 	custom   []CustomGuardrail
 	policies map[string]*GuardrailPolicy
+
+	// outputEnabled gates the output stage (CheckOutput). Off by default →
+	// the input stage behaves exactly as today and no output guardrails run.
+	// Atomic so the hot path reads it without the policy lock.
+	outputEnabled atomic.Bool
 }
 
 func New(piiDetector *pii.Detector, injectionDetector *injection.Detector) *Engine {
@@ -300,5 +319,133 @@ func (e *Engine) Check(ctx context.Context, wsID, prompt string, body []byte) Gu
 		}
 	}
 
+	return result
+}
+
+// ─── output stage (Upgrade 13) ───
+
+// SetOutputEnabled toggles the output stage (wired from
+// LENS_GUARDRAILS_ENABLED). When off, CheckOutput is a no-op.
+func (e *Engine) SetOutputEnabled(b bool) {
+	if e != nil {
+		e.outputEnabled.Store(b)
+	}
+}
+
+// OutputEnabled reports whether the output stage is on.
+func (e *Engine) OutputEnabled() bool { return e != nil && e.outputEnabled.Load() }
+
+// ShouldBufferStream reports whether a streamed response for this workspace
+// should be buffered so output guardrails can run (the opt-in that trades
+// streaming for output safety). False unless the output stage is on AND the
+// workspace opted in.
+func (e *Engine) ShouldBufferStream(wsID string) bool {
+	if !e.OutputEnabled() {
+		return false
+	}
+	return e.GetPolicy(wsID).BufferStreamForOutput
+}
+
+// DeletePolicy removes a workspace's policy so it reverts to the default.
+func (e *Engine) DeletePolicy(wsID string) {
+	if wsID == "" {
+		wsID = "default"
+	}
+	e.mu.Lock()
+	delete(e.policies, wsID)
+	e.mu.Unlock()
+}
+
+// CheckOutput runs the OUTPUT-stage guardrails over a response's content
+// (the assistant text, extracted by the caller). A no-op returning Passed
+// when the output stage is disabled — so off = behaves as today.
+//
+// On a redact action, RedactedPrompt carries the redacted content (the
+// caller re-injects it into the response). On block, Passed=false — the
+// caller rejects the response (the upstream call already ran, so spend is
+// still recorded; the offending content is just never returned/cached).
+func (e *Engine) CheckOutput(_ context.Context, wsID, content string) GuardrailResult {
+	if e == nil || !e.outputEnabled.Load() {
+		return GuardrailResult{Passed: true}
+	}
+	return e.evalOutput(e.GetPolicy(wsID), content)
+}
+
+// CheckOutputPreview runs the output guardrails IGNORING the enabled flag —
+// for the dry-run test endpoint, so users can preview what would trigger even
+// before they turn the output stage on. Never used on the request path.
+func (e *Engine) CheckOutputPreview(wsID, content string) GuardrailResult {
+	if e == nil {
+		return GuardrailResult{Passed: true}
+	}
+	return e.evalOutput(e.GetPolicy(wsID), content)
+}
+
+func (e *Engine) evalOutput(policy *GuardrailPolicy, content string) GuardrailResult {
+	result := GuardrailResult{Passed: true}
+	current := content
+
+	// Output PII — redact or block.
+	if policy.OutputPIIAction != "" && e.pii != nil {
+		r := e.pii.Detect(current)
+		if r.WasRedacted {
+			result.Violations = append(result.Violations, Violation{
+				Rule: "output_pii", Type: "pii", Action: policy.OutputPIIAction,
+				Message: "PII in response: " + strings.Join(r.Types, ", "),
+			})
+			switch policy.OutputPIIAction {
+			case ActionBlock:
+				result.Passed = false
+				result.Action = ActionBlock
+				return result
+			case ActionRedact:
+				current = r.Redacted
+				result.RedactedPrompt = current
+			}
+		}
+	}
+
+	// Output validation — JSON validity, length, regex. The action is block
+	// when OutputValidationBlock, else warn (flag). The first blocking
+	// failure short-circuits.
+	valAction := ActionWarn
+	if policy.OutputValidationBlock {
+		valAction = ActionBlock
+	}
+	addVal := func(msg string) bool { // returns true when it blocks
+		result.Violations = append(result.Violations, Violation{
+			Rule: "output_validation", Type: "output_validation", Action: valAction, Message: msg,
+		})
+		if valAction == ActionBlock {
+			result.Passed = false
+			result.Action = ActionBlock
+			return true
+		}
+		return false
+	}
+	if policy.OutputValidateJSON && !json.Valid([]byte(current)) {
+		if addVal("response content is not valid JSON") {
+			return result
+		}
+	}
+	if policy.OutputMaxLength > 0 && len(current) > policy.OutputMaxLength {
+		if addVal(fmt.Sprintf("response exceeds max length %d", policy.OutputMaxLength)) {
+			return result
+		}
+	}
+	if policy.OutputMustMatch != "" {
+		if re, err := regexp.Compile(policy.OutputMustMatch); err == nil && !re.MatchString(current) {
+			if addVal("response does not match the required pattern") {
+				return result
+			}
+		}
+	}
+	if policy.OutputMustNotMatch != "" {
+		if re, err := regexp.Compile(policy.OutputMustNotMatch); err == nil && re.MatchString(current) {
+			if addVal("response matches a forbidden pattern") {
+				return result
+			}
+		}
+	}
 	return result
 }

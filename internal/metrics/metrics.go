@@ -186,6 +186,23 @@ var (
 	ModalityUnsupportedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_modality_unsupported_total", Help: "Requests failed fast because no configured model supports the requested modality."},
 	)
+
+	// ─── guardrails (Upgrade 13) ───
+	// type (pii/injection/topic/word_filter/custom/output_validation) and
+	// action (block/redact/warn/allow) are bounded sets. Never workspace or
+	// content as a label.
+	GuardrailTriggeredTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_guardrail_triggered_total", Help: "Guardrail rules triggered, by type and action."},
+		[]string{"type", "action"},
+	)
+	GuardrailBlocksTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_guardrail_blocks_total", Help: "Requests/responses blocked by a guardrail, by type."},
+		[]string{"type"},
+	)
+	GuardrailRedactionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_guardrail_redactions_total", Help: "Guardrail redactions applied, by type."},
+		[]string{"type"},
+	)
 )
 
 func init() {
@@ -206,6 +223,7 @@ func init() {
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
+		GuardrailTriggeredTotal, GuardrailBlocksTotal, GuardrailRedactionsTotal,
 	)
 }
 
@@ -309,3 +327,12 @@ func RoutingFallback()                   { RoutingFallbackTotal.Inc() }
 func RequestByModality(modality string) { RequestsByModalityTotal.WithLabelValues(modality).Inc() }
 func VisionRouteRedirect()              { VisionRouteRedirectsTotal.Inc() }
 func ModalityUnsupported()              { ModalityUnsupportedTotal.Inc() }
+
+// ─── guardrails helpers ───
+// Bounded {type, action} labels only — never workspace or content.
+
+func GuardrailTriggered(gtype, action string) {
+	GuardrailTriggeredTotal.WithLabelValues(gtype, action).Inc()
+}
+func GuardrailBlock(gtype string)     { GuardrailBlocksTotal.WithLabelValues(gtype).Inc() }
+func GuardrailRedaction(gtype string) { GuardrailRedactionsTotal.WithLabelValues(gtype).Inc() }
