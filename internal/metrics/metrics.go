@@ -158,6 +158,20 @@ var (
 	ROIReportDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{Name: "lens_roi_report_generation_duration_seconds", Help: "ROI report generation latency (an expensive aggregation).", Buckets: latencyBuckets},
 	)
+
+	// ─── routing intelligence (Upgrade 22) ───
+	// Bounded label: basis (quality_per_dollar | quality | none). No
+	// feature/model/workspace labels.
+	RoutingRecommendationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_routing_recommendations_total", Help: "Routing recommendations computed on the request path, by basis."},
+		[]string{"basis"},
+	)
+	RoutingIntelligenceAppliedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_routing_intelligence_applied_total", Help: "Requests whose model was changed from the default by routing intelligence."},
+	)
+	RoutingFallbackTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_routing_fallback_total", Help: "Requests that fell back to the default route (no recommendation / below sample floor)."},
+	)
 )
 
 func init() {
@@ -176,6 +190,7 @@ func init() {
 		ForecastProjectedUSD, ForecastWillExceedTotal,
 		AnomaliesDetectedTotal, AnomalyMaxFactor,
 		ROIReportsGeneratedTotal, ROIReportDuration,
+		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal,
 	)
 }
 
@@ -265,3 +280,10 @@ func ROIReportGenerated(period string) { ROIReportsGeneratedTotal.WithLabelValue
 func ObserveROIReportDuration(d time.Duration) {
 	ROIReportDuration.Observe(d.Seconds())
 }
+
+// ─── routing intelligence helpers ───
+// Bounded {basis} label on recommendations; applied/fallback are unlabeled.
+
+func RoutingRecommendation(basis string) { RoutingRecommendationsTotal.WithLabelValues(basis).Inc() }
+func RoutingIntelligenceApplied()        { RoutingIntelligenceAppliedTotal.Inc() }
+func RoutingFallback()                   { RoutingFallbackTotal.Inc() }

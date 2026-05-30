@@ -121,6 +121,12 @@ func inputBucket(tokens int) string {
 	}
 }
 
+// InputBucketFor exposes the privacy-preserving input-token bucketing so
+// consumers of the aggregated corpus (the routing advisor, Upgrade 22)
+// bucket a request's input size identically to how patterns were recorded —
+// rather than duplicating the boundaries.
+func InputBucketFor(tokens int) string { return inputBucket(tokens) }
+
 // latencyBucket categorises raw latency into the three buckets.
 func latencyBucket(latencyMs int64) string {
 	switch {
@@ -483,6 +489,54 @@ func (m *PatternMiner) GetTopInsight(ctx context.Context, feature, inputRange st
 		return nil, fmt.Errorf("pattern mining: top insight: %w", err)
 	}
 	return &p, nil
+}
+
+// ─── AggregateCohorts (routing intelligence, Upgrade 22) ───
+
+// CohortStat is one aggregated (feature, input-range, model, provider)
+// candidate across all OPTED-IN workspaces: its mean quality, how many
+// patterns backed it, and — critically for the "don't override from a
+// single workspace" rule — how many DISTINCT workspaces contributed.
+type CohortStat struct {
+	FeatureCategory    string  `json:"feature_category"`
+	InputTokenRange    string  `json:"input_token_range"`
+	ModelUsed          string  `json:"model_used"`
+	ProviderUsed       string  `json:"provider_used"`
+	AvgQuality         float64 `json:"avg_quality"`
+	SampleCount        int     `json:"sample_count"`
+	DistinctWorkspaces int     `json:"distinct_workspaces"`
+}
+
+const aggregateCohortsSQL = `
+SELECT feature_category, input_token_range, model_used, provider_used,
+       AVG(output_quality), COUNT(*), COUNT(DISTINCT workspace_id)
+FROM routing_patterns
+WHERE opted_in = TRUE
+GROUP BY feature_category, input_token_range, model_used, provider_used`
+
+// AggregateCohorts returns every candidate (feature, input-range, model,
+// provider) over the opted-in corpus in ONE query — the routing advisor
+// loads this into memory on a timer so the per-request path never hits the
+// DB. Reads only the privacy-bucketed aggregate, never raw request content.
+func (m *PatternMiner) AggregateCohorts(ctx context.Context) ([]CohortStat, error) {
+	if m.pool == nil {
+		return nil, nil
+	}
+	rows, err := m.pool.Query(ctx, aggregateCohortsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("pattern mining: aggregate cohorts: %w", err)
+	}
+	defer rows.Close()
+	var out []CohortStat
+	for rows.Next() {
+		var c CohortStat
+		if err := rows.Scan(&c.FeatureCategory, &c.InputTokenRange, &c.ModelUsed,
+			&c.ProviderUsed, &c.AvgQuality, &c.SampleCount, &c.DistinctWorkspaces); err != nil {
+			return nil, fmt.Errorf("pattern mining: scan cohort: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // ─── PatternRates ────────────────────────────────

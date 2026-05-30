@@ -65,6 +65,7 @@ import (
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/roi"
 	"github.com/talyvor/lens/internal/router"
+	"github.com/talyvor/lens/internal/routing"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/status"
 	"github.com/talyvor/lens/internal/templates"
@@ -315,6 +316,19 @@ func run() error {
 	// opt-in before earnings fire (RecordPattern's optedIn arg).
 	patternMiner := mining.NewPatternMiner(tokenLedger, pool)
 
+	// Routing intelligence (Upgrade 22). Consumes the opted-in pattern
+	// aggregate to recommend best quality-per-dollar models. OFF by default;
+	// when on, only auto-route requests are influenced. In-memory cohort
+	// cache refreshed on a timer — the per-request path never hits the DB.
+	// Cost basis reuses the alerts price table (blended $/1k tokens).
+	routingAdvisor := routing.New(
+		patternMiner,
+		func(m string) float64 { return alerts.CostUSD(m, 500, 500) },
+		routing.Config{Enabled: cfg.RoutingIntelligenceEnabled},
+	)
+	routingAdvisor.StartRefresh(ctx)
+	p.SetRoutingAdvisor(routingAdvisor)
+
 	// Token marketplace + staking (Batch 3 Phase 1).
 	marketplace := economy.NewMarketplaceStore(tokenLedger, pool)
 
@@ -513,6 +527,8 @@ func run() error {
 	apiServer.SetCostAnomalyDetector(costAnomalyDetector)
 	// ROI reporter powers the dashboard's Executive summary panel.
 	apiServer.SetROIReporter(roiReporter)
+	// Routing advisor powers the dashboard's Routing intelligence panel.
+	apiServer.SetRoutingAdvisor(routingAdvisor)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -1116,6 +1132,35 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, summary)
+		})
+
+		// ─── routing intelligence introspection (Upgrade 22) ───
+		// Read-only: lets users SEE what the advisor would pick (basis +
+		// numbers) so the intelligence isn't a black box.
+		authed.Get("/v1/workspaces/{wsID}/routing/recommendation", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			q := req.URL.Query()
+			inputRange := q.Get("input_range")
+			if inputRange == "" {
+				inputRange = mining.InputBucketMedium
+			}
+			provider := q.Get("provider")
+			if provider == "" {
+				provider = "openai"
+			}
+			var allowedModels, allowedProviders []string
+			if ws, ok := wsManager.GetWorkspace(wsID); ok {
+				allowedModels, allowedProviders = ws.AllowedModels, ws.AllowedProviders
+			}
+			rec := routingAdvisor.RecommendByRange(req.Context(), wsID, q.Get("feature"), inputRange, provider, allowedModels, allowedProviders)
+			writeJSONOK(w, http.StatusOK, rec)
+		})
+
+		authed.Get("/v1/routing/intelligence/status", func(w http.ResponseWriter, req *http.Request) {
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"status":  routingAdvisor.Status(),
+				"cohorts": routingAdvisor.Overview(),
+			})
 		})
 
 		// ─── Local endpoint registry ───────────────────
