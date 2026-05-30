@@ -270,6 +270,21 @@ func (m *ComputeMiner) NodeWorkspace(ctx context.Context, nodeID string) (string
 	return ws, nil
 }
 
+// NodeURL returns a node's reachable URL — used by PoVI Part 3 so Lens can
+// issue a challenge request to the node that produced a receipt.
+func (m *ComputeMiner) NodeURL(ctx context.Context, nodeID string) (string, error) {
+	if m.pool == nil {
+		return "", errors.New("compute mining: no pool")
+	}
+	var url string
+	if err := m.pool.QueryRow(ctx,
+		`SELECT url FROM inference_nodes WHERE id = $1`, nodeID,
+	).Scan(&url); err != nil {
+		return "", err
+	}
+	return url, nil
+}
+
 // validateNodeURL enforces http(s) + non-empty host.
 func validateNodeURL(s string) error {
 	if s == "" {

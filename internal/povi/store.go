@@ -50,17 +50,26 @@ type StoredReceipt struct {
 	MerkleRootHex string    `json:"merkle_root"`
 	Verified      bool      `json:"verified"`
 	Timestamp     int64     `json:"timestamp"`
+	LeafCount     int       `json:"leaf_count"` // committed trace length, for Part-3 sampling
 	CreatedAt     time.Time `json:"created_at"`
 }
 
 const insertReceiptSQL = `INSERT INTO povi_receipts
-    (request_id, node_id, workspace_id, model, input_tokens, output_tokens, merkle_root, verified, timestamp)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    (request_id, node_id, workspace_id, model, input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (request_id) DO NOTHING`
 
 const listReceiptsSQL = `SELECT request_id, node_id, workspace_id, model,
-    input_tokens, output_tokens, merkle_root, verified, timestamp, created_at
+    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, created_at
 FROM povi_receipts WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2`
+
+const getReceiptSQL = `SELECT request_id, node_id, workspace_id, model,
+    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, created_at
+FROM povi_receipts WHERE request_id = $1`
+
+const listVerifiedReceiptsSQL = `SELECT request_id, node_id, workspace_id, model,
+    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, created_at
+FROM povi_receipts WHERE verified = true AND leaf_count > 0 ORDER BY created_at DESC LIMIT $1`
 
 const statsSQL = `SELECT COUNT(*), COUNT(*) FILTER (WHERE verified) FROM povi_receipts`
 
@@ -73,11 +82,57 @@ func (s *Store) RecordReceipt(ctx context.Context, r Receipt, verified bool) err
 	rootHex := hex.EncodeToString(r.MerkleRoot[:])
 	if _, err := s.pool.Exec(ctx, insertReceiptSQL,
 		r.RequestID, r.NodeID, r.WorkspaceID, r.Model,
-		r.InputTokens, r.OutputTokens, rootHex, verified, r.Timestamp,
+		r.InputTokens, r.OutputTokens, rootHex, verified, r.Timestamp, r.LeafCount,
 	); err != nil {
 		return fmt.Errorf("povi: insert receipt: %w", err)
 	}
 	return nil
+}
+
+// scanReceipt scans one row in the standard column order.
+func scanReceipt(row interface{ Scan(...any) error }) (StoredReceipt, error) {
+	var sr StoredReceipt
+	err := row.Scan(&sr.RequestID, &sr.NodeID, &sr.WorkspaceID, &sr.Model,
+		&sr.InputTokens, &sr.OutputTokens, &sr.MerkleRootHex, &sr.Verified,
+		&sr.Timestamp, &sr.LeafCount, &sr.CreatedAt)
+	return sr, err
+}
+
+// GetReceipt fetches one recorded receipt by request id (for manual challenge).
+func (s *Store) GetReceipt(ctx context.Context, requestID string) (*StoredReceipt, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	sr, err := scanReceipt(s.pool.QueryRow(ctx, getReceiptSQL, requestID))
+	if err != nil {
+		return nil, err
+	}
+	return &sr, nil
+}
+
+// ListVerifiedReceipts returns recent verified receipts with a committed trace
+// — the pool the challenger samples from.
+func (s *Store) ListVerifiedReceipts(ctx context.Context, limit int) ([]StoredReceipt, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, listVerifiedReceiptsSQL, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StoredReceipt
+	for rows.Next() {
+		sr, err := scanReceipt(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sr)
+	}
+	return out, rows.Err()
 }
 
 // ListReceipts returns recent receipts for a workspace (audit view).
@@ -95,9 +150,8 @@ func (s *Store) ListReceipts(ctx context.Context, workspaceID string, limit int)
 	defer rows.Close()
 	var out []StoredReceipt
 	for rows.Next() {
-		var sr StoredReceipt
-		if err := rows.Scan(&sr.RequestID, &sr.NodeID, &sr.WorkspaceID, &sr.Model,
-			&sr.InputTokens, &sr.OutputTokens, &sr.MerkleRootHex, &sr.Verified, &sr.Timestamp, &sr.CreatedAt); err != nil {
+		sr, err := scanReceipt(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, sr)

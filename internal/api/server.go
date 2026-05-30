@@ -72,6 +72,7 @@ type Server struct {
 	guardrails       *guardrails.Engine
 	evalPipeline     *eval.Pipeline
 	poviStakes       *povi.StakeManager
+	poviChallenges   *povi.ChallengeStore
 	version          string
 	startTime        time.Time
 }
@@ -187,6 +188,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/models/recommendations", s.handleModelsRecommendations)
 	r.Get("/v1/api/eval/runs", s.handleEvalRuns)
 	r.Get("/v1/api/povi/stakes", s.handlePOVIStakes)
+	r.Get("/v1/api/povi/challenges", s.handlePOVIChallenges)
 	r.Get("/v1/api/workspaces", s.handleWorkspaces)
 	r.Get("/v1/api/alerts/circuits", s.handleAlertsCircuits)
 	r.Get("/v1/api/alerts/rules", s.handleAlertsRules)
@@ -324,6 +326,28 @@ func (s *Server) handleEvalRuns(w http.ResponseWriter, r *http.Request) {
 // Staking panel. A nil manager makes handlePOVIStakes return an empty list
 // (panel stays hidden).
 func (s *Server) SetPOVIStakeManager(m *povi.StakeManager) { s.poviStakes = m }
+
+// SetPOVIChallengeStore wires the challenge audit store for the dashboard's
+// Challenges panel. A nil store makes handlePOVIChallenges return an empty list.
+func (s *Server) SetPOVIChallengeStore(st *povi.ChallengeStore) { s.poviChallenges = st }
+
+// handlePOVIChallenges returns recent challenges (pass/fail/timeout + slashes)
+// for the Challenges panel. Off the hot path; read-only.
+func (s *Server) handlePOVIChallenges(w http.ResponseWriter, r *http.Request) {
+	if s.poviChallenges == nil {
+		writeJSON(w, http.StatusOK, []povi.Challenge{})
+		return
+	}
+	list, err := s.poviChallenges.List(r.Context(), r.URL.Query().Get("node"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []povi.Challenge{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
 
 // handlePOVIStakes returns the node stakes for the Staking panel (collateral,
 // status, slashes). Off the hot path; read-only.

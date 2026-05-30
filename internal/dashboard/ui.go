@@ -398,6 +398,20 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="challenges-panel" style="display:none">
+      <h2>Challenges <span class="pill" style="background:#3b3b52;color:#cfcfe6">PoVI proof-of-retention</span></h2>
+      <p class="muted">
+        Random Merkle-path challenges. A node that can't prove sampled positions
+        (bad path or no answer) is <span class="pill bad">slashed</span>.
+        Security is <em>economic + probabilistic</em>: expected cost of cheating
+        = P(challenge) × slash &gt; gain — not an absolute proof of honest
+        computation.
+      </p>
+      <div id="challenges">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section id="staking-panel" style="display:none">
       <h2>Staking <span class="pill" style="background:#3b3b52;color:#cfcfe6">PoVI collateral</span></h2>
       <p class="muted">
@@ -786,6 +800,34 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyChallenges(list) {
+      const panel = document.getElementById('challenges-panel');
+      if (!Array.isArray(list) || list.length === 0) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      const badge = function (r) {
+        if (r === 'pass') return '<span class="pill good">pass</span>';
+        if (r === 'fail') return '<span class="pill bad">fail</span>';
+        if (r === 'timeout') return '<span class="pill bad">timeout</span>';
+        return '<span class="pill">' + r + '</span>';
+      };
+      document.getElementById('challenges').innerHTML =
+        '<table><thead><tr><th>Challenge</th><th>Node</th><th>Request</th><th>Positions</th><th>Result</th><th>Slashed</th><th>When</th></tr></thead><tbody>' +
+        list.map(function (c) {
+          return '<tr>' +
+            '<td class="mono">' + String(c.id || '').slice(0, 12) + '</td>' +
+            '<td class="mono">' + String(c.node_id || '').slice(0, 12) + '</td>' +
+            '<td class="mono">' + String(c.request_id || '').slice(0, 12) + '</td>' +
+            '<td class="mono">' + ((c.positions || []).join(',')) + '</td>' +
+            '<td>' + badge(c.result) + '</td>' +
+            '<td class="mono">' + (c.slashed_amount ? (c.slashed_amount).toFixed(3) : '—') + '</td>' +
+            '<td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '—') + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
     function applyStakes(list) {
       const panel = document.getElementById('staking-panel');
       if (!Array.isArray(list) || list.length === 0) {
@@ -1066,6 +1108,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/catalog',                                         applyCatalog],
         ['/v1/api/eval/runs?workspace_id=default',                  applyEvalRuns],
         ['/v1/api/povi/stakes',                                     applyStakes],
+        ['/v1/api/povi/challenges',                                 applyChallenges],
         ['/v1/api/guardrails?workspace_id=default',                 applyGuardrails],
       ];
       await Promise.all(tries.map(async function (entry) {

@@ -112,6 +112,49 @@ func TestSlashStake_InsufficientLocked(t *testing.T) {
 	}
 }
 
+// THE PART-2 BLOCKER FIX (required before minting is safe): a slash burns
+// LENS, so circulating supply must DECREASE by the slashed amount. The burned
+// query must count povi_stake_slash rows, not just plain burns.
+func TestGetCirculatingSupply_CountsSlashBurns(t *testing.T) {
+	store, mock := newMockStore(t)
+	// total minted
+	mock.ExpectQuery(`amount > 0 AND type IN`).
+		WithArgs(TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine).
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(1000.0))
+	// burned: MUST include both plain burns AND stake slashes.
+	mock.ExpectQuery(`SUM\(-amount\)`).
+		WithArgs(TypeBurn, TypeStakeSlash).
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(30.0)) // 10 burn + 20 slash
+
+	got, err := store.GetCirculatingSupply(context.Background())
+	if err != nil {
+		t.Fatalf("GetCirculatingSupply: %v", err)
+	}
+	if got != 970.0 {
+		t.Errorf("circulating = %v, want 970 (1000 minted − 30 burned incl. slash)", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet (burned query must count slash burns): %v", err)
+	}
+}
+
+// GetTotalBurned must also count slash burns, so the economy-stats display
+// (GetEconomyStats = total − GetTotalBurned) stays consistent with the
+// slash-aware GetCirculatingSupply.
+func TestGetTotalBurned_CountsSlashBurns(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectQuery(`SUM\(-amount\)`).
+		WithArgs(TypeBurn, TypeStakeSlash).
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(42.0))
+	got, err := store.GetTotalBurned(context.Background())
+	if err != nil {
+		t.Fatalf("GetTotalBurned: %v", err)
+	}
+	if got != 42.0 {
+		t.Errorf("burned = %v, want 42 (burn + slash)", got)
+	}
+}
+
 func TestStakeOps_RejectNonPositive(t *testing.T) {
 	store, _ := newMockStore(t)
 	for _, fn := range []func() error{

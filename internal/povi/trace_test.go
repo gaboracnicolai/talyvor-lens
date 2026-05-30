@@ -54,6 +54,31 @@ func TestTraceCache_RetainAndSampledPaths(t *testing.T) {
 	}
 }
 
+// SampledLeafProofs bundles the leaf + its proof for each position — the node's
+// challenge answer. Each must verify against the trace's root.
+func TestTraceCache_SampledLeafProofs(t *testing.T) {
+	c := NewTraceCache(time.Minute)
+	st := [][]byte{[]byte("t0"), []byte("t1"), []byte("t2"), []byte("t3")}
+	root := MerkleRoot(st)
+	c.Put("req-1", st)
+
+	lps, err := c.SampledLeafProofs("req-1", []int{1, 3})
+	if err != nil {
+		t.Fatalf("SampledLeafProofs: %v", err)
+	}
+	if len(lps) != 2 {
+		t.Fatalf("got %d, want 2", len(lps))
+	}
+	for _, lp := range lps {
+		if !VerifyPath(root, lp.Leaf, lp.Proof) {
+			t.Errorf("position %d leaf+proof did not verify", lp.Position)
+		}
+	}
+	if string(lps[0].Leaf) != "t1" {
+		t.Errorf("leaf[0] = %q, want t1", lps[0].Leaf)
+	}
+}
+
 func TestTraceCache_MissingAndOutOfRange(t *testing.T) {
 	c := NewTraceCache(time.Minute)
 	if _, err := c.SampledPaths("nope", []int{0}); err == nil {

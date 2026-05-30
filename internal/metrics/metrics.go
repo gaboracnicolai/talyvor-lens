@@ -248,6 +248,19 @@ var (
 	POVISlashAmountTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_povi_slash_amount_total", Help: "Total LENS burned via stake slashing."},
 	)
+
+	// ─── PoVI challenge-and-slash (Token Economy Phase 1, Part 3) ───
+	// result is the bounded set {pass, fail, timeout}.
+	POVIChallengesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_povi_challenges_total", Help: "PoVI challenges issued, by result."},
+		[]string{"result"},
+	)
+	POVIChallengeSlashesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_povi_challenge_slashes_total", Help: "Slashes triggered by a failed/timed-out challenge."},
+	)
+	POVIChallengeTimeoutsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_povi_challenge_timeouts_total", Help: "Challenges where the node did not answer (treated as a failure)."},
+	)
 )
 
 func init() {
@@ -272,6 +285,7 @@ func init() {
 		EvalRunsTotal, EvalRegressionsDetectedTotal, ABSignificantResultsTotal,
 		POVIReceiptsTotal, POVIReceiptVerifyFailuresTotal, POVIProvisionalMintsTotal,
 		POVIStakeLockedTotal, POVINodesStakedGauge, POVISlashesTotal, POVISlashAmountTotal,
+		POVIChallengesTotal, POVIChallengeSlashesTotal, POVIChallengeTimeoutsTotal,
 	)
 }
 
@@ -440,3 +454,27 @@ func POVISlash(amount float64) {
 		POVISlashAmountTotal.Add(amount)
 	}
 }
+
+// ─── PoVI challenge helpers (Part 3) ───
+
+// POVIChallenge counts a challenge by result, folding unexpected values to
+// "unknown" so the label stays bounded.
+func POVIChallenge(result string) {
+	switch result {
+	case "pass", "fail", "timeout":
+	default:
+		result = "unknown"
+	}
+	POVIChallengesTotal.WithLabelValues(result).Inc()
+}
+
+// POVIChallengeSlash records a slash triggered by a failed challenge.
+func POVIChallengeSlash(amount float64) {
+	POVIChallengeSlashesTotal.Inc()
+	if amount > 0 {
+		POVISlashAmountTotal.Add(amount)
+	}
+}
+
+// POVIChallengeTimeout records a challenge the node did not answer.
+func POVIChallengeTimeout() { POVIChallengeTimeoutsTotal.Inc() }

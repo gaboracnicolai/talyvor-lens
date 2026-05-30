@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -174,6 +175,23 @@ func (c *LensClient) Register(ctx context.Context, cfg NodeConfig) (NodeState, e
 		return NodeState{}, fmt.Errorf("node: save state: %w", err)
 	}
 	return state, nil
+}
+
+// FetchChallengePubKey fetches Lens's challenge-signing public key so the node
+// can verify that PoVI Part-3 challenges are genuinely from Lens before
+// answering (and thus before revealing any trace content).
+func (c *LensClient) FetchChallengePubKey(ctx context.Context) (ed25519.PublicKey, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/v1/povi/pubkey", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Ed25519PubKey string `json:"ed25519_pubkey"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		return nil, err
+	}
+	return povi.DecodePublicKey(out.Ed25519PubKey)
 }
 
 // SubmitReceipt pushes a signed PoVI receipt to Lens for verification +

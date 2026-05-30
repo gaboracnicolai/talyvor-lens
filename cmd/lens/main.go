@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -319,6 +320,14 @@ func run() error {
 	// cross-workspace request gets credited automatically.
 	computeMiner := mining.NewComputeMiner(tokenLedger, pool)
 	localRouterMulti.SetOnRequestServed(func(nodeID, requesterWS string, tokens int, latencyMs int64) {
+		// RETIREMENT SWITCH (PoVI Part 3): this is the LEGACY trust-based mint
+		// (mints LENS per served request, no receipt). With Parts 1+2+3 in
+		// place, receipt-minting is now economically safe; an operator can set
+		// LENS_TRUSTFUL_COMPUTE_MINT_ENABLED=false to retire this blind mint.
+		// Default TRUE preserves current behavior — do not flip by default.
+		if !cfg.TrustfulComputeMintEnabled {
+			return
+		}
 		if err := computeMiner.RecordServedRequest(ctx, nodeID, requesterWS, tokens, latencyMs); err != nil {
 			logger.Warn("compute mining: record served request failed",
 				slog.String("node_id", nodeID), slog.String("err", err.Error()))
@@ -356,8 +365,22 @@ func run() error {
 	// (still OFF by default).
 	poviProcessor := povi.NewProcessor(poviStore, tokenLedger, poviLookup, stakeEligible, cfg.POVIMintingEnabled)
 	if cfg.POVIMintingEnabled {
-		logger.Warn("PoVI PROVISIONAL minting is ENABLED (LENS_POVI_MINTING_ENABLED) — UNSAFE without challenge-and-slash (Part 3); receipts can mint LENS against a fabricated trace even with staking")
+		logger.Warn("PoVI receipt minting is ENABLED (LENS_POVI_MINTING_ENABLED). Now SAFE only because Parts 1+2+3 are in place (verified receipt + staked node + challenge-and-slash). Ensure LENS_POVI_CHALLENGE_RATE > 0 so cheating is deterred.")
 	}
+
+	// PoVI challenge-and-slash (Part 3): the keystone. Lens randomly challenges
+	// nodes to prove sampled Merkle paths; failures slash stake (Part 2),
+	// making receipt-minting economically safe. Lens signs challenges with its
+	// own ed25519 key (symmetric to Part 1's node-signed receipts); the node
+	// verifies + answers from its retained trace.
+	lensChallengePub, lensChallengePriv := loadOrGenChallengeKey(cfg.POVIChallengeKey, logger)
+	challengeClient := povi.NewChallengeClient(lensChallengePriv, 10*time.Second)
+	challengeStore := povi.NewChallengeStore(pool)
+	poviChallenger := povi.NewChallenger(
+		computeMiner.NodeURL, challengeClient, poviStakeManager, challengeStore,
+		4, cfg.POVISlashFraction)
+	challengeScheduler := povi.NewChallengeScheduler(poviChallenger, poviStore, cfg.POVIChallengeRate)
+	go challengeScheduler.StartScheduler(ctx, time.Minute)
 
 	// Embedding mining (Batch 2 Item 3). Shares the ledger;
 	// proxy wires RecordEmbeddingsServed in the semantic-cache
@@ -592,6 +615,7 @@ func run() error {
 	apiServer.SetGuardrailsEngine(guardrailsEngine)
 	apiServer.SetEvalPipeline(evalPipeline)
 	apiServer.SetPOVIStakeManager(poviStakeManager)
+	apiServer.SetPOVIChallengeStore(challengeStore)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -2541,6 +2565,74 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, status)
 		})
 
+		// ── PoVI challenge-and-slash (Part 3). Lens publishes its challenge
+		// pubkey for nodes to pin; audits challenges; allows a manual challenge
+		// (admin/testing); and reports the honest economic-deterrent summary.
+		authed.Get("/v1/povi/pubkey", func(w http.ResponseWriter, req *http.Request) {
+			writeJSONOK(w, http.StatusOK, map[string]string{
+				"ed25519_pubkey": povi.EncodePublicKey(lensChallengePub),
+				"purpose":        "PoVI Part-3 challenge signing — pin this to verify challenges are from Lens",
+			})
+		})
+
+		authed.Get("/v1/povi/challenges", func(w http.ResponseWriter, req *http.Request) {
+			list, err := challengeStore.List(req.Context(), req.URL.Query().Get("node"))
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, list)
+		})
+
+		authed.Get("/v1/povi/challenges/{id}", func(w http.ResponseWriter, req *http.Request) {
+			ch, err := challengeStore.Get(req.Context(), chi.URLParam(req, "id"))
+			if err != nil {
+				writeJSONErr(w, http.StatusNotFound, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, ch)
+		})
+
+		authed.Post("/v1/povi/challenges/issue", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				RequestID string `json:"request_id"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			rec, err := poviStore.GetReceipt(req.Context(), in.RequestID)
+			if err != nil || rec == nil {
+				writeJSONErr(w, http.StatusNotFound, "receipt not found")
+				return
+			}
+			ch, err := poviChallenger.Challenge(req.Context(), *rec)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, ch)
+		})
+
+		authed.Get("/v1/povi/security/status", func(w http.ResponseWriter, req *http.Request) {
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"minting_enabled":         cfg.POVIMintingEnabled,
+				"trustful_compute_mint":   cfg.TrustfulComputeMintEnabled,
+				"challenge_rate":          cfg.POVIChallengeRate,
+				"slash_fraction":          cfg.POVISlashFraction,
+				"positions_per_challenge": poviChallenger.PositionsPerChallenge(),
+				"min_stake":               cfg.POVIMinStake,
+				"model": "PROBABILISTIC, NOT ABSOLUTE. Security is economic: a rational node with stake at risk " +
+					"finds cheating unprofitable when expected_cost = P(challenge) × slash_amount > gain_from_cheating. " +
+					"A low challenge rate leaves some bad receipts unchallenged — this is NOT a cryptographic guarantee " +
+					"of honest computation; receipts are attestation + tamper-evidence, and challenge-and-slash makes " +
+					"cheating economically irrational, not impossible.",
+				"retirement_note": "With Parts 1+2+3 in place, receipt minting is now SAFE to enable " +
+					"(LENS_POVI_MINTING_ENABLED=true) — operator decision, default OFF. Once enabled, retire the legacy " +
+					"trust-mint with LENS_TRUSTFUL_COMPUTE_MINT_ENABLED=false.",
+			})
+		})
+
 		// Guardrails: per-workspace safety policy + pre-flight check.
 		// Policy changes apply immediately; the engine reads on every
 		// proxy request and there is no per-request policy cache.
@@ -2955,6 +3047,30 @@ func run() error {
 	}
 
 	return nil
+}
+
+// loadOrGenChallengeKey returns Lens's ed25519 challenge-signing keypair. A
+// base64 seed/private key (LENS_POVI_CHALLENGE_KEY) gives a STABLE key so a Lens
+// restart doesn't invalidate the pubkey nodes have pinned (which would make
+// honest nodes fail challenges). Empty → ephemeral key + a loud warning.
+func loadOrGenChallengeKey(b64 string, logger *slog.Logger) (ed25519.PublicKey, ed25519.PrivateKey) {
+	if b64 != "" {
+		if raw, err := base64.StdEncoding.DecodeString(b64); err == nil {
+			switch len(raw) {
+			case ed25519.SeedSize:
+				priv := ed25519.NewKeyFromSeed(raw)
+				return priv.Public().(ed25519.PublicKey), priv
+			case ed25519.PrivateKeySize:
+				priv := ed25519.PrivateKey(raw)
+				return priv.Public().(ed25519.PublicKey), priv
+			}
+		}
+		logger.Warn("LENS_POVI_CHALLENGE_KEY is set but not a valid base64 ed25519 seed/key — generating an ephemeral key instead")
+	} else {
+		logger.Warn("PoVI challenge key generated EPHEMERALLY — set LENS_POVI_CHALLENGE_KEY (base64 ed25519 seed) in production; a restart otherwise invalidates pinned node pubkeys and would fail honest challenges")
+	}
+	pub, priv, _ := povi.GenerateNodeKey()
+	return pub, priv
 }
 
 func writeJSONOK(w http.ResponseWriter, status int, body any) {
