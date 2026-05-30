@@ -172,6 +172,20 @@ var (
 	RoutingFallbackTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_routing_fallback_total", Help: "Requests that fell back to the default route (no recommendation / below sample floor)."},
 	)
+
+	// ─── vision / multimodal routing (Upgrade 15) ───
+	// modality is a bounded, low-cardinality label (text / image / audio /
+	// document / comma-joined sets). No per-model or per-workspace labels.
+	RequestsByModalityTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_requests_by_modality_total", Help: "Requests by detected modality."},
+		[]string{"modality"},
+	)
+	VisionRouteRedirectsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_vision_route_redirects_total", Help: "Requests redirected to a modality-capable model (auto-route)."},
+	)
+	ModalityUnsupportedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_modality_unsupported_total", Help: "Requests failed fast because no configured model supports the requested modality."},
+	)
 )
 
 func init() {
@@ -191,6 +205,7 @@ func init() {
 		AnomaliesDetectedTotal, AnomalyMaxFactor,
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal,
+		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 	)
 }
 
@@ -287,3 +302,10 @@ func ObserveROIReportDuration(d time.Duration) {
 func RoutingRecommendation(basis string) { RoutingRecommendationsTotal.WithLabelValues(basis).Inc() }
 func RoutingIntelligenceApplied()        { RoutingIntelligenceAppliedTotal.Inc() }
 func RoutingFallback()                   { RoutingFallbackTotal.Inc() }
+
+// ─── vision / multimodal helpers ───
+// Bounded {modality} label on the counter; redirects/unsupported unlabeled.
+
+func RequestByModality(modality string) { RequestsByModalityTotal.WithLabelValues(modality).Inc() }
+func VisionRouteRedirect()              { VisionRouteRedirectsTotal.Inc() }
+func ModalityUnsupported()              { ModalityUnsupportedTotal.Inc() }

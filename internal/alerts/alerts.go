@@ -183,8 +183,8 @@ func providerForModel(model string) string {
 }
 
 const insertTokenEventSQL = `INSERT INTO token_events
-  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 
 // RecordSpend takes a `prompt` (or already-redacted equivalent) so the
 // cache warmer can later JOIN prompt_embeddings against token_events to
@@ -199,12 +199,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 // per-workspace spend cap was summing globally; passing it here makes that
 // cap — and the new workspace-scoped budgets — truly per-workspace. See
 // migration 0028.
-func (a *AlertManager) RecordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID string) error {
+//
+// modality + estimated land on this same single write (migration 0029) so
+// budgets/forecast/anomaly/ROI can reflect image cost. modality is the
+// canonical label ("text" / "image" / "image,audio" …); estimated is true
+// when the cost is a documented estimate rather than exact accounting
+// (multimodal input tokens are estimated).
+func (a *AlertManager) RecordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool) error {
 	cost := costUSD(model, inputTokens, outputTokens)
 	provider := providerForModel(model)
+	if modality == "" {
+		modality = "text"
+	}
 
 	if _, err := a.pool.Exec(ctx, insertTokenEventSQL,
-		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, cost, prompt, sessionID, requestID,
+		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, cost, prompt, sessionID, requestID, modality, estimated,
 	); err != nil {
 		return fmt.Errorf("alerts: insert token_event: %w", err)
 	}

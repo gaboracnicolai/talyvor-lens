@@ -38,6 +38,7 @@ import (
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/quality"
@@ -64,7 +65,7 @@ const (
 type alertSink interface {
 	IsCircuitOpen(team, feature string) bool
 	GetDowngradeModel(provider, model string) string
-	RecordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID string) error
+	RecordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool) error
 }
 
 // budgetGate is the subset of *budgets.Service the proxy hot path touches.
@@ -345,6 +346,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
+
+	// Modality detection (Upgrade 15). Cheap + structural — inspects content
+	// block types only, never decodes the base64 image/audio bytes. Drives
+	// capability-aware routing below and the modality dimension on the spend
+	// record. Always recorded so the dashboard sees the request mix.
+	modSet := modality.Detect(body)
+	metrics.RequestByModality(modSet.Label())
+	w.Header().Set("X-Talyvor-Modality", modSet.Label())
 
 	// Batch dispatch: when the caller flips X-Talyvor-Batch we route the
 	// whole request through Anthropic's async batches endpoint instead of
@@ -658,8 +667,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// Local-model short-circuit: simple queries from the default
 	// workspace can be served by a local Ollama instance for free. On
 	// any failure we fall through to the regular cloud path — local
-	// routing must never break the main request.
-	if p.tryLocalRouting(w, ctx, cfg.name, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt) {
+	// routing must never break the main request. Multimodal requests
+	// skip local entirely (the local text models can't serve images) and
+	// fall through to the capability-aware cloud path below.
+	if !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.name, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt) {
 		return
 	}
 
@@ -668,6 +679,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// assembled response after the upstream stream completes. We skip the
 	// compression + routing path for streams since that would rewrite the
 	// body and break wire-compatibility with the live SSE.
+	// Streaming skips the routing/capability path below (to preserve SSE
+	// wire-compatibility — it must not rewrite the body), so the capability
+	// gate is enforced here: a multimodal stream to a model that can't serve
+	// the modality fails fast rather than streaming a wrong answer.
+	if streaming && modSet.Multimodal() && !modality.Supports(model, modSet) {
+		metrics.ModalityUnsupported()
+		writeError(w, http.StatusUnprocessableEntity,
+			"streaming request contains "+modSet.Label()+" content but model "+model+" does not support it")
+		return
+	}
 	if streaming {
 		sh := &StreamHandler{proxy: p}
 		var serr error
@@ -745,6 +766,40 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if p.alertManager != nil && p.alertManager.IsCircuitOpen(team, feature) {
 		circuitOpen = true
 		upstreamModel = p.alertManager.GetDowngradeModel(cfg.name, model)
+	}
+
+	// Capability hard constraint (Upgrade 15). A multimodal request MUST go
+	// to a model that can serve the modality — unlike routing intelligence
+	// (advisory), this is a hard gate on the FINAL model, and we never
+	// silently strip the content and send text-only:
+	//   - auto-route + incapable → redirect to the cheapest capable allowed
+	//     model of this provider; if none → fail fast 422.
+	//   - pinned + incapable → fail fast 422 (never silently serve an image
+	//     at a model the caller explicitly pinned that can't see it).
+	if modSet.Multimodal() && !modality.Supports(upstreamModel, modSet) {
+		var allowedModels []string
+		if ws, ok := p.workspaceManager.GetWorkspace(wsID); ok {
+			allowedModels = ws.AllowedModels
+		}
+		if isAutoRoute(r, model) {
+			capable, ok := modality.CapableModel(cfg.name, modSet, allowedModels)
+			if !ok {
+				metrics.ModalityUnsupported()
+				writeError(w, http.StatusUnprocessableEntity,
+					"request contains "+modSet.Label()+" content but no configured "+cfg.name+" model supports it")
+				return
+			}
+			w.Header().Set("X-Talyvor-Vision-Redirect", upstreamModel+"→"+capable)
+			upstreamModel = capable
+			overrideModel = capable
+			overrideReason = "modality redirect: " + modSet.Label() + " requires a capable model"
+			metrics.VisionRouteRedirect()
+		} else {
+			metrics.ModalityUnsupported()
+			writeError(w, http.StatusUnprocessableEntity,
+				"request contains "+modSet.Label()+" content but the requested model "+model+" does not support it")
+			return
+		}
 	}
 
 	upstreamBodyOut, err := rebuildBody(body, upstreamModel, compressedPrompt)
@@ -868,13 +923,23 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// LLM (the upstream model, after any router or circuit override).
 		// Fire-and-forget — alert manager failures must never break a
 		// successful request.
+		// For multimodal requests len(prompt)/4 would count the base64 image
+		// blob (extractPrompt flattens blocks into the prompt). Use a
+		// modality-aware estimate (text chars + a per-image estimate) and
+		// mark the row estimated so budgets/ROI don't over-trust it.
 		inT, outT := len(prompt)/4, len(upstreamBody)/4
+		costEstimated := false
+		if modSet.Multimodal() {
+			inT = modSet.EstimateInputTokens()
+			costEstimated = true
+		}
 		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
 			// spendPrompt is "" in metadata mode (no prompt text persisted)
 			// and the redacted form in full mode when PII was detected.
 			// wsID + sprint travel on this single billing write so spend is
-			// attributable per workspace / team / sprint (see migration 0028).
-			if err := p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID); err != nil {
+			// attributable per workspace / team / sprint (see migration 0028);
+			// modality + estimated ride along too (migration 0029).
+			if err := p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated); err != nil {
 				slog.Warn("alerts: RecordSpend failed",
 					slog.String("err", err.Error()),
 				)
@@ -994,7 +1059,9 @@ func (p *Proxy) tryLocalRouting(
 	// cloud traffic.
 	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected)
 	if p.alertManager != nil {
-		_ = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt, sessionID, requestID)
+		// Local routing is text-only (multimodal skips it upstream), so the
+		// spend row is "text" and exact (cost 0).
+		_ = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt, sessionID, requestID, "text", false)
 	}
 	metrics.RequestsTotal.WithLabelValues(provider, "local").Inc()
 	return true
