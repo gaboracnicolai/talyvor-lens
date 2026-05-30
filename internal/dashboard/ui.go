@@ -458,6 +458,18 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section>
+      <h2>Model catalog <span class="pill" style="background:#3b3b52;color:#cfcfe6">single source</span></h2>
+      <p class="muted">
+        The authoritative model registry — provider, pricing ($/1M tokens),
+        capabilities, and context limits. Cost attribution, capability
+        routing, and introspection all read from here.
+      </p>
+      <div id="model-catalog">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section id="guardrails-panel" style="display:none">
       <h2>Guardrails <span class="pill" style="background:#3b3b52;color:#cfcfe6">safety</span></h2>
       <p class="muted">
@@ -899,6 +911,29 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyCatalog(models) {
+      const root = document.getElementById('model-catalog');
+      if (!Array.isArray(models) || models.length === 0) {
+        root.innerHTML = '<span class="muted">No catalog data.</span>';
+        return;
+      }
+      const yn = function (b) { return b ? '✓' : '—'; };
+      root.innerHTML =
+        '<table><thead><tr><th>Model</th><th>Provider</th><th>$/1M in</th><th>$/1M out</th><th>Vision</th><th>Audio</th><th>Doc</th><th>Context</th></tr></thead><tbody>' +
+        models.map(function (m) {
+          const c = m.capabilities || {};
+          return '<tr>' +
+            '<td class="mono">' + m.id + (m.deprecated ? ' <span class="pill warn">deprecated</span>' : '') + '</td>' +
+            '<td>' + m.provider + '</td>' +
+            '<td class="mono">' + fmtUSD(m.input_per_1m) + '</td>' +
+            '<td class="mono">' + fmtUSD(m.output_per_1m) + '</td>' +
+            '<td>' + yn(c.vision) + '</td><td>' + yn(c.audio) + '</td><td>' + yn(c.document) + '</td>' +
+            '<td class="mono">' + (m.context_tokens ? (m.context_tokens / 1000) + 'K' : '—') + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</tbody></table>';
+    }
+
     function applyGuardrails(d) {
       const panel = document.getElementById('guardrails-panel');
       // Hidden when the output stage is disabled.
@@ -946,6 +981,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/roi/summary?workspace_id=default',                applyROISummary],
         ['/v1/api/routing/intelligence',                            applyRoutingIntel],
         ['/v1/api/modality/capabilities',                           applyModalityCaps],
+        ['/v1/api/catalog',                                         applyCatalog],
         ['/v1/api/guardrails?workspace_id=default',                 applyGuardrails],
       ];
       await Promise.all(tries.map(async function (entry) {

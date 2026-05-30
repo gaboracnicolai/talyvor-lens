@@ -40,6 +40,7 @@ import (
 	"github.com/talyvor/lens/internal/costanomaly"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
@@ -197,6 +198,19 @@ func run() error {
 	go anomalyDetector.StartMonitor(ctx, nc, 1*time.Hour)
 	statusPage := status.New(pool, redisClient, nc, "0.1.0")
 	go statusPage.StartCacher(ctx, 60*time.Second)
+	// Model-catalog runtime overrides (Upgrade 16): an operator can add or
+	// reprice models without a rebuild via LENS_MODEL_CATALOG_OVERRIDES (a
+	// JSON array of catalog.Model), layered on top of the embedded default.
+	if raw := os.Getenv("LENS_MODEL_CATALOG_OVERRIDES"); raw != "" {
+		var overrides []catalog.Model
+		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+			logger.Warn("catalog: invalid LENS_MODEL_CATALOG_OVERRIDES", slog.String("err", err.Error()))
+		} else {
+			catalog.LoadOverrides(overrides)
+			logger.Info("catalog: applied model overrides", slog.Int("count", len(overrides)))
+		}
+	}
+
 	guardrailsEngine := guardrails.New(piiDetector, injectionDetector)
 	// Output-stage guardrails (Upgrade 13) are OFF by default; when off the
 	// input guardrails behave exactly as today and no output guardrails run.
@@ -1174,6 +1188,22 @@ func run() error {
 		// routing isn't a black box.
 		authed.Get("/v1/models/capabilities", func(w http.ResponseWriter, req *http.Request) {
 			writeJSONOK(w, http.StatusOK, modality.CapabilityMap())
+		})
+
+		// ─── model catalog (Upgrade 16) ───
+		// The single source of truth for models — provider, pricing,
+		// capabilities, context. Read-only introspection so pricing/caps are
+		// transparent, not hidden.
+		authed.Get("/v1/catalog/models", func(w http.ResponseWriter, req *http.Request) {
+			writeJSONOK(w, http.StatusOK, catalog.All())
+		})
+		authed.Get("/v1/catalog/models/{id}", func(w http.ResponseWriter, req *http.Request) {
+			m, ok := catalog.Get(chi.URLParam(req, "id"))
+			if !ok {
+				writeJSONErr(w, http.StatusNotFound, "model not in catalog")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, m)
 		})
 
 		// ─── Local endpoint registry ───────────────────
