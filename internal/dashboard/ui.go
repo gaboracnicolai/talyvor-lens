@@ -398,6 +398,20 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="eval-panel" style="display:none">
+      <h2>Evaluation <span class="pill" style="background:#3b3b52;color:#cfcfe6">golden datasets</span></h2>
+      <p class="muted">
+        Recent eval runs — pass rate against the 80% gate. Runs below the gate
+        are flagged <span class="pill bad">⚠</span>. Per-case regressions
+        (vs the prior run on the same dataset) and A/B significance verdicts —
+        with an honest <em>“inconclusive”</em> when the sample is too small to
+        call a winner — are served on demand by the eval API.
+      </p>
+      <div id="eval-runs">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section>
       <h2>Anomalies</h2>
       <div id="anomalies">
@@ -758,6 +772,33 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyEvalRuns(list) {
+      const panel = document.getElementById('eval-panel');
+      // Hidden entirely when there are no eval runs.
+      if (!Array.isArray(list) || list.length === 0) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      document.getElementById('eval-runs').innerHTML =
+        '<table><thead><tr><th>Run</th><th>When</th><th>Tests</th><th>Passed</th><th>Failed</th><th>Pass rate</th><th>Cost</th></tr></thead><tbody>' +
+        list.map(function (r) {
+          const rate = r.pass_rate || 0;
+          const ratePill = rate >= 0.8
+            ? '<span class="pill good">' + (rate * 100).toFixed(0) + '%</span>'
+            : '<span class="pill bad">' + (rate * 100).toFixed(0) + '% ⚠</span>';
+          return '<tr>' +
+            '<td class="mono">' + String(r.run_id || '').slice(0, 8) + '</td>' +
+            '<td>' + (r.created_at ? new Date(r.created_at).toLocaleString() : '—') + '</td>' +
+            '<td class="mono">' + (r.total_tests || 0) + '</td>' +
+            '<td class="mono">' + (r.passed || 0) + '</td>' +
+            '<td class="mono">' + (r.failed || 0) + '</td>' +
+            '<td>' + ratePill + '</td>' +
+            '<td class="mono">' + fmtUSD(r.total_cost_usd || 0) + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
     function applyForecast(list) {
       const panel = document.getElementById('forecast-panel');
       // Hidden when there are no budgets to project (or no data).
@@ -982,6 +1023,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/routing/intelligence',                            applyRoutingIntel],
         ['/v1/api/modality/capabilities',                           applyModalityCaps],
         ['/v1/api/catalog',                                         applyCatalog],
+        ['/v1/api/eval/runs?workspace_id=default',                  applyEvalRuns],
         ['/v1/api/guardrails?workspace_id=default',                 applyGuardrails],
       ];
       await Promise.all(tries.map(async function (entry) {
