@@ -56,6 +56,7 @@ import (
 	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
+	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/prompts"
@@ -1161,6 +1162,13 @@ func run() error {
 				"status":  routingAdvisor.Status(),
 				"cohorts": routingAdvisor.Overview(),
 			})
+		})
+
+		// ─── model capabilities (Upgrade 15) ───
+		// Which models support which modalities — so capability-aware
+		// routing isn't a black box.
+		authed.Get("/v1/models/capabilities", func(w http.ResponseWriter, req *http.Request) {
+			writeJSONOK(w, http.StatusOK, modality.CapabilityMap())
 		})
 
 		// ─── Local endpoint registry ───────────────────

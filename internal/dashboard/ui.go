@@ -447,6 +447,18 @@ const dashboardHTML = `<!DOCTYPE html>
     </section>
 
     <section>
+      <h2>Model capabilities <span class="pill" style="background:#3b3b52;color:#cfcfe6">multimodal</span></h2>
+      <p class="muted">
+        Which models can serve which modalities. A multimodal request is
+        routed to a capable model (or fails fast with a clear error) — never
+        silently answered from text. Unknown models are treated as text-only.
+      </p>
+      <div id="modality-caps">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
+    <section>
       <h2>Git attribution</h2>
       <p class="muted">
         Workspace-scoped Git rollups (branch, PR, commit, author, repo)
@@ -856,6 +868,23 @@ const dashboardHTML = `<!DOCTYPE html>
       document.getElementById('routing-intel').innerHTML = meta + body;
     }
 
+    function applyModalityCaps(map) {
+      const models = Object.keys(map || {}).sort();
+      const yn = function (b) { return b ? '<span class="pill good">✓</span>' : '<span class="muted">—</span>'; };
+      const root = document.getElementById('modality-caps');
+      if (models.length === 0) {
+        root.innerHTML = '<span class="muted">No capability data.</span>';
+        return;
+      }
+      root.innerHTML =
+        '<table><thead><tr><th>Model</th><th>Vision</th><th>Audio</th><th>Document</th></tr></thead><tbody>' +
+        models.map(function (m) {
+          const c = map[m] || {};
+          return '<tr><td class="mono">' + m + '</td><td>' + yn(c.vision) + '</td><td>' + yn(c.audio) + '</td><td>' + yn(c.document) + '</td></tr>';
+        }).join('') +
+        '</tbody></table>';
+    }
+
     async function refresh() {
       const alertEl = document.getElementById('api-alert');
       let anyFail = false;
@@ -874,6 +903,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/costanomalies?workspace_id=default',              applyCostOutliers],
         ['/v1/api/roi/summary?workspace_id=default',                applyROISummary],
         ['/v1/api/routing/intelligence',                            applyRoutingIntel],
+        ['/v1/api/modality/capabilities',                           applyModalityCaps],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];

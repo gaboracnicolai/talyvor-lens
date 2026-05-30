@@ -25,6 +25,7 @@ import (
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
+	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/roi"
 	"github.com/talyvor/lens/internal/routing"
 	"github.com/talyvor/lens/internal/metrics"
@@ -188,6 +189,13 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/costanomalies", s.handleCostAnomalies)
 	r.Get("/v1/api/roi/summary", s.handleROISummary)
 	r.Get("/v1/api/routing/intelligence", s.handleRoutingIntelligence)
+	r.Get("/v1/api/modality/capabilities", s.handleModalityCapabilities)
+}
+
+// handleModalityCapabilities returns the model→capabilities map for the
+// dashboard's capability view. Static, no state.
+func (s *Server) handleModalityCapabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, modality.CapabilityMap())
 }
 
 // SetBudgetStore wires the budgets store used by the dashboard's Budgets
