@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/talyvor/lens/internal/povi"
 )
 
 // InferenceServer is the small HTTP layer in front of the local
@@ -26,12 +28,26 @@ type InferenceServer struct {
 	secret   string
 	cfg      NodeConfig
 
+	// signer (optional) produces a signed PoVI receipt per served request;
+	// lens (optional) submits it to Lens for verification + audit. Both nil
+	// for a node without a signing key.
+	signer *receiptSigner
+	lens   *LensClient
+
 	mu             sync.Mutex
 	activeRequests int64
 	startedAt      time.Time
 	// modelsCache is refreshed each /models call (kept simple —
 	// the heartbeat will re-fetch every 30s anyway).
 	modelsCache []string
+}
+
+// SetReceiptSigner wires PoVI receipt production. A nil signer disables
+// receipts (older nodes); a nil lens disables the async submit (the receipt is
+// still returned in the response).
+func (s *InferenceServer) SetReceiptSigner(rs *receiptSigner, lens *LensClient) {
+	s.signer = rs
+	s.lens = lens
 }
 
 func NewInferenceServer(provider Provider, secret string, cfg NodeConfig) *InferenceServer {
@@ -89,6 +105,26 @@ func (s *InferenceServer) handleInference(w http.ResponseWriter, r *http.Request
 		http.Error(w, "inference failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+
+	// PoVI: produce a signed receipt attesting to this response (attestation +
+	// tamper-evidence, NOT proof of honest computation). Returned in the body
+	// and best-effort submitted to Lens off the response path.
+	if s.signer != nil {
+		reqID := r.Header.Get("X-Request-ID")
+		if reqID == "" {
+			reqID = "req_" + generateSecret()
+		}
+		rec := s.signer.sign(reqID, req.Model, resp.InputTokens, resp.OutputTokens, resp.Text)
+		resp.Receipt = &rec
+		if s.lens != nil {
+			go func(rc povi.Receipt, ws string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = s.lens.SubmitReceipt(ctx, ws, rc)
+			}(rec, s.signer.workspaceID)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)

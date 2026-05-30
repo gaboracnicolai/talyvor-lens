@@ -117,6 +117,14 @@ func runStart(args []string) {
 	log.Printf("🪪 Node ID: %s", state.NodeID)
 
 	srv := NewInferenceServer(provider, state.NodeSecret, cfg)
+	// Wire PoVI receipt production (Token Economy Phase 1, Part 1). A node
+	// without a signing key simply produces no receipts.
+	if signer, serr := newReceiptSigner(state); serr != nil {
+		log.Printf("node: PoVI receipt signing disabled: %v", serr)
+	} else if signer != nil {
+		srv.SetReceiptSigner(signer, client)
+		log.Printf("🔏 PoVI receipts enabled (attestation + tamper-evidence; minting stays OFF until stake+challenge)")
+	}
 	httpServer, _ := srv.ListenAndServe(cfg.Port)
 
 	// Heartbeat loop — runs until ctx is cancelled by the

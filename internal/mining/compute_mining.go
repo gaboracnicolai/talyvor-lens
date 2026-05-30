@@ -76,6 +76,11 @@ type InferenceNode struct {
 	Active        bool      `json:"active"`
 	Verified      bool      `json:"verified"`
 	CreatedAt     time.Time `json:"created_at"`
+	// Ed25519PubKey is the node's registered ed25519 public key (base64) for
+	// PoVI receipt verification (Token Economy Phase 1, Part 1). Optional —
+	// nodes from before PoVI have none, and a node without a pubkey simply
+	// can't have its receipts verified.
+	Ed25519PubKey string `json:"ed25519_pubkey,omitempty"`
 }
 
 // NodeMetrics mirrors one row of node_metrics.
@@ -209,11 +214,11 @@ func (m *ComputeMiner) RegisterNode(ctx context.Context, in InferenceNode) (*Inf
 
 	row := m.pool.QueryRow(ctx, `
 		INSERT INTO inference_nodes
-			(workspace_id, url, provider, models, gpu_type, max_concurrent, price_per_token)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+			(workspace_id, url, provider, models, gpu_type, max_concurrent, price_per_token, ed25519_pubkey)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''))
 		RETURNING id, created_at`,
 		in.WorkspaceID, in.URL, in.Provider, in.Models,
-		in.GPUType, in.MaxConcurrent, in.PricePerToken,
+		in.GPUType, in.MaxConcurrent, in.PricePerToken, in.Ed25519PubKey,
 	)
 	if err := row.Scan(&in.ID, &in.CreatedAt); err != nil {
 		return nil, fmt.Errorf("compute mining: insert node: %w", err)
@@ -228,6 +233,25 @@ func (m *ComputeMiner) RegisterNode(ctx context.Context, in InferenceNode) (*Inf
 	// Async verification — don't block the registration response.
 	go m.verifyNodeAsync(in.ID, in.URL, in.Provider)
 	return &in, nil
+}
+
+// NodePubKey returns a node's registered ed25519 public key (base64) for PoVI
+// receipt verification. Errors when the node is unknown or has no pubkey on
+// file (a receipt from such a node simply can't be verified).
+func (m *ComputeMiner) NodePubKey(ctx context.Context, nodeID string) (string, error) {
+	if m.pool == nil {
+		return "", errors.New("compute mining: no pool")
+	}
+	var pub *string
+	if err := m.pool.QueryRow(ctx,
+		`SELECT ed25519_pubkey FROM inference_nodes WHERE id = $1`, nodeID,
+	).Scan(&pub); err != nil {
+		return "", err
+	}
+	if pub == nil || *pub == "" {
+		return "", fmt.Errorf("compute mining: node %q has no registered pubkey", nodeID)
+	}
+	return *pub, nil
 }
 
 // validateNodeURL enforces http(s) + non-empty host.
