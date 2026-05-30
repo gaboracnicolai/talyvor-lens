@@ -248,6 +248,52 @@ func (p *Proxy) setAlertSink(sink alertSink) {
 	p.alertManager = sink
 }
 
+// extractResponseContent pulls the assistant text out of an OpenAI-shape
+// response (forwardWithFallback normalizes every provider to this shape), so
+// the output guardrails inspect the model's actual output, not the JSON
+// envelope. Returns "" when the shape doesn't match.
+func extractResponseContent(body []byte) string {
+	var r struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(body, &r) == nil && len(r.Choices) > 0 {
+		return r.Choices[0].Message.Content
+	}
+	return ""
+}
+
+// replaceResponseContent rewrites the first choice's message content (used to
+// re-inject redacted output). Returns the body unchanged when the shape
+// doesn't match, so a redaction can never corrupt the response envelope.
+func replaceResponseContent(body []byte, newContent string) []byte {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	choices, ok := m["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return body
+	}
+	c0, ok := choices[0].(map[string]any)
+	if !ok {
+		return body
+	}
+	msg, ok := c0["message"].(map[string]any)
+	if !ok {
+		return body
+	}
+	msg["content"] = newContent
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // isAutoRoute reports whether a request cedes its model choice to the
 // routing advisor — either the "auto" pseudo-model (a convention developers
 // recognise from model-router gateways) or an explicit X-Talyvor-Auto-Route
@@ -561,7 +607,21 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if p.guardrails != nil {
 		gr := p.guardrails.Check(ctx, wsID, prompt, body)
 		w.Header().Set("X-Talyvor-Risk-Score", strconv.FormatFloat(gr.RiskScore, 'f', 2, 64))
+		// Per-type/action guardrail metrics (Upgrade 13). Bounded labels.
+		for _, v := range gr.Violations {
+			metrics.GuardrailTriggered(v.Type, string(v.Action))
+			if v.Action == guardrails.ActionRedact {
+				metrics.GuardrailRedaction(v.Type)
+			}
+		}
 		if !gr.Passed {
+			blockType := "guardrail"
+			for _, v := range gr.Violations {
+				if v.Action == guardrails.ActionBlock {
+					blockType = v.Type
+				}
+			}
+			metrics.GuardrailBlock(blockType)
 			slog.Warn("proxy: guardrail blocked",
 				slog.String("provider", cfg.name),
 				slog.String("workspace_id", wsID),
@@ -689,7 +749,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			"streaming request contains "+modSet.Label()+" content but model "+model+" does not support it")
 		return
 	}
+	// Output guardrails (Upgrade 13) can't inspect an in-flight stream. By
+	// default they're not applied to streams (marked on the response); a
+	// workspace can opt into buffering — which gives up streaming so the full
+	// response can be inspected — by trading the SSE fast-path for the
+	// buffered non-streaming path below.
+	if streaming && p.guardrails != nil && p.guardrails.ShouldBufferStream(wsID) {
+		w.Header().Set("X-Talyvor-Stream-Buffered", "true")
+		streaming = false
+	}
 	if streaming {
+		if p.guardrails != nil && p.guardrails.OutputEnabled() {
+			w.Header().Set("X-Talyvor-Output-Guardrails", "not-applied-streaming")
+		}
 		sh := &StreamHandler{proxy: p}
 		var serr error
 		if cfg.name == "openai" {
@@ -846,6 +918,44 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		attribute.Float64("lens.quality_score", scoreVal),
 	))
 
+	// Output guardrails (Upgrade 13) — full, non-streaming response. Off by
+	// default (CheckOutput no-ops when disabled → behaves as today). On block
+	// we write a 422 + reject the content but still record spend (the upstream
+	// call already ran); on redact we re-inject the masked content so the
+	// client, cache, and spend record all see the masked response.
+	clientBody := upstreamBody
+	clientStatus := statusCode
+	outputBlocked := false
+	if statusCode == http.StatusOK && p.guardrails != nil && p.guardrails.OutputEnabled() {
+		w.Header().Set("X-Talyvor-Output-Guardrails", "applied")
+		ogr := p.guardrails.CheckOutput(ctx, wsID, extractResponseContent(upstreamBody))
+		for _, v := range ogr.Violations {
+			metrics.GuardrailTriggered(v.Type, string(v.Action))
+		}
+		switch {
+		case !ogr.Passed:
+			outputBlocked = true
+			blockType := "output"
+			for _, v := range ogr.Violations {
+				if v.Action == guardrails.ActionBlock {
+					blockType = v.Type
+				}
+			}
+			metrics.GuardrailBlock(blockType)
+			w.Header().Set("X-Talyvor-Output-Guardrail-Blocked", "true")
+			clientStatus = http.StatusUnprocessableEntity
+			clientBody, _ = json.Marshal(map[string]any{
+				"error":      "output guardrail violation",
+				"violations": ogr.Violations,
+			})
+		case ogr.RedactedPrompt != "":
+			upstreamBody = replaceResponseContent(upstreamBody, ogr.RedactedPrompt)
+			clientBody = upstreamBody
+			metrics.GuardrailRedaction("output_pii")
+			w.Header().Set("X-Talyvor-Output-Redacted", "true")
+		}
+	}
+
 	// Headers must be set BEFORE WriteHeader. X-Talyvor-* surface routing
 	// decisions to the client; all of these go on the response, never on
 	// the upstream request.
@@ -886,10 +996,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", "application/json")
 	}
-	w.WriteHeader(statusCode)
-	_, _ = w.Write(upstreamBody)
+	w.WriteHeader(clientStatus)
+	_, _ = w.Write(clientBody)
 
-	if statusCode == http.StatusOK {
+	// A blocked output is treated like a blocked request: no caching, no
+	// spend, no attribution. The guardrail block itself is recorded
+	// (metric + log + the 422 response); the workspace isn't billed for a
+	// response we refused to return.
+	if statusCode == http.StatusOK && !outputBlocked {
 		// Cache iff the prompt has no PII AND the response is judged
 		// cacheable by the quality scorer. Low-quality responses are
 		// forwarded to the client but never persisted.

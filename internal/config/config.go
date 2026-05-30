@@ -82,6 +82,14 @@ type Config struct {
 	// must AND with per-workspace opt-in for earnings to fire.
 	PatternMiningEnabled bool
 
+	// GuardrailsEnabled gates the Upgrade 13 OUTPUT guardrails (CheckOutput:
+	// output PII, JSON/length/regex validation) + the per-workspace config
+	// API for them. OFF by default: when false the INPUT guardrails behave
+	// exactly as today and no output guardrails run. Even when on, output
+	// block-actions are explicit opt-in (default flag/observe). Opt in via
+	// LENS_GUARDRAILS_ENABLED=true.
+	GuardrailsEnabled bool
+
 	// RoutingIntelligenceEnabled gates Upgrade 22 — feeding aggregated
 	// pattern-mining intelligence back into model selection. OFF by default:
 	// when false, routing behaves byte-for-byte as before. Even when on, it
@@ -145,6 +153,8 @@ func Load() (*Config, error) {
 		PatternMiningEnabled: parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
+
+		GuardrailsEnabled: parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
 
 		RoutingIntelligenceEnabled: parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 

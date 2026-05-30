@@ -458,6 +458,20 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="guardrails-panel" style="display:none">
+      <h2>Guardrails <span class="pill" style="background:#3b3b52;color:#cfcfe6">safety</span></h2>
+      <p class="muted">
+        Per-workspace input + output safety rules (PII, prompt-injection,
+        content policy, output validation). Block fails fast with a clear
+        error; redact masks and continues; flag observes. Output guardrails
+        don't apply to streamed responses unless the workspace opts into
+        buffering. Hidden when the output stage is disabled.
+      </p>
+      <div id="guardrails-cfg">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section>
       <h2>Git attribution</h2>
       <p class="muted">
@@ -885,6 +899,34 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyGuardrails(d) {
+      const panel = document.getElementById('guardrails-panel');
+      // Hidden when the output stage is disabled.
+      if (!d || !d.enabled) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      const p = d.policy || {};
+      const yn = function (b) { return b ? '<span class="pill good">on</span>' : '<span class="muted">off</span>'; };
+      const act = function (a) { return a ? '<span class="pill ' + (a === 'block' ? 'bad' : 'warn') + '">' + a + '</span>' : '<span class="muted">—</span>'; };
+      const rows = [
+        ['Input PII', yn(p.enable_pii), act(p.pii_action)],
+        ['Prompt injection', yn(p.enable_injection), act(p.injection_action)],
+        ['Blocked topics', yn(p.enable_topics), (p.blocked_topics || []).length + ' configured'],
+        ['Word filter', yn(p.enable_word_filter), (p.blocked_words || []).length + ' configured'],
+        ['Custom rules', '—', (p.custom_rules || []).length + ' configured'],
+        ['Output PII', p.output_pii_action ? yn(true) : yn(false), act(p.output_pii_action)],
+        ['Output validate JSON', yn(p.output_validate_json), p.output_validation_block ? '<span class="pill bad">block</span>' : '<span class="pill warn">flag</span>'],
+        ['Output max length', p.output_max_length ? yn(true) : yn(false), (p.output_max_length || 0) + ' chars'],
+        ['Stream buffering', yn(p.buffer_stream_for_output), p.buffer_stream_for_output ? 'output guardrails on streams' : 'streams not inspected'],
+      ];
+      document.getElementById('guardrails-cfg').innerHTML =
+        '<table><thead><tr><th>Rule</th><th>Status</th><th>Action / detail</th></tr></thead><tbody>' +
+        rows.map(function (r) { return '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td><td>' + r[2] + '</td></tr>'; }).join('') +
+        '</tbody></table>';
+    }
+
     async function refresh() {
       const alertEl = document.getElementById('api-alert');
       let anyFail = false;
@@ -904,6 +946,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/roi/summary?workspace_id=default',                applyROISummary],
         ['/v1/api/routing/intelligence',                            applyRoutingIntel],
         ['/v1/api/modality/capabilities',                           applyModalityCaps],
+        ['/v1/api/guardrails?workspace_id=default',                 applyGuardrails],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];

@@ -25,6 +25,7 @@ import (
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
+	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/roi"
 	"github.com/talyvor/lens/internal/routing"
@@ -65,6 +66,7 @@ type Server struct {
 	costAnomaly      *costanomaly.Detector
 	roiReporter      *roi.Reporter
 	routingAdvisor   *routing.Advisor
+	guardrails       *guardrails.Engine
 	version          string
 	startTime        time.Time
 }
@@ -190,6 +192,28 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/roi/summary", s.handleROISummary)
 	r.Get("/v1/api/routing/intelligence", s.handleRoutingIntelligence)
 	r.Get("/v1/api/modality/capabilities", s.handleModalityCapabilities)
+	r.Get("/v1/api/guardrails", s.handleGuardrails)
+}
+
+// SetGuardrailsEngine wires the guardrails engine for the dashboard panel.
+func (s *Server) SetGuardrailsEngine(e *guardrails.Engine) { s.guardrails = e }
+
+// handleGuardrails returns the default workspace's policy + whether the
+// output stage is enabled, for the dashboard. Hidden client-side when the
+// output stage is off.
+func (s *Server) handleGuardrails(w http.ResponseWriter, r *http.Request) {
+	if s.guardrails == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	wsID := r.URL.Query().Get("workspace_id")
+	if wsID == "" {
+		wsID = "default"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": s.guardrails.OutputEnabled(),
+		"policy":  s.guardrails.GetPolicy(wsID),
+	})
 }
 
 // handleModalityCapabilities returns the model→capabilities map for the
