@@ -217,6 +217,21 @@ var (
 	ABSignificantResultsTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_ab_significant_results_total", Help: "A/B experiments whose quality difference reached statistical significance."},
 	)
+
+	// ─── PoVI receipts (Token Economy Phase 1, Part 1) ───
+	// verified is a bounded {true,false} set. Never node_id/request_id labels.
+	POVIReceiptsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_povi_receipts_total", Help: "PoVI receipts processed, by signature-verified."},
+		[]string{"verified"},
+	)
+	POVIReceiptVerifyFailuresTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_povi_receipt_verify_failures_total", Help: "PoVI receipts that failed signature verification (forged/tampered)."},
+	)
+	// Only ever increments if the provisional/unsafe minting flag is on — so a
+	// flipped LENS_POVI_MINTING_ENABLED is visible in metrics.
+	POVIProvisionalMintsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_povi_provisional_mints_total", Help: "PROVISIONAL receipt-based LENS mints (UNSAFE — only if LENS_POVI_MINTING_ENABLED is on; default off)."},
+	)
 )
 
 func init() {
@@ -239,6 +254,7 @@ func init() {
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 		GuardrailTriggeredTotal, GuardrailBlocksTotal, GuardrailRedactionsTotal,
 		EvalRunsTotal, EvalRegressionsDetectedTotal, ABSignificantResultsTotal,
+		POVIReceiptsTotal, POVIReceiptVerifyFailuresTotal, POVIProvisionalMintsTotal,
 	)
 }
 
@@ -374,3 +390,20 @@ func EvalRegressionsDetected(n int) {
 
 // ABSignificantResult counts one A/B experiment that reached significance.
 func ABSignificantResult() { ABSignificantResultsTotal.Inc() }
+
+// ─── PoVI receipt helpers (Token Economy Phase 1, Part 1) ───
+
+// POVIReceipt counts a processed receipt by signature-verified, and bumps the
+// dedicated failures counter when verification failed.
+func POVIReceipt(verified bool) {
+	if verified {
+		POVIReceiptsTotal.WithLabelValues("true").Inc()
+		return
+	}
+	POVIReceiptsTotal.WithLabelValues("false").Inc()
+	POVIReceiptVerifyFailuresTotal.Inc()
+}
+
+// POVIProvisionalMint counts a PROVISIONAL receipt-based mint. Only invoked
+// when the unsafe minting flag is on, so flipping it is observable.
+func POVIProvisionalMint() { POVIProvisionalMintsTotal.Inc() }

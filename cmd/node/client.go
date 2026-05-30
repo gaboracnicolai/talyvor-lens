@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/talyvor/lens/internal/povi"
 )
 
 // LensClient is a thin wrapper around the Lens REST API. The
@@ -49,6 +52,10 @@ type NodeState struct {
 	Provider    string    `json:"provider"`
 	GPUType     string    `json:"gpu_type"`
 	Models      []string  `json:"models"`
+	// Ed25519Priv is the node's ed25519 PRIVATE key (base64) for signing PoVI
+	// receipts (Token Economy Phase 1, Part 1). Sensitive — the state file is
+	// 0600. The matching public key is registered with Lens.
+	Ed25519Priv  string    `json:"ed25519_priv,omitempty"`
 	RegisteredAt time.Time `json:"registered_at"`
 }
 
@@ -121,6 +128,12 @@ func ClearState() error {
 // runs without secret auth.
 func (c *LensClient) Register(ctx context.Context, cfg NodeConfig) (NodeState, error) {
 	secret := generateSecret()
+	// Generate a PoVI signing keypair; register the PUBLIC key, keep the
+	// private key locally (state file, 0600) to sign receipts.
+	pub, priv, keyErr := povi.GenerateNodeKey()
+	if keyErr != nil {
+		return NodeState{}, fmt.Errorf("node: generate signing key: %w", keyErr)
+	}
 	payload := map[string]any{
 		"url":             cfg.NodeURL,
 		"provider":        cfg.Provider,
@@ -129,6 +142,7 @@ func (c *LensClient) Register(ctx context.Context, cfg NodeConfig) (NodeState, e
 		"max_concurrent":  cfg.MaxConcurrent,
 		"node_secret":     secret, // Lens stores the hash and discards the plaintext
 		"workspace_id":    cfg.WorkspaceID,
+		"ed25519_pubkey":  povi.EncodePublicKey(pub), // PoVI receipt-verification key
 	}
 	resp, err := c.do(ctx, http.MethodPost,
 		fmt.Sprintf("/v1/workspaces/%s/nodes", cfg.WorkspaceID), payload)
@@ -153,12 +167,22 @@ func (c *LensClient) Register(ctx context.Context, cfg NodeConfig) (NodeState, e
 		Provider:     cfg.Provider,
 		GPUType:      cfg.GPUType,
 		Models:       append([]string{}, cfg.Models...),
+		Ed25519Priv:  base64.StdEncoding.EncodeToString(priv),
 		RegisteredAt: time.Now().UTC(),
 	}
 	if err := SaveState(state); err != nil {
 		return NodeState{}, fmt.Errorf("node: save state: %w", err)
 	}
 	return state, nil
+}
+
+// SubmitReceipt pushes a signed PoVI receipt to Lens for verification +
+// audit recording (Token Economy Phase 1, Part 1). Best-effort and off the
+// node's response path — the node returns the receipt in the response too.
+func (c *LensClient) SubmitReceipt(ctx context.Context, workspaceID string, r povi.Receipt) error {
+	_, err := c.do(ctx, http.MethodPost,
+		fmt.Sprintf("/v1/workspaces/%s/povi/receipts", workspaceID), r)
+	return err
 }
 
 // Deregister flips the node inactive + clears local state. Best-

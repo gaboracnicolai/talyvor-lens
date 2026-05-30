@@ -82,6 +82,16 @@ type Config struct {
 	// must AND with per-workspace opt-in for earnings to fire.
 	PatternMiningEnabled bool
 
+	// POVIMintingEnabled gates PROVISIONAL receipt-based LENS minting
+	// (Token Economy Phase 1, Part 1). DEFAULT FALSE and intentionally so:
+	// minting from a signed receipt is UNSAFE on receipt-alone — a node can
+	// sign a fabricated trace and this layer can't catch it. Real safety needs
+	// stake + random challenge-and-slash (Parts 2/3). When false (default),
+	// PoVI verifies + records receipts for audit but mints NOTHING. Only flip
+	// LENS_POVI_MINTING_ENABLED in a test/throwaway context — never production
+	// until Parts 2/3 land.
+	POVIMintingEnabled bool
+
 	// GuardrailsEnabled gates the Upgrade 13 OUTPUT guardrails (CheckOutput:
 	// output PII, JSON/length/regex validation) + the per-workspace config
 	// API for them. OFF by default: when false the INPUT guardrails behave
@@ -151,6 +161,7 @@ func Load() (*Config, error) {
 
 		CacheSharingEnabled:  parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
 		PatternMiningEnabled: parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
+		POVIMintingEnabled:   parseBoolEnv("LENS_POVI_MINTING_ENABLED"),
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 

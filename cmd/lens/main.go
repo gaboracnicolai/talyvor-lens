@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"encoding/json"
 	"errors"
@@ -57,6 +58,7 @@ import (
 	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
+	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/pii"
@@ -322,6 +324,28 @@ func run() error {
 				slog.String("node_id", nodeID), slog.String("err", err.Error()))
 		}
 	})
+
+	// PoVI receipts (Token Economy Phase 1, Part 1). Verifies node-signed
+	// receipts against each node's registered ed25519 pubkey, records them for
+	// audit, and — ONLY when LENS_POVI_MINTING_ENABLED is on (default OFF,
+	// and UNSAFE: a node can sign a fabricated trace) — performs a gated
+	// provisional mint. Default behavior: verify + record, mint NOTHING.
+	// NOTE: the existing ComputeMiner.RecordServedRequest above already mints
+	// LENS on trust (no receipt); PoVI is designed to REPLACE it once Part 3
+	// (challenge-and-slash) provides the economic security — that path stays
+	// active and unsecured until then (tracked, not an oversight).
+	poviStore := povi.NewStore(pool)
+	poviLookup := func(lookupCtx context.Context, nodeID string) (ed25519.PublicKey, error) {
+		enc, err := computeMiner.NodePubKey(lookupCtx, nodeID)
+		if err != nil {
+			return nil, err
+		}
+		return povi.DecodePublicKey(enc)
+	}
+	poviProcessor := povi.NewProcessor(poviStore, tokenLedger, poviLookup, cfg.POVIMintingEnabled)
+	if cfg.POVIMintingEnabled {
+		logger.Warn("PoVI PROVISIONAL minting is ENABLED (LENS_POVI_MINTING_ENABLED) — UNSAFE without stake + challenge (Parts 2/3); receipts can mint LENS against a fabricated trace")
+	}
 
 	// Embedding mining (Batch 2 Item 3). Shares the ledger;
 	// proxy wires RecordEmbeddingsServed in the semantic-cache
@@ -2386,6 +2410,54 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, list)
+		})
+
+		// ── PoVI receipts (Token Economy Phase 1, Part 1). A node submits its
+		// signed receipt; Lens verifies it against the node's registered
+		// pubkey, records it for audit, and (only if minting is explicitly
+		// enabled) provisionally mints. GET endpoints are audit + status. A
+		// receipt is ATTESTATION + TAMPER-EVIDENCE, never proof of honest
+		// computation.
+		authed.Post("/v1/workspaces/{wsID}/povi/receipts", func(w http.ResponseWriter, req *http.Request) {
+			var rec povi.Receipt
+			if err := json.NewDecoder(req.Body).Decode(&rec); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			res, err := poviProcessor.Process(req.Context(), rec)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, res)
+		})
+
+		authed.Get("/v1/povi/receipts", func(w http.ResponseWriter, req *http.Request) {
+			ws := req.URL.Query().Get("workspace")
+			if ws == "" {
+				ws = "default"
+			}
+			list, err := poviStore.ListReceipts(req.Context(), ws, 50)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, list)
+		})
+
+		authed.Get("/v1/povi/status", func(w http.ResponseWriter, req *http.Request) {
+			total, verified, _ := poviStore.Stats(req.Context())
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"minting_enabled": cfg.POVIMintingEnabled,
+				"receipts_total":  total,
+				"receipts_verified": verified,
+				"attestation_only": true,
+				"warning": "Receipts are ATTESTATION + TAMPER-EVIDENCE, NOT proof of honest computation. " +
+					"Provisional receipt-based minting is UNSAFE without stake + challenge (Parts 2/3) and is " +
+					"OFF by default; when off, receipts are verified + recorded for audit but NO LENS is minted. " +
+					"Separately, the existing trust-based compute mint (RecordServedRequest) remains active and " +
+					"unsecured until Part 3 — PoVI is designed to replace it.",
+			})
 		})
 
 		// Guardrails: per-workspace safety policy + pre-flight check.

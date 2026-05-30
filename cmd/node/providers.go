@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/talyvor/lens/internal/povi"
 )
 
 // inferTimeout caps a single inference call. 60s matches the
@@ -46,11 +48,17 @@ type InferRequest struct {
 
 // InferResponse is what every adapter returns — text + actual
 // (not estimated) token counts so the earnings record is honest.
+//
+// Receipt is the optional PoVI signed attestation (Token Economy Phase 1,
+// Part 1): a node-signed commitment to this response's metadata + a Merkle
+// root over the generation trace. It is ATTESTATION + TAMPER-EVIDENCE, not
+// proof of honest computation. Present only when the node has a signing key.
 type InferResponse struct {
-	Text         string `json:"text"`
-	InputTokens  int    `json:"input_tokens"`
-	OutputTokens int    `json:"output_tokens"`
-	LatencyMs    int64  `json:"latency_ms"`
+	Text         string         `json:"text"`
+	InputTokens  int            `json:"input_tokens"`
+	OutputTokens int            `json:"output_tokens"`
+	LatencyMs    int64          `json:"latency_ms"`
+	Receipt      *povi.Receipt  `json:"receipt,omitempty"`
 }
 
 // Provider is the contract — implementations live below. Three
