@@ -92,6 +92,17 @@ type Config struct {
 	// until Parts 2/3 land.
 	POVIMintingEnabled bool
 
+	// POVIMinStake is the minimum LENS a node must lock as collateral to be
+	// minting-eligible (Part 2). Env: LENS_POVI_MIN_STAKE. Default 100.
+	POVIMinStake float64
+
+	// POVIUnbondPeriod is how long staked collateral stays locked AND SLASHABLE
+	// after a node begins unbonding — the anti-yank delay (a node can't cheat
+	// then instantly withdraw before a challenge slashes it). Env:
+	// LENS_POVI_UNBOND_PERIOD as a Go duration (units h/m/s — NOT "d"; use
+	// "168h" for 7 days). Default 7*24h.
+	POVIUnbondPeriod time.Duration
+
 	// GuardrailsEnabled gates the Upgrade 13 OUTPUT guardrails (CheckOutput:
 	// output PII, JSON/length/regex validation) + the per-workspace config
 	// API for them. OFF by default: when false the INPUT guardrails behave
@@ -235,6 +246,23 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_BURST_MULTIPLIER (must be ≥ 1.0): %s", v)
 		}
 		c.BurstMultiplier = f
+	}
+
+	c.POVIMinStake = 100.0
+	if v := os.Getenv("LENS_POVI_MIN_STAKE"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_POVI_MIN_STAKE (must be ≥ 0): %s", v)
+		}
+		c.POVIMinStake = f
+	}
+	c.POVIUnbondPeriod = 7 * 24 * time.Hour
+	if v := os.Getenv("LENS_POVI_UNBOND_PERIOD"); v != "" {
+		d, err := time.ParseDuration(v) // Go duration units (h/m/s); e.g. 168h = 7 days
+		if err != nil || d < 0 {
+			return nil, fmt.Errorf("invalid LENS_POVI_UNBOND_PERIOD (Go duration, e.g. 168h): %s", v)
+		}
+		c.POVIUnbondPeriod = d
 	}
 
 	if v := os.Getenv("LENS_RETRY_MAX_ATTEMPTS"); v != "" {

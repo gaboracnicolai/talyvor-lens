@@ -398,6 +398,20 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="staking-panel" style="display:none">
+      <h2>Staking <span class="pill" style="background:#3b3b52;color:#cfcfe6">PoVI collateral</span></h2>
+      <p class="muted">
+        Node-registration collateral (LENS locked). A node must stake ≥ the
+        minimum to be <em>minting-eligible</em>; collateral is slashable while
+        active <em>or</em> unbonding (the anti-yank property). Slashed
+        collateral is <span class="pill bad">burned</span>. Minting itself stays
+        OFF until challenge-and-slash (Part 3).
+      </p>
+      <div id="staking">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section id="eval-panel" style="display:none">
       <h2>Evaluation <span class="pill" style="background:#3b3b52;color:#cfcfe6">golden datasets</span></h2>
       <p class="muted">
@@ -772,6 +786,33 @@ const dashboardHTML = `<!DOCTYPE html>
         '</tbody></table>';
     }
 
+    function applyStakes(list) {
+      const panel = document.getElementById('staking-panel');
+      if (!Array.isArray(list) || list.length === 0) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      const badge = function (s) {
+        if (s === 'active') return '<span class="pill good">active</span>';
+        if (s === 'unbonding') return '<span class="pill" style="background:#5a4b1f;color:#f0d98c">unbonding</span>';
+        if (s === 'slashed') return '<span class="pill bad">slashed</span>';
+        return '<span class="pill">' + s + '</span>';
+      };
+      document.getElementById('staking').innerHTML =
+        '<table><thead><tr><th>Node</th><th>Workspace</th><th>Locked LENS</th><th>Status</th><th>Slashed</th><th>Unbond at</th></tr></thead><tbody>' +
+        list.map(function (s) {
+          return '<tr>' +
+            '<td class="mono">' + String(s.node_id || '').slice(0, 12) + '</td>' +
+            '<td class="mono">' + (s.workspace_id || '—') + '</td>' +
+            '<td class="mono">' + (s.amount || 0).toFixed(3) + '</td>' +
+            '<td>' + badge(s.status) + '</td>' +
+            '<td class="mono">' + (s.slashed_amount ? (s.slashed_amount).toFixed(3) : '—') + '</td>' +
+            '<td>' + (s.unbond_at ? new Date(s.unbond_at).toLocaleString() : '—') + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
     function applyEvalRuns(list) {
       const panel = document.getElementById('eval-panel');
       // Hidden entirely when there are no eval runs.
@@ -1024,6 +1065,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/modality/capabilities',                           applyModalityCaps],
         ['/v1/api/catalog',                                         applyCatalog],
         ['/v1/api/eval/runs?workspace_id=default',                  applyEvalRuns],
+        ['/v1/api/povi/stakes',                                     applyStakes],
         ['/v1/api/guardrails?workspace_id=default',                 applyGuardrails],
       ];
       await Promise.all(tries.map(async function (entry) {
