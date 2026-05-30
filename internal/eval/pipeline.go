@@ -68,6 +68,7 @@ type TestCase struct {
 	ID             string     `json:"id"`
 	Name           string     `json:"name"`
 	WorkspaceID    string     `json:"workspace_id"`
+	DatasetID      string     `json:"dataset_id,omitempty"`
 	Provider       string     `json:"provider"`
 	Model          string     `json:"model"`
 	Prompt         string     `json:"prompt"`
@@ -109,6 +110,7 @@ type Pipeline struct {
 	pool         pgxDB
 	scorer       *quality.Scorer
 	httpClient   *http.Client
+	spend        SpendRecorder // optional eval-spend attribution (nil = off)
 	openAIKey    string
 	anthropicKey string
 	googleKey    string
@@ -213,25 +215,28 @@ func (p *Pipeline) runTestCaseWith(ctx context.Context, tc TestCase, runID strin
 	result.Response = response
 	result.CostUSD = alerts.CostUSD(tc.Model, len(tc.Prompt)/4, len(response)/4)
 
-	switch tc.EvalMethod {
-	case EvalExact:
-		if response == tc.ExpectedOutput {
-			result.Score = 1.0
-		}
-	case EvalContains:
-		if tc.ExpectedOutput != "" && strings.Contains(response, tc.ExpectedOutput) {
-			result.Score = 1.0
-		}
-	case EvalLLMJudge:
-		score, jerr := p.judgeResponse(callCtx, tc.Prompt, response)
-		if jerr != nil {
-			result.Error = jerr.Error()
+	// Deterministic, network-free methods (exact/contains/regex/json_schema)
+	// are scored by staticScore. A configuration error (bad regex/schema) is
+	// surfaced on the result rather than silently scored 0.
+	if s, handled, serr := staticScore(tc.EvalMethod, tc.ExpectedOutput, response); handled {
+		if serr != nil {
+			result.Error = serr.Error()
 			return result
 		}
-		result.Score = score
-	default:
-		q := p.scorer.ScoreResponse(callCtx, tc.Prompt, response, tc.Provider, tc.Model)
-		result.Score = q.Score
+		result.Score = s
+	} else {
+		switch tc.EvalMethod {
+		case EvalLLMJudge:
+			score, jerr := p.judgeResponse(callCtx, tc.Prompt, response)
+			if jerr != nil {
+				result.Error = jerr.Error()
+				return result
+			}
+			result.Score = score
+		default:
+			q := p.scorer.ScoreResponse(callCtx, tc.Prompt, response, tc.Provider, tc.Model)
+			result.Score = q.Score
+		}
 	}
 
 	result.Passed = result.Score >= tc.PassThreshold

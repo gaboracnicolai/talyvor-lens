@@ -194,6 +194,11 @@ func run() error {
 	keyPool := keypool.New()
 	auditExporter := audit.New(pool)
 	evalPipeline := eval.New(pool, qualityScorer, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey)
+	// Attribute eval spend through the normal cost ledger (feature/modality
+	// "eval") so eval runs show up in budgets/forecasts/reports, and run the
+	// scheduler for cadence-based dataset evals (both off the request hot path).
+	evalPipeline.SetSpendRecorder(alertManager)
+	go evalPipeline.StartScheduler(ctx, time.Minute)
 	anomalyDetector := anomaly.New(pool)
 	go anomalyDetector.StartMonitor(ctx, nc, 1*time.Hour)
 	statusPage := status.New(pool, redisClient, nc, "0.1.0")
@@ -549,6 +554,7 @@ func run() error {
 	apiServer.SetRoutingAdvisor(routingAdvisor)
 	// Guardrails engine powers the dashboard's Guardrails panel.
 	apiServer.SetGuardrailsEngine(guardrailsEngine)
+	apiServer.SetEvalPipeline(evalPipeline)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -2252,6 +2258,134 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, runs)
+		})
+
+		// ── Evaluation pipeline: golden datasets, regression runs, A/B
+		// significance verdicts, scheduling (Upgrade 17). Workspace-scoped;
+		// every path is background/on-demand, off the request hot path.
+		authed.Post("/v1/workspaces/{wsID}/eval/datasets", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			ds, err := evalPipeline.CreateDataset(req.Context(), eval.Dataset{
+				WorkspaceID: wsID, Name: in.Name, Description: in.Description,
+			})
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, ds)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/eval/datasets", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			list, err := evalPipeline.ListDatasets(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, list)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/eval/datasets/{dsID}/cases", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			dsID := chi.URLParam(req, "dsID")
+			var in eval.TestCase
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			in.WorkspaceID = wsID
+			created, err := evalPipeline.AddDatasetCase(req.Context(), dsID, in)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, created)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/eval/run", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				DatasetID string      `json:"dataset_id"`
+				Target    eval.Target `json:"target"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			run, err := evalPipeline.RunEval(req.Context(), wsID, in.DatasetID, in.Target)
+			if errors.Is(err, eval.ErrCostCapExceeded) {
+				// Refuse the run rather than silently burn spend.
+				writeJSONErr(w, http.StatusPaymentRequired, err.Error())
+				return
+			}
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, run)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/eval/runs", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			runs, err := evalPipeline.ListRuns(req.Context(), wsID, 20)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, runs)
+		})
+
+		// A/B significance verdict — honest p-value + sample size + plain
+		// verdict ("inconclusive" when the data doesn't support a winner).
+		authed.Get("/v1/workspaces/{wsID}/eval/ab/{experiment}", func(w http.ResponseWriter, req *http.Request) {
+			expID := chi.URLParam(req, "experiment")
+			rep, err := abEngine.Significance(req.Context(), expID)
+			if err != nil {
+				writeJSONErr(w, http.StatusNotFound, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, rep)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/eval/schedules", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				DatasetID   string `json:"dataset_id"`
+				IntervalSec int    `json:"interval_seconds"`
+				Enabled     bool   `json:"enabled"`
+				TargetModel string `json:"target_model"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			s, err := evalPipeline.CreateSchedule(req.Context(), eval.Schedule{
+				WorkspaceID: wsID, DatasetID: in.DatasetID, IntervalSec: in.IntervalSec,
+				Enabled: in.Enabled, TargetModel: in.TargetModel,
+			})
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, s)
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/eval/schedules", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			list, err := evalPipeline.ListSchedules(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, list)
 		})
 
 		// Guardrails: per-workspace safety policy + pre-flight check.

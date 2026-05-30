@@ -23,6 +23,7 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/costanomaly"
+	"github.com/talyvor/lens/internal/eval"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
@@ -68,6 +69,7 @@ type Server struct {
 	roiReporter      *roi.Reporter
 	routingAdvisor   *routing.Advisor
 	guardrails       *guardrails.Engine
+	evalPipeline     *eval.Pipeline
 	version          string
 	startTime        time.Time
 }
@@ -181,6 +183,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/cache/top-patterns", s.handleCacheTopPatterns)
 	r.Get("/v1/api/models/usage", s.handleSpendBy("model"))
 	r.Get("/v1/api/models/recommendations", s.handleModelsRecommendations)
+	r.Get("/v1/api/eval/runs", s.handleEvalRuns)
 	r.Get("/v1/api/workspaces", s.handleWorkspaces)
 	r.Get("/v1/api/alerts/circuits", s.handleAlertsCircuits)
 	r.Get("/v1/api/alerts/rules", s.handleAlertsRules)
@@ -282,6 +285,34 @@ func (s *Server) handleForecastSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	if list == nil {
 		list = []forecast.Forecast{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// SetEvalPipeline wires the evaluation pipeline used by the dashboard's
+// Evaluation panel. A setter so NewServer's signature stays put; a nil
+// pipeline makes handleEvalRuns return an empty list (panel stays hidden).
+func (s *Server) SetEvalPipeline(p *eval.Pipeline) { s.evalPipeline = p }
+
+// handleEvalRuns returns the recent eval run summaries for a workspace so the
+// dashboard can show pass/fail and highlight runs whose pass rate dipped. Off
+// the hot path; read-only.
+func (s *Server) handleEvalRuns(w http.ResponseWriter, r *http.Request) {
+	if s.evalPipeline == nil {
+		writeJSON(w, http.StatusOK, []eval.RunSummary{})
+		return
+	}
+	wsID := r.URL.Query().Get("workspace_id")
+	if wsID == "" {
+		wsID = "default"
+	}
+	list, err := s.evalPipeline.ListRuns(r.Context(), wsID, 15)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []eval.RunSummary{}
 	}
 	writeJSON(w, http.StatusOK, list)
 }

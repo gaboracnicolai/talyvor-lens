@@ -203,6 +203,20 @@ var (
 		prometheus.CounterOpts{Name: "lens_guardrail_redactions_total", Help: "Guardrail redactions applied, by type."},
 		[]string{"type"},
 	)
+
+	// ─── evaluation pipeline (Upgrade 17) ───
+	// result is the bounded set {pass, fail, unknown}. Never per-dataset or
+	// per-workspace as a label — those are unbounded.
+	EvalRunsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_eval_runs_total", Help: "Eval dataset runs completed, by aggregate result."},
+		[]string{"result"},
+	)
+	EvalRegressionsDetectedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_eval_regressions_detected_total", Help: "Per-case quality regressions detected across eval runs."},
+	)
+	ABSignificantResultsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_ab_significant_results_total", Help: "A/B experiments whose quality difference reached statistical significance."},
+	)
 )
 
 func init() {
@@ -224,6 +238,7 @@ func init() {
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 		GuardrailTriggeredTotal, GuardrailBlocksTotal, GuardrailRedactionsTotal,
+		EvalRunsTotal, EvalRegressionsDetectedTotal, ABSignificantResultsTotal,
 	)
 }
 
@@ -336,3 +351,26 @@ func GuardrailTriggered(gtype, action string) {
 }
 func GuardrailBlock(gtype string)     { GuardrailBlocksTotal.WithLabelValues(gtype).Inc() }
 func GuardrailRedaction(gtype string) { GuardrailRedactionsTotal.WithLabelValues(gtype).Inc() }
+
+// ─── evaluation pipeline helpers (Upgrade 17) ───
+
+// EvalRunRecorded counts a completed eval run. result is folded to the bounded
+// set {pass, fail, unknown} so the label can never explode cardinality.
+func EvalRunRecorded(result string) {
+	switch result {
+	case "pass", "fail":
+	default:
+		result = "unknown"
+	}
+	EvalRunsTotal.WithLabelValues(result).Inc()
+}
+
+// EvalRegressionsDetected adds n detected regressions (no-op for n<=0).
+func EvalRegressionsDetected(n int) {
+	if n > 0 {
+		EvalRegressionsDetectedTotal.Add(float64(n))
+	}
+}
+
+// ABSignificantResult counts one A/B experiment that reached significance.
+func ABSignificantResult() { ABSignificantResultsTotal.Inc() }
