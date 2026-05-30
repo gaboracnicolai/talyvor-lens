@@ -432,6 +432,20 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="routing-panel" style="display:none">
+      <h2>Routing intelligence <span class="pill" style="background:#3b3b52;color:#cfcfe6">data-driven</span></h2>
+      <p class="muted">
+        Best quality-per-dollar model per feature category, learned from the
+        opted-in pattern network. <em>Data-driven suggestions</em> — applied
+        only to requests that cede the model choice (model "auto" /
+        X-Talyvor-Auto-Route), within the workspace's allowed models, and
+        only above the sample floor. Hidden when disabled.
+      </p>
+      <div id="routing-intel">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section>
       <h2>Git attribution</h2>
       <p class="muted">
@@ -805,6 +819,43 @@ const dashboardHTML = `<!DOCTYPE html>
         '<p class="muted" style="margin-top:8px">Top teams: ' + (teams || '—') + '</p>';
     }
 
+    function applyRoutingIntel(d) {
+      const panel = document.getElementById('routing-panel');
+      const st = d && d.status;
+      // Hidden when intelligence is disabled.
+      if (!st || !st.enabled) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      const cohorts = (d.cohorts || []);
+      const meta = '<p class="muted" style="font-size:12px">' + cohorts.length + ' cohorts · floor ≥' + st.min_samples +
+        ' samples / ≥' + st.min_workspaces + ' workspaces · refreshed ' +
+        (st.last_refresh ? new Date(st.last_refresh).toLocaleTimeString() : '—') + '</p>';
+      let body;
+      if (cohorts.length === 0) {
+        body = '<span class="muted">No cohorts yet — not enough opted-in pattern data.</span>';
+      } else {
+        body = '<table><thead><tr><th>Feature</th><th>Input</th><th>Recommended</th><th>Quality</th><th>$/1k</th><th>Q/$</th><th>Samples</th><th>Status</th></tr></thead><tbody>' +
+          cohorts.map(function (c) {
+            const cls = c.qualifies ? 'good' : 'warn';
+            const label = c.qualifies ? 'active' : 'below floor';
+            return '<tr>' +
+              '<td>' + c.feature + '</td>' +
+              '<td>' + c.input_range + '</td>' +
+              '<td class="mono">' + c.model + '</td>' +
+              '<td class="mono">' + (c.avg_quality || 0).toFixed(2) + '</td>' +
+              '<td class="mono">' + fmtUSD(c.cost_per_1k) + '</td>' +
+              '<td class="mono">' + (c.quality_per_dollar || 0).toFixed(1) + '</td>' +
+              '<td class="mono">' + c.sample_count + ' / ' + c.distinct_workspaces + 'ws</td>' +
+              '<td><span class="pill ' + cls + '">' + label + '</span></td>' +
+              '</tr>';
+          }).join('') +
+          '</tbody></table>';
+      }
+      document.getElementById('routing-intel').innerHTML = meta + body;
+    }
+
     async function refresh() {
       const alertEl = document.getElementById('api-alert');
       let anyFail = false;
@@ -822,6 +873,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/forecast/summary?workspace_id=default',           applyForecast],
         ['/v1/api/costanomalies?workspace_id=default',              applyCostOutliers],
         ['/v1/api/roi/summary?workspace_id=default',                applyROISummary],
+        ['/v1/api/routing/intelligence',                            applyRoutingIntel],
       ];
       await Promise.all(tries.map(async function (entry) {
         const url = entry[0], fn = entry[1];

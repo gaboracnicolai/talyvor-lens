@@ -82,6 +82,15 @@ type Config struct {
 	// must AND with per-workspace opt-in for earnings to fire.
 	PatternMiningEnabled bool
 
+	// RoutingIntelligenceEnabled gates Upgrade 22 — feeding aggregated
+	// pattern-mining intelligence back into model selection. OFF by default:
+	// when false, routing behaves byte-for-byte as before. Even when on, it
+	// only influences requests that explicitly opt into auto-routing
+	// (model "auto" or X-Talyvor-Auto-Route) and only within the
+	// workspace's allowed models. Opt in via
+	// LENS_ROUTING_INTELLIGENCE_ENABLED=true.
+	RoutingIntelligenceEnabled bool
+
 	// ROIIncludeEngineerBreakdown gates the per-engineer (author) cost
 	// section of the executive ROI report (Upgrade 24). OFF by default:
 	// attributing cost to named people is SENSITIVE and easily misread as a
@@ -136,6 +145,8 @@ func Load() (*Config, error) {
 		PatternMiningEnabled: parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
+
+		RoutingIntelligenceEnabled: parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 
 		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
 

@@ -26,6 +26,7 @@ import (
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/roi"
+	"github.com/talyvor/lens/internal/routing"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -62,6 +63,7 @@ type Server struct {
 	forecaster       *forecast.Forecaster
 	costAnomaly      *costanomaly.Detector
 	roiReporter      *roi.Reporter
+	routingAdvisor   *routing.Advisor
 	version          string
 	startTime        time.Time
 }
@@ -185,6 +187,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/forecast/summary", s.handleForecastSummary)
 	r.Get("/v1/api/costanomalies", s.handleCostAnomalies)
 	r.Get("/v1/api/roi/summary", s.handleROISummary)
+	r.Get("/v1/api/routing/intelligence", s.handleRoutingIntelligence)
 }
 
 // SetBudgetStore wires the budgets store used by the dashboard's Budgets
@@ -295,6 +298,23 @@ func (s *Server) handleROISummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+// SetRoutingAdvisor wires the pattern-network routing advisor used by the
+// dashboard's Routing intelligence panel.
+func (s *Server) SetRoutingAdvisor(a *routing.Advisor) { s.routingAdvisor = a }
+
+// handleRoutingIntelligence returns the advisor status + per-cohort digest
+// for the dashboard. Read-only, in-memory.
+func (s *Server) handleRoutingIntelligence(w http.ResponseWriter, r *http.Request) {
+	if s.routingAdvisor == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": routing.Status{}, "cohorts": []routing.CohortDigest{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":  s.routingAdvisor.Status(),
+		"cohorts": s.routingAdvisor.Overview(),
+	})
 }
 
 // handleAnomalies runs Detect for the dimension tuple supplied via query

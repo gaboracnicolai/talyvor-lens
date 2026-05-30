@@ -43,6 +43,7 @@ import (
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/router"
+	"github.com/talyvor/lens/internal/routing"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/workspace"
@@ -90,6 +91,7 @@ type Proxy struct {
 	tracker           *attribution.Tracker
 	attrStore         *attribution.Store
 	budgetService     budgetGate
+	routingAdvisor    *routing.Advisor
 	workspaceManager  *workspace.Manager
 	localRouter       *localrouter.LocalRouter
 	injectionDetector *injection.Detector
@@ -221,6 +223,15 @@ func (p *Proxy) SetAttributionStore(s *attribution.Store) {
 	p.attrStore = s
 }
 
+// SetRoutingAdvisor wires the pattern-network routing advisor (Upgrade 22).
+// A setter so proxy.New's signature stays put. A nil advisor (or one whose
+// Enabled() is false) leaves model selection byte-for-byte unchanged.
+func (p *Proxy) SetRoutingAdvisor(a *routing.Advisor) {
+	if a != nil {
+		p.routingAdvisor = a
+	}
+}
+
 // SetBudgetService wires the per-team / per-sprint budget governor
 // (Upgrade 19). A setter, like SetAttributionStore, so proxy.New's
 // signature stays put. A nil service disables the budget gate entirely —
@@ -234,6 +245,21 @@ func (p *Proxy) SetBudgetService(s *budgets.Service) {
 
 func (p *Proxy) setAlertSink(sink alertSink) {
 	p.alertManager = sink
+}
+
+// isAutoRoute reports whether a request cedes its model choice to the
+// routing advisor — either the "auto" pseudo-model (a convention developers
+// recognise from model-router gateways) or an explicit X-Talyvor-Auto-Route
+// header. Any concrete model name is treated as pinned and always honored.
+func isAutoRoute(r *http.Request, model string) bool {
+	if strings.EqualFold(strings.TrimSpace(model), "auto") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Talyvor-Auto-Route"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // providerConfig holds the per-provider knobs HandleOpenAI/HandleAnthropic/
@@ -672,7 +698,37 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// model in the same provider family; it never silently upgrades.
 	upstreamModel := model
 	var overrideModel, overrideReason string
-	if p.router != nil {
+
+	// Routing intelligence (Upgrade 22) engages ONLY when enabled AND the
+	// request explicitly cedes the model choice ("auto" pseudo-model or the
+	// X-Talyvor-Auto-Route header). A concrete model is PINNED and falls
+	// through to the existing router path below — byte-for-byte unchanged.
+	if p.routingAdvisor.Enabled() && isAutoRoute(r, model) {
+		var allowedModels, allowedProviders []string
+		if ws, ok := p.workspaceManager.GetWorkspace(wsID); ok {
+			allowedModels, allowedProviders = ws.AllowedModels, ws.AllowedProviders
+		}
+		// In-memory lookup only — never a DB query on the request path.
+		rec := p.routingAdvisor.Recommend(ctx, wsID, feature, len(compressedPrompt)/4, cfg.name, allowedModels, allowedProviders)
+		if rec.Basis != routing.BasisNone && rec.Model != "" {
+			upstreamModel = rec.Model
+			overrideModel = rec.Model
+			overrideReason = rec.Reason
+			metrics.RoutingIntelligenceApplied()
+		} else if p.router != nil {
+			// No qualifying recommendation — fall back to the complexity
+			// router so an "auto" request still gets a concrete model.
+			decision := p.router.Route(ctx, cfg.name, model, compressedPrompt)
+			if decision.Model != "" {
+				upstreamModel = decision.Model
+				overrideModel = decision.Model
+				overrideReason = "routing default (no qualifying intelligence): " + decision.Reason
+			}
+			metrics.RoutingFallback()
+		} else {
+			metrics.RoutingFallback()
+		}
+	} else if p.router != nil {
 		decision := p.router.Route(ctx, cfg.name, model, compressedPrompt)
 		if p.router.ShouldOverride(model, decision) {
 			upstreamModel = decision.Model
