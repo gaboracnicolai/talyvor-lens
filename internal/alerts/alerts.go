@@ -14,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+
+	"github.com/talyvor/lens/internal/catalog"
 )
 
 type AlertLevel string
@@ -79,62 +81,15 @@ func newAlertManager(pool pgxDB, nc *nats.Conn, rules []SpendRule) *AlertManager
 	}
 }
 
-// modelPrice holds per-million-token USD pricing for one model.
-type modelPrice struct {
-	inputPerMillion  float64
-	outputPerMillion float64
-}
-
-// modelPrices is the per-model USD price table from the spec. Numbers here
-// are authoritative — tests assert exact arithmetic, so do not round.
-var modelPrices = map[string]modelPrice{
-	// OpenAI
-	"gpt-4o":            {2.50, 10.00},
-	"gpt-4o-mini":       {0.15, 0.60},
-	"gpt-4.1-nano":      {0.10, 0.40},
-	"gpt-5.4":           {5.00, 20.00},
-	"gpt-5.4-mini":      {0.50, 2.00},
-	"gpt-4.1":           {2.00, 8.00},
-	"gpt-4.1-mini":      {0.40, 1.60},
-	// Anthropic
-	"claude-opus-4-5":   {15.00, 75.00},
-	"claude-sonnet-4-5": {3.00, 15.00},
-	"claude-haiku-4-5":  {0.80, 4.00},
-	"claude-opus-4-6":   {15.00, 75.00},
-	"claude-sonnet-4-6": {3.00, 15.00},
-	"claude-haiku-4-6":  {0.80, 4.00},
-	// Google Gemini
-	"gemini-2.5-pro":   {1.25, 10.00},
-	"gemini-2.5-flash": {0.075, 0.30},
-	"gemini-2.0-flash": {0.10, 0.40},
-	"gemini-1.5-pro":   {1.25, 5.00},
-	"gemini-1.5-flash": {0.075, 0.30},
-	// AWS Bedrock — Claude billed through Bedrock carries a ~15% markup
-	// over the direct Anthropic API. Keys use the raw Bedrock model IDs
-	// so RecordSpend prices the row that token_events actually carries.
-	"anthropic.claude-opus-4-6-20251101-v1:0":   {17.25, 86.25},
-	"anthropic.claude-sonnet-4-6-20251101-v1:0": {3.45, 17.25},
-	"anthropic.claude-haiku-4-6-20251103-v1:0":  {0.92, 4.60},
-	// Mistral — published prices per million tokens.
-	"mistral-large-latest": {2.00, 6.00},
-	"mistral-small-latest": {0.10, 0.30},
-	"mistral-nemo":         {0.015, 0.045},
-	"open-mistral-7b":      {0.025, 0.025},
-	// Groq — hardware-accelerated; published prices per million tokens.
-	"llama-3.3-70b-versatile": {0.59, 0.79},
-	"llama-3.1-8b-instant":    {0.05, 0.08},
-	"mixtral-8x7b-32768":      {0.24, 0.24},
-	"gemma2-9b-it":            {0.20, 0.20},
-}
-
-// costUSD returns the realized USD cost for the request. Unknown models
+// costUSD returns the realized USD cost for the request, pricing the model
+// from the catalog (the single source of truth — Upgrade 16). Unknown models
 // cost 0 — we'd rather miss an alert than fire a false one off bad data.
 func costUSD(model string, inputTokens, outputTokens int) float64 {
-	p, ok := modelPrices[model]
+	inP, outP, ok := catalog.Price(model)
 	if !ok {
 		return 0
 	}
-	return (float64(inputTokens)*p.inputPerMillion + float64(outputTokens)*p.outputPerMillion) / 1_000_000
+	return (float64(inputTokens)*inP + float64(outputTokens)*outP) / 1_000_000
 }
 
 // CostUSD is the exported entry point on the per-million-token price table.
@@ -148,36 +103,30 @@ func CostUSD(model string, inputTokens, outputTokens int) float64 {
 // the (provider, model) pair stays consistent in token_events even when the
 // caller only supplies the model.
 func providerForModel(model string) string {
-	// Bedrock model IDs ("anthropic.claude-…") are checked before the
-	// generic claude- branch so a Bedrock-billed row never gets logged
-	// as a direct Anthropic call.
-	if strings.HasPrefix(model, "anthropic.") {
+	// Catalog is authoritative for known models (Upgrade 16) — this also
+	// resolves dated-snapshot aliases to their canonical model's provider.
+	if m, ok := catalog.Get(model); ok {
+		return m.Provider
+	}
+	// Unknown to the catalog — derive the provider from the name prefix,
+	// exactly as before. Bedrock model IDs ("anthropic.claude-…") are checked
+	// before the generic claude- branch so a Bedrock-billed row never gets
+	// logged as a direct Anthropic call.
+	switch {
+	case strings.HasPrefix(model, "anthropic."):
 		return "bedrock"
-	}
-	if strings.HasPrefix(model, "claude-") {
+	case strings.HasPrefix(model, "claude-"):
 		return "anthropic"
-	}
-	if strings.HasPrefix(model, "gemini-") {
+	case strings.HasPrefix(model, "gemini-"):
 		return "google"
-	}
 	// vLLM is self-hosted; the user-facing model name is whatever the
-	// operator loaded into vLLM and is namespaced with "vllm/" prefix
-	// to keep cache keys disjoint from the same model served elsewhere.
-	if strings.HasPrefix(model, "vllm/") {
+	// operator loaded, namespaced with "vllm/" to keep cache keys disjoint.
+	case strings.HasPrefix(model, "vllm/"):
 		return "vllm"
-	}
-	// Mistral first-party: mistral-* family + the open-mistral-* line.
-	if strings.HasPrefix(model, "mistral-") || strings.HasPrefix(model, "open-mistral-") {
+	case strings.HasPrefix(model, "mistral-"), strings.HasPrefix(model, "open-mistral-"):
 		return "mistral"
-	}
-	// Groq hosts open-weight models. Without further provider context
-	// these names map to Groq; if the same model is served through
-	// vLLM the operator should prefix the model name with "vllm/".
-	if strings.HasPrefix(model, "llama-") || strings.HasPrefix(model, "mixtral-") || strings.HasPrefix(model, "gemma") {
+	case strings.HasPrefix(model, "llama-"), strings.HasPrefix(model, "mixtral-"), strings.HasPrefix(model, "gemma"):
 		return "groq"
-	}
-	if _, ok := modelPrices[model]; ok {
-		return "openai"
 	}
 	return "unknown"
 }

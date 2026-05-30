@@ -21,6 +21,7 @@ import (
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/costanomaly"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/learner"
@@ -193,6 +194,13 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/routing/intelligence", s.handleRoutingIntelligence)
 	r.Get("/v1/api/modality/capabilities", s.handleModalityCapabilities)
 	r.Get("/v1/api/guardrails", s.handleGuardrails)
+	r.Get("/v1/api/catalog", s.handleCatalog)
+}
+
+// handleCatalog returns the full model catalog for the dashboard. Static
+// (read-mostly), no state.
+func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, catalog.All())
 }
 
 // SetGuardrailsEngine wires the guardrails engine for the dashboard panel.

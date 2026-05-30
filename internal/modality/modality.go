@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+
+	"github.com/talyvor/lens/internal/catalog"
 )
 
 // Per-modality input-token estimates (documented, rough). Exact image-token
@@ -153,40 +155,20 @@ type Capabilities struct {
 	Document bool `json:"document"`
 }
 
-// capabilities is the seed registry. A model NOT listed here is text-only by
-// default (the conservative case). Keep it data-driven — add a row to extend.
-var capabilities = map[string]Capabilities{
-	// OpenAI GPT-4o / 4.1 / 5.4 families — vision.
-	"gpt-4o":       {Vision: true},
-	"gpt-4o-mini":  {Vision: true},
-	"gpt-4.1":      {Vision: true},
-	"gpt-4.1-mini": {Vision: true},
-	"gpt-4.1-nano": {Vision: true},
-	"gpt-5.4":      {Vision: true},
-	"gpt-5.4-mini": {Vision: true},
-	// Anthropic Claude 4 family — vision + document (PDF).
-	"claude-opus-4-5":   {Vision: true, Document: true},
-	"claude-opus-4-6":   {Vision: true, Document: true},
-	"claude-sonnet-4-5": {Vision: true, Document: true},
-	"claude-sonnet-4-6": {Vision: true, Document: true},
-	"claude-haiku-4-5":  {Vision: true, Document: true},
-	"claude-haiku-4-6":  {Vision: true, Document: true},
-	// Google Gemini — vision + audio + document.
-	"gemini-1.5-pro":   {Vision: true, Audio: true, Document: true},
-	"gemini-1.5-flash": {Vision: true, Audio: true, Document: true},
-	"gemini-2.0-flash": {Vision: true, Audio: true, Document: true},
-	"gemini-2.5-flash": {Vision: true, Audio: true, Document: true},
-	"gemini-2.5-pro":   {Vision: true, Audio: true, Document: true},
-	// AWS Bedrock Claude — vision + document.
-	"anthropic.claude-opus-4-6-20251101-v1:0":   {Vision: true, Document: true},
-	"anthropic.claude-sonnet-4-6-20251101-v1:0": {Vision: true, Document: true},
-	"anthropic.claude-haiku-4-6-20251103-v1:0":  {Vision: true, Document: true},
-	// Mistral (listed models) + Groq open models are text-only — omitted, so
-	// they fall through to the conservative text-only default.
+// Capability FACTS now live in the model catalog (the single source of
+// truth — Upgrade 16). modality reads them from there; an unlisted model is
+// text-only (the conservative default), exactly as before.
+func capsOf(model string) Capabilities {
+	c := catalog.CapabilitiesOf(model)
+	return Capabilities{Vision: c.Vision, Audio: c.Audio, Document: c.Document}
 }
 
-// providerPreference lists each provider's multimodal-capable models cheapest
-// first, used to pick a redirect target.
+// providerPreference is the curated redirect-PREFERENCE order (a routing
+// POLICY, like the router's tier ranks — kept here, not in the facts
+// catalog). It deliberately lists the models we'd prefer to redirect a
+// multimodal request to, cheapest-capable first; capability facts for each
+// still come from the catalog via Supports. (Note it intentionally omits the
+// nano tier as a redirect target even though it's vision-capable.)
 var providerPreference = map[string][]string{
 	"openai":    {"gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-5.4-mini", "gpt-5.4"},
 	"anthropic": {"claude-haiku-4-6", "claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-opus-4-6", "claude-opus-4-5"},
@@ -195,12 +177,12 @@ var providerPreference = map[string][]string{
 }
 
 // Get returns a model's capabilities (zero value = text-only for unknowns).
-func Get(model string) Capabilities { return capabilities[model] }
+func Get(model string) Capabilities { return capsOf(model) }
 
 // Supports reports whether a model can serve every modality the request
 // needs. A text-only request (all-false set) is supported by every model.
 func Supports(model string, need ModalitySet) bool {
-	c := capabilities[model]
+	c := capsOf(model)
 	if need.HasImage && !c.Vision {
 		return false
 	}
@@ -213,10 +195,11 @@ func Supports(model string, need ModalitySet) bool {
 	return true
 }
 
-// CapableModel returns the cheapest model of `provider` that serves `need`
+// CapableModel returns the preferred model of `provider` that serves `need`
 // and is in the workspace's allowed set (empty allowed = all). Used to
 // redirect an auto-route request whose chosen model can't handle the
-// modality. Returns ok=false when no capable allowed model exists.
+// modality. Walks the curated providerPreference order (policy); capability
+// facts come from the catalog via Supports. ok=false when none qualifies.
 func CapableModel(provider string, need ModalitySet, allowed []string) (string, bool) {
 	for _, m := range providerPreference[provider] {
 		if len(allowed) > 0 && !contains(allowed, m) {
@@ -229,20 +212,23 @@ func CapableModel(provider string, need ModalitySet, allowed []string) (string, 
 	return "", false
 }
 
-// CapabilityMap returns a copy of the registry for the introspection API.
+// CapabilityMap returns the model→capabilities map for the introspection API,
+// sourced from the catalog.
 func CapabilityMap() map[string]Capabilities {
-	out := make(map[string]Capabilities, len(capabilities))
-	for k, v := range capabilities {
-		out[k] = v
+	all := catalog.All()
+	out := make(map[string]Capabilities, len(all))
+	for _, m := range all {
+		out[m.ID] = Capabilities{Vision: m.Capabilities.Vision, Audio: m.Capabilities.Audio, Document: m.Capabilities.Document}
 	}
 	return out
 }
 
-// KnownModels returns the registry's model names, sorted (deterministic API).
+// KnownModels returns the catalog's model ids, sorted (deterministic API).
 func KnownModels() []string {
-	out := make([]string, 0, len(capabilities))
-	for k := range capabilities {
-		out = append(out, k)
+	all := catalog.All()
+	out := make([]string, 0, len(all))
+	for _, m := range all {
+		out = append(out, m.ID)
 	}
 	sort.Strings(out)
 	return out
