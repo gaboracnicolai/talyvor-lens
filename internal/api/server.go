@@ -24,6 +24,7 @@ import (
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/costanomaly"
 	"github.com/talyvor/lens/internal/eval"
+	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
@@ -70,6 +71,7 @@ type Server struct {
 	routingAdvisor   *routing.Advisor
 	guardrails       *guardrails.Engine
 	evalPipeline     *eval.Pipeline
+	poviStakes       *povi.StakeManager
 	version          string
 	startTime        time.Time
 }
@@ -184,6 +186,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/models/usage", s.handleSpendBy("model"))
 	r.Get("/v1/api/models/recommendations", s.handleModelsRecommendations)
 	r.Get("/v1/api/eval/runs", s.handleEvalRuns)
+	r.Get("/v1/api/povi/stakes", s.handlePOVIStakes)
 	r.Get("/v1/api/workspaces", s.handleWorkspaces)
 	r.Get("/v1/api/alerts/circuits", s.handleAlertsCircuits)
 	r.Get("/v1/api/alerts/rules", s.handleAlertsRules)
@@ -313,6 +316,29 @@ func (s *Server) handleEvalRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	if list == nil {
 		list = []eval.RunSummary{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// SetPOVIStakeManager wires the PoVI node-staking manager for the dashboard's
+// Staking panel. A nil manager makes handlePOVIStakes return an empty list
+// (panel stays hidden).
+func (s *Server) SetPOVIStakeManager(m *povi.StakeManager) { s.poviStakes = m }
+
+// handlePOVIStakes returns the node stakes for the Staking panel (collateral,
+// status, slashes). Off the hot path; read-only.
+func (s *Server) handlePOVIStakes(w http.ResponseWriter, r *http.Request) {
+	if s.poviStakes == nil {
+		writeJSON(w, http.StatusOK, []povi.Stake{})
+		return
+	}
+	list, err := s.poviStakes.List(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []povi.Stake{}
 	}
 	writeJSON(w, http.StatusOK, list)
 }

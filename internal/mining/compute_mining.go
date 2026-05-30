@@ -254,6 +254,22 @@ func (m *ComputeMiner) NodePubKey(ctx context.Context, nodeID string) (string, e
 	return *pub, nil
 }
 
+// NodeWorkspace returns the operator workspace that owns a node (node→workspace
+// is 1:1). Used by PoVI staking to resolve which workspace's LENS to lock as a
+// node's collateral.
+func (m *ComputeMiner) NodeWorkspace(ctx context.Context, nodeID string) (string, error) {
+	if m.pool == nil {
+		return "", errors.New("compute mining: no pool")
+	}
+	var ws string
+	if err := m.pool.QueryRow(ctx,
+		`SELECT workspace_id FROM inference_nodes WHERE id = $1`, nodeID,
+	).Scan(&ws); err != nil {
+		return "", err
+	}
+	return ws, nil
+}
+
 // validateNodeURL enforces http(s) + non-empty host.
 func validateNodeURL(s string) error {
 	if s == "" {

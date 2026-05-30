@@ -11,12 +11,37 @@ func staticLookup(pub ed25519.PublicKey) PubKeyLookup {
 	return func(_ context.Context, _ string) (ed25519.PublicKey, error) { return pub, nil }
 }
 
+func alwaysEligible(_ context.Context, _ string) bool { return true }
+func neverEligible(_ context.Context, _ string) bool  { return false }
+
+// PART 2 GATE: even a verified receipt with minting ON must NOT mint when the
+// node is not stake-eligible — the receipt is recorded but ineligible.
+func TestProcess_StakeIneligible_NoMintEvenWhenVerifiedAndEnabled(t *testing.T) {
+	pub, priv, _ := GenerateNodeKey()
+	m := &fakeMinter{}
+	p := NewProcessor(NewStore(nil), m, staticLookup(pub), neverEligible, true) // minting ON
+
+	res, err := p.Process(context.Background(), SignReceipt(priv, sampleReceipt()))
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !res.Verified {
+		t.Error("receipt should still verify")
+	}
+	if res.StakeEligible {
+		t.Error("node should be reported ineligible")
+	}
+	if res.Minted || len(m.calls) != 0 {
+		t.Error("an ineligible node must never mint, even verified + enabled")
+	}
+}
+
 // A valid receipt with minting OFF (default): verified + recorded for audit,
 // but NO mint.
 func TestProcess_ValidReceipt_MintingOff_RecordsNoMint(t *testing.T) {
 	pub, priv, _ := GenerateNodeKey()
 	m := &fakeMinter{}
-	p := NewProcessor(NewStore(nil), m, staticLookup(pub), false)
+	p := NewProcessor(NewStore(nil), m, staticLookup(pub), alwaysEligible, false)
 
 	res, err := p.Process(context.Background(), SignReceipt(priv, sampleReceipt()))
 	if err != nil {
@@ -38,7 +63,7 @@ func TestProcess_ValidReceipt_MintingOff_RecordsNoMint(t *testing.T) {
 func TestProcess_ForgedReceipt_Unverified_NoMint(t *testing.T) {
 	pub, priv, _ := GenerateNodeKey()
 	m := &fakeMinter{}
-	p := NewProcessor(NewStore(nil), m, staticLookup(pub), true) // even with minting ON
+	p := NewProcessor(NewStore(nil), m, staticLookup(pub), alwaysEligible, true) // even with minting ON
 
 	r := SignReceipt(priv, sampleReceipt())
 	r.OutputTokens = 999999 // tamper AFTER signing → signature invalid
@@ -61,7 +86,7 @@ func TestProcess_NoPubKey_Unverified(t *testing.T) {
 	lookup := func(_ context.Context, _ string) (ed25519.PublicKey, error) {
 		return nil, errors.New("node has no pubkey on file")
 	}
-	p := NewProcessor(NewStore(nil), m, lookup, true)
+	p := NewProcessor(NewStore(nil), m, lookup, alwaysEligible, true)
 
 	res, err := p.Process(context.Background(), SignReceipt(priv, sampleReceipt()))
 	if err != nil {
@@ -77,7 +102,7 @@ func TestProcess_NoPubKey_Unverified(t *testing.T) {
 func TestProcess_ValidReceipt_MintingOn_ProvisionalMint(t *testing.T) {
 	pub, priv, _ := GenerateNodeKey()
 	m := &fakeMinter{}
-	p := NewProcessor(NewStore(nil), m, staticLookup(pub), true)
+	p := NewProcessor(NewStore(nil), m, staticLookup(pub), alwaysEligible, true)
 
 	r := sampleReceipt()
 	r.WorkspaceID = "ws-owner"
