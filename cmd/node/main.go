@@ -124,6 +124,16 @@ func runStart(args []string) {
 	} else if signer != nil {
 		srv.SetReceiptSigner(signer, client)
 		log.Printf("🔏 PoVI receipts enabled (attestation + tamper-evidence; minting stays OFF until stake+challenge)")
+		// Pin Lens's challenge pubkey so the node can verify + answer Part-3
+		// challenges (and refuse forged ones). Best-effort at startup.
+		keyCtx, keyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if pub, perr := client.FetchChallengePubKey(keyCtx); perr != nil {
+			log.Printf("node: could not fetch Lens challenge pubkey (Part-3 challenges will be refused until available): %v", perr)
+		} else {
+			srv.SetChallengePubKey(pub)
+			log.Printf("🛡️  PoVI challenge verification enabled (Lens-signed challenges)")
+		}
+		keyCancel()
 	}
 	httpServer, _ := srv.ListenAndServe(cfg.Port)
 

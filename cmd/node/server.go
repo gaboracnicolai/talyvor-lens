@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -33,6 +34,10 @@ type InferenceServer struct {
 	// for a node without a signing key.
 	signer *receiptSigner
 	lens   *LensClient
+	// challengePub is Lens's pinned challenge-signing public key (PoVI Part 3).
+	// The node verifies every /challenge is signed by Lens before answering, so
+	// arbitrary callers can't extract its served-response content.
+	challengePub ed25519.PublicKey
 
 	mu             sync.Mutex
 	activeRequests int64
@@ -49,6 +54,9 @@ func (s *InferenceServer) SetReceiptSigner(rs *receiptSigner, lens *LensClient) 
 	s.signer = rs
 	s.lens = lens
 }
+
+// SetChallengePubKey pins Lens's challenge-signing public key (PoVI Part 3).
+func (s *InferenceServer) SetChallengePubKey(pub ed25519.PublicKey) { s.challengePub = pub }
 
 func NewInferenceServer(provider Provider, secret string, cfg NodeConfig) *InferenceServer {
 	return &InferenceServer{
@@ -67,7 +75,46 @@ func (s *InferenceServer) Handler() http.Handler {
 	mux.HandleFunc("/inference", s.handleInference)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/models", s.handleModels)
+	mux.HandleFunc("/challenge", s.handleChallenge)
 	return mux
+}
+
+// handleChallenge answers a PoVI Part-3 challenge: it verifies the challenge was
+// signed by Lens (pinned pubkey), then returns the {leaf, proof} for each
+// sampled position from the retained trace. A node that can't answer (trace
+// expired, no signer) returns an error → Lens treats it as a failed challenge
+// → slash. Failing to verify the signature → 401 (don't leak trace content).
+func (s *InferenceServer) handleChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.signer == nil {
+		http.Error(w, "node produces no receipts", http.StatusBadRequest)
+		return
+	}
+	var req povi.ChallengeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Fail CLOSED: without a pinned Lens key we can't authenticate the caller,
+	// so we refuse rather than leak the trace content.
+	if len(s.challengePub) != ed25519.PublicKeySize {
+		http.Error(w, "node has no pinned Lens challenge key", http.StatusServiceUnavailable)
+		return
+	}
+	if err := povi.VerifyChallenge(req, s.challengePub); err != nil {
+		http.Error(w, "unauthorized challenge", http.StatusUnauthorized)
+		return
+	}
+	answers, err := s.signer.traces.SampledLeafProofs(req.RequestID, req.Positions)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(answers)
 }
 
 // ─── inference ───────────────────────────────────

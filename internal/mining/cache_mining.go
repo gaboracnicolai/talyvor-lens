@@ -426,6 +426,11 @@ func (s *LedgerStore) GetTotalSupply(ctx context.Context) (float64, error) {
 
 // GetCirculatingSupply = total minted - total burned. The
 // difference is what's currently in workspace wallets + staked.
+//
+// "Burned" counts BOTH plain burns (TypeBurn) AND slashed stake
+// (TypeStakeSlash) — a slash destroys collateral, reducing supply
+// (PoVI Part 3). Without counting slashes, supply would be overstated
+// after a slash, and supply feeds the LXC conversion math.
 func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (float64, error) {
 	total, err := s.GetTotalSupply(ctx)
 	if err != nil {
@@ -435,7 +440,8 @@ func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (float64, error)
 		return total, nil
 	}
 	row := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = $1`, TypeBurn)
+		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type IN ($1, $2)`,
+		TypeBurn, TypeStakeSlash)
 	var burned float64
 	if err := row.Scan(&burned); err != nil {
 		return 0, fmt.Errorf("mining: burned: %w", err)
@@ -443,14 +449,17 @@ func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (float64, error)
 	return total - burned, nil
 }
 
-// GetTotalBurned returns the cumulative LENS removed via Burn.
-// Useful for the public economy stats.
+// GetTotalBurned returns the cumulative LENS removed from supply — both plain
+// burns (TypeBurn) AND slashed stake (TypeStakeSlash). Counting slashes keeps
+// the economy-stats display (GetEconomyStats = total − burned) consistent with
+// the slash-aware GetCirculatingSupply.
 func (s *LedgerStore) GetTotalBurned(ctx context.Context) (float64, error) {
 	if s.pool == nil {
 		return 0, nil
 	}
 	row := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = $1`, TypeBurn)
+		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type IN ($1, $2)`,
+		TypeBurn, TypeStakeSlash)
 	var n float64
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("mining: total burned: %w", err)

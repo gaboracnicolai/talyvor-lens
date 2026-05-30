@@ -50,6 +50,14 @@ type Receipt struct {
 	MerkleRoot   [32]byte `json:"merkle_root"`
 	Timestamp    int64    `json:"timestamp"`
 	Signature    []byte   `json:"signature"`
+	// LeafCount is the number of leaves in the committed trace (output runes).
+	// It is NOT part of the signed CanonicalPayload — it's an informational
+	// hint so Lens knows the sampling range [0, LeafCount) for a Part-3
+	// challenge. A node can't benefit from lying about it: the sampled
+	// positions must still verify against the SIGNED MerkleRoot (understating
+	// just narrows the range checked; overstating gets it asked for positions
+	// it can't answer → the challenge fails).
+	LeafCount int `json:"leaf_count,omitempty"`
 }
 
 // GenerateNodeKey creates a fresh ed25519 keypair for a node. The node keeps

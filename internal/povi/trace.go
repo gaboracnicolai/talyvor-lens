@@ -107,6 +107,32 @@ func (c *TraceCache) SampledPaths(requestID string, indices []int) ([]Proof, err
 	return proofs, nil
 }
 
+// SampledLeafProofs returns the leaf value + authentication path for each
+// requested position — the node's answer to a Part-3 challenge. Errors if the
+// trace is unknown/expired or an index is out of range.
+func (c *TraceCache) SampledLeafProofs(requestID string, indices []int) ([]LeafProof, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[requestID]
+	if !ok || !c.now().Before(e.expiresAt) {
+		if ok {
+			delete(c.entries, requestID)
+		}
+		return nil, errors.New("povi: trace not retained for request (unknown or expired)")
+	}
+	out := make([]LeafProof, 0, len(indices))
+	for _, idx := range indices {
+		p, err := BuildProof(e.steps, idx)
+		if err != nil {
+			return nil, err
+		}
+		leaf := make([]byte, len(e.steps[idx]))
+		copy(leaf, e.steps[idx])
+		out = append(out, LeafProof{Position: idx, Leaf: leaf, Proof: p})
+	}
+	return out, nil
+}
+
 // Len is the current number of retained traces (after no sweep).
 func (c *TraceCache) Len() int {
 	c.mu.Lock()

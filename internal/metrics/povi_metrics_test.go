@@ -33,6 +33,29 @@ func TestPOVIProvisionalMint(t *testing.T) {
 	}
 }
 
+// Challenge result label is bounded {pass,fail,timeout,unknown}.
+func TestPOVIChallenge_BoundedLabel(t *testing.T) {
+	POVIChallenge("pass")
+	POVIChallenge("fail")
+	POVIChallenge("weird-unbounded")
+	if v := testutil.ToFloat64(POVIChallengesTotal.WithLabelValues("pass")); v < 1 {
+		t.Errorf("pass = %v, want >=1", v)
+	}
+	if v := testutil.ToFloat64(POVIChallengesTotal.WithLabelValues("unknown")); v < 1 {
+		t.Errorf("unbounded value should fold to unknown, got %v", v)
+	}
+	tBefore := testutil.ToFloat64(POVIChallengeTimeoutsTotal)
+	POVIChallengeTimeout()
+	if got := testutil.ToFloat64(POVIChallengeTimeoutsTotal); got != tBefore+1 {
+		t.Errorf("timeouts = %v, want %v", got, tBefore+1)
+	}
+	sBefore := testutil.ToFloat64(POVIChallengeSlashesTotal)
+	POVIChallengeSlash(5)
+	if got := testutil.ToFloat64(POVIChallengeSlashesTotal); got != sBefore+1 {
+		t.Errorf("challenge-slashes = %v, want %v", got, sBefore+1)
+	}
+}
+
 // Staking metrics are unlabeled (trivially cardinality-safe); confirm the
 // helpers set/increment them.
 func TestPOVIStakingMetrics(t *testing.T) {

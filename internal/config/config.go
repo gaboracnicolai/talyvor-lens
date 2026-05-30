@@ -103,6 +103,34 @@ type Config struct {
 	// "168h" for 7 days). Default 7*24h.
 	POVIUnbondPeriod time.Duration
 
+	// POVIChallengeRate is the fraction of verified receipts challenged per
+	// scheduler round (Part 3). Env: LENS_POVI_CHALLENGE_RATE in [0,1].
+	// Default 0.1. The economic deterrent: expected cost of cheating =
+	// P(challenge) × slash_amount must exceed the gain. Higher rate = stronger
+	// deterrent + more overhead; a low rate leaves some bad receipts
+	// unchallenged (probabilistic, not absolute).
+	POVIChallengeRate float64
+
+	// POVISlashFraction is the fraction of a node's stake burned on a failed
+	// challenge. Env: LENS_POVI_SLASH_FRACTION in (0,1]. Default 0.5.
+	POVISlashFraction float64
+
+	// POVIChallengeKey is the base64 ed25519 PRIVATE key Lens signs challenges
+	// with (env: LENS_POVI_CHALLENGE_KEY). If empty, Lens generates an
+	// ephemeral key at startup — fine for a single-instance dev run, but set a
+	// stable key in production so a Lens restart doesn't invalidate the pubkey
+	// nodes have pinned (which would make honest nodes fail challenges).
+	POVIChallengeKey string
+
+	// TrustfulComputeMintEnabled gates the LEGACY trust-based compute mint
+	// (ComputeMiner.RecordServedRequest mints LENS per served request with no
+	// receipt). Env: LENS_TRUSTFUL_COMPUTE_MINT_ENABLED. DEFAULT TRUE
+	// (preserves current behavior). This is the RETIREMENT SWITCH: once
+	// receipt-minting is enabled (LENS_POVI_MINTING_ENABLED=true, now safe with
+	// Parts 1+2+3), set this false to retire the blind trust-mint. Operator
+	// decision — do NOT flip the default here.
+	TrustfulComputeMintEnabled bool
+
 	// GuardrailsEnabled gates the Upgrade 13 OUTPUT guardrails (CheckOutput:
 	// output PII, JSON/length/regex validation) + the per-workspace config
 	// API for them. OFF by default: when false the INPUT guardrails behave
@@ -263,6 +291,28 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_POVI_UNBOND_PERIOD (Go duration, e.g. 168h): %s", v)
 		}
 		c.POVIUnbondPeriod = d
+	}
+	c.POVIChallengeRate = 0.1
+	if v := os.Getenv("LENS_POVI_CHALLENGE_RATE"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || f > 1 {
+			return nil, fmt.Errorf("invalid LENS_POVI_CHALLENGE_RATE (must be in [0,1]): %s", v)
+		}
+		c.POVIChallengeRate = f
+	}
+	c.POVISlashFraction = 0.5
+	if v := os.Getenv("LENS_POVI_SLASH_FRACTION"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 || f > 1 {
+			return nil, fmt.Errorf("invalid LENS_POVI_SLASH_FRACTION (must be in (0,1]): %s", v)
+		}
+		c.POVISlashFraction = f
+	}
+	c.POVIChallengeKey = os.Getenv("LENS_POVI_CHALLENGE_KEY")
+	// Retirement switch defaults TRUE (preserve current trust-mint behavior).
+	c.TrustfulComputeMintEnabled = true
+	if v := os.Getenv("LENS_TRUSTFUL_COMPUTE_MINT_ENABLED"); v != "" {
+		c.TrustfulComputeMintEnabled = parseBoolEnv("LENS_TRUSTFUL_COMPUTE_MINT_ENABLED")
 	}
 
 	if v := os.Getenv("LENS_RETRY_MAX_ATTEMPTS"); v != "" {
