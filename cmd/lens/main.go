@@ -342,9 +342,21 @@ func run() error {
 		}
 		return povi.DecodePublicKey(enc)
 	}
-	poviProcessor := povi.NewProcessor(poviStore, tokenLedger, poviLookup, cfg.POVIMintingEnabled)
+	// PoVI staking (Part 2): node collateral that gates minting-eligibility and
+	// that Part 3 will slash. Reuses the ledger's atomic lock primitive
+	// (tokenLedger satisfies povi.StakeLedger) via the locked_balance column.
+	poviStakeStore := povi.NewNodeStakeStore(pool)
+	poviStakeManager := povi.NewStakeManager(
+		poviStakeStore, tokenLedger, computeMiner.NodeWorkspace,
+		cfg.POVIMinStake, cfg.POVIUnbondPeriod)
+	stakeEligible := func(eligCtx context.Context, nodeID string) bool {
+		return poviStakeManager.IsEligible(eligCtx, nodeID)
+	}
+	// The mint gate is now verified AND stake-eligible AND minting-enabled
+	// (still OFF by default).
+	poviProcessor := povi.NewProcessor(poviStore, tokenLedger, poviLookup, stakeEligible, cfg.POVIMintingEnabled)
 	if cfg.POVIMintingEnabled {
-		logger.Warn("PoVI PROVISIONAL minting is ENABLED (LENS_POVI_MINTING_ENABLED) — UNSAFE without stake + challenge (Parts 2/3); receipts can mint LENS against a fabricated trace")
+		logger.Warn("PoVI PROVISIONAL minting is ENABLED (LENS_POVI_MINTING_ENABLED) — UNSAFE without challenge-and-slash (Part 3); receipts can mint LENS against a fabricated trace even with staking")
 	}
 
 	// Embedding mining (Batch 2 Item 3). Shares the ledger;
@@ -579,6 +591,7 @@ func run() error {
 	// Guardrails engine powers the dashboard's Guardrails panel.
 	apiServer.SetGuardrailsEngine(guardrailsEngine)
 	apiServer.SetEvalPipeline(evalPipeline)
+	apiServer.SetPOVIStakeManager(poviStakeManager)
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -2458,6 +2471,74 @@ func run() error {
 					"Separately, the existing trust-based compute mint (RecordServedRequest) remains active and " +
 					"unsecured until Part 3 — PoVI is designed to replace it.",
 			})
+		})
+
+		// ── PoVI staking (Part 2): node collateral that gates minting-
+		// eligibility and is slashable (Part 3). Staking does NOT gate serving —
+		// an unstaked node still serves, it's just not minting-eligible.
+		authed.Post("/v1/povi/nodes/{nodeID}/stake", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			var in struct {
+				Amount float64 `json:"amount"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			st, err := poviStakeManager.Stake(req.Context(), nodeID, in.Amount)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, st)
+		})
+
+		authed.Post("/v1/povi/nodes/{nodeID}/unbond", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			if err := poviStakeManager.Unbond(req.Context(), nodeID); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			st, _ := poviStakeManager.Get(req.Context(), nodeID)
+			writeJSONOK(w, http.StatusOK, st)
+		})
+
+		authed.Post("/v1/povi/nodes/{nodeID}/release", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			if err := poviStakeManager.Release(req.Context(), nodeID); err != nil {
+				// Unbonding-not-elapsed is a client error (try again later).
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			st, _ := poviStakeManager.Get(req.Context(), nodeID)
+			writeJSONOK(w, http.StatusOK, st)
+		})
+
+		authed.Get("/v1/povi/nodes/{nodeID}/stake", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			st, err := poviStakeManager.Get(req.Context(), nodeID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if st == nil {
+				writeJSONOK(w, http.StatusOK, map[string]any{"node_id": nodeID, "staked": false, "eligible": false})
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"stake":    st,
+				"eligible": poviStakeManager.IsEligible(req.Context(), nodeID),
+				"min_stake": cfg.POVIMinStake,
+			})
+		})
+
+		authed.Get("/v1/povi/staking/status", func(w http.ResponseWriter, req *http.Request) {
+			status, err := poviStakeManager.Status(req.Context())
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, status)
 		})
 
 		// Guardrails: per-workspace safety policy + pre-flight check.

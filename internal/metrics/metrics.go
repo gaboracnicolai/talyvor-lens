@@ -232,6 +232,22 @@ var (
 	POVIProvisionalMintsTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_povi_provisional_mints_total", Help: "PROVISIONAL receipt-based LENS mints (UNSAFE — only if LENS_POVI_MINTING_ENABLED is on; default off)."},
 	)
+
+	// ─── PoVI staking (Token Economy Phase 1, Part 2) ───
+	// Unlabeled gauges/counters — trivially cardinality-safe (no node/workspace
+	// labels; these are protocol-wide totals).
+	POVIStakeLockedTotal = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "lens_povi_stake_locked_total", Help: "Total LENS currently locked as node-registration collateral."},
+	)
+	POVINodesStakedGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "lens_povi_nodes_staked", Help: "Number of minting-eligible staked nodes (active stake ≥ min)."},
+	)
+	POVISlashesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_povi_slashes_total", Help: "Stake slash events."},
+	)
+	POVISlashAmountTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_povi_slash_amount_total", Help: "Total LENS burned via stake slashing."},
+	)
 )
 
 func init() {
@@ -255,6 +271,7 @@ func init() {
 		GuardrailTriggeredTotal, GuardrailBlocksTotal, GuardrailRedactionsTotal,
 		EvalRunsTotal, EvalRegressionsDetectedTotal, ABSignificantResultsTotal,
 		POVIReceiptsTotal, POVIReceiptVerifyFailuresTotal, POVIProvisionalMintsTotal,
+		POVIStakeLockedTotal, POVINodesStakedGauge, POVISlashesTotal, POVISlashAmountTotal,
 	)
 }
 
@@ -407,3 +424,19 @@ func POVIReceipt(verified bool) {
 // POVIProvisionalMint counts a PROVISIONAL receipt-based mint. Only invoked
 // when the unsafe minting flag is on, so flipping it is observable.
 func POVIProvisionalMint() { POVIProvisionalMintsTotal.Inc() }
+
+// ─── PoVI staking helpers (Part 2) ───
+
+// SetPOVIStakeLocked publishes the total LENS locked as node collateral.
+func SetPOVIStakeLocked(v float64) { POVIStakeLockedTotal.Set(v) }
+
+// SetPOVINodesStaked publishes the count of minting-eligible staked nodes.
+func SetPOVINodesStaked(n float64) { POVINodesStakedGauge.Set(n) }
+
+// POVISlash records one slash event of `amount` LENS burned.
+func POVISlash(amount float64) {
+	POVISlashesTotal.Inc()
+	if amount > 0 {
+		POVISlashAmountTotal.Add(amount)
+	}
+}

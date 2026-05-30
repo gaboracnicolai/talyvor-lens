@@ -13,6 +13,10 @@ import (
 // registry / mining packages.
 type PubKeyLookup func(ctx context.Context, nodeID string) (ed25519.PublicKey, error)
 
+// StakeLookup reports whether a node is minting-eligible: it has an active
+// stake at or above the minimum (Part 2). Injected so the gate stays decoupled.
+type StakeLookup func(ctx context.Context, nodeID string) bool
+
 // Processor is the Lens-side entry point for a receipt received alongside a
 // network node's response: it verifies the signature, records the receipt for
 // audit (verified or not), and — only when the receipt verifies AND provisional
@@ -24,14 +28,20 @@ type Processor struct {
 	store          *Store
 	minter         Minter
 	lookup         PubKeyLookup
+	stakeEligible  StakeLookup
 	mintingEnabled bool
 }
 
 // NewProcessor wires the audit store, the ledger minter, the node pubkey
-// lookup, and the provisional-minting flag (LENS_POVI_MINTING_ENABLED; default
-// false). With minting disabled, Process verifies + records but never mints.
-func NewProcessor(store *Store, minter Minter, lookup PubKeyLookup, mintingEnabled bool) *Processor {
-	return &Processor{store: store, minter: minter, lookup: lookup, mintingEnabled: mintingEnabled}
+// lookup, the stake-eligibility lookup (Part 2), and the provisional-minting
+// flag (LENS_POVI_MINTING_ENABLED; default false). With minting disabled,
+// Process verifies + records but never mints. A nil stakeEligible defaults to
+// "not eligible" (safe): the mint gate then requires staking to be wired.
+func NewProcessor(store *Store, minter Minter, lookup PubKeyLookup, stakeEligible StakeLookup, mintingEnabled bool) *Processor {
+	if stakeEligible == nil {
+		stakeEligible = func(context.Context, string) bool { return false }
+	}
+	return &Processor{store: store, minter: minter, lookup: lookup, stakeEligible: stakeEligible, mintingEnabled: mintingEnabled}
 }
 
 // MintingEnabled reports whether provisional (unsafe) minting is on.
@@ -39,10 +49,11 @@ func (p *Processor) MintingEnabled() bool { return p.mintingEnabled }
 
 // ProcessResult is the outcome of handling one receipt.
 type ProcessResult struct {
-	Verified bool    `json:"verified"`
-	Minted   bool    `json:"minted"`
-	Amount   float64 `json:"amount"`
-	Reason   string  `json:"reason,omitempty"` // why unverified, when applicable
+	Verified      bool    `json:"verified"`
+	StakeEligible bool    `json:"stake_eligible"`
+	Minted        bool    `json:"minted"`
+	Amount        float64 `json:"amount"`
+	Reason        string  `json:"reason,omitempty"` // why unverified/ineligible, when applicable
 }
 
 // Process verifies a receipt against the node's registered pubkey, records it
@@ -72,13 +83,21 @@ func (p *Processor) Process(ctx context.Context, r Receipt) (ProcessResult, erro
 
 	res := ProcessResult{Verified: verified, Reason: reason}
 	if verified {
-		// MintFromReceipt is itself gated: it no-ops when mintingEnabled is
-		// false, so this never mints by default.
-		minted, amount, err := MintFromReceipt(ctx, p.minter, r, p.mintingEnabled)
-		if err != nil {
-			return res, err
+		// Part 2: minting also requires the node to be stake-eligible (an
+		// active stake ≥ min). An unstaked/under-staked node's receipt is
+		// recorded but ineligible to mint — even if minting is enabled.
+		res.StakeEligible = p.stakeEligible(ctx, r.NodeID)
+		if res.StakeEligible {
+			// MintFromReceipt is itself gated: it no-ops when mintingEnabled is
+			// false, so this never mints by default.
+			minted, amount, err := MintFromReceipt(ctx, p.minter, r, p.mintingEnabled)
+			if err != nil {
+				return res, err
+			}
+			res.Minted, res.Amount = minted, amount
+		} else if res.Reason == "" {
+			res.Reason = "node not stake-eligible — receipt recorded but ineligible to mint"
 		}
-		res.Minted, res.Amount = minted, amount
 	}
 	return res, nil
 }
