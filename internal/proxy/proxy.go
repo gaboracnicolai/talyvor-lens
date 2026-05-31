@@ -758,9 +758,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// workspace can opt into buffering — which gives up streaming so the full
 	// response can be inspected — by trading the SSE fast-path for the
 	// buffered non-streaming path below.
+	bufferedStream := false
 	if streaming && p.guardrails != nil && p.guardrails.ShouldBufferStream(wsID) {
 		w.Header().Set("X-Talyvor-Stream-Buffered", "true")
 		streaming = false
+		bufferedStream = true
 	}
 	if streaming {
 		if p.guardrails != nil && p.guardrails.OutputEnabled() {
@@ -879,6 +881,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	}
 
 	upstreamBodyOut, err := rebuildBody(body, upstreamModel, compressedPrompt)
+	if err == nil && bufferedStream {
+		// Buffering for output guardrails: force the UPSTREAM call non-streaming
+		// so it returns a parseable completion CheckOutput can inspect (the
+		// client still gets a stream-shaped response below). Every OpenAI-
+		// compatible provider — including Anthropic — reads this top-level
+		// "stream" field verbatim; Google already uses the non-streaming
+		// endpoint, so a single override covers all providers.
+		upstreamBodyOut = disableStream(upstreamBodyOut)
+	}
 	if err != nil {
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
 		writeError(w, http.StatusBadGateway, "rebuild request body: "+err.Error())
@@ -997,11 +1008,24 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// forwardWithFallback always returns OpenAI-shape JSON, so we default
 	// Content-Type to application/json. Streaming responses are handled in
 	// a different code path (stream.go) and don't pass through here.
-	if w.Header().Get("Content-Type") == "" {
-		w.Header().Set("Content-Type", "application/json")
+	if bufferedStream && clientStatus == http.StatusOK {
+		// The client asked for a stream; we buffered the full response so the
+		// output guardrails could inspect it. Deliver the (possibly redacted)
+		// result as a single SSE event so the client still gets a stream-shaped
+		// response — just not incrementally. A blocked output falls through to
+		// the JSON 422 below (errors aren't streamed).
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(clientStatus)
+		_, _ = w.Write([]byte("data: "))
+		_, _ = w.Write(clientBody)
+		_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+	} else {
+		if w.Header().Get("Content-Type") == "" {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(clientStatus)
+		_, _ = w.Write(clientBody)
 	}
-	w.WriteHeader(clientStatus)
-	_, _ = w.Write(clientBody)
 
 	// A blocked output is treated like a blocked request: no caching, no
 	// spend, no attribution. The guardrail block itself is recorded
@@ -1408,6 +1432,25 @@ func streamRequested(body []byte) bool {
 		return false
 	}
 	return m.Stream
+}
+
+// disableStream sets the top-level "stream" field to false on a canonical
+// (OpenAI-shape) request body so the upstream returns a non-streaming
+// completion. Used when buffering for output guardrails. Every OpenAI-
+// compatible provider (incl. Anthropic, which Lens forwards verbatim) reads
+// this field; Google uses a non-streaming endpoint regardless. Best-effort:
+// on a parse error the body is returned unchanged.
+func disableStream(body []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	m["stream"] = false
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func writeBytes(w http.ResponseWriter, status int, body []byte) {

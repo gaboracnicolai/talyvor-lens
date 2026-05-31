@@ -71,28 +71,13 @@ func streamReq(t *testing.T) *http.Request {
 	return req
 }
 
-// THE E2E (currently SKIPPED — it documents a CONFIRMED BUG):
-//
-// A streamed request with output guardrails + BufferStreamForOutput opted in,
-// whose buffered output contains PII, SHOULD have the output guardrail fire on
-// the buffered content (block). It does NOT.
-//
-// BUG (found by this test, reported — NOT fixed in the cleanup PR that added
-// this test): when buffering, proxy.go:761-764 sets X-Talyvor-Stream-Buffered
-// and flips streaming=false, then falls through to the non-streaming forward
-// path — but it forwards the ORIGINAL request body, which still has
-// "stream":true. The upstream therefore streams SSE; the non-streaming handler
-// reads the SSE bytes, extractResponseContent can't parse them (it expects the
-// JSON completion shape), so CheckOutput inspects EMPTY content and never fires,
-// and the raw SSE is written back to the client at 200 with the PII intact.
-// Net: output guardrails on buffered streams are silently a no-op.
-//
-// Fix (separate change — it alters streaming behavior): force "stream":false on
-// the body sent upstream when buffering, so the provider returns a parseable
-// completion the output guardrail can inspect. Remove the t.Skip once fixed.
+// THE E2E (now FIXED): a streamed request with output guardrails +
+// BufferStreamForOutput opted in, whose buffered output contains PII, has the
+// output guardrail FIRE on the buffered content → BLOCK (422), not a leak. This
+// proves streaming + buffering + output-guardrail evaluation work together: the
+// upstream call is forced non-streaming (so CheckOutput can inspect a parseable
+// completion), and the PII never reaches the client.
 func TestStreamGuardrails_BufferedOutputPIIBlocks(t *testing.T) {
-	t.Skip("KNOWN BUG: buffered streams forward stream:true upstream → SSE response is unparseable → output guardrails run on empty content and never fire. Reported, not fixed here (streaming-behavior change). Remove this Skip when fixed.")
-
 	eng := guardrails.New(pii.New(), injection.New(injection.DefaultPolicy()))
 	eng.SetOutputEnabled(true)
 	eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
@@ -118,30 +103,67 @@ func TestStreamGuardrails_BufferedOutputPIIBlocks(t *testing.T) {
 	}
 }
 
-// Documents the CURRENT (buggy) behavior so the suite stays green and the bug
-// is visible in code: a buffered stream is marked buffered, but because the
-// output guardrail can't inspect the forwarded SSE, the PII is returned to the
-// client at 200 (it SHOULD be blocked — see the skipped test above). Flip this
-// to expect a block when the bug is fixed.
-func TestStreamGuardrails_BufferedOutputPII_CurrentBuggyBehavior(t *testing.T) {
+// REDACT action on a buffered stream: PII is masked in the delivered response
+// (not blocked), the client still gets a stream-shaped (SSE) response with the
+// PII removed, and X-Talyvor-Output-Redacted is set. (The masked result is what
+// gets billed/cached — see the spend gating in proxy.go.)
+func TestStreamGuardrails_BufferedOutputPIIRedacts(t *testing.T) {
 	eng := guardrails.New(pii.New(), injection.New(injection.DefaultPolicy()))
 	eng.SetOutputEnabled(true)
 	eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
 		BufferStreamForOutput: true,
-		OutputPIIAction:       guardrails.ActionBlock,
+		OutputPIIAction:       guardrails.ActionRedact,
 	})
 	p := e2eProxy(t, eng, bufferAwareUpstream(t, piiEmail).URL)
 
 	w := newFlushRecorder()
 	p.HandleOpenAI(w, streamReq(t))
 
-	// The buffer DECISION is taken (header set, streaming flipped off)…
 	if got := w.Header().Get("X-Talyvor-Stream-Buffered"); got != "true" {
-		t.Errorf("expected X-Talyvor-Stream-Buffered=true, got %q", got)
+		t.Errorf("expected buffered, got %q", got)
 	}
-	// …but the output guardrail does NOT fire (the bug): PII reaches the client.
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "john.doe@example.com") {
-		t.Fatalf("documents the BUG: expected the unblocked SSE+PII at 200, got %d / %s", w.Code, w.Body.String())
+	if got := w.Header().Get("X-Talyvor-Output-Redacted"); got != "true" {
+		t.Errorf("expected X-Talyvor-Output-Redacted=true, got %q", got)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("redacted output must pass (200), got %d — %s", w.Code, w.Body.String())
+	}
+	// Client gets a stream-shaped (SSE) response…
+	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("buffered success should be delivered as SSE, got Content-Type %q", got)
+	}
+	if !strings.HasPrefix(w.Body.String(), "data: ") || !strings.Contains(w.Body.String(), "[DONE]") {
+		t.Errorf("buffered success should be a single SSE event; got %s", w.Body.String())
+	}
+	// …with the PII masked out.
+	if strings.Contains(w.Body.String(), "john.doe@example.com") {
+		t.Errorf("redacted response still contains the PII: %s", w.Body.String())
+	}
+}
+
+// A CLEAN buffered stream passes through and reaches the client intact, as a
+// stream-shaped (SSE) response.
+func TestStreamGuardrails_BufferedCleanReachesClient(t *testing.T) {
+	eng := guardrails.New(pii.New(), injection.New(injection.DefaultPolicy()))
+	eng.SetOutputEnabled(true)
+	eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
+		BufferStreamForOutput: true,
+		OutputPIIAction:       guardrails.ActionBlock,
+	})
+	clean := "here is a perfectly clean answer with no sensitive data"
+	p := e2eProxy(t, eng, bufferAwareUpstream(t, clean).URL)
+
+	w := newFlushRecorder()
+	p.HandleOpenAI(w, streamReq(t))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("clean buffered output must pass (200), got %d — %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("clean buffered success should be SSE-shaped, got %q", got)
+	}
+	if !strings.Contains(w.Body.String(), "clean answer") || !strings.Contains(w.Body.String(), "[DONE]") {
+		t.Errorf("clean content should reach the client as an SSE event; got %s", w.Body.String())
 	}
 }
 
