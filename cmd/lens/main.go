@@ -518,90 +518,93 @@ func run() error {
 	// OpenAPI spec — public, no auth, no version path prefix.
 	r.Get("/openapi.json", api.ServeOpenAPI)
 
-	// Public token-rate endpoint — no auth needed; rates are
-	// part of Lens's public economic surface.
-	r.Get("/v1/tokens/rates", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"cache": mining.Rates(),
-			"compute": map[string]float64{
-				"base_per_1k_tokens": mining.ComputeMineBaseRate,
-				"multiplier_cpu":     mining.GPUMultiplierCPU,
-				"multiplier_rtx4090": mining.GPUMultiplierRTX4090,
-				"multiplier_a100":    mining.GPUMultiplierA100,
-				"multiplier_h100":    mining.GPUMultiplierH100,
-			},
-			"embedding":  mining.EmbeddingRates(),
-			"annotation": mining.AnnotationRates(),
-			"pattern":    mining.PatternRates(),
+	// Public read-only API endpoints — no auth required, but rate-limited to
+	// prevent enumeration and DoS on the public economic surface.
+	r.Group(func(pub chi.Router) {
+		pub.Use(ratelimit.RateLimitMiddleware(rateLimiter))
+
+		// Token earning rates — part of Lens's public economic surface.
+		pub.Get("/v1/tokens/rates", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"cache": mining.Rates(),
+				"compute": map[string]float64{
+					"base_per_1k_tokens": mining.ComputeMineBaseRate,
+					"multiplier_cpu":     mining.GPUMultiplierCPU,
+					"multiplier_rtx4090": mining.GPUMultiplierRTX4090,
+					"multiplier_a100":    mining.GPUMultiplierA100,
+					"multiplier_h100":    mining.GPUMultiplierH100,
+				},
+				"embedding":  mining.EmbeddingRates(),
+				"annotation": mining.AnnotationRates(),
+				"pattern":    mining.PatternRates(),
+			})
 		})
-	})
 
-	// Public economy stats (Batch 3 Phase 1).
-	r.Get("/v1/economy/stats", func(w http.ResponseWriter, req *http.Request) {
-		stats, err := marketplace.GetEconomyStats(req.Context())
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSONOK(w, http.StatusOK, stats)
-	})
+		// Economy stats (Batch 3 Phase 1).
+		pub.Get("/v1/economy/stats", func(w http.ResponseWriter, req *http.Request) {
+			stats, err := marketplace.GetEconomyStats(req.Context())
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
+		})
 
-	// Public marketplace listings (read-only — no auth needed
-	// to browse; buying requires auth).
-	r.Get("/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
-		limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
-		listings, err := marketplace.GetListings(req.Context(), limit)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSONOK(w, http.StatusOK, listings)
-	})
+		// Marketplace listings (read-only — browsing is public; buying requires auth).
+		pub.Get("/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
+			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+			listings, err := marketplace.GetListings(req.Context(), limit)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, listings)
+		})
 
-	// Public insights endpoint — aggregated patterns across all
-	// opted-in workspaces. Filters supported via query params.
-	r.Get("/v1/insights/routing", func(w http.ResponseWriter, req *http.Request) {
-		q := req.URL.Query()
-		insights, err := patternMiner.GetInsights(req.Context(),
-			q.Get("model"), q.Get("provider"), q.Get("feature"))
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSONOK(w, http.StatusOK, insights)
-	})
+		// Aggregated routing patterns across opted-in workspaces.
+		pub.Get("/v1/insights/routing", func(w http.ResponseWriter, req *http.Request) {
+			q := req.URL.Query()
+			insights, err := patternMiner.GetInsights(req.Context(),
+				q.Get("model"), q.Get("provider"), q.Get("feature"))
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, insights)
+		})
 
-	// Public discovery: embedding nodes available for a model.
-	r.Get("/v1/embedding-nodes/available", func(w http.ResponseWriter, req *http.Request) {
-		model := req.URL.Query().Get("model")
-		if model == "" {
-			writeJSONErr(w, http.StatusBadRequest, "model query param required")
-			return
-		}
-		minDim, _ := strconv.Atoi(req.URL.Query().Get("min_dimensions"))
-		nodes, err := embeddingMiner.ListAvailableNodes(req.Context(), model, minDim)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSONOK(w, http.StatusOK, nodes)
-	})
+		// Discovery: embedding nodes available for a model.
+		pub.Get("/v1/embedding-nodes/available", func(w http.ResponseWriter, req *http.Request) {
+			model := req.URL.Query().Get("model")
+			if model == "" {
+				writeJSONErr(w, http.StatusBadRequest, "model query param required")
+				return
+			}
+			minDim, _ := strconv.Atoi(req.URL.Query().Get("min_dimensions"))
+			nodes, err := embeddingMiner.ListAvailableNodes(req.Context(), model, minDim)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, nodes)
+		})
 
-	// Public discovery: GPU nodes available for a model.
-	r.Get("/v1/nodes/available", func(w http.ResponseWriter, req *http.Request) {
-		model := req.URL.Query().Get("model")
-		if model == "" {
-			writeJSONErr(w, http.StatusBadRequest, "model query param required")
-			return
-		}
-		nodes, err := computeMiner.ListAvailableNodes(req.Context(), model)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSONOK(w, http.StatusOK, nodes)
+		// Discovery: GPU nodes available for a model.
+		pub.Get("/v1/nodes/available", func(w http.ResponseWriter, req *http.Request) {
+			model := req.URL.Query().Get("model")
+			if model == "" {
+				writeJSONErr(w, http.StatusBadRequest, "model query param required")
+				return
+			}
+			nodes, err := computeMiner.ListAvailableNodes(req.Context(), model)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, nodes)
+		})
 	})
 
 	r.Handle("/metrics", metrics.Handler())
@@ -647,39 +650,44 @@ func run() error {
 	r.Get("/dashboard/economy", dashHandler.ServeEconomy)
 	r.Get("/", dashHandler.RedirectRoot)
 
-	// Public oracle stats — no auth, no PII, just rollup counters.
-	r.Get("/v1/oracle/stats", func(w http.ResponseWriter, req *http.Request) {
-		stats, err := oracleEngine.GetOracleStats(req.Context())
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSONOK(w, http.StatusOK, stats)
-	})
+	// Public oracle + economy endpoints — no auth, no PII, but rate-limited
+	// to prevent scraping / DoS.
+	r.Group(func(pub chi.Router) {
+		pub.Use(ratelimit.RateLimitMiddleware(rateLimiter))
 
-	// Public conversion-rate surface (two-token split). The rate +
-	// its full derivation are public economic signal; no auth.
-	r.Get("/v1/economy/conversion-rate", func(w http.ResponseWriter, req *http.Request) {
-		rate, err := rateEngine.CurrentRate(req.Context())
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSONOK(w, http.StatusOK, map[string]any{
-			"rate":        rate,
-			"usd_per_lxc": economy.LXCUSDValue,
-			"lens_per_lxc": rate,
+		pub.Get("/v1/oracle/stats", func(w http.ResponseWriter, req *http.Request) {
+			stats, err := oracleEngine.GetOracleStats(req.Context())
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, stats)
 		})
-	})
 
-	r.Get("/v1/economy/conversion-rate/history", func(w http.ResponseWriter, req *http.Request) {
-		limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
-		hist, err := rateEngine.RateHistory(req.Context(), limit)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSONOK(w, http.StatusOK, hist)
+		// Public conversion-rate surface (two-token split). The rate +
+		// its full derivation are public economic signal; no auth.
+		pub.Get("/v1/economy/conversion-rate", func(w http.ResponseWriter, req *http.Request) {
+			rate, err := rateEngine.CurrentRate(req.Context())
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"rate":         rate,
+				"usd_per_lxc":  economy.LXCUSDValue,
+				"lens_per_lxc": rate,
+			})
+		})
+
+		pub.Get("/v1/economy/conversion-rate/history", func(w http.ResponseWriter, req *http.Request) {
+			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+			hist, err := rateEngine.RateHistory(req.Context(), limit)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, hist)
+		})
 	})
 
 	// Public status page. /status content-negotiates between HTML and
