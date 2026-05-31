@@ -681,6 +681,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			if c := p.trySemantic(ctx, cfg.name, model, cachePrompt); c != nil {
 				cached, layer = c, "cache_hit_semantic"
 				span.AddEvent("cache.hit.semantic")
+			} else {
+				// Both exact and semantic missed — a true cache miss. Symmetric
+				// with the RecordCacheHit calls below.
+				metrics.RecordCacheMiss("cache_miss")
 			}
 		}
 		if cached != nil {
@@ -1279,7 +1283,16 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, prompt string,
 // up. The closure builds a fresh request each attempt (bytes.NewReader
 // keeps the body re-readable). Returns the final response, its body,
 // the attempt count, and any non-retryable error.
-func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model string, cfg providerConfig) (*http.Response, []byte, int, error) {
+func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model string, cfg providerConfig) (resp *http.Response, respBody []byte, attempts int, err error) {
+	// Observe upstream provider latency + outcome on EVERY return path. The
+	// named returns let one deferred RecordUpstream cover both success and
+	// error without restructuring the call below. Bounded labels only; this
+	// never alters control flow or the returned error.
+	start := time.Now()
+	defer func() {
+		metrics.RecordUpstream(upstreamProviderLabel(cfg.name), upstreamStatusClass(resp, err), time.Since(start))
+	}()
+
 	upstreamURL := cfg.upstreamURLFn(model)
 	result := retry.Do(ctx, p.retryConfig, func(c context.Context) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(c, http.MethodPost, upstreamURL, bytes.NewReader(body))
@@ -1304,14 +1317,46 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 	if result.LastError != nil {
 		return nil, nil, result.Attempts, result.LastError
 	}
-	resp := result.Response
+	resp = result.Response
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, nil, result.Attempts, fmt.Errorf("read upstream response: %w", err)
 	}
 	return resp, respBody, result.Attempts, nil
+}
+
+// upstreamProviderLabel guards the provider metric label so an empty provider
+// can never produce a blank series (and never panics).
+func upstreamProviderLabel(provider string) string {
+	if provider == "" {
+		return "unknown"
+	}
+	return provider
+}
+
+// upstreamStatusClass normalizes an upstream result to a BOUNDED status label:
+// "1xx"/"2xx"/"3xx"/"4xx"/"5xx", or "error" for a transport failure / no
+// response. Never the raw code or error string (cardinality).
+func upstreamStatusClass(resp *http.Response, err error) string {
+	if err != nil || resp == nil {
+		return "error"
+	}
+	switch resp.StatusCode / 100 {
+	case 1:
+		return "1xx"
+	case 2:
+		return "2xx"
+	case 3:
+		return "3xx"
+	case 4:
+		return "4xx"
+	case 5:
+		return "5xx"
+	default:
+		return "error"
+	}
 }
 
 func readLimitedBody(r *http.Request, limit int64) ([]byte, error) {
