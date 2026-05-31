@@ -1,8 +1,25 @@
 .PHONY: build test vet status bench bench-compare up down logs ps reset \
-        binaries lens node cachenode embednode
+        binaries lens node cachenode embednode \
+        shellcheck backup-verify-local
 
 build:
 	go build ./...
+
+# ────────────────────────────────────────────────────────────
+# Backup & Disaster Recovery (Upgrade 12). The scripts + runbook live in
+# deploy/backup/. These targets statically check the scripts and run a LOCAL
+# backup→restore→verify round-trip in a throwaway docker Postgres — the only
+# DR proof obtainable without real infrastructure. A real production restore
+# drill (backup_verify.sh against prod backups) is a manual operational task.
+# ────────────────────────────────────────────────────────────
+
+# Lint every backup script. Requires shellcheck (brew install shellcheck).
+shellcheck:
+	shellcheck deploy/backup/scripts/*.sh
+
+# Prove the backup machinery round-trips locally (needs docker).
+backup-verify-local:
+	deploy/backup/scripts/local_drill.sh
 
 # ────────────────────────────────────────────────────────────
 # Mining binaries — one go-build per cmd/ subdirectory. The
