@@ -201,9 +201,9 @@ func run() error {
 	// "eval") so eval runs show up in budgets/forecasts/reports, and run the
 	// scheduler for cadence-based dataset evals (both off the request hot path).
 	evalPipeline.SetSpendRecorder(alertManager)
-	go evalPipeline.StartScheduler(ctx, time.Minute)
+	// eval scheduler and anomaly monitor goroutines are launched after setupHA
+	// below so they can be wrapped with leader election.
 	anomalyDetector := anomaly.New(pool)
-	go anomalyDetector.StartMonitor(ctx, nc, 1*time.Hour)
 	statusPage := status.New(pool, redisClient, nc, "0.1.0")
 	go statusPage.StartCacher(ctx, 60*time.Second)
 	// Model-catalog runtime overrides (Upgrade 16): an operator can add or
@@ -310,6 +310,15 @@ func run() error {
 	// its registry/breaker drive graceful drain on shutdown.
 	haComps := setupHA(ctx, cfg, redisClient, pool, breakerRegistry, rateLimiter, logger)
 
+	// Singleton background jobs — wrapped with leader election so exactly one
+	// instance runs each when HA is enabled; runs directly when disabled.
+	go haComps.leader.Run(ctx, "eval-scheduler", 30*time.Second, func(lctx context.Context) {
+		evalPipeline.StartScheduler(lctx, time.Minute)
+	})
+	go haComps.leader.Run(ctx, "anomaly-monitor", 30*time.Second, func(lctx context.Context) {
+		anomalyDetector.StartMonitor(lctx, nc, 1*time.Hour)
+	})
+
 	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
 	tokenLedger := mining.NewLedgerStore(pool)
 	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
@@ -380,7 +389,9 @@ func run() error {
 		computeMiner.NodeURL, challengeClient, poviStakeManager, challengeStore,
 		4, cfg.POVISlashFraction)
 	challengeScheduler := povi.NewChallengeScheduler(poviChallenger, poviStore, cfg.POVIChallengeRate)
-	go challengeScheduler.StartScheduler(ctx, time.Minute)
+	go haComps.leader.Run(ctx, "povi-challenge", 30*time.Second, func(lctx context.Context) {
+		challengeScheduler.StartScheduler(lctx, time.Minute)
+	})
 
 	// Embedding mining (Batch 2 Item 3). Shares the ledger;
 	// proxy wires RecordEmbeddingsServed in the semantic-cache

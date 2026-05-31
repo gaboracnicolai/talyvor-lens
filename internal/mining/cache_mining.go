@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -566,14 +565,8 @@ func (s *LedgerStore) GetHistory(ctx context.Context, workspaceID string, limit,
 // CacheMiner is the LENS earner for the cache-contribution
 // track. Wraps a LedgerStore + the cross-workspace toggle.
 type CacheMiner struct {
-	ledger          *LedgerStore
-	crossWorkspace  bool
-
-	// mu guards the in-process counters used by GetMiningStats
-	// when there's no DB pool wired (test path).
-	mu              sync.Mutex
-	served          map[string]int
-	benefited       map[string]int
+	ledger         *LedgerStore
+	crossWorkspace bool
 }
 
 // NewCacheMiner builds a miner. `crossWorkspaceEnabled` mirrors
@@ -586,8 +579,6 @@ func NewCacheMiner(ledger *LedgerStore, crossWorkspaceEnabled bool) *CacheMiner 
 	return &CacheMiner{
 		ledger:         ledger,
 		crossWorkspace: crossWorkspaceEnabled,
-		served:         map[string]int{},
-		benefited:      map[string]int{},
 	}
 }
 
@@ -605,17 +596,6 @@ func (m *CacheMiner) RecordCacheHit(
 		// owner tracking landed. Skip (no one to credit).
 		return nil
 	}
-
-	// Track per-workspace counters for GetMiningStats — the DB
-	// query is the canonical source, but holding a small
-	// in-process counter lets stats endpoints work even before
-	// the first DB flush.
-	m.mu.Lock()
-	m.served[cacheOwnerWorkspace]++
-	if requestWorkspace != "" && requestWorkspace != cacheOwnerWorkspace {
-		m.benefited[requestWorkspace]++
-	}
-	m.mu.Unlock()
 
 	earning := m.earnFor(cacheOwnerWorkspace, requestWorkspace, hitType)
 	if earning <= 0 {
@@ -652,10 +632,14 @@ func (m *CacheMiner) GetMiningStats(ctx context.Context, workspaceID string) (*C
 	if err != nil {
 		return nil, err
 	}
-	m.mu.Lock()
-	served := m.served[workspaceID]
-	benefited := m.benefited[workspaceID]
-	m.mu.Unlock()
+	served, err := m.ledger.CountCacheHitsServed(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	benefited, err := m.ledger.CountCacheHitsBenefited(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
 
 	// EstimatedMonthly: lifetimeEarned across a guessed
 	// onboarding-to-now window. Without a per-day breakdown we
@@ -679,6 +663,38 @@ func (m *CacheMiner) GetMiningStats(ctx context.Context, workspaceID string) (*C
 		CacheHitsBenefited: benefited,
 		EstimatedMonthly:   monthly,
 	}, nil
+}
+
+const countServedSQL = `SELECT COUNT(*) FROM lens_token_ledger WHERE workspace_id = $1 AND type = 'cache_mine'`
+
+// CountCacheHitsServed returns the number of cache-mine credits issued to
+// workspaceID — the count of cache hits this workspace's entries served to any
+// requester. Queries PG directly so the count is consistent across instances.
+func (s *LedgerStore) CountCacheHitsServed(ctx context.Context, workspaceID string) (int, error) {
+	if s.pool == nil {
+		return 0, nil
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, countServedSQL, workspaceID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("mining: count served: %w", err)
+	}
+	return n, nil
+}
+
+const countBeneditedSQL = `SELECT COUNT(*) FROM lens_token_ledger WHERE type = 'cache_mine' AND metadata->>'request_workspace_id' = $1`
+
+// CountCacheHitsBenefited returns the number of times workspaceID benefited
+// from another workspace's cache entry. Reads the request_workspace_id field
+// stored in ledger metadata. Cross-partition query — analytics only, not hot path.
+func (s *LedgerStore) CountCacheHitsBenefited(ctx context.Context, workspaceID string) (int, error) {
+	if s.pool == nil {
+		return 0, nil
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, countBeneditedSQL, workspaceID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("mining: count benefited: %w", err)
+	}
+	return n, nil
 }
 
 // Rates returns the public rate table — backs the
