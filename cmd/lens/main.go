@@ -66,6 +66,7 @@ import (
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/quality"
+	"github.com/talyvor/lens/internal/controlplane"
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/roi"
@@ -318,6 +319,24 @@ func run() error {
 	go haComps.leader.Run(ctx, "anomaly-monitor", 30*time.Second, func(lctx context.Context) {
 		anomalyDetector.StartMonitor(lctx, nc, 1*time.Hour)
 	})
+
+	// Control-plane — stateless reconciler (leader-only) + syncer (every instance).
+	//
+	// Reconciler: marks stale nodes inactive in Postgres, builds a NodeSnapshot,
+	// and publishes it to Redis on every tick.
+	//
+	// NodeSyncer: every Lens instance reads the Redis snapshot on every tick and
+	// syncs live inference nodes into localRouterMulti so the proxy's smart
+	// endpoint selection (least-loaded / lowest-latency) picks from the live
+	// mining fleet rather than only statically configured endpoints.
+	cpStore := controlplane.NewNodeStore(pool)
+	cpPublisher := controlplane.NewPublisher(redisClient)
+	cpReconciler := controlplane.NewReconciler(cpStore, cpPublisher)
+	go haComps.leader.Run(ctx, "node-reconciler", 30*time.Second, func(lctx context.Context) {
+		cpReconciler.Run(lctx, 30*time.Second)
+	})
+	cpSyncer := controlplane.NewNodeSyncer(cpPublisher, localRouterMulti)
+	go cpSyncer.Run(ctx, 30*time.Second)
 
 	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
 	tokenLedger := mining.NewLedgerStore(pool)
@@ -1610,6 +1629,25 @@ func run() error {
 					writeJSONErr(w, http.StatusNotFound, "node not found")
 					return
 				}
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		// Embedding-node heartbeat — mirrors the inference-node and cache-node
+		// heartbeat endpoints.  Refreshes last_seen_at via the control-plane
+		// store so the reconciler can track liveness uniformly across all node
+		// types (migration 0035 added last_seen_at to embedding_nodes).
+		authed.Post("/v1/workspaces/{wsID}/embedding-nodes/{nodeID}/heartbeat", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			var in struct {
+				SpeedTPS      int64 `json:"speed_tps"`
+				Inflight      int64 `json:"inflight"`
+				UptimeSeconds int64 `json:"uptime_seconds"`
+			}
+			_ = json.NewDecoder(req.Body).Decode(&in)
+			if err := cpStore.RecordEmbedHeartbeat(req.Context(), nodeID, in.UptimeSeconds); err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
