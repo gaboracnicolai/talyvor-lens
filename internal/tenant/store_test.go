@@ -285,107 +285,36 @@ func TestCheckAllowed(t *testing.T) {
 	}
 }
 
-// ─── 8) SpendTracker: cap enforcement ───────────────
+// ─── SpendTracker: cached current-month spend (cache TTL) ───
+// (The cap-enforcement method CheckCap was removed as dead code —
+// the live spend gate is budgets.Service.CheckBudget. This keeps the
+// cache-TTL coverage via the live CurrentSpend path.)
 
-func TestSpendTracker_CheckCap_Enforces(t *testing.T) {
+func TestSpendTracker_CurrentSpend_CachesWithinTTL(t *testing.T) {
 	store, mock := newMockStore(t)
 	defer mock.Close()
 
 	ctx := context.Background()
 	tracker := NewSpendTracker(store)
 
-	// GetConfig → returns a config with cap $10
-	mock.ExpectQuery("SELECT id, name, spending_cap").
-		WithArgs("ws_cap").
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "name", "spending_cap", "monthly_budget",
-			"rate_limit_rpm", "rate_limit_tpm",
-			"allowed_models", "allowed_providers",
-			"log_level", "retention_days",
-			"created_at", "updated_at",
-		}).AddRow(
-			"ws_cap", "", 10.0, 0.0, 0, 0,
-			[]string{}, []string{}, "all", 30,
-			time.Now(), time.Now(),
-		))
-	// currentSpend → returns 9.95
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(cost_usd\\), 0\\)").
-		WithArgs("ws_cap").
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(9.95))
-
-	// estimated 0.10 → 10.05 > 10, must be blocked
-	err := tracker.CheckCap(ctx, "ws_cap", 0.10)
-	if !errors.Is(err, ErrSpendCapExceeded) {
-		t.Fatalf("expected ErrSpendCapExceeded, got %v", err)
-	}
-}
-
-func TestSpendTracker_CheckCap_BelowCapPasses(t *testing.T) {
-	store, mock := newMockStore(t)
-	defer mock.Close()
-
-	ctx := context.Background()
-	tracker := NewSpendTracker(store)
-
-	mock.ExpectQuery("SELECT id, name, spending_cap").
-		WithArgs("ws_below").
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "name", "spending_cap", "monthly_budget",
-			"rate_limit_rpm", "rate_limit_tpm",
-			"allowed_models", "allowed_providers",
-			"log_level", "retention_days",
-			"created_at", "updated_at",
-		}).AddRow(
-			"ws_below", "", 100.0, 0.0, 0, 0,
-			[]string{}, []string{}, "all", 30,
-			time.Now(), time.Now(),
-		))
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(cost_usd\\), 0\\)").
-		WithArgs("ws_below").
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(12.34))
-
-	if err := tracker.CheckCap(ctx, "ws_below", 0.50); err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-}
-
-// ─── 9) SpendTracker: cache TTL ─────────────────────
-
-func TestSpendTracker_CachesWithinTTL(t *testing.T) {
-	store, mock := newMockStore(t)
-	defer mock.Close()
-
-	ctx := context.Background()
-	tracker := NewSpendTracker(store)
-
-	// Two CheckCap calls → expect GetConfig twice (it's not
-	// cached here) but currentSpend ONCE.
-	for i := 0; i < 2; i++ {
-		mock.ExpectQuery("SELECT id, name, spending_cap").
-			WithArgs("ws_cache").
-			WillReturnRows(pgxmock.NewRows([]string{
-				"id", "name", "spending_cap", "monthly_budget",
-				"rate_limit_rpm", "rate_limit_tpm",
-				"allowed_models", "allowed_providers",
-				"log_level", "retention_days",
-				"created_at", "updated_at",
-			}).AddRow(
-				"ws_cache", "", 100.0, 0.0, 0, 0,
-				[]string{}, []string{}, "all", 30,
-				time.Now(), time.Now(),
-			))
-	}
+	// CurrentSpend does NOT read config; two calls within the TTL must
+	// hit Postgres exactly ONCE (the second is served from cache).
 	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(cost_usd\\), 0\\)").
 		WithArgs("ws_cache").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(5.0))
 
 	for i := 0; i < 2; i++ {
-		if err := tracker.CheckCap(ctx, "ws_cache", 0.1); err != nil {
-			t.Fatalf("CheckCap[%d]: %v", i, err)
+		got, err := tracker.CurrentSpend(ctx, "ws_cache")
+		if err != nil {
+			t.Fatalf("CurrentSpend[%d]: %v", i, err)
+		}
+		if got != 5.0 {
+			t.Fatalf("CurrentSpend[%d] = %v, want 5.0", i, got)
 		}
 	}
+	// Exactly one SUM query expected — proves the second call was cached.
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("expectations: %v", err)
+		t.Fatalf("expectations (cache should serve the 2nd call): %v", err)
 	}
 }
 

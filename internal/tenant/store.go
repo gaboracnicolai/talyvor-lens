@@ -5,11 +5,11 @@
 // scoped keys with their own quota envelope.
 //
 // All the heavy lifting (DB schema, bcrypt hashing, async spend
-// cache) is collected here so the proxy hot path only needs a
-// single function call (`SpendTracker.CheckCap`) to enforce the
-// workspace budget. Same idea for the model allowlist —
-// `CheckAllowed` returns an error the proxy can surface to the
-// client without round-tripping to Postgres.
+// cache) is collected here. The model allowlist check `CheckAllowed`
+// returns an error the proxy can surface to the client without
+// round-tripping to Postgres. (The live spending gate is
+// budgets.Service.CheckBudget on the proxy hot path; SpendTracker
+// here only tracks the cached current-month spend for the admin API.)
 
 package tenant
 
@@ -113,7 +113,6 @@ type WorkspaceAPIKey struct {
 // Sentinel errors. The proxy maps these to specific HTTP status
 // codes / messages; tests use `errors.Is` to assert intent.
 var (
-	ErrSpendCapExceeded   = errors.New("tenant: monthly spending cap exceeded")
 	ErrModelNotAllowed    = errors.New("tenant: model not in workspace allowlist")
 	ErrProviderNotAllowed = errors.New("tenant: provider not in workspace allowlist")
 	ErrInvalidKey         = errors.New("tenant: invalid or unknown API key")
@@ -477,10 +476,11 @@ type spendCacheEntry struct {
 	fetched  time.Time
 }
 
-// SpendTracker enforces the spending cap with in-process
-// caching so the proxy hot path doesn't pay a Postgres query
-// per request. Cache misses + invalidations happen via the
-// 5-minute TTL or an explicit RecordSpend post-request.
+// SpendTracker keeps the cached current-month spend per workspace
+// (in-process, 5-minute TTL + explicit RecordSpend / InvalidateCache)
+// so the admin API can read it without a Postgres query per call.
+// Note: it does NOT enforce the spend cap — that gate is
+// budgets.Service.CheckBudget on the proxy hot path.
 type SpendTracker struct {
 	store *Store
 	mu    sync.RWMutex
@@ -492,39 +492,6 @@ func NewSpendTracker(store *Store) *SpendTracker {
 		store: store,
 		cache: map[string]*spendCacheEntry{},
 	}
-}
-
-// CheckCap returns ErrSpendCapExceeded when the workspace's
-// current-month spend + estimatedCostUSD would exceed the
-// configured cap. Returns nil when:
-//
-//   - the workspace has no config row,
-//   - the config sets SpendingCapUSD = 0 (unlimited),
-//   - the projected spend fits inside the cap.
-func (st *SpendTracker) CheckCap(ctx context.Context, workspaceID string, estimatedCostUSD float64) error {
-	if st == nil || st.store == nil {
-		return nil
-	}
-	cfg, err := st.store.GetConfig(ctx, workspaceID)
-	if err != nil {
-		// Best-effort: a transient DB error should not fail
-		// open *or* hard-block traffic. We choose fail-open so a
-		// glitch in workspace_configs doesn't take down the
-		// proxy — the cap is a guard rail, not a hard fence.
-		return nil
-	}
-	if cfg == nil || cfg.SpendingCapUSD <= 0 {
-		return nil
-	}
-	spent, err := st.currentSpend(ctx, workspaceID)
-	if err != nil {
-		return nil
-	}
-	if spent+estimatedCostUSD > cfg.SpendingCapUSD {
-		return fmt.Errorf("%w (spent $%.2f + est $%.4f > cap $%.2f)",
-			ErrSpendCapExceeded, spent, estimatedCostUSD, cfg.SpendingCapUSD)
-	}
-	return nil
 }
 
 // CurrentSpend exposes the cached running total for the API.
@@ -545,7 +512,7 @@ func (st *SpendTracker) currentSpend(ctx context.Context, workspaceID string) (f
 		return e.spent, nil
 	}
 	// Cache miss — query Postgres. Best-effort: a query error
-	// returns 0 + nil so the cap check fails open (see CheckCap).
+	// returns 0 + nil (callers treat current-spend as a soft signal).
 	if st.store == nil || st.store.pool == nil {
 		return 0, nil
 	}
@@ -573,8 +540,8 @@ func (st *SpendTracker) RecordSpend(_ context.Context, workspaceID string, costU
 	defer st.mu.Unlock()
 	e, ok := st.cache[workspaceID]
 	if !ok {
-		// Lazy init — let CheckCap repopulate from the DB on the
-		// next miss. We could backfill here but it'd hold the lock
+		// Lazy init — let the next currentSpend cache-miss repopulate
+		// from the DB. We could backfill here but it'd hold the lock
 		// across a Postgres query.
 		return
 	}
@@ -582,7 +549,7 @@ func (st *SpendTracker) RecordSpend(_ context.Context, workspaceID string, costU
 }
 
 // InvalidateCache drops the cached snapshot for `workspaceID`
-// so the next CheckCap call re-queries Postgres. Useful when
+// so the next CurrentSpend call re-queries Postgres. Useful when
 // the admin API changes the config.
 func (st *SpendTracker) InvalidateCache(workspaceID string) {
 	if st == nil {

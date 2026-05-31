@@ -12,6 +12,7 @@ package main
 // Lens proxy + its dependencies on every GPU box.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -125,15 +126,13 @@ func runStart(args []string) {
 		srv.SetReceiptSigner(signer, client)
 		log.Printf("🔏 PoVI receipts enabled (attestation + tamper-evidence; minting stays OFF until stake+challenge)")
 		// Pin Lens's challenge pubkey so the node can verify + answer Part-3
-		// challenges (and refuse forged ones). Best-effort at startup.
-		keyCtx, keyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if pub, perr := client.FetchChallengePubKey(keyCtx); perr != nil {
-			log.Printf("node: could not fetch Lens challenge pubkey (Part-3 challenges will be refused until available): %v", perr)
-		} else {
-			srv.SetChallengePubKey(pub)
-			log.Printf("🛡️  PoVI challenge verification enabled (Lens-signed challenges)")
+		// challenges (and refuse forged ones). Best-effort at startup; the
+		// heartbeat loop re-fetches so a Lens key rotation is picked up without
+		// a restart.
+		refreshChallengeKey(context.Background(), client, srv)
+		if len(srv.challengeKey()) == 0 {
+			log.Printf("node: Lens challenge pubkey not yet available — Part-3 challenges refused (fail-closed) until a heartbeat re-fetch succeeds")
 		}
-		keyCancel()
 	}
 	httpServer, _ := srv.ListenAndServe(cfg.Port)
 
@@ -159,6 +158,30 @@ func runStart(args []string) {
 	log.Printf("👋 bye")
 }
 
+// refreshChallengeKey fetches Lens's challenge-signing pubkey and pins it,
+// swapping ONLY when a valid, DIFFERENT key arrives (a key rotation). A failed
+// fetch is non-fatal and leaves the currently-pinned key in place, so a
+// transient Lens blip doesn't break challenge-answering. A node that has never
+// successfully fetched stays unpinned (handleChallenge then fails closed).
+func refreshChallengeKey(ctx context.Context, client *LensClient, srv *InferenceServer) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	pub, err := client.FetchChallengePubKey(fetchCtx)
+	if err != nil {
+		return // keep last-known-good (silent — the heartbeat retries)
+	}
+	cur := srv.challengeKey()
+	if bytes.Equal(cur, pub) {
+		return // unchanged
+	}
+	srv.SetChallengePubKey(pub)
+	if len(cur) == 0 {
+		log.Printf("🛡️  PoVI challenge verification enabled (Lens-signed challenges)")
+	} else {
+		log.Printf("🔄 Lens challenge key rotated — re-pinned new key")
+	}
+}
+
 // heartbeatLoop pings Lens every 30s with the live counters.
 // Failures are logged but never fatal — Lens marks us inactive
 // after 90s of silence so a transient blip recovers naturally.
@@ -177,6 +200,14 @@ func heartbeatLoop(ctx context.Context, client *LensClient, state NodeState, srv
 				log.Printf("⚠️  heartbeat failed: %v", err)
 			}
 			cancel()
+			// PoVI Part 3: re-fetch the Lens challenge pubkey on the heartbeat
+			// cadence so a key rotation is picked up without a node restart.
+			// Last-known-good on failure (a transient Lens blip must not break
+			// challenge-answering). Only relevant once the node produces
+			// receipts (has a signer).
+			if srv.signer != nil {
+				refreshChallengeKey(ctx, client, srv)
+			}
 		}
 	}
 }
