@@ -1,0 +1,30 @@
+{{- if .Values.metrics.serviceMonitor.enabled -}}
+# Prometheus Operator ServiceMonitor (Upgrade 11). Gated behind
+# metrics.serviceMonitor.enabled (default false) so the chart installs cleanly
+# on clusters WITHOUT the Prometheus Operator CRDs. Non-Operator users scrape
+# /metrics directly via deploy/observability/prometheus/scrape-config.example.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "lens.fullname" . }}
+  {{- with .Values.metrics.serviceMonitor.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "lens.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "lens.componentSelectorLabels" (list . "gateway") | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: http
+      path: {{ .Values.metrics.serviceMonitor.path | default "/metrics" }}
+      interval: {{ .Values.metrics.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout | default "10s" }}
+{{- end }}

@@ -1,0 +1,32 @@
+apiVersion: v2
+name: lens
+description: |
+  Talyvor Lens — the AI gateway. This is the REFERENCE Helm chart for the
+  Talyvor platform; Track/Docs/Code charts follow the same pattern.
+
+  Default install = a single gateway replica, external Postgres/Redis/NATS,
+  secrets supplied by reference, and a pre-upgrade migration hook. HA,
+  autoscaling, in-cluster mining nodes, and embedded databases are all opt-in.
+type: application
+
+# Chart version — bump on any chart change (SemVer).
+version: 0.1.0
+
+# appVersion tracks the Lens application version this chart deploys by default
+# (used as the default image tag). Keep in sync with the Lens release.
+appVersion: "0.1.0"
+
+home: https://github.com/talyvor/lens
+sources:
+  - https://github.com/talyvor/lens
+maintainers:
+  - name: Talyvor Platform
+keywords:
+  - talyvor
+  - lens
+  - ai-gateway
+
+# NOTE: Bitnami postgresql/redis subcharts are intentionally NOT declared here.
+# They are a dev-only convenience and would force `helm dependency build`
+# (network) for every lint/template. See README "Embedded databases" for the
+# exact dependency block to paste in if you want them for local testing.

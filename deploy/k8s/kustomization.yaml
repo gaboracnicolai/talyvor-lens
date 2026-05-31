@@ -1,0 +1,13 @@
+# Raw-manifest fallback for operators who don't use Helm.
+#
+# manifests.yaml is GENERATED from deploy/helm/lens (default values) via
+# `make k8s-manifests`. The Helm chart is the SOURCE OF TRUTH — do not edit the
+# generated YAML by hand; change the chart and regenerate.
+#
+# NOTE: this reflects chart DEFAULTS — no Secret is included (the gateway expects
+# a Secret named "lens-lens-env" or your own; see the chart README → Secrets),
+# and the migration Job needs migrations.command configured. Adjust before apply.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - manifests.yaml
