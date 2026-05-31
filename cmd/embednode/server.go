@@ -165,11 +165,11 @@ func RunBenchmark(ctx context.Context, backend Backend, model string) (int64, er
 	if _, err := backend.Embed(bctx, model, benchmarkCorpus); err != nil {
 		return 0, err
 	}
-	elapsed := time.Since(start).Seconds()
+	elapsed := time.Since(start)
 	if elapsed <= 0 {
-		return 0, fmt.Errorf("benchmark completed in zero time")
+		elapsed = time.Nanosecond
 	}
-	return int64(float64(len(benchmarkCorpus)) / elapsed), nil
+	return int64(float64(len(benchmarkCorpus)) / elapsed.Seconds()), nil
 }
 
 // ─── ListenAndServe ──────────────────────────────
