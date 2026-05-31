@@ -11,18 +11,21 @@ const defaultReconcileInterval = 30 * time.Second
 // Reconciler is a stateless control-plane loop. On each tick it:
 //  1. Marks nodes whose last heartbeat is older than StaleThreshold inactive
 //     in Postgres — the DB is the single source of truth for node health.
-//  2. Builds a NodeSnapshot of the still-live fleet and logs a summary.
+//  2. Builds a NodeSnapshot of the still-live fleet.
+//  3. Publishes the snapshot to Redis so every Lens instance's NodeSyncer can
+//     pull it and keep its local localrouter.Router current.
 //
 // It is designed to be called under ha.Leader so exactly one Lens instance
 // drives reconciliation in a multi-process deployment; the heartbeat-receiving
-// HTTP endpoints run on every instance regardless.
+// HTTP endpoints and the NodeSyncer run on every instance regardless.
 type Reconciler struct {
 	store *NodeStore
+	pub   *Publisher
 }
 
-// NewReconciler builds a Reconciler backed by store.
-func NewReconciler(store *NodeStore) *Reconciler {
-	return &Reconciler{store: store}
+// NewReconciler builds a Reconciler backed by store and pub.
+func NewReconciler(store *NodeStore, pub *Publisher) *Reconciler {
+	return &Reconciler{store: store, pub: pub}
 }
 
 // Run starts the reconciliation loop and blocks until ctx is cancelled.
@@ -58,6 +61,12 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 	if err != nil {
 		slog.Warn("controlplane: snapshot failed", slog.String("err", err.Error()))
 		return
+	}
+
+	// Publish to Redis so every instance's NodeSyncer can pull the fresh fleet.
+	if err := r.pub.Publish(ctx, snap); err != nil {
+		slog.Warn("controlplane: publish snapshot failed", slog.String("err", err.Error()))
+		// Non-fatal — DB state is still correct; syncer will retry next tick.
 	}
 
 	slog.Info("controlplane: reconcile",

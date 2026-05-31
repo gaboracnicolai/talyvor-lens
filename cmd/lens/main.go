@@ -320,13 +320,23 @@ func run() error {
 		anomalyDetector.StartMonitor(lctx, nc, 1*time.Hour)
 	})
 
-	// Control-plane reconciler — marks stale nodes inactive and logs live
-	// fleet state on every tick. Runs on the leader only in HA mode.
+	// Control-plane — stateless reconciler (leader-only) + syncer (every instance).
+	//
+	// Reconciler: marks stale nodes inactive in Postgres, builds a NodeSnapshot,
+	// and publishes it to Redis on every tick.
+	//
+	// NodeSyncer: every Lens instance reads the Redis snapshot on every tick and
+	// syncs live inference nodes into localRouterMulti so the proxy's smart
+	// endpoint selection (least-loaded / lowest-latency) picks from the live
+	// mining fleet rather than only statically configured endpoints.
 	cpStore := controlplane.NewNodeStore(pool)
-	cpReconciler := controlplane.NewReconciler(cpStore)
+	cpPublisher := controlplane.NewPublisher(redisClient)
+	cpReconciler := controlplane.NewReconciler(cpStore, cpPublisher)
 	go haComps.leader.Run(ctx, "node-reconciler", 30*time.Second, func(lctx context.Context) {
 		cpReconciler.Run(lctx, 30*time.Second)
 	})
+	cpSyncer := controlplane.NewNodeSyncer(cpPublisher, localRouterMulti)
+	go cpSyncer.Run(ctx, 30*time.Second)
 
 	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
 	tokenLedger := mining.NewLedgerStore(pool)
