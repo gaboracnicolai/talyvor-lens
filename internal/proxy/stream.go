@@ -12,9 +12,33 @@ import (
 	"strings"
 	"time"
 
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/retry"
+	"github.com/talyvor/lens/internal/workspace"
 )
+
+// streamUsage accumulates the provider's reported token counts as they
+// arrive across the stream (OpenAI's final usage chunk; Anthropic's
+// message_start input + message_delta output). present=false means the
+// stream surfaced no usage, so the caller bills via the len/4 estimate.
+type streamUsage struct {
+	inputTokens  int
+	outputTokens int
+	present      bool
+}
+
+// streamSpend carries the per-request billing context into the stream
+// handler so a completed stream can record spend — the piece that used to be
+// missing, leaving streamed requests invisible to budgets/alerts.
+type streamSpend struct {
+	wsID, team, sprint, feature string
+	model                       string
+	requestID, sessionID        string
+	modality                    string
+	logging                     workspace.LoggingPolicy
+	estInputTokens              int // fallback input estimate when no usage is emitted
+}
 
 const (
 	openAIDoneMarker = "[DONE]"
@@ -39,8 +63,9 @@ func (s *StreamHandler) ServeOpenAI(
 	cachePrompt string,
 	body []byte,
 	piiDetected bool,
+	sc streamSpend,
 ) error {
-	return s.serve(w, r, provider, model, prompt, cachePrompt, body, piiDetected, openAIStreamOps{
+	return s.serve(w, r, provider, model, prompt, cachePrompt, body, piiDetected, sc, openAIStreamOps{
 		url:     s.proxy.openAIURL,
 		setAuth: func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+s.proxy.openAIKey) },
 	})
@@ -56,8 +81,9 @@ func (s *StreamHandler) ServeAnthropic(
 	cachePrompt string,
 	body []byte,
 	piiDetected bool,
+	sc streamSpend,
 ) error {
-	return s.serve(w, r, provider, model, prompt, cachePrompt, body, piiDetected, anthropicStreamOps{
+	return s.serve(w, r, provider, model, prompt, cachePrompt, body, piiDetected, sc, anthropicStreamOps{
 		url: s.proxy.anthropicURL,
 		setAuth: func(req *http.Request) {
 			req.Header.Set("x-api-key", s.proxy.anthropicKey)
@@ -72,9 +98,17 @@ func (s *StreamHandler) ServeAnthropic(
 type streamOps interface {
 	upstreamURL() string
 	applyAuth(*http.Request)
+	// prepareBody adjusts the upstream request body before streaming — e.g.
+	// injecting stream_options.include_usage for OpenAI-family providers so
+	// the final chunk carries a usage block. Identity for providers that
+	// emit usage natively (Anthropic).
+	prepareBody(body []byte) []byte
 	// processLine inspects an SSE line, appends any extracted content to
 	// the accumulator, and reports whether the stream should terminate.
 	processLine(line []byte, accumulated *strings.Builder) (done bool)
+	// extractUsage inspects one SSE line for provider-reported usage,
+	// updating u in place. No-op for lines that carry no usage.
+	extractUsage(line []byte, u *streamUsage)
 	// synthesizeCachePayload produces the JSON to cache once the stream
 	// has fully been consumed.
 	synthesizeCachePayload(accumulated string) []byte
@@ -87,6 +121,52 @@ type openAIStreamOps struct {
 
 func (o openAIStreamOps) upstreamURL() string         { return o.url }
 func (o openAIStreamOps) applyAuth(req *http.Request) { o.setAuth(req) }
+
+// prepareBody injects stream_options.include_usage so OpenAI-compatible
+// providers emit a final usage chunk. Best-effort: a parse failure returns
+// the body untouched — metering must never break the stream.
+func (openAIStreamOps) prepareBody(body []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	so, _ := m["stream_options"].(map[string]any)
+	if so == nil {
+		so = map[string]any{}
+	}
+	so["include_usage"] = true
+	m["stream_options"] = so
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// extractUsage reads the final chunk's usage block (present once
+// include_usage is set). Intermediate chunks carry usage:null and are
+// skipped via the pointer.
+func (openAIStreamOps) extractUsage(line []byte, u *streamUsage) {
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return
+	}
+	payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+	if bytes.Equal(payload, []byte(openAIDoneMarker)) {
+		return
+	}
+	var chunk struct {
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(payload, &chunk) != nil || chunk.Usage == nil {
+		return
+	}
+	u.inputTokens = chunk.Usage.PromptTokens
+	u.outputTokens = chunk.Usage.CompletionTokens
+	u.present = true
+}
 
 func (openAIStreamOps) processLine(line []byte, acc *strings.Builder) bool {
 	if !bytes.HasPrefix(line, []byte("data:")) {
@@ -129,6 +209,37 @@ type anthropicStreamOps struct {
 func (a anthropicStreamOps) upstreamURL() string         { return a.url }
 func (a anthropicStreamOps) applyAuth(req *http.Request) { a.setAuth(req) }
 
+// prepareBody is identity: Anthropic emits usage natively (message_start +
+// message_delta), so there is no include_usage flag to inject.
+func (anthropicStreamOps) prepareBody(body []byte) []byte { return body }
+
+// extractUsage reuses the canonical Anthropic chunk normaliser
+// (internal/cache) for OUTPUT tokens rather than re-parsing message_delta
+// usage here, and parses the message_start event — which that normaliser
+// (content + output focused) doesn't surface — for INPUT tokens.
+func (anthropicStreamOps) extractUsage(line []byte, u *streamUsage) {
+	if chunk, ok := cache.NormalizeAnthropicChunk(string(line)); ok && chunk.IsFinal && chunk.TokenDelta > 0 {
+		u.outputTokens = chunk.TokenDelta
+		u.present = true
+	}
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return
+	}
+	payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+	var ev struct {
+		Type    string `json:"type"`
+		Message struct {
+			Usage struct {
+				InputTokens int `json:"input_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(payload, &ev) == nil && ev.Type == "message_start" && ev.Message.Usage.InputTokens > 0 {
+		u.inputTokens = ev.Message.Usage.InputTokens
+		u.present = true
+	}
+}
+
 func (anthropicStreamOps) processLine(line []byte, acc *strings.Builder) bool {
 	if !bytes.HasPrefix(line, []byte("data:")) {
 		return false
@@ -170,12 +281,17 @@ func (s *StreamHandler) serve(
 	cachePrompt string,
 	body []byte,
 	piiDetected bool,
+	sc streamSpend,
 	ops streamOps,
 ) error {
 	// Headers must be committed BEFORE the first write/flush.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
+
+	// Ask the provider to surface usage in the stream (OpenAI-family:
+	// stream_options.include_usage; identity for Anthropic). Best-effort.
+	body = ops.prepareBody(body)
 
 	// Retry the initial upstream call on transient failures. Once we
 	// commit to streaming (after WriteHeader below) there's no second
@@ -223,6 +339,7 @@ func (s *StreamHandler) serve(
 	flusher, _ := w.(http.Flusher)
 
 	var accumulated strings.Builder
+	var usage streamUsage
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), sseScannerMax)
 
@@ -244,6 +361,7 @@ func (s *StreamHandler) serve(
 			flusher.Flush()
 		}
 
+		ops.extractUsage(line, &usage)
 		if ops.processLine(line, &accumulated) {
 			break
 		}
@@ -276,5 +394,9 @@ func (s *StreamHandler) serve(
 		eventPrompt = s.proxy.piiDetector.Detect(prompt).Redacted
 	}
 	s.proxy.recordTokenEvent(storeCtx, provider, model, eventPrompt, cached, 0, piiDetected)
+	// Close the streamed-spend gap: bill on the captured provider usage when
+	// present, else the len/4 estimate. A streamed request must never again
+	// be invisible to budgets/alerts.
+	s.proxy.recordStreamSpend(storeCtx, sc, usage, accumulated.String())
 	return nil
 }

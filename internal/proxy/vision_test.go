@@ -44,7 +44,10 @@ func TestVision_PinnedTextOnlyModelFailsFast(t *testing.T) {
 }
 
 // A capable model serves the image and the spend row is tagged with the
-// modality (and marked estimated).
+// modality. This fake upstream surfaces no usage, so the row falls back to
+// the modality-aware estimate (marked estimated); with real provider usage
+// the same path bills exact — see
+// TestSpend_NonStreamingMultimodalUsesProviderUsageNotFlat1000.
 func TestVision_CapableModelPassesAndRecordsModality(t *testing.T) {
 	p, sink, _ := newLoggingProxy(t, workspace.LoggingMetadata)
 	w := dispatchBody(t, p, "ws-log", imageBody("gpt-4o")) // gpt-4o family = vision
@@ -59,7 +62,7 @@ func TestVision_CapableModelPassesAndRecordsModality(t *testing.T) {
 		t.Fatalf("spend record modality: got %q want image", sink.lastModality)
 	}
 	if !sink.lastEstimated {
-		t.Fatal("multimodal spend must be marked estimated")
+		t.Fatal("multimodal spend without provider usage must fall back to the estimate")
 	}
 }
 
@@ -91,7 +94,11 @@ func TestVision_TextRequestUnaffected(t *testing.T) {
 	if sink.lastModality != "text" {
 		t.Fatalf("text request modality: got %q want text", sink.lastModality)
 	}
-	if sink.lastEstimated {
-		t.Fatal("text request must not be marked estimated")
+	// This fake upstream returns no usage block, so the row is HONESTLY
+	// marked estimated (len/4 fallback). In production the provider returns
+	// a usage object and the row is billed exact / not-estimated — see
+	// TestSpend_NonStreamingOpenAIUsageBilledExact.
+	if !sink.lastEstimated {
+		t.Fatal("text request without provider usage must fall back to an estimate (marked estimated)")
 	}
 }

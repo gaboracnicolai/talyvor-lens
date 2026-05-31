@@ -186,6 +186,13 @@ var (
 	ModalityUnsupportedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_modality_unsupported_total", Help: "Requests failed fast because no configured model supports the requested modality."},
 	)
+	// source is a bounded set: provider_usage (billed on the provider's
+	// reported token counts) vs estimated (len/4 fallback when no usage was
+	// surfaced). Lets us watch how often metering falls back to estimation.
+	SpendRecordsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_spend_records_total", Help: "Spend records written, by token-count source (provider_usage|estimated)."},
+		[]string{"source"},
+	)
 
 	// ─── guardrails (Upgrade 13) ───
 	// type (pii/injection/topic/word_filter/custom/output_validation) and
@@ -281,6 +288,7 @@ func init() {
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
+		SpendRecordsTotal,
 		GuardrailTriggeredTotal, GuardrailBlocksTotal, GuardrailRedactionsTotal,
 		EvalRunsTotal, EvalRegressionsDetectedTotal, ABSignificantResultsTotal,
 		POVIReceiptsTotal, POVIReceiptVerifyFailuresTotal, POVIProvisionalMintsTotal,
@@ -389,6 +397,11 @@ func RoutingFallback()                   { RoutingFallbackTotal.Inc() }
 func RequestByModality(modality string) { RequestsByModalityTotal.WithLabelValues(modality).Inc() }
 func VisionRouteRedirect()              { VisionRouteRedirectsTotal.Inc() }
 func ModalityUnsupported()              { ModalityUnsupportedTotal.Inc() }
+
+// SpendRecord counts a spend write by its token-count source. Pass
+// "provider_usage" when billed on the provider's reported counts, or
+// "estimated" on the len/4 fallback.
+func SpendRecord(source string) { SpendRecordsTotal.WithLabelValues(source).Inc() }
 
 // ─── guardrails helpers ───
 // Bounded {type, action} labels only — never workspace or content.

@@ -29,6 +29,10 @@ type Provider interface {
 	// ParseResponse translates the provider's response back to OpenAI shape.
 	// Identity when the provider is OpenAI-compatible.
 	ParseResponse(body []byte, model string) ([]byte, error)
+	// ExtractUsage reads the provider's reported token usage from a response
+	// body, returning ok=false when no usage block is present (caller then
+	// estimates). See usage.go for the per-provider wire shapes.
+	ExtractUsage(body []byte) (Usage, bool)
 }
 
 // providerConfig satisfies Provider — the methods delegate to the closures,
