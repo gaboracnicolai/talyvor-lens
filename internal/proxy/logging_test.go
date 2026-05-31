@@ -27,19 +27,23 @@ type recordingAlertSink struct {
 	lastPrompt    string
 	lastModality  string
 	lastEstimated bool
+	lastInput     int
+	lastOutput    int
 }
 
 func (r *recordingAlertSink) IsCircuitOpen(string, string) bool { return false }
 func (r *recordingAlertSink) GetDowngradeModel(_ string, model string) string {
 	return model
 }
-func (r *recordingAlertSink) RecordSpend(_ context.Context, _, _, _, _, _ string, _, _ int, prompt, _, _, modality string, estimated bool) error {
+func (r *recordingAlertSink) RecordSpend(_ context.Context, _, _, _, _, _ string, inputTokens, outputTokens int, prompt, _, _, modality string, estimated bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
 	r.lastPrompt = prompt
 	r.lastModality = modality
 	r.lastEstimated = estimated
+	r.lastInput = inputTokens
+	r.lastOutput = outputTokens
 	return nil
 }
 

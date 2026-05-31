@@ -769,11 +769,23 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			w.Header().Set("X-Talyvor-Output-Guardrails", "not-applied-streaming")
 		}
 		sh := &StreamHandler{proxy: p}
+		// Streaming skips routing, so the billed model is the requested
+		// model. The fallback input estimate mirrors the non-streaming path:
+		// modality-aware for multimodal, else len(prompt)/4.
+		estIn := len(prompt) / 4
+		if modSet.Multimodal() {
+			estIn = modSet.EstimateInputTokens()
+		}
+		sc := streamSpend{
+			wsID: wsID, team: team, sprint: sprint, feature: feature,
+			model: model, requestID: requestID, sessionID: sessionID,
+			modality: modSet.Label(), logging: loggingPolicy, estInputTokens: estIn,
+		}
 		var serr error
 		if cfg.name == "openai" {
-			serr = sh.ServeOpenAI(w, r, cfg.name, model, prompt, cachePrompt, body, piiDetected)
+			serr = sh.ServeOpenAI(w, r, cfg.name, model, prompt, cachePrompt, body, piiDetected, sc)
 		} else {
-			serr = sh.ServeAnthropic(w, r, cfg.name, model, prompt, cachePrompt, body, piiDetected)
+			serr = sh.ServeAnthropic(w, r, cfg.name, model, prompt, cachePrompt, body, piiDetected, sc)
 		}
 		if serr != nil {
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "stream_error").Inc()
@@ -1065,15 +1077,23 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// LLM (the upstream model, after any router or circuit override).
 		// Fire-and-forget — alert manager failures must never break a
 		// successful request.
-		// For multimodal requests len(prompt)/4 would count the base64 image
-		// blob (extractPrompt flattens blocks into the prompt). Use a
-		// modality-aware estimate (text chars + a per-image estimate) and
-		// mark the row estimated so budgets/ROI don't over-trust it.
+		// Bill on the provider's REPORTED usage when it surfaces one — that
+		// is the exact count the provider charged (and for multimodal it
+		// already folds in the image cost, beating the flat per-image
+		// estimate). Fall back to a len/4 estimate only when usage is absent,
+		// and mark the row estimated HONESTLY so budgets/ROI know which rows
+		// are real. For multimodal the fallback uses a modality-aware figure
+		// (text chars + per-image) rather than len(prompt)/4, which would
+		// count the flattened base64 blob.
 		inT, outT := len(prompt)/4, len(upstreamBody)/4
-		costEstimated := false
-		if modSet.Multimodal() {
+		costEstimated := true
+		spendSource := "estimated"
+		if u, ok := cfg.ExtractUsage(upstreamBody); ok {
+			inT, outT = u.InputTokens, u.OutputTokens
+			costEstimated = false
+			spendSource = "provider_usage"
+		} else if modSet.Multimodal() {
 			inT = modSet.EstimateInputTokens()
-			costEstimated = true
 		}
 		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
 			// spendPrompt is "" in metadata mode (no prompt text persisted)
@@ -1081,6 +1101,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// wsID + sprint travel on this single billing write so spend is
 			// attributable per workspace / team / sprint (see migration 0028);
 			// modality + estimated ride along too (migration 0029).
+			metrics.SpendRecord(spendSource)
 			if err := p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated); err != nil {
 				slog.Warn("alerts: RecordSpend failed",
 					slog.String("err", err.Error()),
@@ -1267,6 +1288,34 @@ func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt st
 		SavingsPct:   savingsPct,
 		PIIDetected:  piiDetected,
 	})
+}
+
+// recordStreamSpend closes the streamed-spend gap. Streamed requests used to
+// record no spend at all — invisible to budgets/alerts. This bills on the
+// captured provider usage when present (cost_estimated=false), else a len/4
+// estimate (cost_estimated=true), so a streamed request is never invisible.
+// Respects the workspace logging policy (None opts out, like non-streaming).
+// Prompt text isn't persisted on the streamed spend row (metadata-equivalent);
+// the durable prompt record is the learner token-event written alongside.
+func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamUsage, outputText string) {
+	if p.alertManager == nil || sc.logging == workspace.LoggingNone {
+		return
+	}
+	inT, outT := sc.estInputTokens, len(outputText)/4
+	estimated := true
+	source := "estimated"
+	if u.present {
+		inT, outT = u.inputTokens, u.outputTokens
+		estimated = false
+		source = "provider_usage"
+	}
+	metrics.SpendRecord(source)
+	if err := p.alertManager.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated); err != nil {
+		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", err.Error()))
+	}
+	if p.budgetService != nil {
+		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, alerts.CostUSD(sc.model, inT, outT))
+	}
 }
 
 func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []byte {

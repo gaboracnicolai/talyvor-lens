@@ -106,6 +106,10 @@ func translateFromGemini(body []byte, model string) ([]byte, error) {
 				Role string `json:"role"`
 			} `json:"content"`
 		} `json:"candidates"`
+		UsageMetadata struct {
+			PromptTokenCount     int `json:"promptTokenCount"`
+			CandidatesTokenCount int `json:"candidatesTokenCount"`
+		} `json:"usageMetadata"`
 	}
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("gemini: decode gemini response: %w", err)
@@ -131,6 +135,15 @@ func translateFromGemini(body []byte, model string) ([]byte, error) {
 			},
 			"finish_reason": "stop",
 		}},
+		// Carry Gemini's usageMetadata into the OpenAI usage block so the
+		// shared (OpenAI-shape) usage extractor bills Gemini on its real
+		// reported counts. Gemini folds image cost into promptTokenCount,
+		// so this is the exact TOTAL input — not itemized per image.
+		"usage": map[string]any{
+			"prompt_tokens":     in.UsageMetadata.PromptTokenCount,
+			"completion_tokens": in.UsageMetadata.CandidatesTokenCount,
+			"total_tokens":      in.UsageMetadata.PromptTokenCount + in.UsageMetadata.CandidatesTokenCount,
+		},
 	}
 	return json.Marshal(out)
 }
