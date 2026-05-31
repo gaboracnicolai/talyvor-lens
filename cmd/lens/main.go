@@ -66,6 +66,7 @@ import (
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/quality"
+	"github.com/talyvor/lens/internal/controlplane"
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/roi"
@@ -317,6 +318,14 @@ func run() error {
 	})
 	go haComps.leader.Run(ctx, "anomaly-monitor", 30*time.Second, func(lctx context.Context) {
 		anomalyDetector.StartMonitor(lctx, nc, 1*time.Hour)
+	})
+
+	// Control-plane reconciler — marks stale nodes inactive and logs live
+	// fleet state on every tick. Runs on the leader only in HA mode.
+	cpStore := controlplane.NewNodeStore(pool)
+	cpReconciler := controlplane.NewReconciler(cpStore)
+	go haComps.leader.Run(ctx, "node-reconciler", 30*time.Second, func(lctx context.Context) {
+		cpReconciler.Run(lctx, 30*time.Second)
 	})
 
 	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
@@ -1610,6 +1619,25 @@ func run() error {
 					writeJSONErr(w, http.StatusNotFound, "node not found")
 					return
 				}
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
+		// Embedding-node heartbeat — mirrors the inference-node and cache-node
+		// heartbeat endpoints.  Refreshes last_seen_at via the control-plane
+		// store so the reconciler can track liveness uniformly across all node
+		// types (migration 0035 added last_seen_at to embedding_nodes).
+		authed.Post("/v1/workspaces/{wsID}/embedding-nodes/{nodeID}/heartbeat", func(w http.ResponseWriter, req *http.Request) {
+			nodeID := chi.URLParam(req, "nodeID")
+			var in struct {
+				SpeedTPS      int64 `json:"speed_tps"`
+				Inflight      int64 `json:"inflight"`
+				UptimeSeconds int64 `json:"uptime_seconds"`
+			}
+			_ = json.NewDecoder(req.Body).Decode(&in)
+			if err := cpStore.RecordEmbedHeartbeat(req.Context(), nodeID, in.UptimeSeconds); err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
