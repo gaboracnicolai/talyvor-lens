@@ -197,15 +197,16 @@ func (s *LedgerStore) apply(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Lock the balance row (UPSERT default 0). Using ON CONFLICT
-	// + FOR UPDATE in a single statement gives us "create or
-	// take the lock" in one round-trip.
-	row := tx.QueryRow(ctx, `
+	// Two-step pessimistic lock: ensure the row exists without touching
+	// updated_at on every write, then acquire an explicit FOR UPDATE lock.
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO lens_token_balances (workspace_id, balance, lifetime_earned, lifetime_spent)
-		VALUES ($1, 0, 0, 0)
-		ON CONFLICT (workspace_id) DO UPDATE SET updated_at = NOW()
-		RETURNING balance, lifetime_earned, lifetime_spent
-	`, workspaceID)
+		VALUES ($1, 0, 0, 0) ON CONFLICT (workspace_id) DO NOTHING`, workspaceID); err != nil {
+		return fmt.Errorf("mining: ensure balance row: %w", err)
+	}
+	row := tx.QueryRow(ctx, `
+		SELECT balance, lifetime_earned, lifetime_spent
+		FROM lens_token_balances WHERE workspace_id = $1 FOR UPDATE`, workspaceID)
 	var bal, earned, spent float64
 	if err := row.Scan(&bal, &earned, &spent); err != nil {
 		return fmt.Errorf("mining: read balance: %w", err)
@@ -474,12 +475,15 @@ func (s *LedgerStore) GetTotalBurned(ctx context.Context) (float64, error) {
 // caller controls transactional semantics.
 
 func readBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, earned, spent float64, err error) {
-	row := tx.QueryRow(ctx, `
+	if _, err = tx.Exec(ctx, `
 		INSERT INTO lens_token_balances (workspace_id, balance, lifetime_earned, lifetime_spent)
-		VALUES ($1, 0, 0, 0)
-		ON CONFLICT (workspace_id) DO UPDATE SET updated_at = NOW()
-		RETURNING balance, lifetime_earned, lifetime_spent`, workspaceID)
-	if err := row.Scan(&bal, &earned, &spent); err != nil {
+		VALUES ($1, 0, 0, 0) ON CONFLICT (workspace_id) DO NOTHING`, workspaceID); err != nil {
+		return 0, 0, 0, fmt.Errorf("mining: ensure balance row: %w", err)
+	}
+	row := tx.QueryRow(ctx, `
+		SELECT balance, lifetime_earned, lifetime_spent
+		FROM lens_token_balances WHERE workspace_id = $1 FOR UPDATE`, workspaceID)
+	if err = row.Scan(&bal, &earned, &spent); err != nil {
 		return 0, 0, 0, fmt.Errorf("mining: read balance: %w", err)
 	}
 	return

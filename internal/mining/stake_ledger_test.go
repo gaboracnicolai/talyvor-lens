@@ -8,10 +8,13 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
-// expectStakeOp mocks the FOR-UPDATE balance read used by the lock/release/slash
-// txs. The balances row returns (balance, locked_balance).
+// expectStakeOp mocks the two-step FOR-UPDATE balance read used by the
+// lock/release/slash txs: INSERT DO NOTHING (ensure row) + SELECT FOR UPDATE.
 func expectStakeRead(mock pgxmock.PgxPoolIface, ws string, bal, locked float64) {
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs(ws).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, locked_balance").
 		WithArgs(ws).
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "locked_balance"}).AddRow(bal, locked))
 }

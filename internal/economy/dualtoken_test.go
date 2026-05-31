@@ -244,8 +244,11 @@ func TestConvertLENStoLXC_AtomicDebitAndMint(t *testing.T) {
 	// rate = 2.0; convert 50 LXC → lensCost = 100.
 	expectCurrentRate(mock, 2.0, false)
 	mock.ExpectBegin()
-	// debit LENS: start at 500 balance.
-	mock.ExpectQuery(`INSERT INTO lens_token_balances`).
+	// debit LENS: ensure row + FOR UPDATE read at 500 balance.
+	mock.ExpectExec(`INSERT INTO lens_token_balances`).
+		WithArgs("ws_c").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery(`SELECT balance, lifetime_earned, lifetime_spent`).
 		WithArgs("ws_c").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(500.0, 500.0, 0.0))
@@ -255,8 +258,11 @@ func TestConvertLENStoLXC_AtomicDebitAndMint(t *testing.T) {
 	mock.ExpectExec(`UPDATE lens_token_balances`).
 		WithArgs("ws_c", 400.0, 500.0, 100.0).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	// credit LXC: start at 0.
-	mock.ExpectQuery(`INSERT INTO lxc_balances`).
+	// credit LXC: ensure row + FOR UPDATE read at 0.
+	mock.ExpectExec(`INSERT INTO lxc_balances`).
+		WithArgs("ws_c").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
 		WithArgs("ws_c").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
 			AddRow(0.0, 0.0, 0.0))
@@ -288,7 +294,10 @@ func TestConvertLENStoLXC_InsufficientLENS(t *testing.T) {
 	expectCurrentRate(mock, 2.0, false)
 	mock.ExpectBegin()
 	// balance 50 < lensCost 100 → reject.
-	mock.ExpectQuery(`INSERT INTO lens_token_balances`).
+	mock.ExpectExec(`INSERT INTO lens_token_balances`).
+		WithArgs("ws_p").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery(`SELECT balance, lifetime_earned, lifetime_spent`).
 		WithArgs("ws_p").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(50.0, 50.0, 0.0))
@@ -344,7 +353,10 @@ func TestNoReverseConversionPath(t *testing.T) {
 func TestSpendLXC_DebitsBalance(t *testing.T) {
 	store, _, mock := newDualTokenMock(t)
 	mock.ExpectBegin()
-	mock.ExpectQuery(`INSERT INTO lxc_balances`).
+	mock.ExpectExec(`INSERT INTO lxc_balances`).
+		WithArgs("ws_s").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
 		WithArgs("ws_s").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
 			AddRow(10.0, 10.0, 0.0))
@@ -363,7 +375,10 @@ func TestSpendLXC_DebitsBalance(t *testing.T) {
 func TestSpendLXC_InsufficientBalance(t *testing.T) {
 	store, _, mock := newDualTokenMock(t)
 	mock.ExpectBegin()
-	mock.ExpectQuery(`INSERT INTO lxc_balances`).
+	mock.ExpectExec(`INSERT INTO lxc_balances`).
+		WithArgs("ws_x").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
 		WithArgs("ws_x").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
 			AddRow(1.0, 1.0, 0.0))

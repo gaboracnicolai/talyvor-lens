@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ── test doubles ──
@@ -43,6 +45,17 @@ func (f *fakeLedger) SlashStake(_ context.Context, ws string, amount float64, _ 
 	return nil
 }
 
+// Tx variants delegate to the non-Tx methods (no real transaction in tests).
+func (f *fakeLedger) LockStakeTx(_ context.Context, _ pgx.Tx, ws string, amount float64, m map[string]interface{}) error {
+	return f.LockStake(context.Background(), ws, amount, m)
+}
+func (f *fakeLedger) ReleaseStakeTx(_ context.Context, _ pgx.Tx, ws string, amount float64, m map[string]interface{}) error {
+	return f.ReleaseStake(context.Background(), ws, amount, m)
+}
+func (f *fakeLedger) SlashStakeTx(_ context.Context, _ pgx.Tx, ws string, amount float64, m map[string]interface{}) error {
+	return f.SlashStake(context.Background(), ws, amount, m)
+}
+
 type memStore struct {
 	mu sync.Mutex
 	m  map[string]Stake
@@ -75,6 +88,14 @@ func (s *memStore) List(_ context.Context) ([]Stake, error) {
 	return out, nil
 }
 
+// Tx variants delegate to the non-Tx methods (no real transaction in tests).
+func (s *memStore) GetTx(ctx context.Context, _ pgx.Tx, nodeID string) (*Stake, error) {
+	return s.Get(ctx, nodeID)
+}
+func (s *memStore) PutTx(ctx context.Context, _ pgx.Tx, st Stake) error {
+	return s.Put(ctx, st)
+}
+
 func fixedWS(ws string) NodeWorkspaceLookup {
 	return func(_ context.Context, _ string) (string, error) { return ws, nil }
 }
@@ -85,7 +106,7 @@ func newTestManager(t *testing.T) (*StakeManager, *fakeLedger, *memStore) {
 	t.Helper()
 	led := &fakeLedger{}
 	store := newMemStore()
-	m := NewStakeManager(store, led, fixedWS("ws-op"), testMin, 7*24*time.Hour)
+	m := NewStakeManager(store, led, fixedWS("ws-op"), testMin, 7*24*time.Hour, nil)
 	return m, led, store
 }
 

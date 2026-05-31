@@ -9,9 +9,9 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
-// expectCreditOrDebit programmes the mock with one full Begin →
-// upsert balance → INSERT ledger → UPDATE balance → Commit cycle.
-// startingBalance is what the SELECT for update returns.
+// expectCreditOrDebit programmes the mock with one full Begin → ensure balance
+// row (INSERT DO NOTHING) → FOR UPDATE read → INSERT ledger → UPDATE balance →
+// Commit cycle. startingBalance is what the FOR UPDATE SELECT returns.
 func expectCreditOrDebit(
 	mock pgxmock.PgxPoolIface,
 	workspaceID string,
@@ -19,7 +19,10 @@ func expectCreditOrDebit(
 	delta, expectedBalance, expectedEarned, expectedSpent float64,
 ) {
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs(workspaceID).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs(workspaceID).
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(startingBalance, startingEarned, startingSpent))
@@ -70,7 +73,10 @@ func TestDebit_DecreasesBalance(t *testing.T) {
 func TestDebit_InsufficientBalance(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_e").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_e").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(0.05, 0.05, 0.0))

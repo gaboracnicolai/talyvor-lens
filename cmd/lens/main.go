@@ -357,7 +357,7 @@ func run() error {
 	poviStakeStore := povi.NewNodeStakeStore(pool)
 	poviStakeManager := povi.NewStakeManager(
 		poviStakeStore, tokenLedger, computeMiner.NodeWorkspace,
-		cfg.POVIMinStake, cfg.POVIUnbondPeriod)
+		cfg.POVIMinStake, cfg.POVIUnbondPeriod, pool)
 	stakeEligible := func(eligCtx context.Context, nodeID string) bool {
 		return poviStakeManager.IsEligible(eligCtx, nodeID)
 	}
