@@ -12,8 +12,8 @@ import (
 )
 
 // expectCreditTx programmes the mock for one full LedgerStore.Credit
-// transaction: Begin → upsert balance → INSERT ledger row → UPDATE
-// balance → Commit.
+// transaction: Begin → INSERT DO NOTHING (ensure row) → SELECT FOR UPDATE →
+// INSERT ledger row → UPDATE balance → Commit.
 func expectCreditTx(
 	mock pgxmock.PgxPoolIface,
 	workspaceID string,
@@ -21,7 +21,10 @@ func expectCreditTx(
 	delta, expectedBal, expectedEarned, expectedSpent float64,
 ) {
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs(workspaceID).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs(workspaceID).
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(startingBal, startingEarned, startingSpent))
@@ -56,8 +59,11 @@ func TestTransfer_MovesTokens(t *testing.T) {
 	ledger := mining.NewLedgerStoreForTesting(mock)
 	// Transfer atomically debits + credits inside one tx.
 	mock.ExpectBegin()
-	// Debit `from` — upsert balance read.
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	// Debit `from` — ensure row + FOR UPDATE read.
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_from").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_from").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(10.0, 10.0, 0.0))
@@ -67,8 +73,11 @@ func TestTransfer_MovesTokens(t *testing.T) {
 	mock.ExpectExec("UPDATE lens_token_balances").
 		WithArgs("ws_from", 7.5, 10.0, 2.5).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	// Credit `to`.
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	// Credit `to` — ensure row + FOR UPDATE read.
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_to").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_to").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(0.0, 0.0, 0.0))
@@ -93,7 +102,10 @@ func TestTransfer_InsufficientBalance(t *testing.T) {
 	defer mock.Close()
 	ledger := mining.NewLedgerStoreForTesting(mock)
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_broke").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_broke").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(0.1, 0.1, 0.0))
@@ -130,7 +142,10 @@ func TestBurn_ReducesBalance(t *testing.T) {
 	defer mock.Close()
 	ledger := mining.NewLedgerStoreForTesting(mock)
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_burn").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_burn").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(5.0, 5.0, 0.0))
@@ -174,7 +189,10 @@ func TestCreateListing_ValidatesSellerBalance(t *testing.T) {
 	store, mock := newStore(t)
 	// Debit will fail (ErrInsufficientBalance via apply).
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_poor").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_poor").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(0.5, 0.5, 0.0))
@@ -280,7 +298,10 @@ func TestStake_90DayUsesCorrectAPY(t *testing.T) {
 	store, mock := newStore(t)
 	// Debit stake from balance.
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_s").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_s").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(100.0, 100.0, 0.0))
@@ -338,7 +359,10 @@ func TestUnstake_AfterLockCreditsYield(t *testing.T) {
 	// figure because it depends on the wall clock; use AnyArg
 	// for the credit amount column.
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_u").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_u").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(0.0, 0.0, 0.0))

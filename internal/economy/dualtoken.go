@@ -468,12 +468,15 @@ func (s *DualTokenStore) GetLXCSnapshot(ctx context.Context, workspaceID string)
 // the mining helpers are package-private.
 
 func readLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, minted, spent float64, err error) {
-	row := tx.QueryRow(ctx, `
+	if _, err = tx.Exec(ctx, `
 		INSERT INTO lxc_balances (workspace_id, balance, lifetime_minted, lifetime_spent)
-		VALUES ($1, 0, 0, 0)
-		ON CONFLICT (workspace_id) DO UPDATE SET updated_at = NOW()
-		RETURNING balance, lifetime_minted, lifetime_spent`, workspaceID)
-	if err := row.Scan(&bal, &minted, &spent); err != nil {
+		VALUES ($1, 0, 0, 0) ON CONFLICT (workspace_id) DO NOTHING`, workspaceID); err != nil {
+		return 0, 0, 0, fmt.Errorf("economy: ensure lxc balance row: %w", err)
+	}
+	row := tx.QueryRow(ctx, `
+		SELECT balance, lifetime_minted, lifetime_spent
+		FROM lxc_balances WHERE workspace_id = $1 FOR UPDATE`, workspaceID)
+	if err = row.Scan(&bal, &minted, &spent); err != nil {
 		return 0, 0, 0, fmt.Errorf("economy: read lxc balance: %w", err)
 	}
 	return
@@ -507,12 +510,15 @@ func insertLXCLedger(ctx context.Context, tx pgx.Tx, workspaceID string, delta, 
 // against lens_token_* here.
 
 func readLENSBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, earned, spent float64, err error) {
-	row := tx.QueryRow(ctx, `
+	if _, err = tx.Exec(ctx, `
 		INSERT INTO lens_token_balances (workspace_id, balance, lifetime_earned, lifetime_spent)
-		VALUES ($1, 0, 0, 0)
-		ON CONFLICT (workspace_id) DO UPDATE SET updated_at = NOW()
-		RETURNING balance, lifetime_earned, lifetime_spent`, workspaceID)
-	if err := row.Scan(&bal, &earned, &spent); err != nil {
+		VALUES ($1, 0, 0, 0) ON CONFLICT (workspace_id) DO NOTHING`, workspaceID); err != nil {
+		return 0, 0, 0, fmt.Errorf("economy: ensure lens balance row: %w", err)
+	}
+	row := tx.QueryRow(ctx, `
+		SELECT balance, lifetime_earned, lifetime_spent
+		FROM lens_token_balances WHERE workspace_id = $1 FOR UPDATE`, workspaceID)
+	if err = row.Scan(&bal, &earned, &spent); err != nil {
 		return 0, 0, 0, fmt.Errorf("economy: read lens balance: %w", err)
 	}
 	return

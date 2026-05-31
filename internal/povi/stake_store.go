@@ -81,6 +81,35 @@ func (s *NodeStakeStore) Get(ctx context.Context, nodeID string) (*Stake, error)
 	return &st, nil
 }
 
+// GetTx reads a stake row within an external transaction.
+func (s *NodeStakeStore) GetTx(ctx context.Context, tx pgx.Tx, nodeID string) (*Stake, error) {
+	var st Stake
+	var status string
+	err := tx.QueryRow(ctx, selectStakeSQL, nodeID).Scan(
+		&st.NodeID, &st.WorkspaceID, &st.Amount, &status,
+		&st.SlashedAmount, &st.LockedAt, &st.UnbondAt, &st.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	st.Status = StakeStatus(status)
+	return &st, nil
+}
+
+// PutTx upserts a stake row within an external transaction.
+func (s *NodeStakeStore) PutTx(ctx context.Context, tx pgx.Tx, st Stake) error {
+	if _, err := tx.Exec(ctx, upsertStakeSQL,
+		st.NodeID, st.WorkspaceID, st.Amount, string(st.Status),
+		st.SlashedAmount, st.LockedAt, st.UnbondAt, st.UpdatedAt,
+	); err != nil {
+		return fmt.Errorf("povi: upsert stake (tx): %w", err)
+	}
+	return nil
+}
+
 // List returns all stakes, newest-updated first.
 func (s *NodeStakeStore) List(ctx context.Context) ([]Stake, error) {
 	if s.pool == nil {

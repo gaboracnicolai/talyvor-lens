@@ -39,6 +39,7 @@ type haComponents struct {
 	registry *ha.Registry
 	health   *ha.Health
 	breaker  *ha.SharedBreaker
+	leader   *ha.Leader
 }
 
 // setupHA builds the High-Availability layer and wires it into the existing
@@ -143,7 +144,9 @@ func setupHA(
 		)
 	}
 
-	return &haComponents{registry: registry, health: health, breaker: breaker}
+	leader := ha.NewLeader(rdb, self.ID, cfg.HAEnabled)
+
+	return &haComponents{registry: registry, health: health, breaker: breaker, leader: leader}
 }
 
 // sharedRateAdapter adapts ha.SharedLimiter to ratelimit.SharedChecker, mapping

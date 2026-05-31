@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -92,18 +93,35 @@ const insertSessionSQL = `INSERT INTO sessions (id, workspace_id, agent_name)
 VALUES ($1, $2, $3)
 ON CONFLICT (id) DO NOTHING`
 
-// GetOrCreate returns the in-memory session for sessionID or creates one,
-// inserting a fresh row in the sessions table the first time. Concurrent
-// callers with the same sessionID see the same *Session.
+// GetOrCreate returns the session for sessionID or creates one. It checks the
+// in-memory map first, then falls back to a PG read so sessions created on
+// another instance are visible here without a round-trip on every request.
 func (t *SessionTracker) GetOrCreate(ctx context.Context, sessionID, workspaceID, agentName string) *Session {
 	if agentName == "" {
 		agentName = defaultAgent
 	}
-	t.mu.Lock()
+
+	// Fast path: already in memory.
+	t.mu.RLock()
 	if s, ok := t.sessions[sessionID]; ok {
-		t.mu.Unlock()
+		t.mu.RUnlock()
 		return s
 	}
+	t.mu.RUnlock()
+
+	// Slow path: try PG — another instance may have created this session.
+	if loaded, err := t.loadFromDB(ctx, sessionID); err == nil && loaded != nil {
+		t.mu.Lock()
+		if s, ok := t.sessions[sessionID]; ok { // double-check after lock
+			t.mu.Unlock()
+			return s
+		}
+		t.sessions[sessionID] = loaded
+		t.mu.Unlock()
+		return loaded
+	}
+
+	// New session.
 	now := time.Now().UTC()
 	s := &Session{
 		ID:           sessionID,
@@ -111,6 +129,11 @@ func (t *SessionTracker) GetOrCreate(ctx context.Context, sessionID, workspaceID
 		AgentName:    agentName,
 		StartedAt:    now,
 		LastActiveAt: now,
+	}
+	t.mu.Lock()
+	if existing, ok := t.sessions[sessionID]; ok { // TOCTOU guard
+		t.mu.Unlock()
+		return existing
 	}
 	t.sessions[sessionID] = s
 	t.mu.Unlock()
@@ -121,6 +144,36 @@ func (t *SessionTracker) GetOrCreate(ctx context.Context, sessionID, workspaceID
 		}
 	}
 	return s
+}
+
+const selectSessionSQL = `
+SELECT id, workspace_id, agent_name,
+       COALESCE(turn_count, 0), COALESCE(total_input_tokens, 0), COALESCE(total_output_tokens, 0),
+       COALESCE(total_cost_usd, 0.0), COALESCE(cache_hits, 0), COALESCE(cache_misses, 0),
+       last_active_at, created_at
+FROM sessions WHERE id = $1`
+
+// loadFromDB reads an existing session row from Postgres. Returns (nil, nil)
+// when no row exists — callers can check for nil to distinguish "not found"
+// from an error.
+func (t *SessionTracker) loadFromDB(ctx context.Context, sessionID string) (*Session, error) {
+	if t.pool == nil {
+		return nil, nil
+	}
+	var s Session
+	err := t.pool.QueryRow(ctx, selectSessionSQL, sessionID).Scan(
+		&s.ID, &s.WorkspaceID, &s.AgentName,
+		&s.TurnCount, &s.TotalInputTokens, &s.TotalOutputTokens,
+		&s.TotalCostUSD, &s.CacheHits, &s.CacheMisses,
+		&s.LastActiveAt, &s.StartedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("session: load from db: %w", err)
+	}
+	return &s, nil
 }
 
 const insertTurnSQL = `INSERT INTO session_turns

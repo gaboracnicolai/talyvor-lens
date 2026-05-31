@@ -9,9 +9,9 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
-// expectCreditOrDebit programmes the mock with one full Begin →
-// upsert balance → INSERT ledger → UPDATE balance → Commit cycle.
-// startingBalance is what the SELECT for update returns.
+// expectCreditOrDebit programmes the mock with one full Begin → ensure balance
+// row (INSERT DO NOTHING) → FOR UPDATE read → INSERT ledger → UPDATE balance →
+// Commit cycle. startingBalance is what the FOR UPDATE SELECT returns.
 func expectCreditOrDebit(
 	mock pgxmock.PgxPoolIface,
 	workspaceID string,
@@ -19,7 +19,10 @@ func expectCreditOrDebit(
 	delta, expectedBalance, expectedEarned, expectedSpent float64,
 ) {
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs(workspaceID).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs(workspaceID).
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(startingBalance, startingEarned, startingSpent))
@@ -70,7 +73,10 @@ func TestDebit_DecreasesBalance(t *testing.T) {
 func TestDebit_InsufficientBalance(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO lens_token_balances").
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_e").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_e").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(0.05, 0.05, 0.0))
@@ -203,15 +209,17 @@ func TestRecordCacheHit_EmptyOwnerNoOp(t *testing.T) {
 func TestGetMiningStats_ReadsSnapshot(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, true)
-	// Pretend the miner has logged some in-memory counters first.
-	_ = miner.RecordCacheHit(context.Background(), "", "anyone", "exact") // no-op, just to exercise the path
-	miner.served["ws_stats"] = 7
-	miner.benefited["ws_stats"] = 3
 	mock.ExpectQuery("SELECT workspace_id, balance, lifetime_earned").
 		WithArgs("ws_stats").
 		WillReturnRows(pgxmock.NewRows([]string{
 			"workspace_id", "balance", "lifetime_earned", "lifetime_spent", "updated_at",
 		}).AddRow("ws_stats", 1.23, 2.50, 1.27, time.Now()))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs("ws_stats").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(7))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs("ws_stats").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
 	stats, err := miner.GetMiningStats(context.Background(), "ws_stats")
 	if err != nil {
 		t.Fatalf("GetMiningStats: %v", err)
@@ -221,6 +229,9 @@ func TestGetMiningStats_ReadsSnapshot(t *testing.T) {
 	}
 	if stats.CacheHitsServed != 7 || stats.CacheHitsBenefited != 3 {
 		t.Fatalf("unexpected counters: %+v", stats)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
 	}
 }
 

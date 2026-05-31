@@ -36,12 +36,15 @@ const (
 // balance.
 var ErrInsufficientLocked = errors.New("mining: insufficient locked balance")
 
-// stakeReadSQL locks the balance row and returns (balance, locked_balance).
-const stakeReadSQL = `
+// Two-step explicit lock: ensure the row exists (DO NOTHING so no spurious
+// updated_at touch), then acquire a row-level write lock with FOR UPDATE.
+const stakeEnsureBalanceSQL = `
 	INSERT INTO lens_token_balances (workspace_id, balance, lifetime_earned, lifetime_spent)
-	VALUES ($1, 0, 0, 0)
-	ON CONFLICT (workspace_id) DO UPDATE SET updated_at = NOW()
-	RETURNING balance, locked_balance`
+	VALUES ($1, 0, 0, 0) ON CONFLICT (workspace_id) DO NOTHING`
+
+const stakeLockSelectSQL = `
+	SELECT balance, locked_balance
+	FROM lens_token_balances WHERE workspace_id = $1 FOR UPDATE`
 
 const stakeLedgerInsertSQL = `
 	INSERT INTO lens_token_ledger (workspace_id, amount, balance_after, type, description, metadata)
@@ -120,31 +123,25 @@ func (s *LedgerStore) LockedBalance(ctx context.Context, workspaceID string) (fl
 	return locked, nil
 }
 
-// stakeTx runs the shared lock/release/slash transaction: read+lock the balance
-// row, apply the caller's transition, append the ledger row, update the
-// balances, commit.
-func (s *LedgerStore) stakeTx(
+// stakeInner executes the balance lock, ledger insert, and balance update for a
+// stake operation within an already-begun transaction. It does NOT Begin or
+// Commit — the caller controls the transaction boundary. This is the shared
+// kernel used by both the self-contained stakeTx and the Tx-accepting variants
+// that let StakeManager wrap multiple operations in one transaction.
+func (s *LedgerStore) stakeInner(
 	ctx context.Context,
+	tx pgx.Tx,
 	workspaceID string,
 	amount float64,
 	txType, description string,
 	metadata map[string]interface{},
 	transition func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error),
 ) error {
-	if s.pool == nil {
-		return nil
+	if _, err := tx.Exec(ctx, stakeEnsureBalanceSQL, workspaceID); err != nil {
+		return fmt.Errorf("mining: ensure balance row: %w", err)
 	}
-	start := time.Now()
-	defer func() { metrics.ObserveLedgerWrite(time.Since(start)) }()
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("mining: begin stake tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	var bal, locked float64
-	if err := tx.QueryRow(ctx, stakeReadSQL, workspaceID).Scan(&bal, &locked); err != nil {
+	if err := tx.QueryRow(ctx, stakeLockSelectSQL, workspaceID).Scan(&bal, &locked); err != nil {
 		return fmt.Errorf("mining: read balance: %w", err)
 	}
 
@@ -168,5 +165,78 @@ func (s *LedgerStore) stakeTx(
 	if _, err := tx.Exec(ctx, stakeBalanceUpdateSQL, workspaceID, newBal, newLocked); err != nil {
 		return fmt.Errorf("mining: update balance: %w", err)
 	}
+	return nil
+}
+
+// stakeTx is the self-contained path (Begin + stakeInner + Commit) used by the
+// public LockStake / ReleaseStake / SlashStake methods that manage their own
+// transaction.
+func (s *LedgerStore) stakeTx(
+	ctx context.Context,
+	workspaceID string,
+	amount float64,
+	txType, description string,
+	metadata map[string]interface{},
+	transition func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error),
+) error {
+	if s.pool == nil {
+		return nil
+	}
+	start := time.Now()
+	defer func() { metrics.ObserveLedgerWrite(time.Since(start)) }()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mining: begin stake tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := s.stakeInner(ctx, tx, workspaceID, amount, txType, description, metadata, transition); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
+}
+
+// LockStakeTx, ReleaseStakeTx, SlashStakeTx are the caller-tx variants: they
+// perform the same balance transitions as their non-Tx counterparts but within
+// an external transaction supplied by the caller (used by StakeManager to bundle
+// the ledger op + stake-record update into one atomic transaction).
+
+func (s *LedgerStore) LockStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error {
+	if amount <= 0 {
+		return errors.New("mining: stake lock amount must be positive")
+	}
+	return s.stakeInner(ctx, tx, workspaceID, amount, TypeStakeLock, "stake locked (collateral)", metadata,
+		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+			if bal < amount {
+				return 0, 0, 0, 0, ErrInsufficientBalance
+			}
+			return bal - amount, locked + amount, -amount, bal - amount, nil
+		})
+}
+
+func (s *LedgerStore) ReleaseStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error {
+	if amount <= 0 {
+		return errors.New("mining: stake release amount must be positive")
+	}
+	return s.stakeInner(ctx, tx, workspaceID, amount, TypeStakeRelease, "stake released (collateral returned)", metadata,
+		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+			if locked < amount {
+				return 0, 0, 0, 0, ErrInsufficientLocked
+			}
+			return bal + amount, locked - amount, amount, bal + amount, nil
+		})
+}
+
+func (s *LedgerStore) SlashStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error {
+	if amount <= 0 {
+		return errors.New("mining: stake slash amount must be positive")
+	}
+	return s.stakeInner(ctx, tx, workspaceID, amount, TypeStakeSlash, "stake slashed (collateral burned)", metadata,
+		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+			if locked < amount {
+				return 0, 0, 0, 0, ErrInsufficientLocked
+			}
+			return bal, locked - amount, -amount, bal, nil
+		})
 }
