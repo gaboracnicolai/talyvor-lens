@@ -56,7 +56,20 @@ func (s *InferenceServer) SetReceiptSigner(rs *receiptSigner, lens *LensClient) 
 }
 
 // SetChallengePubKey pins Lens's challenge-signing public key (PoVI Part 3).
-func (s *InferenceServer) SetChallengePubKey(pub ed25519.PublicKey) { s.challengePub = pub }
+// Safe to call concurrently with handleChallenge (the heartbeat loop re-fetches
+// and may rotate the key while requests are being served).
+func (s *InferenceServer) SetChallengePubKey(pub ed25519.PublicKey) {
+	s.mu.Lock()
+	s.challengePub = pub
+	s.mu.Unlock()
+}
+
+// challengeKey returns the currently-pinned Lens challenge pubkey.
+func (s *InferenceServer) challengeKey() ed25519.PublicKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.challengePub
+}
 
 func NewInferenceServer(provider Provider, secret string, cfg NodeConfig) *InferenceServer {
 	return &InferenceServer{
@@ -100,11 +113,12 @@ func (s *InferenceServer) handleChallenge(w http.ResponseWriter, r *http.Request
 	}
 	// Fail CLOSED: without a pinned Lens key we can't authenticate the caller,
 	// so we refuse rather than leak the trace content.
-	if len(s.challengePub) != ed25519.PublicKeySize {
+	pub := s.challengeKey()
+	if len(pub) != ed25519.PublicKeySize {
 		http.Error(w, "node has no pinned Lens challenge key", http.StatusServiceUnavailable)
 		return
 	}
-	if err := povi.VerifyChallenge(req, s.challengePub); err != nil {
+	if err := povi.VerifyChallenge(req, pub); err != nil {
 		http.Error(w, "unauthorized challenge", http.StatusUnauthorized)
 		return
 	}
