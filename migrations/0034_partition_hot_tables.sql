@@ -133,28 +133,35 @@ CREATE INDEX idx_lxc_ledger_workspace ON lxc_ledger (workspace_id, created_at DE
 ALTER TABLE token_events RENAME TO _token_events_unpartitioned;
 
 -- Column definitions match the cumulative schema across migrations
--- 0001 (base) + 0005 (workspace_id) + 0028 (sprint_id):
+-- 0001 (base) + 0005 (workspace_id) + 0007 (prompt_text) +
+-- 0011 (session_id, request_id) + 0028 (sprint_id) +
+-- 0029 (modality, cost_estimated):
 --   team / feature / user_id are nullable (no NOT NULL in 0001).
 --   created_at has no NOT NULL (matches original).
 --   workspace_id DEFAULT 'default' preserved (matches 0005).
 CREATE TABLE token_events (
-    id            UUID        NOT NULL DEFAULT gen_random_uuid(),
-    provider      TEXT        NOT NULL,
-    model         TEXT        NOT NULL,
-    input_tokens  INTEGER     NOT NULL,
-    output_tokens INTEGER     NOT NULL,
-    cached        BOOLEAN     NOT NULL DEFAULT false,
-    compressed    BOOLEAN     NOT NULL DEFAULT false,
-    savings_pct   FLOAT       NOT NULL DEFAULT 0,
-    team          TEXT,
-    feature       TEXT,
-    user_id       TEXT,
-    created_at    TIMESTAMPTZ          DEFAULT NOW(),
-    prompt_hash   TEXT        NOT NULL DEFAULT '',
-    cost_usd      FLOAT       NOT NULL DEFAULT 0,
-    pii_detected  BOOLEAN     NOT NULL DEFAULT false,
-    workspace_id  TEXT        NOT NULL DEFAULT 'default',
-    sprint_id     TEXT        NOT NULL DEFAULT '',
+    id             UUID        NOT NULL DEFAULT gen_random_uuid(),
+    provider       TEXT        NOT NULL,
+    model          TEXT        NOT NULL,
+    input_tokens   INTEGER     NOT NULL,
+    output_tokens  INTEGER     NOT NULL,
+    cached         BOOLEAN     NOT NULL DEFAULT false,
+    compressed     BOOLEAN     NOT NULL DEFAULT false,
+    savings_pct    FLOAT       NOT NULL DEFAULT 0,
+    team           TEXT,
+    feature        TEXT,
+    user_id        TEXT,
+    session_id     TEXT        NOT NULL DEFAULT '',
+    request_id     TEXT        NOT NULL DEFAULT '',
+    created_at     TIMESTAMPTZ          DEFAULT NOW(),
+    prompt_hash    TEXT        NOT NULL DEFAULT '',
+    prompt_text    TEXT        NOT NULL DEFAULT '',
+    cost_usd       FLOAT       NOT NULL DEFAULT 0,
+    cost_estimated BOOLEAN     NOT NULL DEFAULT FALSE,
+    pii_detected   BOOLEAN     NOT NULL DEFAULT false,
+    modality       TEXT        NOT NULL DEFAULT 'text',
+    workspace_id   TEXT        NOT NULL DEFAULT 'default',
+    sprint_id      TEXT        NOT NULL DEFAULT '',
     PRIMARY KEY (id, workspace_id)
 ) PARTITION BY HASH (workspace_id);
 
@@ -169,13 +176,15 @@ CREATE TABLE token_events_p7 PARTITION OF token_events FOR VALUES WITH (MODULUS 
 
 INSERT INTO token_events (
     id, provider, model, input_tokens, output_tokens, cached, compressed,
-    savings_pct, team, feature, user_id, created_at, prompt_hash, cost_usd,
-    pii_detected, workspace_id, sprint_id
+    savings_pct, team, feature, user_id, session_id, request_id, created_at,
+    prompt_hash, prompt_text, cost_usd, cost_estimated, pii_detected, modality,
+    workspace_id, sprint_id
 )
     SELECT
         id, provider, model, input_tokens, output_tokens, cached, compressed,
-        savings_pct, team, feature, user_id, created_at, prompt_hash, cost_usd,
-        pii_detected, workspace_id, sprint_id
+        savings_pct, team, feature, user_id, session_id, request_id, created_at,
+        prompt_hash, prompt_text, cost_usd, cost_estimated, pii_detected, modality,
+        workspace_id, sprint_id
     FROM _token_events_unpartitioned;
 
 DROP TABLE _token_events_unpartitioned;
@@ -184,5 +193,11 @@ CREATE INDEX idx_token_events_created      ON token_events (created_at DESC);
 CREATE INDEX idx_token_events_prompt_hash  ON token_events (prompt_hash);
 CREATE INDEX idx_token_events_workspace    ON token_events (workspace_id, created_at DESC);
 CREATE INDEX idx_token_events_budget_scope ON token_events (workspace_id, team, sprint_id, created_at DESC);
+-- Partial index from 0029: multimodal rows are a small fraction of traffic;
+-- keeps "show me image-heavy spend" queries cheap without bloating the common path.
+-- Must be recreated here because the partitioned parent replaces the original table.
+CREATE INDEX idx_token_events_modality
+    ON token_events (workspace_id, modality, created_at DESC)
+    WHERE modality <> 'text';
 
 COMMIT;
