@@ -199,6 +199,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/forecast/summary", s.handleForecastSummary)
 	r.Get("/v1/api/costanomalies", s.handleCostAnomalies)
 	r.Get("/v1/api/roi/summary", s.handleROISummary)
+	r.Get("/v1/api/distill/summary", s.handleDistillSummary)
 	r.Get("/v1/api/routing/intelligence", s.handleRoutingIntelligence)
 	r.Get("/v1/api/modality/capabilities", s.handleModalityCapabilities)
 	r.Get("/v1/api/guardrails", s.handleGuardrails)
