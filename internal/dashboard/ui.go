@@ -441,14 +441,18 @@ const dashboardHTML = `<!DOCTYPE html>
     </section>
 
     <section>
-      <h2>Anomalies</h2>
+      <h2>Anomalies (over time)</h2>
+      <p class="muted">
+        Temporal — a unit's spend vs its own recent history (the
+        cross-sectional peer view is <em>Cost outliers</em> below).
+      </p>
       <div id="anomalies">
         <span class="skeleton">Loading…</span>
       </div>
     </section>
 
     <section id="costoutliers-panel" style="display:none">
-      <h2>Cost outliers <span class="pill" style="background:#3b3b52;color:#cfcfe6">statistical flag</span></h2>
+      <h2>Cost outliers (vs peers) <span class="pill" style="background:#3b3b52;color:#cfcfe6">statistical flag</span></h2>
       <p class="muted">
         Units of work whose cost is far above the median of comparable units
         (same workspace, trailing window) by robust statistics (median +
