@@ -51,30 +51,28 @@ Most of the time we're in different code and won't collide. Collisions happen at
 _(last updated from sync: main at 0ae7872 — DISTILL conversion core shipped)_
 
 ### Nicolai + Claude — in progress
-- DISTILL feature (building in stages). Conversion core + PDF converter DONE; next: cache + savings (stage 2).
+- DISTILL feature (building in stages). Core + PDF + cache/savings + tiers DONE; next: vision fallback (stage 5).
 
 ### Nicolai + Claude — up next (the roadmap — ours, don't take)
-- DISTILL remaining stages, in order:
-  - 2. Conversion cache + measured savings → token_events (NEXT — collision-free; touches cache + metering, not proxy/ledger)
-  - 3. Request-path integration (⚠️ touches internal/proxy — seam to watch; carries the resource-isolation STAGE 3 BLOCKER below)
-  - 4. Fidelity tiers (faithful/structured/outline) + preview endpoint
-  - 5. Vision fallback for scanned PDFs (NeedsVision now real)
-  - 6. Dashboard panel + ROI-report line
-- token economy Phases 2–5 (⚠️ GATED on a ledger-seam sync — touches the ledger/economy code the collaborator has been in)
+- DISTILL remaining stages:
+  - 5. Vision fallback for scanned PDFs (NeedsVision is real & wired — pure internal/distill, collision-free) — NEXT
+  - 3. Request-path integration (⚠️ touches internal/proxy — seam to watch; carries the resource-isolation STAGE 3 BLOCKER + the deferred preview endpoint + the binary-format savings-attribution decision)
+  - 6. Dashboard panel + ROI-report line (where distill_tokens_saved_total becomes visible)
+- token economy Phases 2–5 (⚠️ GATED — touches ledger/economy code the collaborator is ACTIVELY in; sync seam #1 before starting)
 - SOC2 foundation
-- PoVI minting go-live: NOT a build — see preconditions section below
+- PoVI minting go-live: NOT a build — see preconditions section
 
 ### Collaborator — recently landed (all merged to main, in our base)
+- Stake-listing-atomicity (a9cd852) — more ledger/economy work; **still ACTIVELY in the ledger/economy area** (relevant to the token-economy-Phases-2–5 gate).
 - Pessimistic locking on ledger writes (extended the existing PoVI FOR UPDATE pattern — seam #1 satisfied).
 - Global lexicographic lock ordering in Transfer() (#32) — resolved the open lock-ordering review item himself.
 - atomic ExecuteTrade (#34), hash partitioning (#21, 0034 + his own #29 fix), security hardening (#28, 0036 + touched our costanomaly/dashboard), rate-limiting (#23), control-plane + Redis routing (#25, 0035), multi-process readiness, PgBouncer, CI/benchmark.
 - edge-infra xDS HA — in his comments, NOT yet pushed (edge-infra frozen at 05-20).
 
 ### Done (recently merged to main — drops off both lists)
-- DISTILL conversion core (#36) + PDF converter (#37, ledongthuc/pdf BSD-3) — HTML/DOCX/XLSX/CSV/JSON/XML/text/PDF converters + golden corpus; NeedsVision real for text-less PDFs.
+- DISTILL: core (#36) + PDF (#37) + cache/savings (#39) + fidelity tiers (#41). Conversion engine complete with selectable fidelity; preview endpoint deferred to stage 3.
 - Chart audit items (d)+(e) + PgBouncer-safe migrations (#30); migration chain validates 36/36.
-- Minor follow-ups (#35): local-routing spend note, anomaly-panel axis labels.
-- All earlier audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch.
+- Minor follow-ups (#35); all earlier audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch.
 
 ---
 
