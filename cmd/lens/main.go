@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
@@ -47,6 +48,7 @@ import (
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/dashboard"
+	"github.com/talyvor/lens/internal/dbmigrate"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/eval"
@@ -78,13 +80,65 @@ import (
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/warmer"
 	"github.com/talyvor/lens/internal/workspace"
+	"github.com/talyvor/lens/migrations"
 )
 
 func main() {
+	// Subcommand dispatch. Only an explicit "migrate" diverts; with no
+	// subcommand (or any other arg, as before) the process starts the gateway
+	// server exactly as it always has — the default entrypoint is unchanged.
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := runMigrate(); err != nil {
+			slog.Error("migrate failed", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("startup failed", slog.String("err", err.Error()))
 		os.Exit(1)
 	}
+}
+
+// runMigrate applies the embedded SQL migrations and exits. It reads the SAME
+// LENS_DATABASE_URL the server uses, but deliberately does NOT call
+// config.Load() — that validates Redis/NATS/provider keys a migration Job has
+// no business needing. Idempotent (already-applied versions are skipped) and
+// fail-loud (a migration error returns non-nil → os.Exit(1) so the K8s Job
+// fails and the rollout is held back from an unmigrated DB).
+func runMigrate() error {
+	level := os.Getenv("LENS_LOG_LEVEL")
+	if level == "" {
+		level = "info"
+	}
+	slog.SetDefault(newLogger(level))
+
+	dbURL := os.Getenv("LENS_DATABASE_URL")
+	if dbURL == "" {
+		return dbmigrate.ErrNoDatabaseURL
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		return fmt.Errorf("migrate: connect: %w", err)
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+
+	applied, err := dbmigrate.Run(ctx, conn, migrations.FS)
+	if err != nil {
+		return err
+	}
+	if len(applied) == 0 {
+		slog.Info("migrate: database already up to date")
+	} else {
+		slog.Info("migrate: applied migrations",
+			slog.Int("count", len(applied)),
+			slog.Any("versions", applied))
+	}
+	return nil
 }
 
 func run() error {
