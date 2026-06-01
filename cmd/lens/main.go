@@ -799,7 +799,7 @@ func run() error {
 		authed.Use(heliconeCompat.Middleware())
 		// Auth must run before the rate-limiter so the limiter sees the
 		// key/workspace that AuthMiddleware just stamped onto the request.
-		authed.Use(auth.AuthMiddleware(keyStore))
+		authed.Use(auth.AuthMiddleware(keyStore, authManager))
 		authed.Use(ratelimit.RateLimitMiddleware(rateLimiter))
 
 		apiServer.MountAuthenticated(authed)

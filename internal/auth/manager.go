@@ -216,10 +216,13 @@ func (m *Manager) JWTSecret() string { return m.jwtSecret }
 
 // extractCredential returns (raw, location). location is purely
 // informational — useful for logging the auth method. Empty raw
-// means "no Authorization header AND no X-API-Key header".
+// means no credential is present in any recognised location.
 func extractCredential(r *http.Request) (raw, location string) {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimPrefix(h, "Bearer "), "authorization"
+	}
+	if v := r.Header.Get("X-Talyvor-Key"); v != "" {
+		return v, "x-talyvor-key"
 	}
 	if v := r.Header.Get("X-API-Key"); v != "" {
 		return v, "x-api-key"
