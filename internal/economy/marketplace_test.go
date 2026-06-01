@@ -356,12 +356,12 @@ func TestStake_90DayUsesCorrectAPY(t *testing.T) {
 	mock.ExpectExec("UPDATE lens_token_balances").
 		WithArgs("ws_s", 50.0, 100.0, 50.0).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectCommit()
-	// INSERT stake position with APY=0.12 for 90 days.
+	// INSERT stake position (inside same tx as the Debit — atomicity fix).
 	mock.ExpectQuery("INSERT INTO stake_positions").
 		WithArgs("ws_s", 50.0, 90, APY90, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "started_at"}).
 			AddRow("stake1", time.Now()))
+	mock.ExpectCommit()
 	pos, err := store.Stake(context.Background(), "ws_s", 50.0, 90)
 	if err != nil {
 		t.Fatalf("Stake: %v", err)
@@ -397,13 +397,13 @@ func TestUnstake_AfterLockCreditsYield(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "workspace_id", "amount", "lock_days", "apy", "started_at", "unlocks_at",
 		}).AddRow("stake_done", "ws_u", 100.0, 30, APY30, started, unlocks))
+	// DELETE + Credit run inside one transaction (atomicity fix).
+	mock.ExpectBegin()
 	mock.ExpectExec("DELETE FROM stake_positions").
 		WithArgs("stake_done").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	// Credit principal + yield. We don't pin the exact yield
-	// figure because it depends on the wall clock; use AnyArg
-	// for the credit amount column.
-	mock.ExpectBegin()
+	// Credit principal + yield inside same tx (CreditTx — no own Begin/Commit).
+	// We don't pin the exact yield figure because it depends on wall clock.
 	mock.ExpectExec("INSERT INTO lens_token_balances").
 		WithArgs("ws_u").
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
