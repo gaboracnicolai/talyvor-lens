@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -187,6 +188,16 @@ type Config struct {
 	HAHeartbeat    time.Duration
 	HAInstanceTTL  time.Duration
 	HADrainTimeout time.Duration
+
+	// DistillWorkerBin is the path to the compiled distill-worker binary that
+	// distill.ProcessIsolator spawns to run document conversion in a killable,
+	// memory-limited subprocess (the stage-3 resource-isolation envelope). Env:
+	// LENS_DISTILL_WORKER_BIN. Defaults to the distill-worker binary sitting
+	// beside the running lens executable, so the Docker image (which ships both
+	// binaries in the same directory) works with no config. Nothing in the
+	// serving path uses it yet — the request-path integration that constructs
+	// the isolator with this path is a later PR.
+	DistillWorkerBin string
 }
 
 func Load() (*Config, error) {
@@ -232,6 +243,8 @@ func Load() (*Config, error) {
 		TokenTTL:  24 * time.Hour,
 
 		HAEnabled: parseBoolEnv("LENS_HA_ENABLED"),
+
+		DistillWorkerBin: getEnv("LENS_DISTILL_WORKER_BIN", defaultDistillWorkerBin()),
 
 		DBPgBouncer: parseBoolEnv("LENS_DB_PGBOUNCER"),
 		DBMaxConns:  25,
@@ -429,6 +442,17 @@ func Load() (*Config, error) {
 }
 
 var ErrMissingEnv = errors.New("missing required environment variables")
+
+// defaultDistillWorkerBin resolves the distill-worker path to a binary named
+// "distill-worker" sitting beside the running executable (e.g. /distill-worker
+// next to /lens in the Docker image). Falls back to a bare "distill-worker"
+// (PATH lookup) if the executable path can't be determined.
+func defaultDistillWorkerBin() string {
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(exe), "distill-worker")
+	}
+	return "distill-worker"
+}
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
