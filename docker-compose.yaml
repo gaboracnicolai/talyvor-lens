@@ -15,7 +15,12 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - LENS_DATABASE_URL=postgres://lens:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_lens?sslmode=disable
+      # Route through PgBouncer (transaction pooling) instead of Postgres directly.
+      # LENS_DB_PGBOUNCER switches pgx to simple query protocol (required).
+      # LENS_DB_MAX_CONNS is raised — connections are cheap against PgBouncer.
+      - LENS_DATABASE_URL=postgres://lens:${POSTGRES_PASSWORD:-changeme}@pgbouncer:6432/talyvor_lens?sslmode=disable
+      - LENS_DB_PGBOUNCER=true
+      - LENS_DB_MAX_CONNS=100
       - LENS_REDIS_URL=redis://redis:6379
       - LENS_NATS_URL=nats://nats:4222
       - LENS_OPENAI_API_KEY=${LENS_OPENAI_API_KEY:-}
@@ -31,7 +36,7 @@ services:
       - LENS_OLLAMA_URL=${LENS_OLLAMA_URL:-}
       - LENS_LOG_LEVEL=${LENS_LOG_LEVEL:-info}
     depends_on:
-      postgres:
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -67,6 +72,34 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+
+  # PgBouncer sits between Lens and Postgres and multiplexes many application
+  # connections onto a small pool of real server connections. Transaction
+  # pooling mode (one server connection per transaction) is the most efficient
+  # mode for OLTP workloads and what Lens is tuned for (LENS_DB_PGBOUNCER=true).
+  pgbouncer:
+    image: bitnami/pgbouncer:1
+    environment:
+      - POSTGRESQL_HOST=postgres
+      - POSTGRESQL_PORT=5432
+      - POSTGRESQL_DATABASE=talyvor_lens
+      - POSTGRESQL_USERNAME=lens
+      - POSTGRESQL_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - PGBOUNCER_PORT=6432
+      - PGBOUNCER_POOL_MODE=transaction
+      - PGBOUNCER_MAX_CLIENT_CONN=1000
+      - PGBOUNCER_DEFAULT_POOL_SIZE=25
+      - PGBOUNCER_MIN_POOL_SIZE=2
+      - PGBOUNCER_SERVER_IDLE_TIMEOUT=600
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U lens"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   postgres:
     image: pgvector/pgvector:pg16

@@ -1,0 +1,57 @@
+{{- if .Values.pgbouncer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lens.fullname" . }}-pgbouncer
+  labels:
+    {{- include "lens.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pgbouncer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "lens.componentSelectorLabels" (list . "pgbouncer") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lens.componentSelectorLabels" (list . "pgbouncer") | nindent 8 }}
+      annotations:
+        # Roll PgBouncer pods when non-secret config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/pgbouncer-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: pgbouncer
+          image: {{ .Values.pgbouncer.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: pgbouncer
+              containerPort: {{ .Values.pgbouncer.listenPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "lens.fullname" . }}-pgbouncer
+          env:
+            # Postgres password comes from the same Secret as the Lens gateway
+            # so operators manage one secret instead of two.
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "lens.secretName" . }}
+                  key: {{ .Values.pgbouncer.postgresPasswordSecretKey | quote }}
+          livenessProbe:
+            tcpSocket:
+              port: pgbouncer
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: pgbouncer
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          {{- with .Values.pgbouncer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
