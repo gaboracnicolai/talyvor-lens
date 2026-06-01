@@ -67,9 +67,29 @@ type Result struct {
 	// fallback. The PDF converter sets it when text extraction yields nothing
 	// (or fails); the vision fallback that ACTS on it is a later PR.
 	NeedsVision bool
+	// Tier is the fidelity tier applied to produce this Markdown (faithful by
+	// default). Recorded so an over-aggressive tier is traceable.
+	Tier Tier
 	// Warnings holds non-fatal structural notes (e.g. a table with ragged
 	// rows). Conversion still succeeds; these are advisory.
 	Warnings []string
+}
+
+// Option configures a conversion call. The zero set = faithful tier, so
+// existing callers (no options) get today's behavior unchanged.
+type Option func(*convOptions)
+
+type convOptions struct{ tier Tier }
+
+// WithTier selects the conversion fidelity tier (default faithful).
+func WithTier(t Tier) Option { return func(o *convOptions) { o.tier = t } }
+
+func resolveOptions(opts []Option) convOptions {
+	o := convOptions{tier: TierFaithful}
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
 }
 
 // Converter turns one document format into Markdown. Implementations must be
@@ -114,14 +134,14 @@ func init() {
 // gateway already knows the declared content type, prefer DistillAs to skip
 // sniffing (content sniffing is best-effort; some formats — notably CSV vs
 // plaintext — are ambiguous from bytes alone).
-func Distill(ctx context.Context, input []byte) (Result, error) {
-	return convert(ctx, input, nil)
+func Distill(ctx context.Context, input []byte, opts ...Option) (Result, error) {
+	return convert(ctx, input, nil, resolveOptions(opts))
 }
 
 // DistillAs converts input as the explicitly-supplied format (e.g. resolved
 // from a request's Content-Type by the future request-path integration).
-func DistillAs(ctx context.Context, input []byte, format Format) (Result, error) {
-	return convert(ctx, input, &format)
+func DistillAs(ctx context.Context, input []byte, format Format, opts ...Option) (Result, error) {
+	return convert(ctx, input, &format, resolveOptions(opts))
 }
 
 // convert enforces the size bound, picks the converter (detecting the format
@@ -129,19 +149,19 @@ func DistillAs(ctx context.Context, input []byte, format Format) (Result, error)
 // recover deliberately spans DETECTION too: DetectFormat parses an untrusted
 // ZIP central directory, which is itself an attacker-reachable parse — a panic
 // there must never escape to the host.
-func convert(ctx context.Context, input []byte, format *Format) (res Result, err error) {
+func convert(ctx context.Context, input []byte, format *Format, o convOptions) (res Result, err error) {
 	// Cheap, panic-free guards first.
 	if len(input) == 0 {
-		return Result{Format: derefFormat(format)}, ErrEmptyInput
+		return Result{Format: derefFormat(format), Tier: normalizeTier(o.tier)}, ErrEmptyInput
 	}
 	if len(input) > MaxInputBytes {
-		return Result{Format: derefFormat(format)}, fmt.Errorf("%w: %d bytes > %d", ErrTooLarge, len(input), MaxInputBytes)
+		return Result{Format: derefFormat(format), Tier: normalizeTier(o.tier)}, fmt.Errorf("%w: %d bytes > %d", ErrTooLarge, len(input), MaxInputBytes)
 	}
 
 	f := derefFormat(format)
 	defer func() {
 		if r := recover(); r != nil {
-			res = Result{Format: f}
+			res = Result{Format: f, Tier: normalizeTier(o.tier)}
 			err = fmt.Errorf("%w: recovered from panic during %s handling: %v", ErrConversionFailed, f, r)
 		}
 	}()
@@ -151,9 +171,16 @@ func convert(ctx context.Context, input []byte, format *Format) (res Result, err
 	}
 	c, ok := registry[f]
 	if !ok {
-		return Result{Format: f}, ErrUnsupportedFormat
+		return Result{Format: f, Tier: normalizeTier(o.tier)}, ErrUnsupportedFormat
 	}
-	return c.Convert(ctx, input)
+	res, err = c.Convert(ctx, input)
+	if err != nil {
+		res.Tier = normalizeTier(o.tier)
+		return res, err
+	}
+	// Tier post-processing: faithful is identity (converter output unchanged),
+	// so existing callers see no regression; structured/outline reduce it.
+	return applyTier(res, o.tier), nil
 }
 
 func derefFormat(f *Format) Format {
