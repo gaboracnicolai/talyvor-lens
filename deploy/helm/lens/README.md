@@ -172,6 +172,27 @@ reads. No separate migrations image or tool is required. Alternatives:
 - set `migrations.enabled=false` and run migrations out of band (the
   `lens migrate` subcommand still works if you invoke it yourself).
 
+### Migrations must connect direct to Postgres (PgBouncer)
+
+Migrations run **DDL** and must connect **directly to Postgres** — never through
+a transaction-mode pooler. PgBouncer in transaction mode rejects the extended /
+prepared-statement protocol and cannot safely run multi-statement DDL
+(`BEGIN/COMMIT`, partitioning). So when **`pgbouncer.enabled=true`** (which
+points the app's `LENS_DATABASE_URL` at the pooler), **set
+`migrations.databaseURL` to the DIRECT Postgres URL**:
+
+```yaml
+pgbouncer:
+  enabled: true            # app connects through the pooler
+migrations:
+  databaseURL: "postgres://lens:<pass>@<postgres-host>:5432/talyvor_lens"
+```
+
+`migrations.databaseURL` overrides `LENS_DATABASE_URL` (and disables the
+PgBouncer flag) **for the migration Job only**; the gateway Deployment keeps
+using the pooled connection. Leave `migrations.databaseURL` unset when PgBouncer
+is not in front (the Job then uses the Secret's `LENS_DATABASE_URL` as before).
+
 ## Scheduled backups
 
 `backup.enabled=true` installs a **CronJob** that runs the canonical

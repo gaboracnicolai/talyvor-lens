@@ -181,6 +181,13 @@ migrations:
   # gateway image's `lens migrate`; override to use a different mechanism.
   command: []
   args: []
+  # -- Direct Postgres URL for the migration Job ONLY (overrides the Secret's
+  # LENS_DATABASE_URL for this Job). Leave UNSET normally. **REQUIRED when
+  # pgbouncer.enabled=true**: migrations run DDL and must connect DIRECT to
+  # Postgres — a transaction-mode pooler rejects prepared statements and can't
+  # safely run multi-statement DDL. The app Deployment keeps using the pooled
+  # URL; only migrations go direct.
+  databaseURL: ""
   # -- Hook weight (lower runs earlier).
   hookWeight: -5
   # -- Resources for the migration Job.

@@ -101,6 +101,7 @@
         "image": { "type": "string" },
         "command": { "type": "array", "items": { "type": "string" } },
         "args": { "type": "array", "items": { "type": "string" } },
+        "databaseURL": { "type": "string" },
         "hookWeight": { "type": "integer" },
         "resources": { "type": "object" }
       }

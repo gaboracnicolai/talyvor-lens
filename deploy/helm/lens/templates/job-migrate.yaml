@@ -62,6 +62,21 @@ spec:
                 name: {{ include "lens.fullname" . }}-config
             - secretRef:
                 name: {{ include "lens.secretName" . }}
+          {{- if .Values.migrations.databaseURL }}
+          # Migrations run DDL and MUST connect DIRECT to Postgres — never
+          # through a transaction-mode pooler (PgBouncer). A transaction pooler
+          # rejects the extended/prepared-statement protocol AND can't safely
+          # run multi-statement DDL (BEGIN/COMMIT, partitioning). When PgBouncer
+          # is in front (pgbouncer.enabled=true), set migrations.databaseURL to
+          # the DIRECT Postgres URL: these explicit env vars override the pooled
+          # LENS_DATABASE_URL + inherited LENS_DB_PGBOUNCER for THIS Job only.
+          # The app Deployment keeps using the pooler.
+          env:
+            - name: LENS_DATABASE_URL
+              value: {{ .Values.migrations.databaseURL | quote }}
+            - name: LENS_DB_PGBOUNCER
+              value: "false"
+          {{- end }}
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}
           volumeMounts:
