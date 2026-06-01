@@ -210,6 +210,18 @@ var (
 	DistillTokensSavedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_distill_tokens_saved_total", Help: "Input tokens saved by document distillation (len/4 basis), summed across results returned (cache hits included — realized per use)."},
 	)
+	// ─── DISTILL vision fallback (stage 5) ───
+	// The EXPENSIVE path: a text-less document (scanned/encrypted PDF) routed to
+	// a vision model for OCR. result is a bounded set: ok | empty | error.
+	// Vision OCR is SPEND, never a saving — its token cost lives in the separate
+	// cost counter below and must never be added to tokens_saved.
+	DistillVisionFallbackTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_distill_vision_fallback_total", Help: "DISTILL vision-OCR fallback attempts for text-less documents, by result (ok|empty|error)."},
+		[]string{"result"},
+	)
+	DistillVisionTokensCostTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_distill_vision_tokens_cost_total", Help: "Tokens SPENT by the vision-OCR fallback (the expensive path — a cost, never a saving)."},
+	)
 
 	// ─── guardrails (Upgrade 13) ───
 	// type (pii/injection/topic/word_filter/custom/output_validation) and
@@ -307,6 +319,7 @@ func init() {
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 		SpendRecordsTotal,
 		DistillCacheTotal, DistillTokensSavedTotal,
+		DistillVisionFallbackTotal, DistillVisionTokensCostTotal,
 		GuardrailTriggeredTotal, GuardrailBlocksTotal, GuardrailRedactionsTotal,
 		EvalRunsTotal, EvalRegressionsDetectedTotal, ABSignificantResultsTotal,
 		POVIReceiptsTotal, POVIReceiptVerifyFailuresTotal, POVIProvisionalMintsTotal,
@@ -433,6 +446,26 @@ func DistillCache(result string) { DistillCacheTotal.WithLabelValues(result).Inc
 func DistillTokensSaved(n int) {
 	if n > 0 {
 		DistillTokensSavedTotal.Add(float64(n))
+	}
+}
+
+// DistillVisionFallback counts a vision-OCR fallback attempt by result, folding
+// unexpected values to "unknown" so the label stays bounded.
+func DistillVisionFallback(result string) {
+	switch result {
+	case "ok", "empty", "error":
+	default:
+		result = "unknown"
+	}
+	DistillVisionFallbackTotal.WithLabelValues(result).Inc()
+}
+
+// DistillVisionTokensCost adds to the running total of tokens SPENT by the
+// vision-OCR fallback (the expensive path). This is a cost, deliberately kept
+// separate from DistillTokensSaved so OCR spend can never look like a saving.
+func DistillVisionTokensCost(n int) {
+	if n > 0 {
+		DistillVisionTokensCostTotal.Add(float64(n))
 	}
 }
 
