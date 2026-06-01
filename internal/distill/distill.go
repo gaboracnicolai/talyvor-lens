@@ -64,8 +64,8 @@ type Result struct {
 	Format Format
 	// NeedsVision reports that the input carries no extractable text layer
 	// (e.g. a scanned, image-only PDF) and should be routed to the vision
-	// fallback. RESERVED: it is set by the PDF/vision converter, which lands in
-	// a later PR; no converter in this package sets it yet.
+	// fallback. The PDF converter sets it when text extraction yields nothing
+	// (or fails); the vision fallback that ACTS on it is a later PR.
 	NeedsVision bool
 	// Warnings holds non-fatal structural notes (e.g. a table with ragged
 	// rows). Conversion still succeeds; these are advisory.
@@ -83,18 +83,14 @@ type Converter interface {
 	Convert(ctx context.Context, input []byte) (Result, error)
 }
 
-// Sentinel errors. Callers can errors.Is against these to branch (e.g. route a
-// FormatPDF/ErrPDFPending input elsewhere, or surface ErrTooLarge distinctly).
+// Sentinel errors. Callers can errors.Is against these to branch (e.g. surface
+// ErrTooLarge distinctly). A text-less PDF is NOT an error — it returns a
+// successful Result with NeedsVision=true (see pdf.go).
 var (
 	ErrEmptyInput        = errors.New("distill: empty input")
 	ErrTooLarge          = errors.New("distill: input exceeds size limit")
 	ErrUnsupportedFormat = errors.New("distill: unsupported or undetected format")
 	ErrConversionFailed  = errors.New("distill: conversion failed")
-	// ErrPDFPending is returned for PDF input: the format is recognized and
-	// reserved in the seam, but real PDF text extraction (and the text-less /
-	// needs-vision signal) lands in a dedicated later PR. It is NOT a broken
-	// or empty conversion — it is an explicit "not yet supported" signal.
-	ErrPDFPending = errors.New("distill: PDF support pending (separate PR)")
 )
 
 // registry maps a detected format to its converter. Populated by init via
