@@ -61,27 +61,34 @@ func (s *Store) UnitCostsWindow(ctx context.Context, ws, unitKind string, since,
 	if s.db == nil {
 		return nil, nil
 	}
-	var table, col string
-	switch unitKind {
-	case UnitIssue:
-		table, col = "request_attribution", "issue_id"
-	case UnitTeam, UnitSprint:
-		col = budgets.ScopeColumn(budgets.Scope(unitKind))
-		if col == "" {
-			return nil, fmt.Errorf("costanomaly: no token_events column for unit %q", unitKind)
-		}
-		table = "token_events"
-	default:
+	// allowedQueries is the closed whitelist of permitted (table, column) pairs.
+	// Column and table names are structural SQL identifiers — they cannot be
+	// parameterised with $N placeholders — so we use a fixed lookup instead of
+	// user-supplied strings to prevent any SQL injection path, even indirect.
+	type tableCol struct{ table, col string }
+	allowedQueries := map[string]tableCol{
+		UnitIssue:  {"request_attribution", "issue_id"},
+		UnitTeam:   {"token_events", budgets.ScopeColumn(budgets.ScopeTeam)},
+		UnitSprint: {"token_events", budgets.ScopeColumn(budgets.ScopeSprint)},
+	}
+	tc, ok := allowedQueries[unitKind]
+	if !ok || tc.col == "" {
 		return nil, fmt.Errorf("costanomaly: unknown unit kind %q", unitKind)
 	}
+	table, col := tc.table, tc.col
 
-	where := fmt.Sprintf("workspace_id = $1 AND %s <> '' AND created_at >= $2", col)
 	args := []any{ws, since}
+	filterUntil := ""
 	if !until.IsZero() {
-		where += " AND created_at < $3"
+		filterUntil = " AND created_at < $3"
 		args = append(args, until)
 	}
-	sql := fmt.Sprintf("SELECT %s, SUM(cost_usd) FROM %s WHERE %s GROUP BY %s HAVING SUM(cost_usd) > 0", col, table, where, col)
+	// table and col are validated above against a closed whitelist —
+	// no user input reaches this Sprintf.
+	sql := fmt.Sprintf(
+		"SELECT %s, SUM(cost_usd) FROM %s WHERE workspace_id = $1 AND %s <> '' AND created_at >= $2%s GROUP BY %s HAVING SUM(cost_usd) > 0",
+		col, table, col, filterUntil, col,
+	)
 
 	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {

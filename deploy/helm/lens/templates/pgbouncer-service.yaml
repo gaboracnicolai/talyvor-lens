@@ -1,0 +1,20 @@
+{{- if .Values.pgbouncer.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lens.fullname" . }}-pgbouncer
+  labels:
+    {{- include "lens.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pgbouncer
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "lens.componentSelectorLabels" (list . "pgbouncer") | nindent 4 }}
+  ports:
+    # Expose standard Postgres port 5432 so LENS_DATABASE_URL only needs the
+    # host changed (not the port) when switching to PgBouncer.
+    - name: pgbouncer
+      port: 5432
+      targetPort: pgbouncer
+      protocol: TCP
+{{- end }}

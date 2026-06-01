@@ -247,6 +247,52 @@ autoscaling:
   # -- Set to 0 to disable the memory target.
   targetMemoryUtilizationPercentage: 80
 
+pgbouncer:
+  # -- Deploy an in-cluster PgBouncer connection pooler in front of Postgres.
+  #
+  # When enabled, three things happen automatically:
+  #   1. A PgBouncer Deployment + ClusterIP Service are created in the release
+  #      namespace.  The service is named "<release>-lens-pgbouncer" on port 5432.
+  #   2. LENS_DB_PGBOUNCER=true is injected into the gateway ConfigMap, which
+  #      switches pgx to simple query protocol (required for transaction pooling).
+  #   3. You MUST update your Secret so LENS_DATABASE_URL points at the PgBouncer
+  #      service, e.g.:
+  #        postgres://lens:<pass>@<release>-lens-pgbouncer:5432/talyvor_lens
+  #      AND add a separate key for the Postgres password:
+  #        PGBOUNCER_POSTGRES_PASSWORD: <same password>
+  #      (PgBouncer reads credentials separately from the connection string.)
+  enabled: false
+  # -- PgBouncer image. Bitnami's image configures itself from environment
+  # variables — no custom config file needed.
+  image: "bitnami/pgbouncer:1"
+  # -- Port PgBouncer listens on inside the container. The ClusterIP Service
+  # always exposes port 5432 → this port so LENS_DATABASE_URL uses :5432.
+  listenPort: 6432
+  # -- Real Postgres hostname (external cloud DB or in-cluster service).
+  postgresHost: ""
+  # -- Real Postgres port.
+  postgresPort: 5432
+  # -- Database name.
+  postgresDatabase: "talyvor_lens"
+  # -- Database username.
+  postgresUsername: "lens"
+  # -- Key in the Lens Secret that holds the Postgres password for PgBouncer.
+  # Add PGBOUNCER_POSTGRES_PASSWORD to your secret with the same password
+  # that appears in LENS_DATABASE_URL.
+  postgresPasswordSecretKey: "PGBOUNCER_POSTGRES_PASSWORD"
+  # -- Pool mode: transaction (recommended), session, or statement.
+  # transaction pooling is most efficient; session avoids the simple-protocol
+  # requirement but is less effective under concurrent load.
+  poolMode: "transaction"
+  # -- Maximum total client connections PgBouncer will accept.
+  maxClientConn: 1000
+  # -- Server connections per (user, database) pair.
+  defaultPoolSize: 25
+  # -- Minimum idle server connections kept warm.
+  minPoolSize: 2
+  # -- PgBouncer container resource requests/limits.
+  resources: {}
+
 podDisruptionBudget:
   # -- PodDisruptionBudget for the HA case (keeps a quorum during node drains).
   enabled: false
