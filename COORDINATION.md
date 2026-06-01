@@ -48,32 +48,35 @@ Most of the time we're in different code and won't collide. Collisions happen at
 ---
 
 ## Work ledger — keep current
-_(last updated from sync: main at fa425ec — 2026-06-01)_
+_(last updated from sync: main at 347a916 — chart work merged, migrations 36/36 validated)_
 
 ### Nicolai + Claude — in progress
-- Chart migrate-runner + backup CronJob — branch `feat/lens-chart-migrate-and-backup` (WIP commit: runner + `lens migrate` subcommand + 0022 repair done; chart hook + CronJob in progress).
+- _(none — chart work shipped; next: minor follow-ups, then DISTILL)_
 
 ### Nicolai + Claude — up next (the roadmap — ours, don't take)
-- Finish chart pieces (migrate hook + backup CronJob)
-- DISTILL · token economy Phases 2–5 · SOC2 foundation
-- Remaining follow-ups: local-routing spend note, anomaly-panel UX polish (b)
+- Two minor follow-ups: local-routing spend note, anomaly-panel UX polish (b)
+- DISTILL (designed, ready to build — self-contained, collision-free with infra work)
+- token economy Phases 2–5
+- SOC2 foundation
 
 ### Collaborator — recently landed (all merged to main, in our base)
-- Pessimistic locking on ledger writes (`8a3ca27`): implicit ON CONFLICT → explicit SELECT FOR UPDATE, atomicized StakeManager (`internal/povi/stakes.go`, `internal/mining/stake_ledger.go`, `internal/economy/dualtoken.go`). **Extended the existing PoVI FOR UPDATE pattern — seam #1 satisfied.**
-- Rate-limiting public endpoints (PR #23).
-- Control-plane node reconciler + Redis routing (PR #25) + migration `0035_controlplane.sql`.
-- Multi-process readiness (leader election, PG read-through), CI workflow, benchmark fix.
-- PgBouncer connection pooling (PR #26): `bitnami/pgbouncer:1` in docker-compose, Helm opt-in (`pgbouncer.enabled`), `LENS_DB_PGBOUNCER` simple-protocol flag, `LENS_DB_MAX_CONNS`/`LENS_DB_MIN_CONNS` pool sizing.
-- Security hardening (PR #28): 6 XSS fixes in dashboard (escapeHTML applied consistently), migration `0036` DB check constraints (`balance >= 0` on ledger/stakes), attribution header length caps (128/256/64/16 chars), costanomaly SQL whitelist replacing column-name Sprintf.
-- **Migration `0034` fresh-apply bug fix (in progress, this branch)** — moved CREATE INDEX after DROP TABLE in each block; see Open items below.
+- Pessimistic locking on ledger writes (`8a3ca27`): explicit SELECT FOR UPDATE, atomicized StakeManager. **Extended the existing PoVI FOR UPDATE pattern — seam #1 satisfied.**
+- Hash partitioning migration `0034` (#21) — had a fresh-apply bug; **HE FIXED IT himself (#29 / `26b45c8`, CREATE INDEX after DROP TABLE).**
+- Rate-limiting public endpoints (#23).
+- Control-plane node reconciler + Redis routing (#25) + migration `0035_controlplane.sql`.
+- Security hardening (#28) — migration `0036_check_constraints.sql` + **touched `internal/{attribution,costanomaly,dashboard}` (costanomaly + dashboard are OUR app-tier code — see seam note below).**
+- Multi-process readiness (leader election, PG read-through), PgBouncer (pooling), CI workflow, benchmark fix.
+- edge-infra xDS HA — in his comments, NOT yet pushed (edge-infra frozen at 05-20).
 
 ### Done (recently merged to main — drops off both lists)
-- All audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch — ours, merged.
-- Hash partitioning migration `0034` — fresh-apply bug fixed (collaborator, see above).
+- Chart audit items (d) functional migrate hook + (e) backup CronJob + PgBouncer-safe migrations (#30, merge commit `347a916`).
+- Migration chain now validates **36/36 end-to-end** (0001–0036) through our runner, unchanged — his 0034 fix unblocked 0035 + 0036.
+- All earlier audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch — ours, merged.
 
 ---
 
 ## Open coordination items
-- **`0034` fix (collaborator, in progress)** — index name collision fixed: CREATE INDEX moved after DROP TABLE in all three blocks. PR pending; once merged, Nicolai's fresh-apply runner should pass 0001–0036.
-- **`0035_controlplane.sql`** — unblocked once 0034 applies cleanly; no changes needed on either side.
+- **Migrations RESOLVED** — full chain 0001–0036 applies clean (his 0034 fix landed). No outstanding migration issues. Count: 36, no 0037+.
+- **New seam to watch — `costanomaly` / `dashboard`:** his security-hardening (#28) touched `internal/costanomaly` and `internal/dashboard`, which are OUR app-tier code. Merged + green, no conflict — but next time we touch those, check what #28 changed there first. The "his infra / our app" split isn't absolute; he reaches into app-tier for cross-cutting hardening.
 - **Ledger lock ordering** — his pessimistic locking extended the PoVI FOR UPDATE pattern (good). Remaining review item (not a conflict): confirm global lock ordering is consistent across all ledger tables to prevent deadlocks.
+- **PgBouncer / migrations seam (handled):** DDL migrations break through a transaction pooler, so our migrate Job takes an explicit `migrations.databaseURL` to go direct when his PgBouncer is enabled. His pooler untouched; the link is one explicit operator-set value. He should know the seam exists.
