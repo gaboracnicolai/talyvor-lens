@@ -49,6 +49,8 @@ import (
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/dashboard"
 	"github.com/talyvor/lens/internal/dbmigrate"
+	"github.com/talyvor/lens/internal/distill"
+	"github.com/talyvor/lens/internal/distillpreview"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/eval"
@@ -941,6 +943,25 @@ func run() error {
 			}
 			writeJSONOK(w, http.StatusOK, comp)
 		})
+
+		// Admin-only DISTILL preview: a DRY RUN that converts an uploaded
+		// document to Markdown through the KILLABLE subprocess (ProcessIsolator,
+		// using the proven-sufficient 512 MiB default) — never the in-process
+		// path. No model call, no token_events, no spend. A text-less/scanned
+		// doc returns needs_vision honestly (vision OCR is a later PR).
+		distillPreview := &distillpreview.Handler{
+			Converter: &distill.ProcessIsolator{WorkerBin: cfg.DistillWorkerBin},
+			IsAdmin: func(req *http.Request) bool {
+				// Mirror the existing admin route's error-first, fail-closed check
+				// (deny on auth error OR non-admin) exactly.
+				actx, err := authManager.Authenticate(req)
+				if err != nil || !actx.IsAdmin {
+					return false
+				}
+				return true
+			},
+		}
+		authed.Post("/v1/admin/distill/preview", distillPreview.ServeHTTP)
 
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
 			if authManager.JWTSecret() == "" {
