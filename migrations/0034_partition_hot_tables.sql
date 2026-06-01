@@ -33,6 +33,18 @@
 -- sequence is a safety net; the INSERT is a no-op on empty tables.
 -- The whole migration runs inside one transaction and rolls back cleanly
 -- if anything fails.
+--
+-- INDEX ORDERING NOTE: CREATE INDEX must come AFTER DROP TABLE for each
+-- block. When ALTER TABLE ... RENAME renames the original table to
+-- _*_unpartitioned, Postgres keeps all existing index names on the renamed
+-- table. Running CREATE INDEX before DROP TABLE causes an "index already
+-- exists" collision. Dropping the unpartitioned table first frees the names;
+-- CREATE INDEX on the new partitioned parent then succeeds and propagates
+-- to all 8 child partitions automatically. Building indexes after the bulk
+-- INSERT is also faster (single pass over sorted data vs. incremental
+-- maintenance during inserts). Do NOT use CREATE INDEX IF NOT EXISTS here —
+-- it would silently skip on a still-taken name and leave the partitioned
+-- table unindexed.
 
 BEGIN;
 
@@ -63,15 +75,19 @@ CREATE TABLE lens_token_ledger_p5 PARTITION OF lens_token_ledger FOR VALUES WITH
 CREATE TABLE lens_token_ledger_p6 PARTITION OF lens_token_ledger FOR VALUES WITH (MODULUS 8, REMAINDER 6);
 CREATE TABLE lens_token_ledger_p7 PARTITION OF lens_token_ledger FOR VALUES WITH (MODULUS 8, REMAINDER 7);
 
--- Indexes on the parent table propagate automatically to all 8 partitions.
-CREATE INDEX idx_ledger_workspace ON lens_token_ledger (workspace_id, created_at DESC);
-CREATE INDEX idx_ledger_type      ON lens_token_ledger (type, workspace_id);
-
+-- Bulk-copy existing rows first, then build indexes (faster than
+-- maintaining them during INSERT, and avoids the name-collision bug —
+-- see header comment above).
 INSERT INTO lens_token_ledger (id, workspace_id, amount, balance_after, type, description, metadata, created_at)
     SELECT id, workspace_id, amount, balance_after, type, description, metadata, created_at
     FROM _lens_token_ledger_unpartitioned;
 
+-- DROP frees the old index names before we recreate them on the new
+-- partitioned parent. Indexes on the parent propagate to all 8 partitions.
 DROP TABLE _lens_token_ledger_unpartitioned;
+
+CREATE INDEX idx_ledger_workspace ON lens_token_ledger (workspace_id, created_at DESC);
+CREATE INDEX idx_ledger_type      ON lens_token_ledger (type, workspace_id);
 
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -101,13 +117,13 @@ CREATE TABLE lxc_ledger_p5 PARTITION OF lxc_ledger FOR VALUES WITH (MODULUS 8, R
 CREATE TABLE lxc_ledger_p6 PARTITION OF lxc_ledger FOR VALUES WITH (MODULUS 8, REMAINDER 6);
 CREATE TABLE lxc_ledger_p7 PARTITION OF lxc_ledger FOR VALUES WITH (MODULUS 8, REMAINDER 7);
 
-CREATE INDEX idx_lxc_ledger_workspace ON lxc_ledger (workspace_id, created_at DESC);
-
 INSERT INTO lxc_ledger (id, workspace_id, amount, balance_after, type, description, metadata, created_at)
     SELECT id, workspace_id, amount, balance_after, type, description, metadata, created_at
     FROM _lxc_ledger_unpartitioned;
 
 DROP TABLE _lxc_ledger_unpartitioned;
+
+CREATE INDEX idx_lxc_ledger_workspace ON lxc_ledger (workspace_id, created_at DESC);
 
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -151,11 +167,6 @@ CREATE TABLE token_events_p5 PARTITION OF token_events FOR VALUES WITH (MODULUS 
 CREATE TABLE token_events_p6 PARTITION OF token_events FOR VALUES WITH (MODULUS 8, REMAINDER 6);
 CREATE TABLE token_events_p7 PARTITION OF token_events FOR VALUES WITH (MODULUS 8, REMAINDER 7);
 
-CREATE INDEX idx_token_events_created      ON token_events (created_at DESC);
-CREATE INDEX idx_token_events_prompt_hash  ON token_events (prompt_hash);
-CREATE INDEX idx_token_events_workspace    ON token_events (workspace_id, created_at DESC);
-CREATE INDEX idx_token_events_budget_scope ON token_events (workspace_id, team, sprint_id, created_at DESC);
-
 INSERT INTO token_events (
     id, provider, model, input_tokens, output_tokens, cached, compressed,
     savings_pct, team, feature, user_id, created_at, prompt_hash, cost_usd,
@@ -168,5 +179,10 @@ INSERT INTO token_events (
     FROM _token_events_unpartitioned;
 
 DROP TABLE _token_events_unpartitioned;
+
+CREATE INDEX idx_token_events_created      ON token_events (created_at DESC);
+CREATE INDEX idx_token_events_prompt_hash  ON token_events (prompt_hash);
+CREATE INDEX idx_token_events_workspace    ON token_events (workspace_id, created_at DESC);
+CREATE INDEX idx_token_events_budget_scope ON token_events (workspace_id, team, sprint_id, created_at DESC);
 
 COMMIT;
