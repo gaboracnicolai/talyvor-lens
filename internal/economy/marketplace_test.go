@@ -58,8 +58,10 @@ func TestTransfer_MovesTokens(t *testing.T) {
 	defer mock.Close()
 	ledger := mining.NewLedgerStoreForTesting(mock)
 	// Transfer atomically debits + credits inside one tx.
+	// Lock order: "ws_from" < "ws_to" lexicographically → ws_from locked first.
+	// Both locks are acquired BEFORE any writes (deadlock-prevention fix).
 	mock.ExpectBegin()
-	// Debit `from` — ensure row + FOR UPDATE read.
+	// Lock 1: ws_from (lex-smaller) — ensure row + FOR UPDATE read.
 	mock.ExpectExec("INSERT INTO lens_token_balances").
 		WithArgs("ws_from").
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
@@ -67,13 +69,7 @@ func TestTransfer_MovesTokens(t *testing.T) {
 		WithArgs("ws_from").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(10.0, 10.0, 0.0))
-	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws_from", -2.5, 7.5, mining.TypeTransferOut, "test", pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs("ws_from", 7.5, 10.0, 2.5).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	// Credit `to` — ensure row + FOR UPDATE read.
+	// Lock 2: ws_to — ensure row + FOR UPDATE read (before any writes).
 	mock.ExpectExec("INSERT INTO lens_token_balances").
 		WithArgs("ws_to").
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
@@ -81,6 +77,13 @@ func TestTransfer_MovesTokens(t *testing.T) {
 		WithArgs("ws_to").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(0.0, 0.0, 0.0))
+	// Writes follow: debit ws_from, credit ws_to.
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_from", -2.5, 7.5, mining.TypeTransferOut, "test", pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_from", 7.5, 10.0, 2.5).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
 		WithArgs("ws_to", 2.5, 2.5, mining.TypeTransferIn, "test", pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -101,6 +104,8 @@ func TestTransfer_InsufficientBalance(t *testing.T) {
 	}
 	defer mock.Close()
 	ledger := mining.NewLedgerStoreForTesting(mock)
+	// "ws_broke" < "ws_other" lexicographically → ws_broke locked first.
+	// Both locks must be acquired before the balance check; expect both reads.
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO lens_token_balances").
 		WithArgs("ws_broke").
@@ -109,6 +114,13 @@ func TestTransfer_InsufficientBalance(t *testing.T) {
 		WithArgs("ws_broke").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(0.1, 0.1, 0.0))
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_other").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
+		WithArgs("ws_other").
+		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
+			AddRow(0.0, 0.0, 0.0))
 	mock.ExpectRollback()
 	err = ledger.Transfer(context.Background(), "ws_broke", "ws_other", 5.0, "test")
 	if !errors.Is(err, mining.ErrInsufficientBalance) {

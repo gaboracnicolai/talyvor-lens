@@ -333,11 +333,43 @@ func (s *LedgerStore) Transfer(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Debit `from`.
-	fromBal, fromEarned, fromSpent, err := readBalance(ctx, tx, fromWorkspace)
+	// Impose a global lock order: always acquire the lexicographically
+	// smaller workspace ID first, regardless of debit/credit direction.
+	//
+	// Without this, two concurrent opposite-direction transfers deadlock:
+	//   Tx A: Transfer("ws_alice", "ws_bob") → locks ws_alice → waits for ws_bob
+	//   Tx B: Transfer("ws_bob", "ws_alice") → locks ws_bob   → waits for ws_alice
+	//
+	// With a consistent global order both transactions always lock the same
+	// workspace first, so one blocks and waits while the other completes —
+	// no cycle, no deadlock.
+	firstWS, secondWS := fromWorkspace, toWorkspace
+	if firstWS > secondWS {
+		firstWS, secondWS = secondWS, firstWS
+	}
+
+	// Acquire both locks before any writes.
+	firstBal, firstEarned, firstSpent, err := readBalance(ctx, tx, firstWS)
 	if err != nil {
 		return err
 	}
+	secondBal, secondEarned, secondSpent, err := readBalance(ctx, tx, secondWS)
+	if err != nil {
+		return err
+	}
+
+	// Map locked balances back to from/to semantics.
+	var fromBal, fromEarned, fromSpent float64
+	var toBal, toEarned, toSpent float64
+	if fromWorkspace == firstWS {
+		fromBal, fromEarned, fromSpent = firstBal, firstEarned, firstSpent
+		toBal, toEarned, toSpent = secondBal, secondEarned, secondSpent
+	} else {
+		fromBal, fromEarned, fromSpent = secondBal, secondEarned, secondSpent
+		toBal, toEarned, toSpent = firstBal, firstEarned, firstSpent
+	}
+
+	// Debit `from`.
 	if fromBal < amount {
 		return ErrInsufficientBalance
 	}
@@ -353,10 +385,6 @@ func (s *LedgerStore) Transfer(
 	}
 
 	// Credit `to`.
-	toBal, toEarned, toSpent, err := readBalance(ctx, tx, toWorkspace)
-	if err != nil {
-		return err
-	}
 	toBalNew := toBal + amount
 	toEarnedNew := toEarned + amount
 	metaIn := map[string]interface{}{"counterparty": fromWorkspace}

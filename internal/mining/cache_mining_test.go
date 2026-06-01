@@ -252,3 +252,140 @@ func TestRates_ReturnsExpectedKeys(t *testing.T) {
 // errNoRows is the pgx.ErrNoRows sentinel surfaced through
 // pgxmock — saves importing pgx directly in the test file.
 func errNoRows() error { return errPgxNoRows }
+
+// ─── Transfer ───────────────────────────────────────────────────────────────
+
+// expectReadBalance programmes one readBalance sub-sequence inside a
+// Transfer transaction: the INSERT DO NOTHING that ensures the row exists,
+// followed by the SELECT … FOR UPDATE that acquires the pessimistic lock.
+func expectReadBalance(
+	mock pgxmock.PgxPoolIface,
+	workspaceID string,
+	bal, earned, spent float64,
+) {
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs(workspaceID).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
+		WithArgs(workspaceID).
+		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
+			AddRow(bal, earned, spent))
+}
+
+// TestTransfer_HappyPath verifies that a straightforward transfer debits the
+// sender and credits the recipient atomically (normal alphabetical order —
+// from < to, so no swap needed).
+func TestTransfer_HappyPath(t *testing.T) {
+	// Transfer("ws_a", "ws_b", 0.5, "test")
+	// Lex order: ws_a < ws_b → ws_a locked first (no swap), ws_b second.
+	store, mock := newMockStore(t)
+	mock.ExpectBegin()
+	expectReadBalance(mock, "ws_a", 1.0, 1.0, 0) // first lock: ws_a (from)
+	expectReadBalance(mock, "ws_b", 0.2, 0.2, 0) // second lock: ws_b (to)
+
+	// debit ws_a: amount -0.5, newBal 0.5, spent 0→0.5
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_a", -0.5, 0.5, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_a", 0.5, 1.0, 0.5).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// credit ws_b: amount +0.5, newBal 0.7, earned 0.2→0.7
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_b", 0.5, 0.7, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_b", 0.7, 0.7, 0.0).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	if err := store.Transfer(context.Background(), "ws_a", "ws_b", 0.5, "test"); err != nil {
+		t.Fatalf("Transfer: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestTransfer_LockOrderIsLexicographic is the deadlock-regression guard.
+//
+// It calls Transfer("ws_b", "ws_a", …) where from > to alphabetically.
+// The fix must still acquire ws_a (the lex-smaller ID) FIRST before ws_b,
+// regardless of which direction LENS is flowing.
+//
+// If the fix ever regresses to caller-order locking, the mock will surface an
+// unexpected query (ws_b before ws_a) and the test fails immediately — no need
+// to construct actual concurrent transactions.
+func TestTransfer_LockOrderIsLexicographic(t *testing.T) {
+	// Transfer("ws_b" → "ws_a", 0.5)  —  from > to alphabetically.
+	// Correct: lock ws_a first, then ws_b (lex order), regardless of flow.
+	store, mock := newMockStore(t)
+	mock.ExpectBegin()
+	expectReadBalance(mock, "ws_a", 0.2, 0.2, 0) // MUST be ws_a first
+	expectReadBalance(mock, "ws_b", 1.0, 1.0, 0) // ws_b second
+
+	// debit ws_b (from): amount -0.5, newBal 0.5, spent 0→0.5
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_b", -0.5, 0.5, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_b", 0.5, 1.0, 0.5).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// credit ws_a (to): amount +0.5, newBal 0.7, earned 0.2→0.7
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_a", 0.5, 0.7, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_a", 0.7, 0.7, 0.0).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	if err := store.Transfer(context.Background(), "ws_b", "ws_a", 0.5, "test"); err != nil {
+		t.Fatalf("Transfer: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestTransfer_InsufficientBalance verifies ErrInsufficientBalance is returned
+// when the sender's balance is too low. Both locks are acquired before the
+// balance check (the fix acquires all locks first), so both readBalance calls
+// appear in the mock before the rollback.
+func TestTransfer_InsufficientBalance(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectBegin()
+	expectReadBalance(mock, "ws_a", 0.1, 0.1, 0) // from=ws_a, only 0.1 available
+	expectReadBalance(mock, "ws_b", 1.0, 1.0, 0)
+	mock.ExpectRollback()
+
+	err := store.Transfer(context.Background(), "ws_a", "ws_b", 0.5, "test")
+	if !errors.Is(err, ErrInsufficientBalance) {
+		t.Fatalf("expected ErrInsufficientBalance, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestTransfer_Validation covers the guard-clause fast-paths that reject bad
+// inputs before touching the database.
+func TestTransfer_Validation(t *testing.T) {
+	store, _ := newMockStore(t)
+	ctx := context.Background()
+
+	if err := store.Transfer(ctx, "ws_a", "ws_b", 0.0001, ""); err == nil {
+		t.Fatal("expected error: amount below minimum")
+	}
+	if err := store.Transfer(ctx, "", "ws_b", 1.0, ""); err == nil {
+		t.Fatal("expected error: empty from workspace")
+	}
+	if err := store.Transfer(ctx, "ws_a", "", 1.0, ""); err == nil {
+		t.Fatal("expected error: empty to workspace")
+	}
+	if err := store.Transfer(ctx, "ws_a", "ws_a", 1.0, ""); err == nil {
+		t.Fatal("expected error: self-transfer")
+	}
+}
