@@ -194,6 +194,23 @@ var (
 		[]string{"source"},
 	)
 
+	// ─── DISTILL (document conversion, stage 2) ───
+	// result is a bounded set: hit | miss. Never document content/hash as a
+	// label.
+	DistillCacheTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_distill_cache_total", Help: "DISTILL conversion-cache lookups, by result (hit|miss)."},
+		[]string{"result"},
+	)
+	// Total input tokens saved by distillation (raw doc estimate minus the
+	// converted Markdown estimate, same len/4 basis the gateway bills on),
+	// summed across every distillation RESULT RETURNED — cache hits included,
+	// because the savings is realized each time distilled Markdown is used in
+	// place of the raw document (the per-request value, which stage 3 attaches
+	// to token_events). NOT a count of unique conversions.
+	DistillTokensSavedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_distill_tokens_saved_total", Help: "Input tokens saved by document distillation (len/4 basis), summed across results returned (cache hits included — realized per use)."},
+	)
+
 	// ─── guardrails (Upgrade 13) ───
 	// type (pii/injection/topic/word_filter/custom/output_validation) and
 	// action (block/redact/warn/allow) are bounded sets. Never workspace or
@@ -289,6 +306,7 @@ func init() {
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 		SpendRecordsTotal,
+		DistillCacheTotal, DistillTokensSavedTotal,
 		GuardrailTriggeredTotal, GuardrailBlocksTotal, GuardrailRedactionsTotal,
 		EvalRunsTotal, EvalRegressionsDetectedTotal, ABSignificantResultsTotal,
 		POVIReceiptsTotal, POVIReceiptVerifyFailuresTotal, POVIProvisionalMintsTotal,
@@ -402,6 +420,21 @@ func ModalityUnsupported()              { ModalityUnsupportedTotal.Inc() }
 // "provider_usage" when billed on the provider's reported counts, or
 // "estimated" on the len/4 fallback.
 func SpendRecord(source string) { SpendRecordsTotal.WithLabelValues(source).Inc() }
+
+// ─── DISTILL helpers ───
+
+// DistillCache counts a conversion-cache lookup by result ("hit"|"miss").
+func DistillCache(result string) { DistillCacheTotal.WithLabelValues(result).Inc() }
+
+// DistillTokensSaved adds to the running total of input tokens saved by
+// distillation. Negative inputs (a conversion that grew the token count) are
+// ignored — a counter only goes up; the per-call signed value lives in the
+// Savings struct.
+func DistillTokensSaved(n int) {
+	if n > 0 {
+		DistillTokensSavedTotal.Add(float64(n))
+	}
+}
 
 // ─── guardrails helpers ───
 // Bounded {type, action} labels only — never workspace or content.
