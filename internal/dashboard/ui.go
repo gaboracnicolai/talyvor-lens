@@ -549,6 +549,12 @@ const dashboardHTML = `<!DOCTYPE html>
   <script>
     const fmtUSD       = (n) => '$' + (Number(n) || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
     const fmtUSDsmall  = (n) => '$' + (Number(n) || 0).toLocaleString('en-US', {minimumFractionDigits: 4, maximumFractionDigits: 4});
+    // escapeHTML prevents XSS when user-supplied strings (node IDs, URLs,
+    // workspace names, anomaly messages, etc.) are rendered into innerHTML.
+    // Always wrap any API-derived string with this before concatenating HTML.
+    function escapeHTML(s) {
+      return (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
     const fmtPct       = (n) => ((Number(n) || 0) * 100).toFixed(1) + '%';
     const fmtInt       = (n) => (Number(n) || 0).toLocaleString('en-US');
 
@@ -607,7 +613,7 @@ const dashboardHTML = `<!DOCTYPE html>
       tbody.innerHTML = rows.map(function (r) {
         const pct = (Number(r.cost_usd) || 0) / total;
         return '<tr>' +
-          '<td class="mono">' + (r.model || '—') + '</td>' +
+          '<td class="mono">' + escapeHTML(r.model || '—') + '</td>' +
           '<td class="num mono">' + fmtInt(r.requests) + '</td>' +
           '<td class="num mono">' + fmtInt(r.input_tokens) + '</td>' +
           '<td class="num mono">' + fmtInt(r.output_tokens) + '</td>' +
@@ -748,7 +754,7 @@ const dashboardHTML = `<!DOCTYPE html>
         return '<div style="margin-bottom:10px;">' +
           '<span class="pill ' + anomalyClass(a.type) + '">' + anomalyGlyph(a.type) + ' ' + (a.type || '').toUpperCase() + '</span> ' +
           '<span style="margin-left:8px;color:var(--secondary)">' + dim + '</span>' +
-          '<div style="margin-top:4px;color:var(--text);font-family:var(--mono);font-size:0.92rem;">' + (a.message || '') + '</div>' +
+          '<div style="margin-top:4px;color:var(--text);font-family:var(--mono);font-size:0.92rem;">' + escapeHTML(a.message) + '</div>' +
           '</div>';
       }).join('');
     }
@@ -763,7 +769,7 @@ const dashboardHTML = `<!DOCTYPE html>
         '<table><thead><tr><th>Workspace</th><th>Logging</th><th>Active</th><th>Cost (30d)</th></tr></thead><tbody>' +
         list.map(function (ws) {
           return '<tr>' +
-            '<td class="mono">' + (ws.name || ws.id) + '</td>' +
+            '<td class="mono">' + escapeHTML(ws.name || ws.id) + '</td>' +
             '<td>' + loggingPolicyBadge(ws.logging_policy) + '</td>' +
             '<td>' + (ws.active ? '<span class="pill good">yes</span>' : '<span class="pill bad">no</span>') + '</td>' +
             '<td class="mono">' + fmtUSD(ws.current_month_cost_usd) + '</td>' +
@@ -914,15 +920,15 @@ const dashboardHTML = `<!DOCTYPE html>
             ? '<em>' + new Date(vb.est_exhaustion_date).toLocaleDateString() + '</em>'
             : '—';
           return '<tr>' +
-            '<td>' + f.scope + '</td>' +
-            '<td class="mono">' + (f.scope_id || '—') + '</td>' +
+            '<td>' + escapeHTML(f.scope) + '</td>' +
+            '<td class="mono">' + escapeHTML(f.scope_id || '—') + '</td>' +
             '<td>' + f.period + '</td>' +
             '<td class="mono">' + fmtUSD(f.spent_so_far_usd) + '</td>' +
             '<td class="mono">' + projCell + '</td>' +
             '<td>' + limitCell + '</td>' +
-            '<td>' + (f.trend_label || 'unknown') + '</td>' +
+            '<td>' + escapeHTML(f.trend_label || 'unknown') + '</td>' +
             '<td class="mono">' + exhaustCell + '</td>' +
-            '<td class="muted" style="font-size:12px">' + (f.confidence_note || '') + '</td>' +
+            '<td class="muted" style="font-size:12px">' + escapeHTML(f.confidence_note || '') + '</td>' +
             '</tr>';
         }).join('') +
         '</tbody></table>';
@@ -939,16 +945,16 @@ const dashboardHTML = `<!DOCTYPE html>
       panel.style.display = '';
       document.getElementById('costoutliers').innerHTML =
         '<p class="muted" style="font-size:12px">Baseline median ' + fmtUSD(res.baseline_median) +
-        ' · threshold ' + fmtUSD(res.threshold_usd) + ' · ' + res.sample_size + ' comparable ' + res.scope + 's · method ' + res.method + '</p>' +
+        ' · threshold ' + fmtUSD(res.threshold_usd) + ' · ' + res.sample_size + ' comparable ' + escapeHTML(res.scope) + 's · method ' + escapeHTML(res.method) + '</p>' +
         '<table><thead><tr><th>Unit</th><th>Cost</th><th>× median</th><th>Severity</th><th>Flag</th></tr></thead><tbody>' +
         anomalies.map(function (a) {
           const cls = a.severity === 'high' ? 'bad' : (a.severity === 'warn' ? 'warn' : 'good');
           return '<tr>' +
-            '<td class="mono">' + a.unit_id + '</td>' +
+            '<td class="mono">' + escapeHTML(a.unit_id) + '</td>' +
             '<td class="mono">' + fmtUSD(a.cost_usd) + '</td>' +
             '<td class="mono">' + (a.factor || 0).toFixed(1) + '×</td>' +
             '<td><span class="pill ' + cls + '">' + a.severity + '</span></td>' +
-            '<td class="muted" style="font-size:12px">' + (a.explanation || '') + '</td>' +
+            '<td class="muted" style="font-size:12px">' + escapeHTML(a.explanation || '') + '</td>' +
             '</tr>';
         }).join('') +
         '</tbody></table>';

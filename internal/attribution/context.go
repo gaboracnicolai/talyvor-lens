@@ -54,10 +54,30 @@ type AttributionContext struct {
 	Timestamp   time.Time  `json:"timestamp"`
 }
 
-// ExtractFromRequest reads the standard X-Talyvor-* headers
-// into an AttributionContext. Missing headers leave the
-// corresponding fields empty — this is a pure transformer, no
-// validation or normalisation beyond URL-unescaping the branch.
+// Header length limits. Values beyond these are silently truncated before
+// storage to prevent oversized strings from bloating the request_attribution
+// table and to limit the blast radius of a client sending garbage headers.
+// Limits are generous enough that no legitimate tool-generated value is cut.
+const (
+	maxIDLen     = 128  // workspace IDs, issue IDs, user IDs, session IDs
+	maxNameLen   = 256  // branch names, repo names, author names, feature names
+	maxSHALen    = 64   // git commit SHA (40 hex for SHA-1, 64 for SHA-256)
+	maxPRNumLen  = 16   // PR number strings ("12345")
+)
+
+// truncate returns s trimmed to at most maxLen runes. Operates on runes so
+// multi-byte UTF-8 characters are not split.
+func truncate(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen])
+}
+
+// ExtractFromRequest reads the standard X-Talyvor-* headers into an
+// AttributionContext. Values are truncated to their per-field limits before
+// storage to guard against oversized inputs.
 func ExtractFromRequest(r *http.Request) AttributionContext {
 	branch := r.Header.Get("X-Talyvor-Branch")
 	if decoded, err := url.QueryUnescape(branch); err == nil {
@@ -68,18 +88,18 @@ func ExtractFromRequest(r *http.Request) AttributionContext {
 	// keeps the dashboard chips readable.
 	feature = strings.TrimPrefix(feature, "code-")
 	return AttributionContext{
-		WorkspaceID: r.Header.Get("X-Talyvor-Workspace"),
-		Feature:     feature,
-		IssueID:     r.Header.Get("X-Talyvor-Issue"),
+		WorkspaceID: truncate(r.Header.Get("X-Talyvor-Workspace"), maxIDLen),
+		Feature:     truncate(feature, maxNameLen),
+		IssueID:     truncate(r.Header.Get("X-Talyvor-Issue"), maxIDLen),
 		Git: GitContext{
-			Branch:    branch,
-			PRNumber:  r.Header.Get("X-Talyvor-PR"),
-			CommitSHA: r.Header.Get("X-Talyvor-Commit"),
-			Author:    r.Header.Get("X-Talyvor-Author"),
-			RepoName:  r.Header.Get("X-Talyvor-Repo"),
+			Branch:    truncate(branch, maxNameLen),
+			PRNumber:  truncate(r.Header.Get("X-Talyvor-PR"), maxPRNumLen),
+			CommitSHA: truncate(r.Header.Get("X-Talyvor-Commit"), maxSHALen),
+			Author:    truncate(r.Header.Get("X-Talyvor-Author"), maxNameLen),
+			RepoName:  truncate(r.Header.Get("X-Talyvor-Repo"), maxNameLen),
 		},
-		UserID:    r.Header.Get("X-Talyvor-User"),
-		SessionID: r.Header.Get("X-Talyvor-Session"),
+		UserID:    truncate(r.Header.Get("X-Talyvor-User"), maxIDLen),
+		SessionID: truncate(r.Header.Get("X-Talyvor-Session"), maxIDLen),
 		Timestamp: time.Now().UTC(),
 	}
 }

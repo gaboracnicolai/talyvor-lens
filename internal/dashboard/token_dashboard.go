@@ -405,7 +405,7 @@ async function loadStakes(ws) {
       return '<tr><td>' + fmt(p.amount) + ' LENS</td><td>' + p.lock_days + 'd</td>' +
              '<td>' + (p.apy * 100).toFixed(0) + '%</td><td>' + unlock + '</td>' +
              '<td>+' + fmt(p.accrued_yield) + '</td>' +
-             '<td><button class="secondary" onclick="unstake(\'' + p.id + '\')">Unstake</button></td></tr>';
+             '<td><button class="secondary" onclick="unstake(\'' + escapeHTML(p.id) + '\')">Unstake</button></td></tr>';
     }).join('');
   } catch (e) { console.warn('stakes', e); }
 }
@@ -418,10 +418,10 @@ async function loadListings() {
       return;
     }
     body.innerHTML = listings.map(l => (
-      '<tr><td>' + l.seller_id + '</td>' +
+      '<tr><td>' + escapeHTML(l.seller_id) + '</td>' +
       '<td>' + fmt(l.amount) + ' LENS</td>' +
       '<td>$' + l.price_usd.toFixed(4) + '/LENS</td>' +
-      '<td><button onclick="buy(\'' + l.id + '\', ' + l.price_usd + ')">Buy</button></td></tr>'
+      '<td><button onclick="buy(\'' + escapeHTML(l.id) + '\', ' + l.price_usd + ')">Buy</button></td></tr>'
     )).join('');
   } catch (e) { console.warn('listings', e); }
 }
@@ -584,9 +584,9 @@ async function loadInference(ws) {
       return;
     }
     body.innerHTML = nodes.map(n => (
-      '<tr><td>' + n.id + '</td><td>' + n.url + '</td>' +
-      '<td>' + n.gpu_type + '</td>' +
-      '<td>' + (n.models || []).join(', ') + '</td>' +
+      '<tr><td>' + escapeHTML(n.id) + '</td><td>' + escapeHTML(n.url) + '</td>' +
+      '<td>' + escapeHTML(n.gpu_type) + '</td>' +
+      '<td>' + (n.models || []).map(escapeHTML).join(', ') + '</td>' +
       '<td>' + statusBadge(n.active, n.verified) + '</td></tr>'
     )).join('');
   } catch (e) { console.warn(e); }
@@ -600,8 +600,8 @@ async function loadEmbedding(ws) {
       return;
     }
     body.innerHTML = nodes.map(n => (
-      '<tr><td>' + n.id + '</td><td>' + n.url + '</td>' +
-      '<td>' + n.model + '</td><td>' + n.dimensions + '</td>' +
+      '<tr><td>' + escapeHTML(n.id) + '</td><td>' + escapeHTML(n.url) + '</td>' +
+      '<td>' + escapeHTML(n.model) + '</td><td>' + n.dimensions + '</td>' +
       '<td>' + statusBadge(n.active, n.verified) + '</td></tr>'
     )).join('');
   } catch (e) { console.warn(e); }
@@ -773,7 +773,7 @@ async function loadListings() {
     }
     body.innerHTML = listings.map(l => {
       const total = (l.amount * l.price_usd).toFixed(2);
-      return '<tr><td>' + l.seller_id + '</td>' +
+      return '<tr><td>' + escapeHTML(l.seller_id) + '</td>' +
              '<td>' + fmt(l.amount) + ' LENS</td>' +
              '<td>$' + l.price_usd.toFixed(4) + '/LENS</td>' +
              '<td>$' + total + '</td></tr>';
