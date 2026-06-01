@@ -1,0 +1,30 @@
+-- 0037_drop_redundant_prompt_hash_idx.sql
+--
+-- Drops the redundant single-column index idx_token_events_prompt_hash from
+-- the token_events partitioned table.
+--
+-- WHY IT IS REDUNDANT:
+--   Migration 0034 created two indexes on token_events.prompt_hash:
+--
+--     idx_token_events_prompt_hash   ON token_events (prompt_hash)
+--     idx_token_events_prompt_hash2  ON token_events (prompt_hash, created_at DESC)
+--                                    WHERE prompt_text != ''
+--
+--   Any query that can use idx_token_events_prompt_hash (equality or range on
+--   prompt_hash) is also satisfied by the leading column of
+--   idx_token_events_prompt_hash2.  Postgres will choose the composite index
+--   for cache-warmer JOIN lookups and any other prompt_hash filter because it
+--   covers more columns.  The single-column index is never chosen by the
+--   planner and only adds write amplification on every INSERT across all 8
+--   partitions.
+--
+-- SAFE TO RUN:
+--   DROP INDEX CONCURRENTLY does not take an AccessExclusiveLock — it runs
+--   without blocking reads or writes.  On a partitioned table the parent-level
+--   index name corresponds to child partition indexes; Postgres drops them all
+--   in one statement.
+--   The migration is wrapped in a transaction for the bookkeeping record;
+--   DROP INDEX CONCURRENTLY cannot run inside a transaction block, so the
+--   DROP is intentionally outside BEGIN/COMMIT.
+
+DROP INDEX CONCURRENTLY IF EXISTS idx_token_events_prompt_hash;

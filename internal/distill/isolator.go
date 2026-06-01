@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"time"
@@ -126,7 +127,12 @@ func (p *ProcessIsolator) Convert(ctx context.Context, input []byte, format Form
 	// Non-fatal if it fails — GOMEMLIMIT is still active and the wall-clock
 	// timeout is the final kill switch.  applyJobLimit is defined in
 	// isolator_posthook_*.go.
-	_ = applyJobLimit(cmd, memBytes)
+	if err := applyJobLimit(cmd, memBytes); err != nil {
+		slog.Warn("distill: isolator memory ceiling unavailable",
+			slog.String("err", err.Error()),
+			slog.String("fallback", "GOMEMLIMIT soft limit still active"),
+		)
+	}
 
 	// Deliver the request, then close stdin to signal EOF to the worker.
 	if _, err := stdin.Write(reqBytes); err != nil {

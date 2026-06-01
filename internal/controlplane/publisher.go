@@ -9,13 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	snapshotKey = "lens:cp:snapshot"
-	// snapshotTTL is 2× the default reconcile interval.  Two missed ticks in a
-	// row must occur before the snapshot expires — a single slow tick won't
-	// cause syncer misses.
-	snapshotTTL = 2 * defaultReconcileInterval // 60 s
-)
+const snapshotKey = "lens:cp:snapshot"
 
 // redisPublisher is the Redis subset the publisher needs.  *redis.Client
 // satisfies this interface unchanged; tests supply a miniredis-backed client.
@@ -30,25 +24,35 @@ type redisPublisher interface {
 // single-instance deployments without Redis keep working unchanged.
 type Publisher struct {
 	rdb redisPublisher
+	// ttl is the Redis key expiry stamped on every snapshot write.
+	// Computed as 2 × reconcileInterval so two consecutive missed ticks must
+	// occur before a syncer sees a stale-or-absent snapshot.
+	ttl time.Duration
 }
 
-// NewPublisher builds a Publisher backed by rdb. Pass nil to disable — methods
-// become no-ops rather than panicking.
-func NewPublisher(rdb *redis.Client) *Publisher {
+// NewPublisher builds a Publisher backed by rdb.
+// reconcileInterval is the interval at which Reconciler.Run ticks — the
+// snapshot TTL is set to 2 × reconcileInterval so a single slow tick does not
+// cause syncer misses.  Pass 0 to use the default (30 s).
+// Pass nil rdb to disable — methods become no-ops rather than panicking.
+func NewPublisher(rdb *redis.Client, reconcileInterval time.Duration) *Publisher {
 	var db redisPublisher
 	if rdb != nil {
 		db = rdb
 	}
-	return &Publisher{rdb: db}
+	return newPublisher(db, reconcileInterval)
 }
 
 // newPublisher is the internal constructor used by tests (accepts the interface
 // directly so a miniredis client can be passed without the nil-pointer guard).
-func newPublisher(rdb redisPublisher) *Publisher {
-	return &Publisher{rdb: rdb}
+func newPublisher(rdb redisPublisher, reconcileInterval time.Duration) *Publisher {
+	if reconcileInterval <= 0 {
+		reconcileInterval = defaultReconcileInterval
+	}
+	return &Publisher{rdb: rdb, ttl: 2 * reconcileInterval}
 }
 
-// Publish serialises snap to Redis with snapshotTTL.
+// Publish serialises snap to Redis with the configured TTL.
 func (p *Publisher) Publish(ctx context.Context, snap *NodeSnapshot) error {
 	if p.rdb == nil {
 		return nil
@@ -57,7 +61,7 @@ func (p *Publisher) Publish(ctx context.Context, snap *NodeSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("controlplane: marshal snapshot: %w", err)
 	}
-	return p.rdb.Set(ctx, snapshotKey, data, snapshotTTL).Err()
+	return p.rdb.Set(ctx, snapshotKey, data, p.ttl).Err()
 }
 
 // Latest reads and deserialises the most recent snapshot from Redis.
