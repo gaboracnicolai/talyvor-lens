@@ -715,7 +715,7 @@ const dashboardHTML = `<!DOCTYPE html>
         entries.map(function (kv) {
           const k = kv[0], v = kv[1];
           const cls = v === 'open' ? 'bad' : 'good';
-          return '<tr><td class="mono">' + k + '</td><td><span class="pill ' + cls + '">' + String(v).toUpperCase() + '</span></td></tr>';
+          return '<tr><td class="mono">' + escapeHTML(k) + '</td><td><span class="pill ' + cls + '">' + String(v).toUpperCase() + '</span></td></tr>';
         }).join('') +
         '</tbody></table>';
     }
@@ -751,10 +751,10 @@ const dashboardHTML = `<!DOCTYPE html>
           var cls = st === 'active' ? 'good' : (st === 'draining' ? 'warn' : 'bad');
           var started = it.started_at ? new Date(it.started_at).getTime() : now;
           var seen = it.last_seen ? new Date(it.last_seen).getTime() : now;
-          return '<tr><td class="mono">' + String(it.id || '').slice(0, 8) +
-            '</td><td class="mono">' + (it.host || '&mdash;') +
+          return '<tr><td class="mono">' + escapeHTML(String(it.id || '').slice(0, 8)) +
+            '</td><td class="mono">' + escapeHTML(it.host || '—') +
             '</td><td><span class="pill ' + cls + '">' + st.toUpperCase() + '</span></td>' +
-            '<td class="mono">' + (it.version || '&mdash;') + '</td>' +
+            '<td class="mono">' + escapeHTML(it.version || '—') + '</td>' +
             '<td class="mono">' + fmtDur(now - started) + '</td>' +
             '<td class="mono">' + fmtDur(now - seen) + ' ago</td></tr>';
         }).join('') +
@@ -764,7 +764,7 @@ const dashboardHTML = `<!DOCTYPE html>
     function applyLocal(d) {
       const root = document.getElementById('local');
       if (d && d.available) {
-        const models = ((d.models || []).map(function (m) { return m && m.name; }).filter(Boolean)).join(', ') || 'no models loaded';
+        const models = ((d.models || []).map(function (m) { return m && escapeHTML(m.name); }).filter(Boolean)).join(', ') || 'no models loaded';
         root.innerHTML = '<span class="pill good">Ollama available ✓</span> <span style="margin-left:12px;color:var(--secondary)">Models: ' + models + '</span>';
       } else {
         root.innerHTML = '<span class="pill warn">Ollama offline</span>';
@@ -813,7 +813,7 @@ const dashboardHTML = `<!DOCTYPE html>
         const dim = [a.team, a.feature, a.provider].filter(Boolean).join(' · ') || a.workspace_id || '—';
         return '<div style="margin-bottom:10px;">' +
           '<span class="pill ' + anomalyClass(a.type) + '">' + anomalyGlyph(a.type) + ' ' + (a.type || '').toUpperCase() + '</span> ' +
-          '<span style="margin-left:8px;color:var(--secondary)">' + dim + '</span>' +
+          '<span style="margin-left:8px;color:var(--secondary)">' + escapeHTML(dim) + '</span>' +
           '<div style="margin-top:4px;color:var(--text);font-family:var(--mono);font-size:0.92rem;">' + escapeHTML(a.message) + '</div>' +
           '</div>';
       }).join('');
@@ -855,12 +855,12 @@ const dashboardHTML = `<!DOCTYPE html>
           const cls = ratio >= 1 ? 'bad' : 'good';
           const pct = limit > 0 ? (ratio * 100).toFixed(0) + '%' : '—';
           return '<tr>' +
-            '<td>' + b.scope + '</td>' +
-            '<td class="mono">' + (b.scope_id || '—') + '</td>' +
-            '<td>' + b.period + '</td>' +
+            '<td>' + escapeHTML(b.scope || '—') + '</td>' +
+            '<td class="mono">' + escapeHTML(b.scope_id || '—') + '</td>' +
+            '<td>' + escapeHTML(b.period || '—') + '</td>' +
             '<td class="mono">' + fmtUSD(spent) + ' / ' + fmtUSD(limit) + '</td>' +
             '<td><span class="pill ' + cls + '">' + pct + '</span></td>' +
-            '<td>' + b.enforcement + '</td>' +
+            '<td>' + escapeHTML(b.enforcement || '—') + '</td>' +
             '</tr>';
         }).join('') +
         '</tbody></table>';
@@ -912,7 +912,7 @@ const dashboardHTML = `<!DOCTYPE html>
         list.map(function (s) {
           return '<tr>' +
             '<td class="mono">' + String(s.node_id || '').slice(0, 12) + '</td>' +
-            '<td class="mono">' + (s.workspace_id || '—') + '</td>' +
+            '<td class="mono">' + escapeHTML(s.workspace_id || '—') + '</td>' +
             '<td class="mono">' + (s.amount || 0).toFixed(3) + '</td>' +
             '<td>' + badge(s.status) + '</td>' +
             '<td class="mono">' + (s.slashed_amount ? (s.slashed_amount).toFixed(3) : '—') + '</td>' +
@@ -1096,7 +1096,7 @@ const dashboardHTML = `<!DOCTYPE html>
         '<table><thead><tr><th>Model</th><th>Vision</th><th>Audio</th><th>Document</th></tr></thead><tbody>' +
         models.map(function (m) {
           const c = map[m] || {};
-          return '<tr><td class="mono">' + m + '</td><td>' + yn(c.vision) + '</td><td>' + yn(c.audio) + '</td><td>' + yn(c.document) + '</td></tr>';
+          return '<tr><td class="mono">' + escapeHTML(m) + '</td><td>' + yn(c.vision) + '</td><td>' + yn(c.audio) + '</td><td>' + yn(c.document) + '</td></tr>';
         }).join('') +
         '</tbody></table>';
     }
@@ -1113,8 +1113,8 @@ const dashboardHTML = `<!DOCTYPE html>
         models.map(function (m) {
           const c = m.capabilities || {};
           return '<tr>' +
-            '<td class="mono">' + m.id + (m.deprecated ? ' <span class="pill warn">deprecated</span>' : '') + '</td>' +
-            '<td>' + m.provider + '</td>' +
+            '<td class="mono">' + escapeHTML(m.id || '—') + (m.deprecated ? ' <span class="pill warn">deprecated</span>' : '') + '</td>' +
+            '<td>' + escapeHTML(m.provider || '—') + '</td>' +
             '<td class="mono">' + fmtUSD(m.input_per_1m) + '</td>' +
             '<td class="mono">' + fmtUSD(m.output_per_1m) + '</td>' +
             '<td>' + yn(c.vision) + '</td><td>' + yn(c.audio) + '</td><td>' + yn(c.document) + '</td>' +
