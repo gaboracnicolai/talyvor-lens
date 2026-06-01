@@ -51,15 +51,14 @@ Most of the time we're in different code and won't collide. Collisions happen at
 _(last updated from sync: main at 0ae7872 — DISTILL conversion core shipped)_
 
 ### Nicolai + Claude — in progress
-- DISTILL feature. Core + PDF + cache/savings + tiers + vision fallback DONE; building stage 6 (dashboard panel + ROI line). Stage 3 (request-path integration) is the remaining gated finale — needs its own sync-first session.
+- DISTILL feature. Engine + visibility COMPLETE (core + PDF + cache/savings + tiers + vision fallback + dashboard/ROI, all on main). Only stage 3 (request-path integration) remains — the gated finale, needs its own sync-first session.
 
 ### Nicolai + Claude — up next (the roadmap — ours, don't take)
-- DISTILL remaining:
-  - 6. Dashboard panel + ROI line (BUILDING — surfaces distill_tokens_saved_total + distill_vision_tokens_cost_total; touches internal/dashboard = the #28 seam, header/static only)
-  - 3. Request-path integration — THE GATED FINALE (sync-first; carries: resource-isolation envelope [STAGE 3 BLOCKER], internal/proxy seam, the deferred preview endpoint, the live VisionDispatcher + token_events write + OCR caching, the binary-format savings-attribution decision)
+- DISTILL stage 3 — request-path integration — THE GATED FINALE (sync-first + investigate his ProcessIsolator interface BEFORE building). Wires into: collaborator's #45 ProcessIsolator.Convert() (the isolation envelope — already built), our VisionDispatcher (live dispatch + token_events distill_method=vision_ocr + OCR caching), the deferred preview endpoint, the binary-format savings-attribution decision. Touches internal/proxy (seam) and internal/distill (now a shared seam since #45).
 - token economy Phases 2–5 (⚠️ GATED — touches ledger/economy code the collaborator is ACTIVELY in; sync seam #1 before starting)
 - SOC2 foundation (codeable groundwork; cert itself = a vendor like Oneleet, only when a customer requires it)
 - PoVI minting go-live: NOT a build — see preconditions section
+- Follow-up: applyLocal #28 XSS gap — hand back to collaborator (his hardened func; same class as the dim-string gap), NOT ours to patch
 
 ### Collaborator — recently landed (all merged to main, in our base)
 - Process-isolation framework (#45, 31eb3e0) — distill-worker subprocess + ProcessIsolator (disposable subprocess, 30s wall-clock + 512 MiB RLIMIT_AS), cmd/distill-worker/ binary. THIS IS THE STAGE 3 BLOCKER'S SOLUTION (framework-only, not yet wired to the request path). FIRST collaborator code inside internal/distill — see new seam below.
@@ -70,7 +69,7 @@ _(last updated from sync: main at 0ae7872 — DISTILL conversion core shipped)_
 - edge-infra xDS HA — in his comments, NOT yet pushed (edge-infra frozen at 05-20).
 
 ### Done (recently merged to main — drops off both lists)
-- DISTILL: core (#36) + PDF (#37) + cache/savings (#39) + fidelity tiers (#41) + vision-OCR fallback (#44). Conversion engine complete with selectable fidelity + honest vision-cost accounting; preview endpoint + live vision dispatch deferred to stage 3.
+- **DISTILL engine + visibility COMPLETE**: core (#36) + PDF (#37) + cache/savings (#39) + tiers (#41) + vision-OCR fallback (#44) + dashboard/ROI (#47). Converts → measures → fidelity tiers → honest vision-cost → visible ROI. Only the live request-path wiring (stage 3) remains.
 - Chart audit items (d)+(e) + PgBouncer-safe migrations (#30); migration chain validates 36/36.
 - Minor follow-ups (#35); all earlier audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch.
 
