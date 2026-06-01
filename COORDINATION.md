@@ -48,7 +48,7 @@ Most of the time we're in different code and won't collide. Collisions happen at
 ---
 
 ## Work ledger — keep current
-_(last updated from sync: main at 1d8d150)_
+_(last updated from sync: main at fa425ec — 2026-06-01)_
 
 ### Nicolai + Claude — in progress
 - Chart migrate-runner + backup CronJob — branch `feat/lens-chart-migrate-and-backup` (WIP commit: runner + `lens migrate` subcommand + 0022 repair done; chart hook + CronJob in progress).
@@ -60,18 +60,20 @@ _(last updated from sync: main at 1d8d150)_
 
 ### Collaborator — recently landed (all merged to main, in our base)
 - Pessimistic locking on ledger writes (`8a3ca27`): implicit ON CONFLICT → explicit SELECT FOR UPDATE, atomicized StakeManager (`internal/povi/stakes.go`, `internal/mining/stake_ledger.go`, `internal/economy/dualtoken.go`). **Extended the existing PoVI FOR UPDATE pattern — seam #1 satisfied.**
-- Hash partitioning (`5f0002c` / migration `0034`) — **has a fresh-apply bug, handed back (see below).**
-- Rate-limiting public endpoints (#23 / `45e28d5`).
-- Control-plane node reconciler + Redis routing (#25) + migration `0035_controlplane.sql`.
+- Rate-limiting public endpoints (PR #23).
+- Control-plane node reconciler + Redis routing (PR #25) + migration `0035_controlplane.sql`.
 - Multi-process readiness (leader election, PG read-through), CI workflow, benchmark fix.
-- edge-infra xDS HA — discussed in his comments, NOT yet pushed (edge-infra frozen at 05-20).
+- PgBouncer connection pooling (PR #26): `bitnami/pgbouncer:1` in docker-compose, Helm opt-in (`pgbouncer.enabled`), `LENS_DB_PGBOUNCER` simple-protocol flag, `LENS_DB_MAX_CONNS`/`LENS_DB_MIN_CONNS` pool sizing.
+- Security hardening (PR #28): 6 XSS fixes in dashboard (escapeHTML applied consistently), migration `0036` DB check constraints (`balance >= 0` on ledger/stakes), attribution header length caps (128/256/64/16 chars), costanomaly SQL whitelist replacing column-name Sprintf.
+- **Migration `0034` fresh-apply bug fix (in progress, this branch)** — moved CREATE INDEX after DROP TABLE in each block; see Open items below.
 
 ### Done (recently merged to main — drops off both lists)
 - All audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch — ours, merged.
+- Hash partitioning migration `0034` — fresh-apply bug fixed (collaborator, see above).
 
 ---
 
 ## Open coordination items
-- **`0034` partitioning migration (his, in our base)** — fresh-apply bug: 7 indexes collide because CREATE INDEX runs before the DROP TABLE that frees the renamed-table index names. Fix shape (his to apply in his own branch): per block, move CREATE INDEX to after DROP TABLE; do NOT use IF NOT EXISTS (would skip and leave the partitioned table unindexed). Our migrate runner is validated against `0001–0033`, correctly fails loud at 0034.
-- **`0035_controlplane.sql` (his, in our base)** — sits AFTER the broken 0034, so our fresh-apply e2e never reached it; it's currently unvalidated. Fixing 0034 unblocks validation of BOTH 0034 and 0035 → full 35/35 with zero changes on our side.
+- **`0034` fix (collaborator, in progress)** — index name collision fixed: CREATE INDEX moved after DROP TABLE in all three blocks. PR pending; once merged, Nicolai's fresh-apply runner should pass 0001–0036.
+- **`0035_controlplane.sql`** — unblocked once 0034 applies cleanly; no changes needed on either side.
 - **Ledger lock ordering** — his pessimistic locking extended the PoVI FOR UPDATE pattern (good). Remaining review item (not a conflict): confirm global lock ordering is consistent across all ledger tables to prevent deadlocks.
