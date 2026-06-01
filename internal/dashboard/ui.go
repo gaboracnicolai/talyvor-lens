@@ -327,6 +327,40 @@ const dashboardHTML = `<!DOCTYPE html>
       </table>
     </section>
 
+    <section id="distill-panel" style="display:none">
+      <h2>DISTILL <span class="pill" style="background:#3b3b52;color:#cfcfe6">document conversion</span></h2>
+      <p class="muted">
+        Token impact of converting documents to clean Markdown before the model
+        sees them. Honest accounting: deterministic-tier savings are a real
+        saving; vision-OCR is a real COST, shown distinctly; the net is savings
+        minus that cost (negative when OCR outweighs savings in a window). Cache
+        hit-rate is a separate avoided-reconversion saving — not blended in.
+      </p>
+      <div class="cards">
+        <div class="card">
+          <div class="label">Tokens Saved</div>
+          <div class="value mono good" id="distill-saved">—</div>
+          <div class="sub">deterministic tiers</div>
+        </div>
+        <div class="card">
+          <div class="label">Vision-OCR Cost</div>
+          <div class="value mono bad" id="distill-vision-cost">—</div>
+          <div class="sub">the expensive path</div>
+        </div>
+        <div class="card">
+          <div class="label">Net Token Impact</div>
+          <div class="value mono" id="distill-net">—</div>
+          <div class="sub">saved − vision cost</div>
+        </div>
+        <div class="card">
+          <div class="label">Cache Hit Rate</div>
+          <div class="value mono" id="distill-cache-rate">—</div>
+          <div class="sub" id="distill-cache-sub">avoided reconversions</div>
+        </div>
+      </div>
+      <p class="muted" style="font-size:12px" id="distill-basis">—</p>
+    </section>
+
     <section id="cluster-panel" style="display:none">
       <h2>Cluster <span class="muted" style="font-size:12px">· high availability</span></h2>
       <div id="cluster">
@@ -630,6 +664,28 @@ const dashboardHTML = `<!DOCTYPE html>
     function applyCacheStats(d) {
       document.getElementById('cache-rate').textContent    = fmtPct(d.total_hit_rate);
       document.getElementById('cache-savings').textContent = fmtUSD(d.estimated_savings_usd);
+    }
+
+    function applyDistill(d) {
+      document.getElementById('distill-panel').style.display = '';
+      // Counters are numbers → rendered via numeric formatters into textContent;
+      // no string XSS surface for the metrics themselves.
+      document.getElementById('distill-saved').textContent       = fmtInt(d.tokens_saved);
+      document.getElementById('distill-vision-cost').textContent = fmtInt(d.vision_tokens_cost);
+      const net   = Number(d.net_tokens) || 0;
+      const netEl = document.getElementById('distill-net');
+      netEl.textContent = (net > 0 ? '+' : '') + fmtInt(net); // honest: shows a leading '-' when negative
+      netEl.className   = 'value mono ' + (net > 0 ? 'good' : net < 0 ? 'bad' : '');
+      const rate   = Number(d.cache_hit_rate) || 0;
+      const rateEl = document.getElementById('distill-cache-rate');
+      rateEl.textContent = fmtPct(d.cache_hit_rate);
+      rateEl.className   = 'value mono ' + (rate > 0.5 ? 'good' : rate > 0.25 ? 'warn' : 'bad');
+      document.getElementById('distill-cache-sub').textContent =
+        fmtInt(d.cache_hits) + ' hits · ' + fmtInt(d.cache_misses) + ' misses (avoided reconversions)';
+      // basis is the one data-derived STRING this panel surfaces; escape it from
+      // the start — even a server-controlled string is never inlined raw (the
+      // #28 lesson — see applyLocal's gap).
+      document.getElementById('distill-basis').innerHTML = 'token basis: ' + escapeHTML(d.basis);
     }
 
     function applyTopPatterns(rows) {
@@ -1113,6 +1169,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/forecast/summary?workspace_id=default',           applyForecast],
         ['/v1/api/costanomalies?workspace_id=default',              applyCostOutliers],
         ['/v1/api/roi/summary?workspace_id=default',                applyROISummary],
+        ['/v1/api/distill/summary',                                 applyDistill],
         ['/v1/api/routing/intelligence',                            applyRoutingIntel],
         ['/v1/api/modality/capabilities',                           applyModalityCaps],
         ['/v1/api/catalog',                                         applyCatalog],
