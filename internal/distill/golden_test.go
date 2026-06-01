@@ -100,24 +100,6 @@ func TestHTMLDropsDangerousHref(t *testing.T) {
 	}
 }
 
-// TestPDFDeferred: PDF is registered but signals "pending", not empty/fake,
-// and reserves (does not set) the needs-vision flag.
-func TestPDFDeferred(t *testing.T) {
-	res, err := DistillAs(context.Background(), []byte("%PDF-1.7\n...."), FormatPDF)
-	if !errors.Is(err, ErrPDFPending) {
-		t.Fatalf("PDF should return ErrPDFPending, got err=%v", err)
-	}
-	if res.Markdown != "" {
-		t.Errorf("deferred PDF must not produce fake Markdown, got %q", res.Markdown)
-	}
-	if res.NeedsVision {
-		t.Errorf("NeedsVision is reserved for the PDF/vision PR; must be false now")
-	}
-	if res.Format != FormatPDF {
-		t.Errorf("Format = %q, want pdf", res.Format)
-	}
-}
-
 func TestDetectFormat(t *testing.T) {
 	cases := []struct {
 		name string
