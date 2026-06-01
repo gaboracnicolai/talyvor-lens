@@ -20,13 +20,15 @@ CREATE TABLE IF NOT EXISTS annotation_tasks (
     expires_at       TIMESTAMPTZ NOT NULL
 );
 
--- Partial index — only "still-open" tasks are interesting for
--- the GetPendingTask hot path. PG re-evaluates the WHERE clause
--- automatically on each query so we never have to compact the
--- index ourselves.
+-- B-tree on expires_at for the GetPendingTask hot path: the query
+-- (WHERE expires_at > now() ORDER BY expires_at) uses this index via a
+-- range scan. This is intentionally NOT a partial index — a partial
+-- index predicate must be IMMUTABLE and NOW() is not, so
+-- "WHERE expires_at > NOW()" is rejected by Postgres (SQLSTATE 42P17).
+-- The full index serves the same lookup; CREATE ... IF NOT EXISTS keeps
+-- this a no-op if an index of this name already exists.
 CREATE INDEX IF NOT EXISTS idx_tasks_pending
-    ON annotation_tasks (expires_at)
-    WHERE expires_at > NOW();
+    ON annotation_tasks (expires_at);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_source_workspace
     ON annotation_tasks (source_workspace);

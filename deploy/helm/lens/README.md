@@ -87,8 +87,12 @@ helm template lens deploy/helm/lens -f deploy/helm/lens/examples/values-ha.yaml
 | `secret.create` | `false` | **Dev only.** Create a Secret from `secret.data`. |
 | `secret.data` | `{}` | **Dev only.** Never commit real secrets. |
 | `postgres.embedded` / `redis.embedded` | `false` | Dev-only embedded DBs (see below). |
-| `migrations.enabled` | `true` | Run the migration hook Job. |
-| `migrations.image` / `command` / `args` | `""` / `[]` / `[]` | Migration mechanism (see below). |
+| `migrations.enabled` | `true` | Run the migration hook Job (defaults to the image's `lens migrate`). |
+| `migrations.image` / `command` / `args` | `""` / `[]` / `[]` | Override the migration mechanism (see below). |
+| `backup.enabled` | `false` | Scheduled-backup CronJob (opt-in; see below). |
+| `backup.schedule` | `0 2 * * *` | Cron schedule (UTC) for the backup. |
+| `backup.scriptConfigMap` | `""` | ConfigMap with `pg_backup.sh` (default `<release>-lens-backup-scripts`). |
+| `backup.image` / `retention.*` / `env` / `storage` | see `values.yaml` | Backup image, retention, S3 env, volume. |
 | `autoscaling.enabled` | `false` | HPA (only with HA). |
 | `autoscaling.{min,max}Replicas` | 2 / 10 | |
 | `autoscaling.target{CPU,Memory}UtilizationPercentage` | 70 / 80 | |
@@ -154,17 +158,65 @@ production.**
 ## Migrations
 
 `migrations.enabled=true` installs a **pre-install/pre-upgrade hook Job** that
-runs **before** new gateway pods roll out (hook weight `-5`).
+runs **before** new gateway pods roll out (hook weight `-5`). If the Job fails
+(non-zero exit), Helm fails the install/upgrade — so a server is never rolled
+out against an unmigrated DB.
 
-⚠ **There is no working default migration command.** The gateway image ships
-neither a `migrate` subcommand nor the SQL files, so the chart cannot guess how
-to migrate. With `migrations.command` unset, the hook **fails closed** (exits
-non-zero with guidance) rather than pretend migrations ran. Choose one:
+By default the hook runs the gateway image's built-in **`lens migrate`**
+subcommand, which applies the embedded SQL migrations idempotently (tracked in
+a `schema_migrations` table) using the same `LENS_DATABASE_URL` the server
+reads. No separate migrations image or tool is required. Alternatives:
 
-- point `migrations.image` at a dedicated migrations image and set
-  `migrations.command`, or
-- use a migration tool (`migrate`, Flyway, …) image + command, or
-- set `migrations.enabled=false` and run migrations out of band.
+- override `migrations.command` to use a different mechanism (a dedicated
+  migrations image, `migrate`/Flyway, …) and optionally `migrations.image`, or
+- set `migrations.enabled=false` and run migrations out of band (the
+  `lens migrate` subcommand still works if you invoke it yourself).
+
+### Migrations must connect direct to Postgres (PgBouncer)
+
+Migrations run **DDL** and must connect **directly to Postgres** — never through
+a transaction-mode pooler. PgBouncer in transaction mode rejects the extended /
+prepared-statement protocol and cannot safely run multi-statement DDL
+(`BEGIN/COMMIT`, partitioning). So when **`pgbouncer.enabled=true`** (which
+points the app's `LENS_DATABASE_URL` at the pooler), **set
+`migrations.databaseURL` to the DIRECT Postgres URL**:
+
+```yaml
+pgbouncer:
+  enabled: true            # app connects through the pooler
+migrations:
+  databaseURL: "postgres://lens:<pass>@<postgres-host>:5432/talyvor_lens"
+```
+
+`migrations.databaseURL` overrides `LENS_DATABASE_URL` (and disables the
+PgBouncer flag) **for the migration Job only**; the gateway Deployment keeps
+using the pooled connection. Leave `migrations.databaseURL` unset when PgBouncer
+is not in front (the Job then uses the Secret's `LENS_DATABASE_URL` as before).
+
+## Scheduled backups
+
+`backup.enabled=true` installs a **CronJob** that runs the canonical
+`deploy/backup/scripts/pg_backup.sh` on `backup.schedule` (default daily
+02:00 UTC). **Disabled by default** — backups need a real destination and
+credentials, so the chart won't run a CronJob against nothing.
+
+The chart **references** the backup script rather than vendoring a copy: mount
+it from a ConfigMap you create from the canonical script (single source of
+truth), e.g.
+
+```sh
+kubectl create configmap <release>-lens-backup-scripts \
+  --from-file=deploy/backup/scripts/pg_backup.sh
+```
+
+(the default ConfigMap name is `<release>-lens-backup-scripts`; override with
+`backup.scriptConfigMap`). The CronJob uses `postgres:16` (has `pg_dump`/`gzip`;
+matches the DR runbook + restore drill), maps the Secret's `LENS_DATABASE_URL`
+into the `DATABASE_URL` the script reads, and honours `backup.retention.*`. Set
+`backup.env` for S3 upload (`BACKUP_S3_BUCKET`/`BACKUP_S3_ENDPOINT`/
+`BACKUP_S3_PREFIX`) and `backup.storage` for a durable `BACKUP_DIR` volume (the
+default is an ephemeral `emptyDir`, intended to be paired with S3 upload). See
+`deploy/backup/DR-RUNBOOK.md`.
 
 ## High availability
 
