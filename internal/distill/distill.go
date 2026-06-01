@@ -70,19 +70,53 @@ type Result struct {
 	// Tier is the fidelity tier applied to produce this Markdown (faithful by
 	// default). Recorded so an over-aggressive tier is traceable.
 	Tier Tier
+	// Method records HOW this Markdown was produced. Empty == standard text
+	// conversion (the cheap path). MethodVisionOCR means the text was recovered
+	// by a vision model from a text-less document — the EXPENSIVE path, whose
+	// cost is reported in Savings.VisionTokensCost and must never be counted as
+	// a saving. Stage 3 maps this to the token_events distill_method label.
+	Method Method
 	// Warnings holds non-fatal structural notes (e.g. a table with ragged
 	// rows). Conversion still succeeds; these are advisory.
 	Warnings []string
+}
+
+// Method is how a Result's Markdown was produced (its provenance).
+type Method string
+
+// MethodVisionOCR marks Markdown recovered by the vision fallback (OCR of a
+// text-less document) — the expensive path. The zero value ("") means standard
+// text conversion.
+const MethodVisionOCR Method = "vision_ocr"
+
+// DistillMethod returns the canonical, bounded method label for cost
+// attribution: "vision_ocr" for an OCR'd result, "convert" otherwise. Stage 3
+// writes this to token_events.distill_method.
+func (r Result) DistillMethod() string {
+	if r.Method == MethodVisionOCR {
+		return string(MethodVisionOCR)
+	}
+	return "convert"
 }
 
 // Option configures a conversion call. The zero set = faithful tier, so
 // existing callers (no options) get today's behavior unchanged.
 type Option func(*convOptions)
 
-type convOptions struct{ tier Tier }
+type convOptions struct {
+	tier   Tier
+	vision VisionDispatcher
+}
 
 // WithTier selects the conversion fidelity tier (default faithful).
 func WithTier(t Tier) Option { return func(o *convOptions) { o.tier = t } }
+
+// WithVision enables the vision-OCR fallback: when a conversion yields a
+// text-less Result (NeedsVision), the document is routed to d for OCR instead
+// of being returned empty. Honored by DistillWithCache (the measured path,
+// where the OCR cost is attributed). Default nil = no fallback — today's
+// behavior, the text-less document stays NeedsVision.
+func WithVision(d VisionDispatcher) Option { return func(o *convOptions) { o.vision = d } }
 
 func resolveOptions(opts []Option) convOptions {
 	o := convOptions{tier: TierFaithful}
@@ -134,12 +168,18 @@ func init() {
 // gateway already knows the declared content type, prefer DistillAs to skip
 // sniffing (content sniffing is best-effort; some formats — notably CSV vs
 // plaintext — are ambiguous from bytes alone).
+//
+// WithTier applies here; WithVision does NOT — the vision-OCR fallback (with its
+// cost accounting) is only run by DistillWithCache. A NeedsVision document
+// distilled here stays NeedsVision.
 func Distill(ctx context.Context, input []byte, opts ...Option) (Result, error) {
 	return convert(ctx, input, nil, resolveOptions(opts))
 }
 
 // DistillAs converts input as the explicitly-supplied format (e.g. resolved
-// from a request's Content-Type by the future request-path integration).
+// from a request's Content-Type by the future request-path integration). As
+// with Distill, WithVision is not honored here — use DistillWithCache for the
+// vision-OCR fallback.
 func DistillAs(ctx context.Context, input []byte, format Format, opts ...Option) (Result, error) {
 	return convert(ctx, input, &format, resolveOptions(opts))
 }

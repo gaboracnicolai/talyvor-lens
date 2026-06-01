@@ -37,7 +37,8 @@ type Cache interface {
 type Savings struct {
 	InputTokensRaw       int  // len(inputBytes)/4
 	InputTokensDistilled int  // len(markdown)/4
-	TokensSaved          int  // raw - distilled (may be negative; 0 when no Markdown delivered)
+	TokensSaved          int  // raw - distilled (may be negative; 0 when no Markdown delivered; forced non-positive for vision OCR)
+	VisionTokensCost     int  // tokens SPENT by the vision-OCR fallback (a COST, never a saving); 0 unless this Result was OCR'd
 	InputBytes           int  // len(inputBytes)
 	OutputBytes          int  // len(markdown)
 	CacheHit             bool // served from the conversion cache (conversion skipped)
@@ -92,6 +93,34 @@ type cachedResult struct {
 // and MEASURES.
 func DistillWithCache(ctx context.Context, c Cache, input []byte, opts ...Option) (Result, Savings, error) {
 	o := resolveOptions(opts)
+	res, sav, err := distillOrCached(ctx, c, input, o, opts)
+	if err != nil {
+		return res, sav, err
+	}
+
+	// Vision-OCR fallback: a text-less document (NeedsVision) + a configured
+	// dispatcher → route to a vision model for OCR. This is the EXPENSIVE path —
+	// visionFallback records its cost distinctly and NEVER as a saving, so the
+	// savings metric below is deliberately skipped here. It runs AFTER the
+	// cache: the cache holds the honest text-extraction result; the OCR output
+	// is not re-cached in this stage (that joins live dispatch in stage 3), so a
+	// NeedsVision cache hit still re-runs the dispatcher.
+	if o.vision != nil && res.NeedsVision {
+		res, sav = visionFallback(ctx, input, res, o.vision)
+		return res, sav, nil
+	}
+
+	// Count on hits too: the savings is REALIZED each time distilled Markdown is
+	// used in place of the raw doc (per-use value, which stage 3 attaches
+	// per-request). Not a unique-conversion count.
+	metrics.DistillTokensSaved(sav.TokensSaved)
+	return res, sav, nil
+}
+
+// distillOrCached returns the conversion Result + Savings, served from c when
+// present (nil c disables caching). It records NO metrics — the caller decides,
+// because a vision fallback changes the accounting (OCR cost, not a saving).
+func distillOrCached(ctx context.Context, c Cache, input []byte, o convOptions, opts []Option) (Result, Savings, error) {
 	hash := ContentHash(input)
 	// The cache value depends on the TIER (faithful vs outline of the same doc
 	// are different outputs), so the tier joins the version in the key:
@@ -104,12 +133,7 @@ func DistillWithCache(ctx context.Context, c Cache, input []byte, opts ...Option
 		if b, err := c.Get(ctx, hash, cacheVer); err == nil && len(b) > 0 {
 			var cr cachedResult
 			if json.Unmarshal(b, &cr) == nil {
-				sav := computeSavings(input, cr.Result, true)
-				// Count on hits too: the savings is REALIZED each time distilled
-				// Markdown is used in place of the raw doc (per-use value, which
-				// stage 3 attaches per-request). Not a unique-conversion count.
-				metrics.DistillTokensSaved(sav.TokensSaved)
-				return cr.Result, sav, nil
+				return cr.Result, computeSavings(input, cr.Result, true), nil
 			}
 			// Corrupt cache entry → fall through to a fresh conversion.
 		}
@@ -126,7 +150,5 @@ func DistillWithCache(ctx context.Context, c Cache, input []byte, opts ...Option
 			_ = c.Set(ctx, hash, cacheVer, b)
 		}
 	}
-	sav := computeSavings(input, res, false)
-	metrics.DistillTokensSaved(sav.TokensSaved)
-	return res, sav, nil
+	return res, computeSavings(input, res, false), nil
 }
