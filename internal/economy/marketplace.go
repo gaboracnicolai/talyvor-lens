@@ -307,39 +307,50 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 	netToBuyer := roundTo(lensAmount-fee, 6)
 	priceActual := listing.PriceUSD
 
-	// Credit buyer (net) and platform (fee). The total credits
-	// here exactly equal the lensAmount we conceptually moved
-	// from the listing's reserved pool.
+	// All mutations (ledger credits + listing update + trade insert) run inside
+	// one transaction. Without this, a failure after the first Credit leaves
+	// the buyer with LENS but no trade record and the listing still active.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("economy: begin trade tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	meta := map[string]interface{}{
 		"listing_id": listing.ID,
 		"seller_id":  listing.SellerID,
 		"price_usd":  priceActual,
 	}
-	if err := s.ledger.Credit(ctx, buyerID, netToBuyer, "marketplace_buy",
+
+	// Credit buyer (net).
+	if err := s.ledger.CreditTx(ctx, tx, buyerID, netToBuyer, "marketplace_buy",
 		"marketplace purchase", meta); err != nil {
 		return nil, fmt.Errorf("economy: credit buyer: %w", err)
 	}
+
+	// Credit platform fee.
 	if fee > 0 {
 		feeMeta := map[string]interface{}{
 			"listing_id": listing.ID,
 			"buyer_id":   buyerID,
 		}
-		if err := s.ledger.Credit(ctx, TalyvorWorkspace, fee, "marketplace_fee",
+		if err := s.ledger.CreditTx(ctx, tx, TalyvorWorkspace, fee, "marketplace_fee",
 			"marketplace 5% fee", feeMeta); err != nil {
 			return nil, fmt.Errorf("economy: credit fee: %w", err)
 		}
 	}
 
-	// Mark listing filled. If buyer purchased less than the
-	// listing amount, refund the unsold portion to the seller.
+	// Refund unsold portion to seller.
 	unsold := listing.Amount - lensAmount
 	if unsold > 0 {
-		if err := s.ledger.Credit(ctx, listing.SellerID, unsold, "marketplace_unsold_refund",
+		if err := s.ledger.CreditTx(ctx, tx, listing.SellerID, unsold, "marketplace_unsold_refund",
 			"unsold portion of listing refunded", meta); err != nil {
 			return nil, fmt.Errorf("economy: refund unsold: %w", err)
 		}
 	}
-	if _, err := s.pool.Exec(ctx,
+
+	// Mark listing filled.
+	if _, err := tx.Exec(ctx,
 		`UPDATE marketplace_listings SET status = $1, filled_at = NOW() WHERE id = $2`,
 		ListingFilled, listing.ID); err != nil {
 		return nil, fmt.Errorf("economy: mark filled: %w", err)
@@ -353,7 +364,7 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 		PriceUSD:   priceActual,
 		TalyvorFee: fee,
 	}
-	row := s.pool.QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 		INSERT INTO marketplace_trades (listing_id, buyer_id, seller_id, amount, price_usd, talyvor_fee)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at`,
@@ -362,7 +373,7 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 	if err := row.Scan(&trade.ID, &trade.CreatedAt); err != nil {
 		return nil, fmt.Errorf("economy: insert trade: %w", err)
 	}
-	return &trade, nil
+	return &trade, tx.Commit(ctx)
 }
 
 // CancelListing releases the seller's reservation. Only the

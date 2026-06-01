@@ -170,31 +170,26 @@ func (s *LedgerStore) Debit(
 	return s.apply(ctx, workspaceID, amount, txType, description, metadata, false)
 }
 
-// apply is the shared transactional path Credit + Debit funnel
-// through. The `add` flag toggles the sign — that keeps the
-// SQL identical regardless of direction.
-func (s *LedgerStore) apply(
+// applyTx contains all the SQL for a single credit or debit within a
+// caller-supplied transaction. It does NOT call Begin, Commit, or Rollback —
+// the caller owns the transaction boundary. This makes it composable: multiple
+// ledger operations can share one transaction and roll back atomically together.
+//
+// Use Credit / Debit for standalone operations.
+// Use CreditTx / DebitTx when multiple operations must be atomic together.
+func (s *LedgerStore) applyTx(
 	ctx context.Context,
+	tx pgx.Tx,
 	workspaceID string,
 	amount float64,
 	txType, description string,
 	metadata map[string]interface{},
 	add bool,
 ) error {
-	if s.pool == nil {
-		// No DB — silently succeed so tests that skip the DB
-		// path can still exercise higher-level mining logic.
-		return nil
-	}
-	// Observe the ledger-write hot path (begin→commit). This is the latency
-	// the LensTokenLedgerSlow alert guards.
+	// Observe the ledger-write hot path. This is the latency the
+	// LensTokenLedgerSlow alert guards.
 	start := time.Now()
 	defer func() { metrics.ObserveLedgerWrite(time.Since(start)) }()
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("mining: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Two-step pessimistic lock: ensure the row exists without touching
 	// updated_at on every write, then acquire an explicit FOR UPDATE lock.
@@ -248,7 +243,68 @@ func (s *LedgerStore) apply(
 		return fmt.Errorf("mining: update balance: %w", err)
 	}
 
+	return nil
+}
+
+// apply is the shared transactional path Credit + Debit funnel through.
+// Opens its own transaction, delegates all SQL to applyTx, then commits.
+// Existing callers (Credit / Debit) are unchanged.
+func (s *LedgerStore) apply(
+	ctx context.Context,
+	workspaceID string,
+	amount float64,
+	txType, description string,
+	metadata map[string]interface{},
+	add bool,
+) error {
+	if s.pool == nil {
+		// No DB — silently succeed so tests that skip the DB
+		// path can still exercise higher-level mining logic.
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mining: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.applyTx(ctx, tx, workspaceID, amount, txType, description, metadata, add); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
+}
+
+// CreditTx adds `amount` LENS to workspaceID within a caller-supplied
+// transaction. The caller owns Begin / Commit / Rollback — this lets
+// multiple ledger credits (and other DB writes) share one atomic transaction.
+func (s *LedgerStore) CreditTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	workspaceID string,
+	amount float64,
+	txType, description string,
+	metadata map[string]interface{},
+) error {
+	if amount <= 0 {
+		return errors.New("mining: credit amount must be positive")
+	}
+	return s.applyTx(ctx, tx, workspaceID, amount, txType, description, metadata, true)
+}
+
+// DebitTx removes `amount` LENS from workspaceID within a caller-supplied
+// transaction. Returns ErrInsufficientBalance when the balance is too low.
+// The caller owns Begin / Commit / Rollback.
+func (s *LedgerStore) DebitTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	workspaceID string,
+	amount float64,
+	txType, description string,
+	metadata map[string]interface{},
+) error {
+	if amount <= 0 {
+		return errors.New("mining: debit amount must be positive")
+	}
+	return s.applyTx(ctx, tx, workspaceID, amount, txType, description, metadata, false)
 }
 
 // GetBalance returns 0.0 (not an error) for a workspace with no
