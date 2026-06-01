@@ -48,35 +48,52 @@ Most of the time we're in different code and won't collide. Collisions happen at
 ---
 
 ## Work ledger — keep current
-_(last updated from sync: main at 347a916 — chart work merged, migrations 36/36 validated)_
+_(last updated from sync: main at 0ae7872 — DISTILL conversion core shipped)_
 
 ### Nicolai + Claude — in progress
-- _(none — chart work shipped; next: minor follow-ups, then DISTILL)_
+- DISTILL feature (building in stages). Conversion core + PDF converter DONE; next: cache + savings (stage 2).
 
 ### Nicolai + Claude — up next (the roadmap — ours, don't take)
-- Two minor follow-ups: local-routing spend note, anomaly-panel UX polish (b)
-- DISTILL (designed, ready to build — self-contained, collision-free with infra work)
-- token economy Phases 2–5
+- DISTILL remaining stages, in order:
+  - 2. Conversion cache + measured savings → token_events (NEXT — collision-free; touches cache + metering, not proxy/ledger)
+  - 3. Request-path integration (⚠️ touches internal/proxy — seam to watch; carries the resource-isolation STAGE 3 BLOCKER below)
+  - 4. Fidelity tiers (faithful/structured/outline) + preview endpoint
+  - 5. Vision fallback for scanned PDFs (NeedsVision now real)
+  - 6. Dashboard panel + ROI-report line
+- token economy Phases 2–5 (⚠️ GATED on a ledger-seam sync — touches the ledger/economy code the collaborator has been in)
 - SOC2 foundation
+- PoVI minting go-live: NOT a build — see preconditions section below
 
 ### Collaborator — recently landed (all merged to main, in our base)
-- Pessimistic locking on ledger writes (`8a3ca27`): explicit SELECT FOR UPDATE, atomicized StakeManager. **Extended the existing PoVI FOR UPDATE pattern — seam #1 satisfied.**
-- Hash partitioning migration `0034` (#21) — had a fresh-apply bug; **HE FIXED IT himself (#29 / `26b45c8`, CREATE INDEX after DROP TABLE).**
-- Rate-limiting public endpoints (#23).
-- Control-plane node reconciler + Redis routing (#25) + migration `0035_controlplane.sql`.
-- Security hardening (#28) — migration `0036_check_constraints.sql` + **touched `internal/{attribution,costanomaly,dashboard}` (costanomaly + dashboard are OUR app-tier code — see seam note below).**
-- Multi-process readiness (leader election, PG read-through), PgBouncer (pooling), CI workflow, benchmark fix.
+- Pessimistic locking on ledger writes (extended the existing PoVI FOR UPDATE pattern — seam #1 satisfied).
+- Global lexicographic lock ordering in Transfer() (#32) — resolved the open lock-ordering review item himself.
+- atomic ExecuteTrade (#34), hash partitioning (#21, 0034 + his own #29 fix), security hardening (#28, 0036 + touched our costanomaly/dashboard), rate-limiting (#23), control-plane + Redis routing (#25, 0035), multi-process readiness, PgBouncer, CI/benchmark.
 - edge-infra xDS HA — in his comments, NOT yet pushed (edge-infra frozen at 05-20).
 
 ### Done (recently merged to main — drops off both lists)
-- Chart audit items (d) functional migrate hook + (e) backup CronJob + PgBouncer-safe migrations (#30, merge commit `347a916`).
-- Migration chain now validates **36/36 end-to-end** (0001–0036) through our runner, unchanged — his 0034 fix unblocked 0035 + 0036.
-- All earlier audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch — ours, merged.
+- DISTILL conversion core (#36) + PDF converter (#37, ledongthuc/pdf BSD-3) — HTML/DOCX/XLSX/CSV/JSON/XML/text/PDF converters + golden corpus; NeedsVision real for text-less PDFs.
+- Chart audit items (d)+(e) + PgBouncer-safe migrations (#30); migration chain validates 36/36.
+- Minor follow-ups (#35): local-routing spend note, anomaly-panel axis labels.
+- All earlier audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch.
 
 ---
 
 ## Open coordination items
-- **Migrations RESOLVED** — full chain 0001–0036 applies clean (his 0034 fix landed). No outstanding migration issues. Count: 36, no 0037+.
-- **New seam to watch — `costanomaly` / `dashboard`:** his security-hardening (#28) touched `internal/costanomaly` and `internal/dashboard`, which are OUR app-tier code. Merged + green, no conflict — but next time we touch those, check what #28 changed there first. The "his infra / our app" split isn't absolute; he reaches into app-tier for cross-cutting hardening.
-- **Ledger lock ordering** — his pessimistic locking extended the PoVI FOR UPDATE pattern (good). Remaining review item (not a conflict): confirm global lock ordering is consistent across all ledger tables to prevent deadlocks.
-- **PgBouncer / migrations seam (handled):** DDL migrations break through a transaction pooler, so our migrate Job takes an explicit `migrations.databaseURL` to go direct when his PgBouncer is enabled. His pooler untouched; the link is one explicit operator-set value. He should know the seam exists.
+- **⚠️ STAGE 3 BLOCKER — enforced resource isolation for untrusted-doc conversion.** PDF (and any untrusted-document) conversion must run under enforced resource isolation — a separate killable process/cgroup with hard memory + CPU + wall-clock limits — before request-path exposure. In-leaf bounds are insufficient: a zlib-bomb PDF can OOM and a cyclic-ref PDF can hang/stack-overflow inside ledongthuc, and Go cannot catch OOM/stack-overflow with recover() nor kill a runaway goroutine. The 10 MiB input cap + recover handle the catchable failures only. **Resource isolation is arguably infra-tier — a candidate coordination item with the collaborator (who proposed process isolation).** Captured in code at pdf.go + skipped tripwire test TestPDFResourceResidual_KNOWN.
+- **DISTILL request-path integration (stage 3, upcoming)** — will touch internal/proxy. Collision-free now, but sync before building it if the collaborator starts on the proxy/request path. (Carries the resource-isolation gate above.)
+- **Token economy Phases 2–5 (gated)** — touches the ledger/economy code the collaborator actively worked. MUST sync on seam #1 before starting.
+- **`costanomaly` / `dashboard` seam** — his #28 touched these (our app-tier); check what it changed before next editing those files.
+- **PgBouncer / migrations seam (handled)** — migrate Job takes explicit migrations.databaseURL to go direct; his pooler untouched.
+- **Ledger lock ordering (resolved by him, #32)** — global lexicographic ordering added; no longer open.
+
+---
+
+## PoVI minting — preconditions before go-live
+The minting mechanism is BUILT and on main, shipped OFF by default (`LENS_POVI_MINTING_ENABLED=false`; trust-mint retirement switch also not flipped). Flipping it on is an operator/business decision, NOT a build milestone. **Leaving it off costs nothing and carries zero risk — the un-flipped switch is correct, not unfinished.** Preconditions before enabling, all of which are mostly NOT engineering tasks:
+1. **A real node network exists** — minting rewards nodes for serving inference; with zero independent operators it mints into a vacuum. Downstream of users/demand (the same constraint as business success).
+2. **Security model survived something real** — live concurrent testing (not just pgxmock) + ideally a qualified external security/crypto audit of PoVI. Minting on an unaudited novel economic-security mechanism is the highest-risk action in the codebase.
+3. **Token economy complete** — Phases 2–5 built, not just the Phase-1 security model.
+4. **A deliberate legal/economic decision on what LENS is** — a mintable value-bearing token has regulatory dimensions (securities/money-transmission, jurisdiction-dependent). Not a code decision.
+5. **Enable in a controlled/testnet env first**, then load-bearing.
+
+The trigger is not another build — it's a real network + an audit + a legal call, all downstream of the customer question. (Full note: povi-minting-preconditions.md.)
