@@ -178,9 +178,31 @@ func (s *MarketplaceStore) CreateListing(ctx context.Context, l MarketplaceListi
 		return nil, errors.New("economy: seller_id required")
 	}
 
-	// Debit seller balance via the ledger primitive — this is
-	// where the insufficient-balance check happens.
-	if err := s.ledger.Debit(ctx, l.SellerID, l.Amount,
+	if s.pool == nil {
+		// No-DB path (in-memory test mode): use standalone Debit for
+		// the balance check, then return a synthetic listing ID.
+		if err := s.ledger.Debit(ctx, l.SellerID, l.Amount,
+			"marketplace_listing", "marketplace listing reservation", nil); err != nil {
+			if errors.Is(err, mining.ErrInsufficientBalance) {
+				return nil, ErrInsufficientBalance
+			}
+			return nil, fmt.Errorf("economy: reserve listing: %w", err)
+		}
+		l.ID = fmt.Sprintf("list_%d", time.Now().UnixNano())
+		l.Status = ListingActive
+		l.CreatedAt = time.Now().UTC()
+		return &l, nil
+	}
+
+	// Full DB path: Debit + INSERT listing run inside one transaction so
+	// a failure at either step leaves the seller balance fully consistent.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("economy: begin listing tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := s.ledger.DebitTx(ctx, tx, l.SellerID, l.Amount,
 		"marketplace_listing", "marketplace listing reservation", nil); err != nil {
 		if errors.Is(err, mining.ErrInsufficientBalance) {
 			return nil, ErrInsufficientBalance
@@ -188,26 +210,15 @@ func (s *MarketplaceStore) CreateListing(ctx context.Context, l MarketplaceListi
 		return nil, fmt.Errorf("economy: reserve listing: %w", err)
 	}
 
-	if s.pool == nil {
-		l.ID = fmt.Sprintf("list_%d", time.Now().UnixNano())
-		l.Status = ListingActive
-		l.CreatedAt = time.Now().UTC()
-		return &l, nil
-	}
-
-	row := s.pool.QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 		INSERT INTO marketplace_listings (seller_id, amount, price_usd, min_buy_usd)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, status, created_at`,
 		l.SellerID, l.Amount, l.PriceUSD, l.MinBuyUSD)
 	if err := row.Scan(&l.ID, &l.Status, &l.CreatedAt); err != nil {
-		// Best-effort rollback: credit the seller back if the
-		// listing insert failed after we debited them.
-		_ = s.ledger.Credit(ctx, l.SellerID, l.Amount, "marketplace_refund",
-			"listing creation failed — refund", nil)
 		return nil, fmt.Errorf("economy: insert listing: %w", err)
 	}
-	return &l, nil
+	return &l, tx.Commit(ctx)
 }
 
 // GetListings returns active listings cheapest-first.
@@ -392,16 +403,27 @@ func (s *MarketplaceStore) CancelListing(ctx context.Context, listingID, workspa
 	if listing.Status != ListingActive {
 		return ErrListingNotActive
 	}
-	if _, err := s.pool.Exec(ctx,
+
+	// UPDATE listing + Credit refund run inside one transaction so a
+	// failure after the status update still returns the LENS to the seller.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: begin cancel tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
 		`UPDATE marketplace_listings SET status = $1 WHERE id = $2`,
 		ListingCancelled, listingID); err != nil {
 		return fmt.Errorf("economy: cancel listing: %w", err)
 	}
-	// Refund the held LENS.
-	return s.ledger.Credit(ctx, listing.SellerID, listing.Amount,
+	if err := s.ledger.CreditTx(ctx, tx, listing.SellerID, listing.Amount,
 		"marketplace_refund", "listing cancelled", map[string]interface{}{
 			"listing_id": listingID,
-		})
+		}); err != nil {
+		return fmt.Errorf("economy: refund cancel: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // GetTrades returns every trade where `workspaceID` was either
@@ -450,13 +472,6 @@ func (s *MarketplaceStore) Stake(ctx context.Context, workspaceID string, amount
 	if amount <= 0 {
 		return nil, errors.New("economy: stake amount must be positive")
 	}
-	if err := s.ledger.Debit(ctx, workspaceID, amount, "stake",
-		"LENS staked for yield", map[string]interface{}{"lock_days": lockDays}); err != nil {
-		if errors.Is(err, mining.ErrInsufficientBalance) {
-			return nil, ErrInsufficientBalance
-		}
-		return nil, fmt.Errorf("economy: debit stake: %w", err)
-	}
 	pos := &StakePosition{
 		WorkspaceID: workspaceID,
 		Amount:      amount,
@@ -465,22 +480,45 @@ func (s *MarketplaceStore) Stake(ctx context.Context, workspaceID string, amount
 		StartedAt:   time.Now().UTC(),
 		UnlocksAt:   time.Now().Add(time.Duration(lockDays) * 24 * time.Hour),
 	}
+
 	if s.pool == nil {
+		// No-DB path: use standalone Debit for the balance check.
+		if err := s.ledger.Debit(ctx, workspaceID, amount, "stake",
+			"LENS staked for yield", map[string]interface{}{"lock_days": lockDays}); err != nil {
+			if errors.Is(err, mining.ErrInsufficientBalance) {
+				return nil, ErrInsufficientBalance
+			}
+			return nil, fmt.Errorf("economy: debit stake: %w", err)
+		}
 		pos.ID = fmt.Sprintf("stake_%d", time.Now().UnixNano())
 		return pos, nil
 	}
-	row := s.pool.QueryRow(ctx, `
+
+	// Full DB path: Debit + INSERT stake_position run inside one transaction
+	// so a failed INSERT never leaves the balance silently drained.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("economy: begin stake tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := s.ledger.DebitTx(ctx, tx, workspaceID, amount, "stake",
+		"LENS staked for yield", map[string]interface{}{"lock_days": lockDays}); err != nil {
+		if errors.Is(err, mining.ErrInsufficientBalance) {
+			return nil, ErrInsufficientBalance
+		}
+		return nil, fmt.Errorf("economy: debit stake: %w", err)
+	}
+
+	row := tx.QueryRow(ctx, `
 		INSERT INTO stake_positions (workspace_id, amount, lock_days, apy, unlocks_at)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, started_at`,
 		workspaceID, amount, lockDays, apy, pos.UnlocksAt)
 	if err := row.Scan(&pos.ID, &pos.StartedAt); err != nil {
-		// Best-effort rollback.
-		_ = s.ledger.Credit(ctx, workspaceID, amount, "stake_refund",
-			"stake insert failed — refund", nil)
 		return nil, fmt.Errorf("economy: insert stake: %w", err)
 	}
-	return pos, nil
+	return pos, tx.Commit(ctx)
 }
 
 // Unstake returns the principal + accrued yield to the
@@ -508,18 +546,31 @@ func (s *MarketplaceStore) Unstake(ctx context.Context, positionID, workspaceID 
 	}
 	yield := computeYield(pos.Amount, pos.APY, time.Since(pos.StartedAt))
 	payout := pos.Amount + yield
-	if _, err := s.pool.Exec(ctx,
+
+	// DELETE stake_position + Credit payout run inside one transaction so the
+	// position is never removed without the LENS being returned (loss-of-funds
+	// protection: if Credit fails, the DELETE is rolled back).
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: begin unstake tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
 		`DELETE FROM stake_positions WHERE id = $1`, positionID); err != nil {
 		return fmt.Errorf("economy: delete stake: %w", err)
 	}
 	meta := map[string]interface{}{
-		"position_id":  positionID,
-		"principal":    pos.Amount,
-		"accrued":      yield,
-		"lock_days":    pos.LockDays,
+		"position_id": positionID,
+		"principal":   pos.Amount,
+		"accrued":     yield,
+		"lock_days":   pos.LockDays,
 	}
-	return s.ledger.Credit(ctx, workspaceID, payout, "unstake",
-		"stake unlocked with yield", meta)
+	if err := s.ledger.CreditTx(ctx, tx, workspaceID, payout, "unstake",
+		"stake unlocked with yield", meta); err != nil {
+		return fmt.Errorf("economy: credit unstake: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // GetStakePositions returns the workspace's open positions
