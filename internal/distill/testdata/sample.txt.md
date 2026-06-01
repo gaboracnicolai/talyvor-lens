@@ -1,0 +1,3 @@
+Hello world.
+
+This is plain text with extra blank lines above.
