@@ -1222,8 +1222,17 @@ func (p *Proxy) tryLocalRouting(
 	// cloud traffic.
 	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected)
 	if p.alertManager != nil {
-		// Local routing is text-only (multimodal skips it upstream), so the
-		// spend row is "text" and exact (cost 0).
+		// Local routing is text-only (multimodal skips it upstream). The token
+		// counts here are ESTIMATED (len/4) — a deliberate, known asymmetry
+		// with the cloud paths, which now meter on the provider's reported
+		// usage object. Local backends are reached via the local router / node
+		// path and surface only aggregate counts, not a per-request provider
+		// usage object, so there is nothing exact to read here. It's harmless:
+		// the billed COST is exactly 0 (local is free — the model isn't in the
+		// price table), so the estimated token counts never affect spend, and
+		// the row is marked not-estimated because the cost itself is exact (0).
+		// Fold real usage in here only if/when local routing exposes a
+		// per-request usage object.
 		_ = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt, sessionID, requestID, "text", false)
 	}
 	metrics.RequestsTotal.WithLabelValues(provider, "local").Inc()
