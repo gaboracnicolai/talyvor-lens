@@ -199,5 +199,10 @@ CREATE INDEX idx_token_events_budget_scope ON token_events (workspace_id, team, 
 CREATE INDEX idx_token_events_modality
     ON token_events (workspace_id, modality, created_at DESC)
     WHERE modality <> 'text';
+-- Partial index from 0007: cache-warmer JOIN path — finds rows with a
+-- recorded prompt so the warmer can re-warm popular patterns cheaply.
+CREATE INDEX idx_token_events_prompt_hash2
+    ON token_events (prompt_hash, created_at DESC)
+    WHERE prompt_text != '';
 
 COMMIT;
