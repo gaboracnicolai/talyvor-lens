@@ -395,7 +395,11 @@ func run() error {
 	// syncs live inference nodes into localRouterMulti so the proxy's smart
 	// endpoint selection (least-loaded / lowest-latency) picks from the live
 	// mining fleet rather than only statically configured endpoints.
-	cpStore := controlplane.NewNodeStore(pool)
+	// HeartbeatStore buffers heartbeats in Redis so any Lens instance can
+	// receive a heartbeat and the Reconciler on any instance (after leader
+	// election) sees current liveness state immediately — the xDS HA property.
+	cpHB := controlplane.NewHeartbeatStore(redisClient)
+	cpStore := controlplane.NewNodeStore(pool, cpHB)
 	cpPublisher := controlplane.NewPublisher(redisClient)
 	cpReconciler := controlplane.NewReconciler(cpStore, cpPublisher)
 	go haComps.leader.Run(ctx, "node-reconciler", 30*time.Second, func(lctx context.Context) {
@@ -1536,6 +1540,10 @@ func run() error {
 				ModelsLoaded   []string `json:"models_loaded"`
 			}
 			_ = json.NewDecoder(req.Body).Decode(&in)
+			// Buffer heartbeat in Redis — any instance contributes to the shared
+			// liveness view; the Reconciler reads Redis freshness when building
+			// NodeSnapshots (xDS HA heartbeat reuse).
+			_ = cpHB.Record(req.Context(), "inference", nodeID, in.UptimeSeconds)
 			if pool != nil {
 				if _, err := pool.Exec(req.Context(), `
 					UPDATE inference_nodes
@@ -1639,6 +1647,8 @@ func run() error {
 				HitRate float64 `json:"hit_rate"`
 			}
 			_ = json.NewDecoder(req.Body).Decode(&in)
+			// Buffer heartbeat in Redis for xDS HA heartbeat reuse.
+			_ = cpHB.Record(req.Context(), "cache", nodeID, 0)
 			if pool != nil {
 				if _, err := pool.Exec(req.Context(), `
 					UPDATE cache_nodes SET last_seen_at = NOW() WHERE id = $1`, nodeID); err != nil {
@@ -1713,6 +1723,8 @@ func run() error {
 				UptimeSeconds int64 `json:"uptime_seconds"`
 			}
 			_ = json.NewDecoder(req.Body).Decode(&in)
+			// Buffer heartbeat in Redis for xDS HA heartbeat reuse.
+			_ = cpHB.Record(req.Context(), "embedding", nodeID, in.UptimeSeconds)
 			if err := cpStore.RecordEmbedHeartbeat(req.Context(), nodeID, in.UptimeSeconds); err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return

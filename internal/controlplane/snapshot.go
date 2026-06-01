@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -52,15 +53,21 @@ type NodeSnapshot struct {
 	GeneratedAt    time.Time            `json:"generated_at"`
 }
 
-// Snapshot queries all three node tables for active, recently-seen nodes and
-// returns a point-in-time view of the live fleet. A nil pool returns an empty
-// snapshot so callers don't need to nil-check.
+// Snapshot queries all three node tables for active nodes and returns a
+// point-in-time view of the live fleet. Liveness is determined by isLive()
+// which prefers Redis heartbeat freshness (primary) over Postgres last_seen_at
+// (fallback). A nil pool returns an empty snapshot so callers don't need to
+// nil-check.
 func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 	snap := &NodeSnapshot{GeneratedAt: time.Now().UTC()}
 	if s.pool == nil {
 		return snap, nil
 	}
-	secs := int(StaleThreshold.Seconds())
+
+	// The SQL no longer filters by last_seen_at — liveness filtering moves to
+	// Go so that Redis heartbeats from any instance contribute to inclusion
+	// rather than only the Postgres-persisted timestamp from whichever instance
+	// last handled the HTTP heartbeat request.
 
 	// ── Inference nodes ──────────────────────────────────────────────────────
 	irows, err := s.pool.Query(ctx, `
@@ -69,8 +76,7 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 		       last_seen_at, uptime_seconds
 		FROM inference_nodes
 		WHERE active = TRUE
-		  AND last_seen_at > NOW() - ($1 * INTERVAL '1 second')
-		ORDER BY last_seen_at DESC`, secs)
+		ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: snapshot inference: %w", err)
 	}
@@ -84,7 +90,9 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 		); err != nil {
 			continue // malformed row — skip, don't abort the whole snapshot
 		}
-		snap.InferenceNodes = append(snap.InferenceNodes, n)
+		if s.isLive(ctx, "inference", n.ID, n.LastSeenAt) {
+			snap.InferenceNodes = append(snap.InferenceNodes, n)
+		}
 	}
 	if err := irows.Err(); err != nil {
 		return nil, fmt.Errorf("controlplane: snapshot inference rows: %w", err)
@@ -95,8 +103,7 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 		SELECT id, workspace_id, url, max_size_gb, last_seen_at
 		FROM cache_nodes
 		WHERE active = TRUE
-		  AND last_seen_at > NOW() - ($1 * INTERVAL '1 second')
-		ORDER BY last_seen_at DESC`, secs)
+		ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: snapshot cache: %w", err)
 	}
@@ -106,7 +113,9 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 		if err := crows.Scan(&n.ID, &n.WorkspaceID, &n.URL, &n.MaxSizeGB, &n.LastSeenAt); err != nil {
 			continue
 		}
-		snap.CacheNodes = append(snap.CacheNodes, n)
+		if s.isLive(ctx, "cache", n.ID, n.LastSeenAt) {
+			snap.CacheNodes = append(snap.CacheNodes, n)
+		}
 	}
 	if err := crows.Err(); err != nil {
 		return nil, fmt.Errorf("controlplane: snapshot cache rows: %w", err)
@@ -118,8 +127,7 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 		       max_batch, speed_tps, last_seen_at, uptime_seconds
 		FROM embedding_nodes
 		WHERE active = TRUE
-		  AND last_seen_at > NOW() - ($1 * INTERVAL '1 second')
-		ORDER BY last_seen_at DESC`, secs)
+		ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: snapshot embedding: %w", err)
 	}
@@ -132,11 +140,40 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 		); err != nil {
 			continue
 		}
-		snap.EmbeddingNodes = append(snap.EmbeddingNodes, n)
+		if s.isLive(ctx, "embedding", n.ID, n.LastSeenAt) {
+			snap.EmbeddingNodes = append(snap.EmbeddingNodes, n)
+		}
 	}
 	if err := erows.Err(); err != nil {
 		return nil, fmt.Errorf("controlplane: snapshot embedding rows: %w", err)
 	}
 
 	return snap, nil
+}
+
+// isLive reports whether a node should appear in the current snapshot.
+//
+// Priority:
+//  1. If a HeartbeatStore is configured and the Redis heartbeat is fresh
+//     (arrived within StaleThreshold) → live. This covers the HA case where
+//     a different Lens instance recorded the heartbeat.
+//  2. If Redis is absent / not configured → fall back to Postgres last_seen_at.
+//     This preserves behaviour for single-instance deployments without Redis.
+//  3. Redis error → warn and fall back to Postgres (non-fatal; stale data is
+//     better than no snapshot at all).
+func (s *NodeStore) isLive(ctx context.Context, nodeType, nodeID string, pgLastSeen time.Time) bool {
+	if s.hb != nil {
+		fresh, _, err := s.hb.IsFresh(ctx, nodeType, nodeID)
+		if err != nil {
+			slog.Warn("controlplane: heartbeat liveness check failed",
+				slog.String("type", nodeType),
+				slog.String("id", nodeID),
+				slog.String("err", err.Error()))
+			// Redis error — fall through to Postgres check.
+		} else if fresh {
+			return true
+		}
+		// Redis says absent or stale — fall through to Postgres check.
+	}
+	return time.Since(pgLastSeen) < StaleThreshold
 }

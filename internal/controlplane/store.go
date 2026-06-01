@@ -27,19 +27,27 @@ type pgxDB interface {
 // single-binary deployments without Postgres working unchanged.
 type NodeStore struct {
 	pool pgxDB
+	// hb is optional. When non-nil, Snapshot() uses Redis heartbeat freshness
+	// as the primary liveness signal instead of Postgres last_seen_at. This is
+	// the xDS HA improvement: any instance's heartbeat write is immediately
+	// visible to the Reconciler on any other instance after failover.
+	hb *HeartbeatStore
 }
 
-// NewNodeStore wraps a live connection pool.
-func NewNodeStore(pool *pgxpool.Pool) *NodeStore {
+// NewNodeStore wraps a live connection pool. Pass a non-nil hb to enable
+// Redis-backed heartbeat liveness — the primary xDS HA improvement.
+// Pass nil for hb to fall back to Postgres-only liveness (single-instance mode).
+func NewNodeStore(pool *pgxpool.Pool, hb *HeartbeatStore) *NodeStore {
 	var db pgxDB
 	if pool != nil {
 		db = pool
 	}
-	return newNodeStore(db)
+	return newNodeStore(db, hb)
 }
 
-func newNodeStore(pool pgxDB) *NodeStore {
-	return &NodeStore{pool: pool}
+// newNodeStore is the internal constructor used by tests.
+func newNodeStore(pool pgxDB, hb *HeartbeatStore) *NodeStore {
+	return &NodeStore{pool: pool, hb: hb}
 }
 
 // RecordEmbedHeartbeat refreshes last_seen_at and uptime_seconds for an
