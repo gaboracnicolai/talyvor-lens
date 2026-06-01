@@ -68,20 +68,49 @@ func (s *NodeStore) RecordEmbedHeartbeat(ctx context.Context, nodeID string, upt
 // embedding_nodes for any row whose last heartbeat is older than threshold and
 // is still marked active. Returns the total number of rows deactivated across
 // all three tables.
+//
+// Each table is queried with a literal, pre-written SQL statement — no
+// fmt.Sprintf table interpolation — so the queries are stable and visible to
+// static analysis tools.
 func (s *NodeStore) MarkStaleInactive(ctx context.Context, threshold time.Duration) (int, error) {
 	if s.pool == nil {
 		return 0, nil
 	}
 	secs := int(threshold.Seconds())
-	total := 0
-	for _, table := range []string{"inference_nodes", "cache_nodes", "embedding_nodes"} {
-		sql := fmt.Sprintf(`UPDATE %s SET active = FALSE
+
+	type staleQuery struct {
+		table string
+		sql   string
+	}
+	queries := []staleQuery{
+		{
+			table: "inference_nodes",
+			sql: `UPDATE inference_nodes SET active = FALSE
 WHERE active = TRUE
   AND last_seen_at IS NOT NULL
-  AND last_seen_at < NOW() - ($1 * INTERVAL '1 second')`, table)
-		tag, err := s.pool.Exec(ctx, sql, secs)
+  AND last_seen_at < NOW() - ($1 * INTERVAL '1 second')`,
+		},
+		{
+			table: "cache_nodes",
+			sql: `UPDATE cache_nodes SET active = FALSE
+WHERE active = TRUE
+  AND last_seen_at IS NOT NULL
+  AND last_seen_at < NOW() - ($1 * INTERVAL '1 second')`,
+		},
+		{
+			table: "embedding_nodes",
+			sql: `UPDATE embedding_nodes SET active = FALSE
+WHERE active = TRUE
+  AND last_seen_at IS NOT NULL
+  AND last_seen_at < NOW() - ($1 * INTERVAL '1 second')`,
+		},
+	}
+
+	total := 0
+	for _, q := range queries {
+		tag, err := s.pool.Exec(ctx, q.sql, secs)
 		if err != nil {
-			return total, fmt.Errorf("controlplane: mark stale %s: %w", table, err)
+			return total, fmt.Errorf("controlplane: mark stale %s: %w", q.table, err)
 		}
 		total += int(tag.RowsAffected())
 	}

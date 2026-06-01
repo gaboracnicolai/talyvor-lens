@@ -1,4 +1,8 @@
 -- 0035_controlplane.sql — embedding-node heartbeat parity.
+-- NOTE: the filename ("controlplane") is broader than the content.
+-- This migration's sole purpose is heartbeat-column parity for embedding_nodes;
+-- a more precise name would be 0035_embedding_node_heartbeat_parity.sql.
+-- The file has not been renamed to avoid breaking migration-runner state.
 --
 -- inference_nodes gained last_seen_at / uptime_seconds / node_secret_hash in
 -- 0025; cache_nodes got last_seen_at / node_secret_hash in 0026.

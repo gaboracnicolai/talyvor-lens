@@ -46,8 +46,12 @@ func applyJobLimit(cmd *exec.Cmd, limitBytes uint64) error {
 	// between cmd.Start() and OpenProcess: if the worker has already exited
 	// (e.g. immediate error), OpenProcess returns an error which we surface as
 	// a non-fatal condition — GOMEMLIMIT still provides soft protection.
+	//
+	// PROCESS_SET_QUOTA is required for AssignProcessToJobObject.
+	// PROCESS_TERMINATE is included so the parent can kill a runaway worker
+	// if needed.  PROCESS_ALL_ACCESS is deliberately avoided — least privilege.
 	proc, err := windows.OpenProcess(
-		windows.PROCESS_ALL_ACCESS, false, uint32(cmd.Process.Pid))
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
 	if err != nil {
 		return fmt.Errorf("distill: OpenProcess pid %d: %w", cmd.Process.Pid, err)
 	}
