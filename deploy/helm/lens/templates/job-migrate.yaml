@@ -1,14 +1,16 @@
 {{- if .Values.migrations.enabled -}}
 # Database migration hook. Runs as a pre-install AND pre-upgrade hook so the
 # schema is migrated BEFORE new gateway pods roll out (ordering: this Job must
-# complete successfully before the Deployment is created/updated).
+# complete successfully before the Deployment is created/updated). If the Job
+# fails (non-zero exit), Helm fails the install/upgrade — so a server is never
+# rolled out against an unmigrated DB.
 #
-# IMPORTANT: the default Lens gateway image ships neither a `migrate`
-# subcommand nor the SQL files, so there is no working default command. You
-# MUST set migrations.command to your migration mechanism (a dedicated
-# migrations image, a `migrate`/flyway tool, etc.) — see the chart README
-# "Migrations". With no command set, this Job intentionally fails closed rather
-# than pretend migrations ran. Set migrations.enabled=false to skip entirely.
+# The default command is the gateway image's own `lens migrate` subcommand,
+# which applies the embedded SQL migrations idempotently (tracked in a
+# schema_migrations table) using the same LENS_DATABASE_URL the server uses.
+# Override migrations.command to use a different mechanism, or set
+# migrations.enabled=false to skip the hook entirely and run migrations
+# externally.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -45,13 +47,11 @@ spec:
             {{- if .Values.migrations.command }}
             {{- toYaml .Values.migrations.command | nindent 12 }}
             {{- else }}
-            - /bin/sh
-            - -c
-            - >-
-              echo 'ERROR: migrations.command is not set. Lens ships no migrate
-              subcommand and the SQL is not in the gateway image, so there is no
-              safe default. Configure migrations.command (see chart README →
-              Migrations) or set migrations.enabled=false.' >&2; exit 1
+            # The gateway image's built-in migrator. Applies embedded SQL
+            # idempotently; exits non-zero on failure so this hook Job fails
+            # and Helm holds back the rollout.
+            - /lens
+            - migrate
             {{- end }}
           {{- with .Values.migrations.args }}
           args:

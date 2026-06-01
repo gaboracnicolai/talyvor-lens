@@ -1,0 +1,90 @@
+{{- if .Values.backup.enabled -}}
+# Scheduled Postgres backup. Runs the canonical deploy/backup/scripts/pg_backup.sh
+# on a schedule, mounted from a ConfigMap you create from that script (see the
+# chart README → "Scheduled backups"). The chart REFERENCES the single-source
+# script rather than vendoring a copy. DEFAULT DISABLED (backup.enabled=false):
+# backups need a real destination + credentials, so the chart won't run a
+# CronJob against nothing. pg_backup.sh fails loud (non-zero) so a failed run
+# marks the Job failed rather than silently producing no backup.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "lens.fullname" . }}-backup
+  labels:
+    {{- include "lens.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: {{ .Values.backup.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ .Values.backup.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.backup.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            {{- include "lens.componentSelectorLabels" (list . "backup") | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "lens.serviceAccountName" . }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: backup
+              image: {{ .Values.backup.image | quote }}
+              imagePullPolicy: {{ .Values.backup.imagePullPolicy }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              # command replaces the postgres image entrypoint — we only want
+              # the pg client tools, not a server. bash runs the mounted script.
+              command:
+                - /bin/bash
+                - {{ printf "/scripts/%s" .Values.backup.script | quote }}
+              env:
+                # pg_backup.sh reads DATABASE_URL; map it from the gateway
+                # Secret's LENS_DATABASE_URL (key overridable).
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "lens.secretName" . }}
+                      key: {{ .Values.backup.databaseUrlKey | quote }}
+                - name: BACKUP_DIR
+                  value: {{ .Values.backup.backupDir | quote }}
+                - name: KEEP_DAILY
+                  value: {{ .Values.backup.retention.keepDaily | quote }}
+                - name: KEEP_WEEKLY
+                  value: {{ .Values.backup.retention.keepWeekly | quote }}
+                {{- range $k, $v := .Values.backup.env }}
+                - name: {{ $k }}
+                  value: {{ $v | quote }}
+                {{- end }}
+              {{- with .Values.backup.envFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: backups
+                  mountPath: {{ .Values.backup.backupDir | quote }}
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ .Values.backup.scriptConfigMap | default (printf "%s-backup-scripts" (include "lens.fullname" .)) | quote }}
+                defaultMode: 0755
+            - name: backups
+              {{- toYaml .Values.backup.storage | nindent 14 }}
+            - name: tmp
+              emptyDir: {}
+{{- end }}

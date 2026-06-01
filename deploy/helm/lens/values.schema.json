@@ -105,6 +105,37 @@
         "resources": { "type": "object" }
       }
     },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schedule": { "type": "string" },
+        "image": { "type": "string" },
+        "imagePullPolicy": { "type": "string" },
+        "script": { "type": "string" },
+        "scriptConfigMap": { "type": "string" },
+        "databaseUrlKey": { "type": "string" },
+        "backupDir": { "type": "string" },
+        "retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keepDaily": { "type": "integer" },
+            "keepWeekly": { "type": "integer" }
+          }
+        },
+        "env": { "type": "object" },
+        "envFrom": { "type": "array", "items": { "type": "object" } },
+        "storage": { "type": "object" },
+        "concurrencyPolicy": { "type": "string" },
+        "startingDeadlineSeconds": { "type": "integer" },
+        "successfulJobsHistoryLimit": { "type": "integer" },
+        "failedJobsHistoryLimit": { "type": "integer" },
+        "backoffLimit": { "type": "integer" },
+        "resources": { "type": "object" }
+      }
+    },
     "metrics": {
       "type": "object",
       "additionalProperties": false,

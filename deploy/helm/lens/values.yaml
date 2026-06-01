@@ -174,16 +174,67 @@ metrics:
 migrations:
   # -- Run the migration hook Job.
   enabled: true
-  # -- Image that performs migrations. Empty = the gateway image. NOTE: the
-  # default gateway image does not bundle SQL or a `migrate` subcommand, so you
-  # MUST point this at a migration mechanism (see README "Migrations").
+  # -- Image that performs migrations. Empty = the gateway image, which has a
+  # built-in `lens migrate` subcommand that applies the embedded SQL.
   image: ""
-  # -- Command/args for the migration container.
+  # -- Command/args for the migration container. Empty command defaults to the
+  # gateway image's `lens migrate`; override to use a different mechanism.
   command: []
   args: []
   # -- Hook weight (lower runs earlier).
   hookWeight: -5
   # -- Resources for the migration Job.
+  resources: {}
+
+# Scheduled Postgres backup CronJob. Runs deploy/backup/scripts/pg_backup.sh
+# on a schedule. DEFAULT DISABLED: backups need a real destination +
+# credentials, so the chart won't ship a CronJob that runs against nothing.
+# The script is NOT vendored into the chart — mount it from a ConfigMap you
+# create from the canonical deploy/backup/scripts/ (see README "Scheduled
+# backups"); that keeps a single source of truth.
+backup:
+  # -- Create the backup CronJob.
+  enabled: false
+  # -- Cron schedule (UTC). Default: daily at 02:00.
+  schedule: "0 2 * * *"
+  # -- Image with bash + pg_dump/gzip. Stock postgres image is the documented
+  # choice (the DR runbook + restore drill use postgres:16).
+  image: "postgres:16"
+  imagePullPolicy: IfNotPresent
+  # -- Which mounted script to run (from the scripts ConfigMap, at /scripts).
+  script: "pg_backup.sh"
+  # -- Name of a ConfigMap holding the backup script(s). Empty = the derived
+  # name "<release>-lens-backup-scripts", which you create from the canonical
+  # script: kubectl create configmap <name> --from-file=deploy/backup/scripts/
+  scriptConfigMap: ""
+  # -- Secret key (in the gateway Secret) mapped to DATABASE_URL for the
+  # script. pg_backup.sh reads DATABASE_URL; the Lens secret stores it as
+  # LENS_DATABASE_URL.
+  databaseUrlKey: "LENS_DATABASE_URL"
+  # -- Local dump directory inside the container (BACKUP_DIR). Backed by the
+  # storage volume below; the script can also upload to S3 (see env).
+  backupDir: "/backups"
+  retention:
+    # -- Local daily/weekly backups to keep (KEEP_DAILY / KEEP_WEEKLY).
+    keepDaily: 7
+    keepWeekly: 4
+  # -- Extra plain env for the script, e.g. BACKUP_S3_BUCKET, BACKUP_S3_ENDPOINT,
+  # BACKUP_S3_PREFIX. Map of NAME → value.
+  env: {}
+  # -- Extra envFrom entries (e.g. a Secret with S3 credentials). List of
+  # {secretRef: {name: ...}} / {configMapRef: {name: ...}}.
+  envFrom: []
+  # -- Volume backing BACKUP_DIR. Default ephemeral emptyDir (pair with S3
+  # upload); set a persistentVolumeClaim for durable local backups.
+  storage:
+    emptyDir: {}
+  # -- CronJob controls.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 2
+  # -- Resources for the backup container.
   resources: {}
 
 autoscaling:
