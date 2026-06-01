@@ -14,6 +14,7 @@ import (
 // expectCreditTx programmes the mock for one full LedgerStore.Credit
 // transaction: Begin → INSERT DO NOTHING (ensure row) → SELECT FOR UPDATE →
 // INSERT ledger row → UPDATE balance → Commit.
+// Used by standalone Credit calls (e.g. Stake, CancelListing, Unstake).
 func expectCreditTx(
 	mock pgxmock.PgxPoolIface,
 	workspaceID string,
@@ -35,6 +36,30 @@ func expectCreditTx(
 		WithArgs(workspaceID, expectedBal, expectedEarned, expectedSpent).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
+}
+
+// expectCreditInTx programmes the mock for one CreditTx call inside a
+// caller-owned transaction — the 4 SQL operations without Begin/Commit.
+// Used when multiple credits share a single transaction (e.g. ExecuteTrade).
+func expectCreditInTx(
+	mock pgxmock.PgxPoolIface,
+	workspaceID string,
+	startingBal, startingEarned, startingSpent float64,
+	delta, expectedBal, expectedEarned, expectedSpent float64,
+) {
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs(workspaceID).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
+		WithArgs(workspaceID).
+		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
+			AddRow(startingBal, startingEarned, startingSpent))
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs(workspaceID, delta, expectedBal, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs(workspaceID, expectedBal, expectedEarned, expectedSpent).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 
 func newStore(t *testing.T) (*MarketplaceStore, pgxmock.PgxPoolIface) {
@@ -249,6 +274,9 @@ func TestExecuteTrade_TransfersCorrectAmounts(t *testing.T) {
 	// Listing: 50 LENS @ $0.10 each, buyer pays $1.00 → 10 LENS.
 	// 5% fee on 10 = 0.5 LENS to talyvor. Net to buyer = 9.5.
 	// Unsold = 40 LENS → refund seller.
+	//
+	// All five mutations (3 credits + UPDATE + INSERT) share one transaction
+	// so a failure at any step rolls back everything atomically.
 	mock.ExpectQuery("SELECT id, seller_id, amount, price_usd").
 		WithArgs("list1").
 		WillReturnRows(pgxmock.NewRows([]string{
@@ -256,21 +284,23 @@ func TestExecuteTrade_TransfersCorrectAmounts(t *testing.T) {
 			"status", "filled_at", "created_at",
 		}).AddRow("list1", "ws_seller", 50.0, 0.10, 0.0,
 			ListingActive, nil, time.Now()))
-	// Credit buyer 9.5 LENS.
-	expectCreditTx(mock, "ws_buyer", 0, 0, 0, 9.5, 9.5, 9.5, 0)
-	// Credit talyvor 0.5 LENS fee.
-	expectCreditTx(mock, TalyvorWorkspace, 0, 0, 0, 0.5, 0.5, 0.5, 0)
-	// Refund seller 40 LENS unsold.
-	expectCreditTx(mock, "ws_seller", 0, 0, 0, 40.0, 40.0, 40.0, 0)
-	// Mark filled.
+	mock.ExpectBegin()
+	// CreditTx buyer 9.5 LENS (no Begin/Commit — inside shared tx).
+	expectCreditInTx(mock, "ws_buyer", 0, 0, 0, 9.5, 9.5, 9.5, 0)
+	// CreditTx talyvor 0.5 LENS fee.
+	expectCreditInTx(mock, TalyvorWorkspace, 0, 0, 0, 0.5, 0.5, 0.5, 0)
+	// CreditTx seller 40 LENS unsold refund.
+	expectCreditInTx(mock, "ws_seller", 0, 0, 0, 40.0, 40.0, 40.0, 0)
+	// Mark listing filled (within same tx).
 	mock.ExpectExec("UPDATE marketplace_listings SET status").
 		WithArgs(ListingFilled, "list1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	// Insert trade row.
+	// Insert trade row (within same tx).
 	mock.ExpectQuery("INSERT INTO marketplace_trades").
 		WithArgs("list1", "ws_buyer", "ws_seller", 10.0, 0.10, 0.5).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("trade1", time.Now()))
+	mock.ExpectCommit()
 
 	trade, err := store.ExecuteTrade(context.Background(), "list1", "ws_buyer", 1.0)
 	if err != nil {
@@ -278,6 +308,9 @@ func TestExecuteTrade_TransfersCorrectAmounts(t *testing.T) {
 	}
 	if trade.Amount != 10.0 || trade.TalyvorFee != 0.5 {
 		t.Fatalf("unexpected trade: %+v", trade)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
 	}
 }
 
