@@ -90,11 +90,18 @@ type cachedResult struct {
 // This is the reusable piece stage 3 will wire into the request path. It does
 // NOT touch token_events or the request path here — it only converts, caches,
 // and MEASURES.
-func DistillWithCache(ctx context.Context, c Cache, input []byte) (Result, Savings, error) {
+func DistillWithCache(ctx context.Context, c Cache, input []byte, opts ...Option) (Result, Savings, error) {
+	o := resolveOptions(opts)
 	hash := ContentHash(input)
+	// The cache value depends on the TIER (faithful vs outline of the same doc
+	// are different outputs), so the tier joins the version in the key:
+	// effectively sha256(ConverterVersion : tier : contentHash). Both
+	// ConverterVersion and the tier are colon-free constants, preserving the
+	// DistillCache.Key injectivity invariant.
+	cacheVer := ConverterVersion + ":" + string(normalizeTier(o.tier))
 
 	if c != nil {
-		if b, err := c.Get(ctx, hash, ConverterVersion); err == nil && len(b) > 0 {
+		if b, err := c.Get(ctx, hash, cacheVer); err == nil && len(b) > 0 {
 			var cr cachedResult
 			if json.Unmarshal(b, &cr) == nil {
 				sav := computeSavings(input, cr.Result, true)
@@ -108,7 +115,7 @@ func DistillWithCache(ctx context.Context, c Cache, input []byte) (Result, Savin
 		}
 	}
 
-	res, err := Distill(ctx, input)
+	res, err := Distill(ctx, input, opts...)
 	if err != nil {
 		return res, Savings{InputBytes: len(input)}, err
 	}
@@ -116,7 +123,7 @@ func DistillWithCache(ctx context.Context, c Cache, input []byte) (Result, Savin
 	if c != nil {
 		if b, mErr := json.Marshal(cachedResult{Result: res}); mErr == nil {
 			// Best-effort: a cache write failure must never fail the conversion.
-			_ = c.Set(ctx, hash, ConverterVersion, b)
+			_ = c.Set(ctx, hash, cacheVer, b)
 		}
 	}
 	sav := computeSavings(input, res, false)

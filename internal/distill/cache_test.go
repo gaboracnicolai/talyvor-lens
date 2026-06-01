@@ -155,3 +155,36 @@ func TestContentHash_Deterministic(t *testing.T) {
 		t.Errorf("sha256 hex should be 64 chars, got %d", len(a))
 	}
 }
+
+// The cache key incorporates the TIER: faithful vs outline of the SAME document
+// are distinct outputs and must not collide in the cache (stage-4 correctness).
+func TestCache_TierInKey(t *testing.T) {
+	ctx := context.Background()
+	c := &fakeCache{}
+	in := mustRead(t, "sample.html")
+
+	rF, _, _ := DistillWithCache(ctx, c, in, WithTier(TierFaithful))
+	rO, _, _ := DistillWithCache(ctx, c, in, WithTier(TierOutline))
+	if c.sets != 2 {
+		t.Fatalf("faithful + outline of the same doc must store 2 DISTINCT entries; sets=%d", c.sets)
+	}
+	if rF.Markdown == rO.Markdown {
+		t.Error("faithful and outline markdown must differ")
+	}
+
+	// Re-fetch each tier → both HIT (no new stores), each returns its own tier.
+	rF2, sF2, _ := DistillWithCache(ctx, c, in, WithTier(TierFaithful))
+	rO2, sO2, _ := DistillWithCache(ctx, c, in, WithTier(TierOutline))
+	if c.sets != 2 {
+		t.Errorf("re-fetch must hit, not store; sets=%d", c.sets)
+	}
+	if !sF2.CacheHit || !sO2.CacheHit {
+		t.Errorf("re-fetch must be hits: faithful=%v outline=%v", sF2.CacheHit, sO2.CacheHit)
+	}
+	if rF2.Markdown != rF.Markdown || rF2.Tier != TierFaithful {
+		t.Errorf("faithful hit served wrong entry: %q tier=%q", rF2.Markdown, rF2.Tier)
+	}
+	if rO2.Markdown != rO.Markdown || rO2.Tier != TierOutline {
+		t.Errorf("outline hit served wrong entry: %q tier=%q", rO2.Markdown, rO2.Tier)
+	}
+}
