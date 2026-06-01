@@ -1,0 +1,12 @@
+# PgBouncer userlist.txt — stores hashed Postgres passwords, NOT plaintext.
+#
+# How to generate the hash for the "lens" user:
+#   psql -U postgres -c "SELECT rolpassword FROM pg_authid WHERE rolname='lens';"
+# The output (e.g. "SCRAM-SHA-256$4096:...") is the value to paste below.
+#
+# Format:  "<username>" "<pg_authid_password_hash>"
+# Example (replace with the actual hash from your Postgres instance):
+#   "lens" "SCRAM-SHA-256$4096:abc123...=="
+#
+# This file is volume-mounted into the PgBouncer container at runtime.
+# Never commit a file containing real password hashes to version control.

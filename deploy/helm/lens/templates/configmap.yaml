@@ -13,6 +13,13 @@ data:
   LENS_HA_HEARTBEAT_SEC: {{ .Values.config.ha.heartbeatSec | quote }}
   LENS_HA_INSTANCE_TTL_SEC: {{ .Values.config.ha.instanceTtlSec | quote }}
   LENS_HA_DRAIN_TIMEOUT_SEC: {{ .Values.config.ha.drainTimeoutSec | quote }}
+  {{- if .Values.pgbouncer.enabled }}
+  # Injected automatically when pgbouncer.enabled=true: tells pgxpool to use
+  # simple query protocol (no prepared statements) for PgBouncer compatibility.
+  LENS_DB_PGBOUNCER: "true"
+  # When PgBouncer is in front, client connections are cheap — raise the cap.
+  LENS_DB_MAX_CONNS: "100"
+  {{- end }}
   {{- range $k, $v := .Values.config.extraEnv }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}

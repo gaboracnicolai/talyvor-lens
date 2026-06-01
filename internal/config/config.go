@@ -156,6 +156,24 @@ type Config struct {
 	// LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN=true.
 	ROIIncludeEngineerBreakdown bool
 
+	// DBPgBouncer switches pgxpool to simple-query protocol (no prepared
+	// statements), required when Lens connects through PgBouncer in
+	// transaction pooling mode. Env: LENS_DB_PGBOUNCER. Default false.
+	// The Helm chart sets this automatically when pgbouncer.enabled=true.
+	DBPgBouncer bool
+
+	// DBMaxConns caps the pgxpool at this many open server connections.
+	// Env: LENS_DB_MAX_CONNS. Default 25 (direct Postgres); raise to ~100
+	// when a PgBouncer in transaction mode sits in front because PgBouncer
+	// multiplexes many cheap client connections onto a smaller pool of real
+	// server connections.
+	DBMaxConns int32
+
+	// DBMinConns is the number of idle connections pgxpool keeps open so
+	// the first burst of requests after a quiet period isn't bottlenecked
+	// on connection establishment. Env: LENS_DB_MIN_CONNS. Default 2.
+	DBMinConns int32
+
 	// High Availability (Upgrade 7). HA is strictly opt-in via
 	// LENS_HA_ENABLED; when false (the default) the process runs as a
 	// single instance exactly as it did before HA existed. Enabling HA
@@ -214,6 +232,26 @@ func Load() (*Config, error) {
 		TokenTTL:  24 * time.Hour,
 
 		HAEnabled: parseBoolEnv("LENS_HA_ENABLED"),
+
+		DBPgBouncer: parseBoolEnv("LENS_DB_PGBOUNCER"),
+		DBMaxConns:  25,
+		DBMinConns:  2,
+	}
+
+	// Pool size overrides.
+	if v := os.Getenv("LENS_DB_MAX_CONNS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("invalid LENS_DB_MAX_CONNS (must be ≥ 1): %s", v)
+		}
+		c.DBMaxConns = int32(n)
+	}
+	if v := os.Getenv("LENS_DB_MIN_CONNS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_DB_MIN_CONNS (must be ≥ 0): %s", v)
+		}
+		c.DBMinConns = int32(n)
 	}
 
 	// HA timers, expressed in whole seconds. Defaults match the

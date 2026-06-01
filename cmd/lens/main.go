@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
@@ -122,9 +123,21 @@ func run() error {
 		logger.Warn("redis ping failed", slog.String("err", err.Error()))
 	}
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("pgxpool parse config: %w", err)
+	}
+	poolCfg.MaxConns = cfg.DBMaxConns
+	poolCfg.MinConns = cfg.DBMinConns
+	if cfg.DBPgBouncer {
+		// PgBouncer in transaction mode doesn't support the extended query
+		// protocol (prepared statements). Simple protocol is compatible with
+		// all pooling modes and has negligible overhead for OLTP queries.
+		poolCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return fmt.Errorf("pgxpool: %w", err)
 	}
 	defer pool.Close()
 
