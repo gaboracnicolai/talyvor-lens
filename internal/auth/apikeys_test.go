@@ -155,7 +155,7 @@ func TestRevoke_RemovesKeyFromCache(t *testing.T) {
 func TestMiddleware_401WhenNoKeyProvided(t *testing.T) {
 	ks := newKeyStore(nil)
 	called := false
-	h := AuthMiddleware(ks)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	h := AuthMiddleware(ks, nil)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		called = true
 	}))
 
@@ -181,7 +181,7 @@ func TestMiddleware_401ForInvalidKey(t *testing.T) {
 	ks := newKeyStore(pool)
 
 	called := false
-	h := AuthMiddleware(ks)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	h := AuthMiddleware(ks, nil)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		called = true
 	}))
 
@@ -206,7 +206,7 @@ func TestMiddleware_CallsNextHandlerForValidKey(t *testing.T) {
 	raw, _, _ := ks.GenerateKey(context.Background(), "default", "team", "test", nil)
 
 	called := false
-	h := AuthMiddleware(ks)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := AuthMiddleware(ks, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -232,7 +232,7 @@ func TestMiddleware_SetsWorkspaceHeaderFromAPIKey(t *testing.T) {
 	raw, _, _ := ks.GenerateKey(context.Background(), "team-a-workspace", "team-a", "test", nil)
 
 	var sawWorkspace, sawTeam string
-	h := AuthMiddleware(ks)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := AuthMiddleware(ks, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawWorkspace = r.Header.Get("X-Talyvor-Workspace")
 		sawTeam = r.Header.Get("X-Talyvor-Team")
 		w.WriteHeader(http.StatusOK)
