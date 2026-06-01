@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Test Doc</title>
+  <style>.x { color: red; }</style>
+</head>
+<body>
+  <h1>Title</h1>
+  <p>Hello <strong>world</strong> and <a href="https://example.com">link</a>.</p>
+  <script>alert('xss')</script>
+  <p onclick="steal()">Second paragraph with <em>emphasis</em>.</p>
+  <h2>Items</h2>
+  <ul>
+    <li>First</li>
+    <li>Second</li>
+  </ul>
+  <table>
+    <thead><tr><th>Name</th><th>Age</th></tr></thead>
+    <tbody>
+      <tr><td>Alice</td><td>30</td></tr>
+      <tr><td>Bob</td><td>25</td></tr>
+    </tbody>
+  </table>
+</body>
+</html>
