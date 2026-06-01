@@ -51,18 +51,18 @@ Most of the time we're in different code and won't collide. Collisions happen at
 _(last updated from sync: main at 0ae7872 — DISTILL conversion core shipped)_
 
 ### Nicolai + Claude — in progress
-- DISTILL feature (building in stages). Core + PDF + cache/savings + tiers DONE; next: vision fallback (stage 5).
+- DISTILL feature. Core + PDF + cache/savings + tiers + vision fallback DONE; building stage 6 (dashboard panel + ROI line). Stage 3 (request-path integration) is the remaining gated finale — needs its own sync-first session.
 
 ### Nicolai + Claude — up next (the roadmap — ours, don't take)
-- DISTILL remaining stages:
-  - 5. Vision fallback for scanned PDFs (NeedsVision is real & wired — pure internal/distill, collision-free) — NEXT
-  - 3. Request-path integration (⚠️ touches internal/proxy — seam to watch; carries the resource-isolation STAGE 3 BLOCKER + the deferred preview endpoint + the binary-format savings-attribution decision)
-  - 6. Dashboard panel + ROI-report line (where distill_tokens_saved_total becomes visible)
+- DISTILL remaining:
+  - 6. Dashboard panel + ROI line (BUILDING — surfaces distill_tokens_saved_total + distill_vision_tokens_cost_total; touches internal/dashboard = the #28 seam, header/static only)
+  - 3. Request-path integration — THE GATED FINALE (sync-first; carries: resource-isolation envelope [STAGE 3 BLOCKER], internal/proxy seam, the deferred preview endpoint, the live VisionDispatcher + token_events write + OCR caching, the binary-format savings-attribution decision)
 - token economy Phases 2–5 (⚠️ GATED — touches ledger/economy code the collaborator is ACTIVELY in; sync seam #1 before starting)
-- SOC2 foundation
+- SOC2 foundation (codeable groundwork; cert itself = a vendor like Oneleet, only when a customer requires it)
 - PoVI minting go-live: NOT a build — see preconditions section
 
 ### Collaborator — recently landed (all merged to main, in our base)
+- Process-isolation framework (#45, 31eb3e0) — distill-worker subprocess + ProcessIsolator (disposable subprocess, 30s wall-clock + 512 MiB RLIMIT_AS), cmd/distill-worker/ binary. THIS IS THE STAGE 3 BLOCKER'S SOLUTION (framework-only, not yet wired to the request path). FIRST collaborator code inside internal/distill — see new seam below.
 - Stake-listing-atomicity (a9cd852) — more ledger/economy work; **still ACTIVELY in the ledger/economy area** (relevant to the token-economy-Phases-2–5 gate).
 - Pessimistic locking on ledger writes (extended the existing PoVI FOR UPDATE pattern — seam #1 satisfied).
 - Global lexicographic lock ordering in Transfer() (#32) — resolved the open lock-ordering review item himself.
@@ -70,14 +70,15 @@ _(last updated from sync: main at 0ae7872 — DISTILL conversion core shipped)_
 - edge-infra xDS HA — in his comments, NOT yet pushed (edge-infra frozen at 05-20).
 
 ### Done (recently merged to main — drops off both lists)
-- DISTILL: core (#36) + PDF (#37) + cache/savings (#39) + fidelity tiers (#41). Conversion engine complete with selectable fidelity; preview endpoint deferred to stage 3.
+- DISTILL: core (#36) + PDF (#37) + cache/savings (#39) + fidelity tiers (#41) + vision-OCR fallback (#44). Conversion engine complete with selectable fidelity + honest vision-cost accounting; preview endpoint + live vision dispatch deferred to stage 3.
 - Chart audit items (d)+(e) + PgBouncer-safe migrations (#30); migration chain validates 36/36.
 - Minor follow-ups (#35); all earlier audit follow-ups (f)/(g), buffered-output-guardrail fix, cleanup batch.
 
 ---
 
 ## Open coordination items
-- **⚠️ STAGE 3 BLOCKER — enforced resource isolation for untrusted-doc conversion.** PDF (and any untrusted-document) conversion must run under enforced resource isolation — a separate killable process/cgroup with hard memory + CPU + wall-clock limits — before request-path exposure. In-leaf bounds are insufficient: a zlib-bomb PDF can OOM and a cyclic-ref PDF can hang/stack-overflow inside ledongthuc, and Go cannot catch OOM/stack-overflow with recover() nor kill a runaway goroutine. The 10 MiB input cap + recover handle the catchable failures only. **Resource isolation is arguably infra-tier — a candidate coordination item with the collaborator (who proposed process isolation).** Captured in code at pdf.go + skipped tripwire test TestPDFResourceResidual_KNOWN.
+- **STAGE 3 BLOCKER — RESOLVED (framework).** The resource-isolation envelope now EXISTS on main (collaborator's #45: ProcessIsolator + distill-worker, 30s + 512 MiB caps), framework-only — NOT yet wired to the request path. Stage 3 now WIRES INTO this rather than building it. Validate his framework's interface fits stage 3's needs (converters + live vision dispatch) before wiring — an investigation, not an assumption.
+- **`internal/distill` is now a SHARED seam.** Until #45 it was entirely ours (every DISTILL stage collision-free because he never touched it). #45 is the first collaborator code in the package. Treat internal/distill like the ledger/proxy seams now: sync before building in it; check what #45 changed before our next edit there (esp. stage 6 dashboard + stage 3 wiring).
 - **DISTILL request-path integration (stage 3, upcoming)** — will touch internal/proxy. Collision-free now, but sync before building it if the collaborator starts on the proxy/request path. (Carries the resource-isolation gate above.)
 - **Token economy Phases 2–5 (gated)** — touches the ledger/economy code the collaborator actively worked. MUST sync on seam #1 before starting.
 - **`costanomaly` / `dashboard` seam** — his #28 touched these (our app-tier); check what it changed before next editing those files.
