@@ -137,10 +137,12 @@ func (p *ProcessIsolator) Convert(ctx context.Context, input []byte, format Form
 	// Deliver the request, then close stdin to signal EOF to the worker.
 	if _, err := stdin.Write(reqBytes); err != nil {
 		_ = cmd.Process.Kill()
+		_ = cmd.Wait() // collect exit status — prevents a zombie on Unix / leaked handle on Windows
 		return Result{Format: format}, fmt.Errorf("distill: isolator write stdin: %w", err)
 	}
 	if err := stdin.Close(); err != nil {
 		_ = cmd.Process.Kill()
+		_ = cmd.Wait() // same: must reap the process even on the error path
 		return Result{Format: format}, fmt.Errorf("distill: isolator close stdin: %w", err)
 	}
 

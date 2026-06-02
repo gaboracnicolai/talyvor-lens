@@ -167,9 +167,8 @@ func (r *Registry) Instances(ctx context.Context) ([]Instance, error) {
 }
 
 // ActiveInstances returns instances that are eligible to receive new work:
-// status==active and a LastSeen within the TTL window (a defence-in-depth
-// freshness check on top of key expiry). When disabled it returns just this
-// instance.
+// status==active and whose Redis key has not yet expired. When disabled it
+// returns just this instance.
 func (r *Registry) ActiveInstances(ctx context.Context) ([]Instance, error) {
 	if !r.enabled {
 		return []Instance{r.Self()}, nil
@@ -178,13 +177,14 @@ func (r *Registry) ActiveInstances(ctx context.Context) ([]Instance, error) {
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
+	// Redis key TTL is the authoritative staleness gate: a crashed or silent
+	// instance's key simply expires and scan() skips it (the SCAN→GET race is
+	// already handled there). A clock-based LastSeen check would compare this
+	// instance's local time against a timestamp written by a peer's clock,
+	// which is unsound under NTP skew across hosts.
 	out := make([]Instance, 0, len(all))
 	for _, in := range all {
 		if in.Status != StatusActive {
-			continue
-		}
-		if now.Sub(in.LastSeen) > r.ttl {
 			continue
 		}
 		out = append(out, in)
