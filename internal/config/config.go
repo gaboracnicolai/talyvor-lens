@@ -156,6 +156,21 @@ type Config struct {
 	// LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN=true.
 	ROIIncludeEngineerBreakdown bool
 
+	// TLS / HTTPS (Let's Encrypt autocert).
+	//
+	// TLSDomain is the public hostname Lens provisions a certificate for.
+	// When set, the server binds on :443 (TLS) and :80 (HTTP→HTTPS redirect).
+	// When empty, Lens runs plain HTTP on ListenAddr — safe for local dev or
+	// when TLS is terminated upstream (e.g. nginx, a load balancer, Cloudflare).
+	// Env: LENS_TLS_DOMAIN.
+	//
+	// TLSCacheDir is where autocert stores the Let's Encrypt certificate and
+	// private key across restarts. The directory must be writable by the Lens
+	// process. Defaults to /var/cache/lens-tls.
+	// Env: LENS_TLS_CACHE_DIR.
+	TLSDomain   string
+	TLSCacheDir string
+
 	// DBPgBouncer switches pgxpool to simple-query protocol (no prepared
 	// statements), required when Lens connects through PgBouncer in
 	// transaction pooling mode. Env: LENS_DB_PGBOUNCER. Default false.
@@ -227,6 +242,9 @@ func Load() (*Config, error) {
 		RoutingIntelligenceEnabled: parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 
 		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
+
+		TLSDomain:   os.Getenv("LENS_TLS_DOMAIN"),
+		TLSCacheDir: getEnv("LENS_TLS_CACHE_DIR", "/var/cache/lens-tls"),
 
 		JWTSecret: os.Getenv("LENS_JWT_SECRET"),
 		TokenTTL:  24 * time.Hour,
