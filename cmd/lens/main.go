@@ -135,7 +135,13 @@ func runMigrate() error {
 	if err != nil {
 		return fmt.Errorf("migrate: connect: %w", err)
 	}
-	defer func() { _ = conn.Close(context.Background()) }()
+	defer func() {
+		// context.Background() would hang indefinitely if the network is
+		// degraded; use a short bounded timeout so the process can exit cleanly.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		_ = conn.Close(closeCtx)
+	}()
 
 	applied, err := dbmigrate.Run(ctx, conn, migrations.FS)
 	if err != nil {
@@ -3160,6 +3166,15 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 	})
+
+	// Verify the TLS cert cache directory exists and is writable before
+	// handing control to the autocert manager.  Failing here is cheap;
+	// failing at the first TLS handshake burns Let's Encrypt rate-limit quota.
+	if cfg.TLSDomain != "" {
+		if err := checkTLSCacheDir(cfg.TLSCacheDir); err != nil {
+			return fmt.Errorf("TLS setup: %w", err)
+		}
+	}
 
 	servers, serverErr := startServers(cfg, r, logger)
 

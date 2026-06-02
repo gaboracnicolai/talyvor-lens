@@ -28,14 +28,39 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/talyvor/lens/internal/config"
+)
+
+// Server timeout constants.
+//
+// ReadHeaderTimeout — applies to all three servers.  10 s is generous for
+// any well-behaved client sending headers; keeps Slowloris (header-side)
+// from pinning goroutines.
+//
+// proxyWriteTimeout — main proxy server only.  Streaming LLM responses can
+// legitimately hold a connection open for 30 s–2 min; 5 min gives headroom
+// while still evicting truly stuck connections.
+//
+// shortWriteTimeout — redirect server and plain-HTTP server.  Neither ever
+// streams; a 30 s write cap is more than sufficient.
+//
+// serverIdleTimeout — applied to all three servers.  After 2 min of
+// keep-alive inactivity the server closes the connection, reclaiming the
+// goroutine from genuinely idle clients.
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	proxyWriteTimeout       = 5 * time.Minute
+	shortWriteTimeout       = 30 * time.Second
+	serverIdleTimeout       = 120 * time.Second
 )
 
 // serverSet holds the live server(s) so the caller can shut them all down.
@@ -77,7 +102,9 @@ func startPlainHTTP(cfg *config.Config, handler http.Handler, logger *slog.Logge
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		WriteTimeout:      shortWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
 	}
 
 	errCh := make(chan error, 1)
@@ -146,10 +173,17 @@ func startTLS(cfg *config.Config, handler http.Handler, logger *slog.Logger) (*s
 	}
 
 	mainSrv := &http.Server{
-		Addr:              ":443",
-		Handler:           hstsMiddleware(handler),
+		Addr:    ":443",
+		Handler: hstsMiddleware(handler),
+		// WriteTimeout is set to proxyWriteTimeout (5 min) rather than the
+		// shorter shortWriteTimeout because this server proxies streaming LLM
+		// responses which can legitimately hold a connection for minutes.
+		// ReadHeaderTimeout still closes the connection fast if the client
+		// stalls before finishing its request headers.
 		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		WriteTimeout:      proxyWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
 	}
 
 	// Port 80 serves two purposes:
@@ -161,7 +195,9 @@ func startTLS(cfg *config.Config, handler http.Handler, logger *slog.Logger) (*s
 	redirectSrv := &http.Server{
 		Addr:              ":80",
 		Handler:           certManager.HTTPHandler(http.HandlerFunc(httpsRedirectHandler)),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		WriteTimeout:      shortWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
 	}
 
 	go func() {
@@ -201,6 +237,30 @@ func httpsRedirectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	target := "https://" + host + r.URL.RequestURI()
 	http.Redirect(w, r, target, http.StatusMovedPermanently)
+}
+
+// checkTLSCacheDir verifies that dir exists (creating it if needed) and is
+// writable by the current process.  It must be called before the autocert
+// manager is initialised so a misconfigured cache is caught at startup rather
+// than silently at first handshake time.
+//
+// Why this matters: autocert.DirCache defers os.MkdirAll until the first
+// cert write, which happens at the TLS handshake.  A non-writable location
+// (e.g. a read-only filesystem in a locked-down container) causes every cert
+// fetch to fail, and each restart triggers a fresh ACME round-trip that burns
+// Let's Encrypt rate-limit quota (5 certs/domain/week).  Failing fast here is
+// cheaper than debugging a LE rate-limit hit in production.
+func checkTLSCacheDir(dir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("tls cache dir %q: cannot create: %w", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".lens-tls-probe-*")
+	if err != nil {
+		return fmt.Errorf("tls cache dir %q is not writable: %w", dir, err)
+	}
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+	return nil
 }
 
 // hstsMiddleware wraps a handler and stamps Strict-Transport-Security on
