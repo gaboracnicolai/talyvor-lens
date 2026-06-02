@@ -126,6 +126,12 @@ func runMigrate() error {
 	if migrateSSLMode == "" {
 		migrateSSLMode = "require"
 	}
+	// Validate before injecting — without this, an invalid value like
+	// LENS_DB_SSL_MODE=badinput would pass silently and produce a confusing
+	// pgx connect error instead of a clear startup failure.
+	if err := config.ValidateDBSSLMode(migrateSSLMode); err != nil {
+		return err
+	}
 	dbURL := injectSSLMode(rawDBURL, migrateSSLMode)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -305,16 +305,8 @@ func Load() (*Config, error) {
 		c.DBMinConns = int32(n)
 	}
 
-	// Validate DBSSLMode against the six libpq values.
-	validSSLModes := map[string]bool{
-		"disable": true, "allow": true, "prefer": true,
-		"require": true, "verify-ca": true, "verify-full": true,
-	}
-	if !validSSLModes[c.DBSSLMode] {
-		return nil, fmt.Errorf(
-			"invalid LENS_DB_SSL_MODE %q: must be one of disable, allow, prefer, require, verify-ca, verify-full",
-			c.DBSSLMode,
-		)
+	if err := ValidateDBSSLMode(c.DBSSLMode); err != nil {
+		return nil, err
 	}
 
 	// HA timers, expressed in whole seconds. Defaults match the
@@ -492,6 +484,22 @@ func Load() (*Config, error) {
 }
 
 var ErrMissingEnv = errors.New("missing required environment variables")
+
+// ValidateDBSSLMode returns an error if mode is not one of the six values
+// accepted by libpq / pgx for the sslmode parameter.  It is exported so that
+// code paths that bypass Load (e.g. the migrate sub-command) can apply the
+// same validation and produce the same clear error message.
+func ValidateDBSSLMode(mode string) error {
+	switch mode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+		return nil
+	default:
+		return fmt.Errorf(
+			"invalid LENS_DB_SSL_MODE %q: must be one of disable, allow, prefer, require, verify-ca, verify-full",
+			mode,
+		)
+	}
+}
 
 // defaultDistillWorkerBin resolves the distill-worker path to a binary named
 // "distill-worker" sitting beside the running executable (e.g. /distill-worker

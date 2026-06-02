@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
@@ -200,16 +201,32 @@ func startTLS(cfg *config.Config, handler http.Handler, logger *slog.Logger) (*s
 		IdleTimeout:       serverIdleTimeout,
 	}
 
+	// errCh is declared before the redirect goroutine so the goroutine can
+	// send a fatal error if port 80 is unavailable on a fresh deployment.
+	errCh := make(chan error, 1)
+
 	go func() {
 		logger.Info("http redirect server listening", slog.String("addr", ":80"))
 		if err := redirectSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			// Log but do not propagate — a port-80 failure is non-fatal when
-			// the cert is already cached (ACME won't need it until renewal).
-			logger.Warn("http redirect server error", slog.String("err", err.Error()))
+			if certIsCached(cfg.TLSCacheDir, cfg.TLSDomain) {
+				// Cert is already on disk — TLS handshakes will continue to
+				// succeed from the cache.  Port 80 will be needed again at the
+				// 90-day renewal; the operator has time to fix it.
+				logger.Warn("http redirect server error (cert cached — TLS still works; fix port 80 before renewal)",
+					slog.String("err", err.Error()))
+			} else {
+				// Fresh deployment — no cert on disk.  autocert's ACME HTTP-01
+				// challenge requires port 80; without it every incoming TLS
+				// handshake will fail.  Treat this as fatal so the operator
+				// sees a clear error at startup rather than confusing handshake
+				// failures on port 443.
+				logger.Error("http redirect server failed on fresh deployment — ACME HTTP-01 needs port 80 to provision the first cert; TLS will not work",
+					slog.String("err", err.Error()))
+				errCh <- fmt.Errorf("redirect server: port 80 bind failed with no cached cert (ACME HTTP-01 provisioning impossible): %w", err)
+			}
 		}
 	}()
 
-	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("server listening (TLS / Let's Encrypt)",
 			slog.String("addr", ":443"),
@@ -237,6 +254,16 @@ func httpsRedirectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	target := "https://" + host + r.URL.RequestURI()
 	http.Redirect(w, r, target, http.StatusMovedPermanently)
+}
+
+// certIsCached reports whether autocert has already written a certificate for
+// domain into dir.  autocert.DirCache stores each cert under the hostname as
+// the filename (e.g. dir/example.com).  This is used to distinguish a fresh
+// deployment (no cert yet — port 80 is critical for ACME HTTP-01) from a
+// restarted one (cert on disk — port 80 is only needed for renewal).
+func certIsCached(dir, domain string) bool {
+	_, err := os.Stat(filepath.Join(dir, domain))
+	return err == nil
 }
 
 // checkTLSCacheDir verifies that dir exists (creating it if needed) and is
