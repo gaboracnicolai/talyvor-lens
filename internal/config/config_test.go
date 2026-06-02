@@ -75,3 +75,47 @@ func TestLoad_HAInvalidValueRejected(t *testing.T) {
 		t.Error("expected error for LENS_HA_INSTANCE_TTL_SEC=0")
 	}
 }
+
+func TestLoad_DBSSLModeDefault(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DBSSLMode != "require" {
+		t.Errorf("DBSSLMode default = %q, want %q", c.DBSSLMode, "require")
+	}
+}
+
+func TestLoad_DBSSLModeOverride(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_DB_SSL_MODE", "verify-full")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DBSSLMode != "verify-full" {
+		t.Errorf("DBSSLMode = %q, want %q", c.DBSSLMode, "verify-full")
+	}
+}
+
+func TestLoad_DBSSLModeInvalidRejected(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_DB_SSL_MODE", "bogus")
+	if _, err := Load(); err == nil {
+		t.Error("expected error for LENS_DB_SSL_MODE=bogus")
+	}
+}
+
+func TestLoad_DBSSLModeDisableAllowed(t *testing.T) {
+	// "disable" is a valid (if insecure) value — Load must accept it.
+	setRequiredEnv(t)
+	t.Setenv("LENS_DB_SSL_MODE", "disable")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DBSSLMode != "disable" {
+		t.Errorf("DBSSLMode = %q, want %q", c.DBSSLMode, "disable")
+	}
+}

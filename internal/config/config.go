@@ -172,6 +172,25 @@ type Config struct {
 	TLSDomain   string
 	TLSCacheDir string
 
+	// DBSSLMode controls TLS for the Postgres connection.
+	// Env: LENS_DB_SSL_MODE. Default "require".
+	//
+	// Valid values mirror the libpq sslmode parameter:
+	//   disable     — no TLS; only appropriate for localhost / trusted private
+	//                 networks.  Logs a startup warning when set.
+	//   allow       — try plain TCP first, upgrade to TLS if the server
+	//                 demands it.  Not recommended (MITM-capable).
+	//   prefer      — try TLS first, fall back to plain TCP.  pgx default
+	//                 when sslmode is omitted; not suitable for production.
+	//   require     — always use TLS; skip server certificate verification.
+	//                 Safe for most managed databases (RDS, Supabase, Neon,
+	//                 etc.) that present TLS certs signed by a private CA.
+	//   verify-ca   — require TLS and verify the server cert is signed by a
+	//                 trusted CA (set sslrootcert in the DSN or via PGSSLROOTCERT).
+	//   verify-full — require TLS, verify CA, and verify the server hostname.
+	//                 Strongest option; requires a valid cert chain.
+	DBSSLMode string
+
 	// DBPgBouncer switches pgxpool to simple-query protocol (no prepared
 	// statements), required when Lens connects through PgBouncer in
 	// transaction pooling mode. Env: LENS_DB_PGBOUNCER. Default false.
@@ -264,6 +283,7 @@ func Load() (*Config, error) {
 
 		DistillWorkerBin: getEnv("LENS_DISTILL_WORKER_BIN", defaultDistillWorkerBin()),
 
+		DBSSLMode:   getEnv("LENS_DB_SSL_MODE", "require"),
 		DBPgBouncer: parseBoolEnv("LENS_DB_PGBOUNCER"),
 		DBMaxConns:  25,
 		DBMinConns:  2,
@@ -283,6 +303,18 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_DB_MIN_CONNS (must be ≥ 0): %s", v)
 		}
 		c.DBMinConns = int32(n)
+	}
+
+	// Validate DBSSLMode against the six libpq values.
+	validSSLModes := map[string]bool{
+		"disable": true, "allow": true, "prefer": true,
+		"require": true, "verify-ca": true, "verify-full": true,
+	}
+	if !validSSLModes[c.DBSSLMode] {
+		return nil, fmt.Errorf(
+			"invalid LENS_DB_SSL_MODE %q: must be one of disable, allow, prefer, require, verify-ca, verify-full",
+			c.DBSSLMode,
+		)
 	}
 
 	// HA timers, expressed in whole seconds. Defaults match the

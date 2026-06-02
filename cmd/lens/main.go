@@ -115,10 +115,18 @@ func runMigrate() error {
 	}
 	slog.SetDefault(newLogger(level))
 
-	dbURL := os.Getenv("LENS_DATABASE_URL")
-	if dbURL == "" {
+	rawDBURL := os.Getenv("LENS_DATABASE_URL")
+	if rawDBURL == "" {
 		return dbmigrate.ErrNoDatabaseURL
 	}
+	// Apply the same sslmode default as the main server so the migration
+	// connection is also encrypted. The operator can override by either
+	// embedding sslmode= in LENS_DATABASE_URL or by setting LENS_DB_SSL_MODE.
+	migrateSSLMode := os.Getenv("LENS_DB_SSL_MODE")
+	if migrateSSLMode == "" {
+		migrateSSLMode = "require"
+	}
+	dbURL := injectSSLMode(rawDBURL, migrateSSLMode)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -178,7 +186,16 @@ func run() error {
 		logger.Warn("redis ping failed", slog.String("err", err.Error()))
 	}
 
-	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	// Inject sslmode before parsing so every pool connection is encrypted.
+	// injectSSLMode is a no-op when the operator already set sslmode= in the URL.
+	dbURL := injectSSLMode(cfg.DatabaseURL, cfg.DBSSLMode)
+	if cfg.DBSSLMode == "disable" {
+		logger.Warn("postgres TLS is disabled — connection is unencrypted; set LENS_DB_SSL_MODE=require for production")
+	} else {
+		logger.Info("postgres TLS", slog.String("sslmode", cfg.DBSSLMode))
+	}
+
+	poolCfg, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
 		return fmt.Errorf("pgxpool parse config: %w", err)
 	}
