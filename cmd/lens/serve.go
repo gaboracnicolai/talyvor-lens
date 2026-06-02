@@ -29,6 +29,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -145,7 +146,7 @@ func startTLS(cfg *config.Config, handler http.Handler, logger *slog.Logger) (*s
 
 	mainSrv := &http.Server{
 		Addr:              ":443",
-		Handler:           handler,
+		Handler:           hstsMiddleware(handler),
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -190,7 +191,29 @@ func startTLS(cfg *config.Config, handler http.Handler, logger *slog.Logger) (*s
 
 // httpsRedirectHandler issues a 301 Moved Permanently redirect from the
 // HTTP URL to its HTTPS equivalent, preserving the path and query string.
+// The port is stripped from r.Host because a client that sends "Host: example.com:80"
+// would otherwise be redirected to https://example.com:80/… (port 80 over TLS — wrong).
 func httpsRedirectHandler(w http.ResponseWriter, r *http.Request) {
-	target := "https://" + r.Host + r.URL.RequestURI()
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	target := "https://" + host + r.URL.RequestURI()
 	http.Redirect(w, r, target, http.StatusMovedPermanently)
+}
+
+// hstsMiddleware wraps a handler and stamps Strict-Transport-Security on
+// every response.  It is applied only to the TLS server (port 443) —
+// never to the plain-HTTP redirect server — so browsers only pin the
+// header over a connection they already know is secure.
+//
+// max-age=63072000 = 2 years (the recommended minimum for HSTS preloading).
+// includeSubDomains covers any sub-domain served by the same instance.
+// preload is intentionally omitted until the domain is submitted to the
+// HSTS preload list (https://hstspreload.org) — it cannot be undone easily.
+func hstsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		next.ServeHTTP(w, r)
+	})
 }
