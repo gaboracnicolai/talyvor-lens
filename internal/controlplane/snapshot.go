@@ -70,6 +70,13 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 	// last handled the HTTP heartbeat request.
 
 	// ── Inference nodes ──────────────────────────────────────────────────────
+	// Each section closes its rows explicitly before issuing the next
+	// pool.Query.  pgxpool.Query checks out a connection per call and holds
+	// it until rows.Close().  With all three rowsets open simultaneously via
+	// defer, a pool under pressure (or sized at 1 in tests) self-deadlocks:
+	// the second Query blocks waiting for a free connection that the first
+	// rows object is still holding.  The defer calls below are kept as
+	// error-path safety nets (pgx rows.Close is idempotent).
 	irows, err := s.pool.Query(ctx, `
 		SELECT id, workspace_id, url, provider, models,
 		       gpu_type, max_concurrent, price_per_token,
@@ -97,6 +104,7 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 	if err := irows.Err(); err != nil {
 		return nil, fmt.Errorf("controlplane: snapshot inference rows: %w", err)
 	}
+	irows.Close() // release connection before querying the next table
 
 	// ── Cache nodes ──────────────────────────────────────────────────────────
 	crows, err := s.pool.Query(ctx, `
@@ -120,6 +128,7 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 	if err := crows.Err(); err != nil {
 		return nil, fmt.Errorf("controlplane: snapshot cache rows: %w", err)
 	}
+	crows.Close() // release connection before querying the next table
 
 	// ── Embedding nodes ──────────────────────────────────────────────────────
 	erows, err := s.pool.Query(ctx, `
