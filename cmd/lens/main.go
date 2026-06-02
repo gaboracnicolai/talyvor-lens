@@ -402,10 +402,11 @@ func run() error {
 	// election) sees current liveness state immediately — the xDS HA property.
 	cpHB := controlplane.NewHeartbeatStore(redisClient)
 	cpStore := controlplane.NewNodeStore(pool, cpHB)
-	cpPublisher := controlplane.NewPublisher(redisClient)
+	const cpReconcileInterval = 30 * time.Second
+	cpPublisher := controlplane.NewPublisher(redisClient, cpReconcileInterval)
 	cpReconciler := controlplane.NewReconciler(cpStore, cpPublisher)
-	go haComps.leader.Run(ctx, "node-reconciler", 30*time.Second, func(lctx context.Context) {
-		cpReconciler.Run(lctx, 30*time.Second)
+	go haComps.leader.Run(ctx, "node-reconciler", cpReconcileInterval, func(lctx context.Context) {
+		cpReconciler.Run(lctx, cpReconcileInterval)
 	})
 	cpSyncer := controlplane.NewNodeSyncer(cpPublisher, localRouterMulti)
 	go cpSyncer.Run(ctx, 30*time.Second)

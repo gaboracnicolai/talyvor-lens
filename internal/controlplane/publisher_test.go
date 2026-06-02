@@ -27,7 +27,7 @@ func newTestRedis(t *testing.T) (*redis.Client, *miniredis.Miniredis) {
 
 func TestPublisher_RoundTrip(t *testing.T) {
 	rc, _ := newTestRedis(t)
-	pub := newPublisher(rc)
+	pub := newPublisher(rc, 0)
 
 	snap := &NodeSnapshot{
 		GeneratedAt: time.Now().UTC(),
@@ -61,7 +61,7 @@ func TestPublisher_RoundTrip(t *testing.T) {
 
 func TestPublisher_Latest_NoSnapshot_ReturnsNil(t *testing.T) {
 	rc, _ := newTestRedis(t)
-	pub := newPublisher(rc)
+	pub := newPublisher(rc, 0)
 	snap, err := pub.Latest(context.Background())
 	if err != nil {
 		t.Fatalf("Latest with no snapshot should not error, got: %v", err)
@@ -72,7 +72,7 @@ func TestPublisher_Latest_NoSnapshot_ReturnsNil(t *testing.T) {
 }
 
 func TestPublisher_NilRedis_NoOp(t *testing.T) {
-	pub := NewPublisher(nil)
+	pub := NewPublisher(nil, 0)
 	if err := pub.Publish(context.Background(), &NodeSnapshot{}); err != nil {
 		t.Fatalf("Publish with nil redis should not error, got: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestPublisher_NilRedis_NoOp(t *testing.T) {
 
 func TestPublisher_TTLIsSet(t *testing.T) {
 	rc, mr := newTestRedis(t)
-	pub := newPublisher(rc)
+	pub := newPublisher(rc, 0)
 	if err := pub.Publish(context.Background(), &NodeSnapshot{GeneratedAt: time.Now()}); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestPublisher_TTLIsSet(t *testing.T) {
 
 func TestPublisher_SecondPublishOverwrites(t *testing.T) {
 	rc, _ := newTestRedis(t)
-	pub := newPublisher(rc)
+	pub := newPublisher(rc, 0)
 
 	first := &NodeSnapshot{CacheNodes: []CacheNodeEntry{{ID: "c-first"}}}
 	second := &NodeSnapshot{CacheNodes: []CacheNodeEntry{{ID: "c-second"}}}
@@ -120,7 +120,7 @@ func TestPublisher_SecondPublishOverwrites(t *testing.T) {
 
 func TestNodeSyncer_RegistersInferenceNodes(t *testing.T) {
 	rc, _ := newTestRedis(t)
-	pub := newPublisher(rc)
+	pub := newPublisher(rc, 0)
 
 	snap := &NodeSnapshot{
 		GeneratedAt: time.Now(),
@@ -144,7 +144,7 @@ func TestNodeSyncer_RegistersInferenceNodes(t *testing.T) {
 
 func TestNodeSyncer_RemovesStaleNodes(t *testing.T) {
 	rc, _ := newTestRedis(t)
-	pub := newPublisher(rc)
+	pub := newPublisher(rc, 0)
 
 	router := newFakeRegistry()
 	// Pre-register a stale mining endpoint and a static (WorkspaceID="") endpoint.
@@ -169,7 +169,7 @@ func TestNodeSyncer_RemovesStaleNodes(t *testing.T) {
 
 func TestNodeSyncer_NoSnapshot_NoChange(t *testing.T) {
 	rc, _ := newTestRedis(t)
-	pub := newPublisher(rc)
+	pub := newPublisher(rc, 0)
 
 	router := newFakeRegistry()
 	router.entries["existing"] = fakeEntry{ID: "existing", WorkspaceID: "ws1"}
