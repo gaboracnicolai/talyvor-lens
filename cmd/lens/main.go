@@ -3144,20 +3144,7 @@ func run() error {
 		})
 	})
 
-	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           r,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	serverErr := make(chan error, 1)
-	go func() {
-		logger.Info("server listening", slog.String("addr", cfg.ListenAddr))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-		}
-		close(serverErr)
-	}()
+	servers, serverErr := startServers(cfg, r, logger)
 
 	select {
 	case <-ctx.Done():
@@ -3192,7 +3179,7 @@ func run() error {
 		}
 	}
 
-	if err := srv.Shutdown(drainCtx); err != nil {
+	if err := servers.shutdown(drainCtx); err != nil {
 		return err
 	}
 
