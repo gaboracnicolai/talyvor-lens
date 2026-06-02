@@ -64,8 +64,11 @@ func TestRegistry_ActiveInstancesFiltersStaleAndDraining(t *testing.T) {
 	writeInstance(t, h, testInstance("peer-active", StatusActive, time.Now()))
 	// peer-draining: should be excluded from "active for routing"
 	writeInstance(t, h, testInstance("peer-draining", StatusDraining, time.Now()))
-	// peer-stale: active status but LastSeen is ancient → excluded
-	writeInstance(t, h, testInstance("peer-stale", StatusActive, time.Now().Add(-time.Hour)))
+	// peer-expired: active status, but its Redis key has a 1 s TTL that we
+	// immediately advance past. Redis key expiry is the authoritative staleness
+	// gate — no clock-skew-sensitive LastSeen comparison needed.
+	writeInstanceWithTTL(t, h, testInstance("peer-expired", StatusActive, time.Now()), 1*time.Second)
+	h.mr.FastForward(2 * time.Second)
 
 	active, err := reg.ActiveInstances(ctx)
 	if err != nil {
@@ -78,8 +81,8 @@ func TestRegistry_ActiveInstancesFiltersStaleAndDraining(t *testing.T) {
 	if got["peer-draining"] {
 		t.Error("draining instance must be excluded from active set")
 	}
-	if got["peer-stale"] {
-		t.Error("stale instance must be excluded from active set")
+	if got["peer-expired"] {
+		t.Error("expired instance must be excluded from active set (key TTL elapsed)")
 	}
 }
 
@@ -149,11 +152,16 @@ func TestRegistry_DisabledIsNoOpAndReturnsSelf(t *testing.T) {
 
 func writeInstance(t *testing.T, h *miniRedisHandle, in Instance) {
 	t.Helper()
+	writeInstanceWithTTL(t, h, in, 15*time.Second)
+}
+
+func writeInstanceWithTTL(t *testing.T, h *miniRedisHandle, in Instance, ttl time.Duration) {
+	t.Helper()
 	data, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := h.rc.Set(context.Background(), "ha:instance:"+in.ID, data, 15*time.Second).Err(); err != nil {
+	if err := h.rc.Set(context.Background(), "ha:instance:"+in.ID, data, ttl).Err(); err != nil {
 		t.Fatalf("seed instance: %v", err)
 	}
 }

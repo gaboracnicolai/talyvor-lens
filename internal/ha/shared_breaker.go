@@ -39,7 +39,7 @@ type SharedBreaker struct {
 	selfID   string
 	enabled  bool
 
-	mu  sync.Mutex
+	mu  sync.RWMutex
 	sub *redis.PubSub
 	ctx context.Context
 }
@@ -62,7 +62,9 @@ func (b *SharedBreaker) Publish(provider string, to retry.CBState) {
 	if !b.enabled {
 		return
 	}
+	b.mu.RLock()
 	ctx := b.ctx
+	b.mu.RUnlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}
