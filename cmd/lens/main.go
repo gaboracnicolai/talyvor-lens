@@ -115,10 +115,18 @@ func runMigrate() error {
 	}
 	slog.SetDefault(newLogger(level))
 
-	dbURL := os.Getenv("LENS_DATABASE_URL")
-	if dbURL == "" {
+	rawDBURL := os.Getenv("LENS_DATABASE_URL")
+	if rawDBURL == "" {
 		return dbmigrate.ErrNoDatabaseURL
 	}
+	// Apply the same sslmode default as the main server so the migration
+	// connection is also encrypted. The operator can override by either
+	// embedding sslmode= in LENS_DATABASE_URL or by setting LENS_DB_SSL_MODE.
+	migrateSSLMode := os.Getenv("LENS_DB_SSL_MODE")
+	if migrateSSLMode == "" {
+		migrateSSLMode = "require"
+	}
+	dbURL := injectSSLMode(rawDBURL, migrateSSLMode)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -127,7 +135,13 @@ func runMigrate() error {
 	if err != nil {
 		return fmt.Errorf("migrate: connect: %w", err)
 	}
-	defer func() { _ = conn.Close(context.Background()) }()
+	defer func() {
+		// context.Background() would hang indefinitely if the network is
+		// degraded; use a short bounded timeout so the process can exit cleanly.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		_ = conn.Close(closeCtx)
+	}()
 
 	applied, err := dbmigrate.Run(ctx, conn, migrations.FS)
 	if err != nil {
@@ -178,7 +192,16 @@ func run() error {
 		logger.Warn("redis ping failed", slog.String("err", err.Error()))
 	}
 
-	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	// Inject sslmode before parsing so every pool connection is encrypted.
+	// injectSSLMode is a no-op when the operator already set sslmode= in the URL.
+	dbURL := injectSSLMode(cfg.DatabaseURL, cfg.DBSSLMode)
+	if cfg.DBSSLMode == "disable" {
+		logger.Warn("postgres TLS is disabled — connection is unencrypted; set LENS_DB_SSL_MODE=require for production")
+	} else {
+		logger.Info("postgres TLS", slog.String("sslmode", cfg.DBSSLMode))
+	}
+
+	poolCfg, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
 		return fmt.Errorf("pgxpool parse config: %w", err)
 	}
@@ -3143,6 +3166,15 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 	})
+
+	// Verify the TLS cert cache directory exists and is writable before
+	// handing control to the autocert manager.  Failing here is cheap;
+	// failing at the first TLS handshake burns Let's Encrypt rate-limit quota.
+	if cfg.TLSDomain != "" {
+		if err := checkTLSCacheDir(cfg.TLSCacheDir); err != nil {
+			return fmt.Errorf("TLS setup: %w", err)
+		}
+	}
 
 	servers, serverErr := startServers(cfg, r, logger)
 
