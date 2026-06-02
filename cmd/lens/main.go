@@ -191,6 +191,21 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// redisTLSActive is true when either:
+	//   (a) the URL uses rediss:// — go-redis already set TLSConfig, or
+	//   (b) LENS_REDIS_TLS=true — operator forces TLS on a redis:// URL.
+	redisTLSActive := redisOpts.TLSConfig != nil || cfg.RedisTLS
+	if redisTLSActive {
+		applyRedisTLS(redisOpts, cfg.RedisTLSSkipVerify)
+		logger.Info("redis TLS enabled", slog.Bool("skip_verify", cfg.RedisTLSSkipVerify))
+		if cfg.RedisTLSSkipVerify {
+			logger.Warn("redis TLS certificate verification is disabled (LENS_REDIS_TLS_SKIP_VERIFY=true)" +
+				" — only appropriate for self-signed certs in controlled environments")
+		}
+	} else {
+		logger.Warn("redis TLS is disabled — connection is unencrypted;" +
+			" use a rediss:// URL or set LENS_REDIS_TLS=true for production")
+	}
 	redisClient := redis.NewClient(redisOpts)
 	defer func() { _ = redisClient.Close() }()
 
