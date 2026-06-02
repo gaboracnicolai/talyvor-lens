@@ -54,3 +54,35 @@ func TestParse_RejectsMalformedName(t *testing.T) {
 		t.Fatal("a .sql file without an NNNN_ version prefix must be rejected")
 	}
 }
+
+func TestParse_NoTxFlagSetWhenMarkerPresent(t *testing.T) {
+	fsys := fstest.MapFS{
+		"0001_normal.sql": {Data: []byte("CREATE TABLE a();")},
+		"0002_notx.sql": {Data: []byte(
+			"-- 0002_notx.sql\n-- lens:no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS idx_foo;",
+		)},
+	}
+	got, err := Parse(fsys)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got[0].NoTx {
+		t.Error("0001_normal.sql: NoTx should be false (no marker)")
+	}
+	if !got[1].NoTx {
+		t.Error("0002_notx.sql: NoTx should be true (marker present)")
+	}
+}
+
+func TestParse_NoTxFalseWithoutMarker(t *testing.T) {
+	fsys := fstest.MapFS{
+		"0001_create.sql": {Data: []byte("CREATE TABLE t (id BIGINT PRIMARY KEY);")},
+	}
+	got, err := Parse(fsys)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got[0].NoTx {
+		t.Error("NoTx should be false when the marker is absent")
+	}
+}

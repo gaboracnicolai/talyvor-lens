@@ -1,4 +1,5 @@
 -- 0037_drop_redundant_prompt_hash_idx.sql
+-- lens:no-transaction
 --
 -- Drops the redundant single-column index idx_token_events_prompt_hash from
 -- the token_events partitioned table.

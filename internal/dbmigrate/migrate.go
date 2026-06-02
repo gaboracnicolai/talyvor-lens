@@ -17,11 +17,28 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// noTxMarker is a SQL comment that opts a migration out of the automatic
+// BEGIN/COMMIT wrapper.  Place it anywhere in the file body; the runner
+// executes the SQL directly on the connection and records the version in
+// a separate transaction afterward.
+//
+// Only use this for statements Postgres explicitly forbids inside a
+// transaction block (DROP INDEX CONCURRENTLY, CREATE INDEX CONCURRENTLY,
+// VACUUM, REINDEX CONCURRENTLY).  Because the SQL and the version-record
+// steps are no longer atomic, the migration SQL must be idempotent
+// (IF EXISTS / IF NOT EXISTS guards) so that a crash between them is
+// safe to re-run.
+const noTxMarker = "-- lens:no-transaction"
+
 // Migration is one parsed *.sql file.
 type Migration struct {
 	Version string // numeric prefix, e.g. "0001"
 	Name    string // full filename, e.g. "0001_init.sql"
 	SQL     string // file body
+	// NoTx is true when the file body contains noTxMarker.  The runner
+	// executes such migrations outside any transaction block, which is
+	// required for statements like DROP/CREATE INDEX CONCURRENTLY.
+	NoTx bool
 }
 
 // Parse reads every *.sql file at the root of fsys and returns them sorted by
@@ -51,7 +68,13 @@ func Parse(fsys fs.FS) ([]Migration, error) {
 		if err != nil {
 			return nil, fmt.Errorf("dbmigrate: read %q: %w", name, err)
 		}
-		out = append(out, Migration{Version: version, Name: name, SQL: string(body)})
+		sql := string(body)
+		out = append(out, Migration{
+			Version: version,
+			Name:    name,
+			SQL:     sql,
+			NoTx:    strings.Contains(sql, noTxMarker),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	return out, nil
@@ -104,7 +127,13 @@ func Run(ctx context.Context, conn *pgx.Conn, fsys fs.FS) ([]string, error) {
 		if applied[m.Version] {
 			continue
 		}
-		if err := applyOne(ctx, conn, m); err != nil {
+		var err error
+		if m.NoTx {
+			err = applyOneNoTx(ctx, conn, m)
+		} else {
+			err = applyOne(ctx, conn, m)
+		}
+		if err != nil {
 			return newlyApplied, fmt.Errorf("dbmigrate: migration %s failed: %w", m.Name, err)
 		}
 		newlyApplied = append(newlyApplied, m.Version)
@@ -124,6 +153,37 @@ func applyOne(ctx context.Context, conn *pgx.Conn, m Migration) error {
 	if _, err := tx.Exec(ctx, m.SQL); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`,
+		m.Version, m.Name); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// applyOneNoTx runs a no-transaction migration in two steps:
+//
+//  1. Execute the SQL directly on the connection (no BEGIN/COMMIT wrapper),
+//     which is required for statements Postgres forbids inside a transaction
+//     block (e.g. DROP INDEX CONCURRENTLY).
+//
+//  2. Record the applied version in schema_migrations inside its own
+//     transaction, separate from step 1.
+//
+// Because steps 1 and 2 are not atomic, a crash between them leaves the
+// schema change applied but the version unrecorded. On the next run the
+// SQL executes again. The migration SQL must therefore be idempotent
+// (IF EXISTS / IF NOT EXISTS) so the retry is a safe no-op.
+func applyOneNoTx(ctx context.Context, conn *pgx.Conn, m Migration) error {
+	if _, err := conn.Exec(ctx, m.SQL); err != nil {
+		return err
+	}
+	// Record the version in its own transaction.
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`,
 		m.Version, m.Name); err != nil {
