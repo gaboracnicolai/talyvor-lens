@@ -172,6 +172,27 @@ type Config struct {
 	TLSDomain   string
 	TLSCacheDir string
 
+	// RedisTLS controls TLS for the Redis connection.
+	// Env: LENS_REDIS_TLS. Default false.
+	//
+	// Two ways to enable Redis TLS:
+	//   1. Use rediss:// in LENS_REDIS_URL — go-redis detects the scheme
+	//      automatically and enables TLS without any extra configuration.
+	//   2. Set LENS_REDIS_TLS=true — Lens forces TLS on the connection even
+	//      when the URL scheme is redis://. Useful when the URL is supplied
+	//      by a secrets manager that always emits redis://.
+	//
+	// Lens logs a startup warning when neither is set, because Redis carries
+	// semantic cache data (which may include LLM prompt fragments),
+	// rate-limit counters, HA heartbeats, and circuit-breaker state.
+	RedisTLS bool
+
+	// RedisTLSSkipVerify disables Redis server certificate verification.
+	// Env: LENS_REDIS_TLS_SKIP_VERIFY. Default false.
+	// Only appropriate for self-signed / internal-CA certificates in
+	// controlled environments. Has no effect when Redis TLS is not active.
+	RedisTLSSkipVerify bool
+
 	// DBSSLMode controls TLS for the Postgres connection.
 	// Env: LENS_DB_SSL_MODE. Default "require".
 	//
@@ -275,6 +296,9 @@ func Load() (*Config, error) {
 
 		TLSDomain:   os.Getenv("LENS_TLS_DOMAIN"),
 		TLSCacheDir: getEnv("LENS_TLS_CACHE_DIR", "/var/cache/lens-tls"),
+
+		RedisTLS:          parseBoolEnv("LENS_REDIS_TLS"),
+		RedisTLSSkipVerify: parseBoolEnv("LENS_REDIS_TLS_SKIP_VERIFY"),
 
 		JWTSecret: os.Getenv("LENS_JWT_SECRET"),
 		TokenTTL:  24 * time.Hour,
