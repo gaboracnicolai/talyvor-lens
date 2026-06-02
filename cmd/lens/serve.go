@@ -45,13 +45,14 @@ type serverSet struct {
 }
 
 // shutdown stops both servers. The redirect server is stateless (it only
-// issues 301s) so it is closed with a background context immediately. The
-// main server is shut down with drainCtx, respecting the configured drain
-// window for in-flight requests.
+// issues 301s) so it gets a short bounded context — capped at 5 s — rather
+// than context.Background(). This ensures a slow port-80 connection cannot
+// consume time from the main server's drain window (drainCtx).
 func (s *serverSet) shutdown(drainCtx context.Context) error {
 	if s.redirect != nil {
-		// Best-effort: redirect server has no long-lived state to drain.
-		_ = s.redirect.Shutdown(context.Background())
+		rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer rcancel()
+		_ = s.redirect.Shutdown(rctx)
 	}
 	return s.main.Shutdown(drainCtx)
 }
