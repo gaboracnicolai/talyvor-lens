@@ -1095,37 +1095,23 @@ func run() error {
 		authed.Post("/v1/workspaces/{wsID}/api-keys/{keyID}/rotate", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			keyID := chi.URLParam(req, "keyID")
-			// Look up the old key to preserve its scopes + name.
-			keys, err := tenantStore.ListAPIKeys(req.Context(), wsID)
+			// RotateAPIKey is a single atomic transaction: SELECT FOR UPDATE on the
+			// old key → INSERT new key → DELETE old key. Concurrent rotate calls for
+			// the same keyID are serialised by the row-level lock; the second call
+			// finds the row gone and gets a 404. This prevents the previous race
+			// where two concurrent calls could produce two simultaneously active keys.
+			raw, fresh, err := tenantStore.RotateAPIKey(req.Context(), wsID, keyID)
+			if errors.Is(err, tenant.ErrKeyNotFound) {
+				writeJSONErr(w, http.StatusNotFound, "key not found")
+				return
+			}
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			var old *tenant.WorkspaceAPIKey
-			for i := range keys {
-				if keys[i].ID == keyID {
-					old = &keys[i]
-					break
-				}
-			}
-			if old == nil {
-				writeJSONErr(w, http.StatusNotFound, "key not found")
-				return
-			}
-			raw, fresh, err := tenantStore.CreateAPIKey(req.Context(), wsID, old.Name, old.Scopes, old.ExpiresAt)
-			if err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			// Best-effort: delete the old key.
-			if err := tenantStore.RevokeAPIKey(req.Context(), old.ID); err != nil {
-				logger.Warn("auth: rotate revoke old failed",
-					slog.String("key_id", old.ID),
-					slog.String("err", err.Error()))
-			}
 			logger.Info("auth: key rotated",
 				slog.String("workspace_id", wsID),
-				slog.String("old_key_id", old.ID),
+				slog.String("old_key_id", keyID),
 				slog.String("new_key_id", fresh.ID),
 			)
 			writeJSONOK(w, http.StatusCreated, map[string]any{

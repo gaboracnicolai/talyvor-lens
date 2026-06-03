@@ -118,6 +118,7 @@ var (
 	ErrInvalidKey         = errors.New("tenant: invalid or unknown API key")
 	ErrKeyExpired         = errors.New("tenant: API key has expired")
 	ErrInvalidScope       = errors.New("tenant: invalid scope (must be one of: proxy, analytics, admin)")
+	ErrKeyNotFound        = errors.New("tenant: API key not found")
 )
 
 // ─── pgxDB / Store skeleton ──────────────────────
@@ -130,6 +131,7 @@ type pgxDB interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
 // Store owns the workspace_configs + workspace_api_keys tables.
@@ -381,6 +383,95 @@ func (s *Store) RevokeAPIKey(ctx context.Context, keyID string) error {
 		return fmt.Errorf("tenant: revoke key: %w", err)
 	}
 	return nil
+}
+
+// selectKeyForRotateSQL locks the key row for the rotate transaction.
+// AND workspace_id prevents cross-workspace key theft.
+const selectKeyForRotateSQL = `
+SELECT id, workspace_id, key_prefix, name, scopes, expires_at, created_at
+FROM workspace_api_keys
+WHERE id = $1 AND workspace_id = $2
+FOR UPDATE`
+
+// RotateAPIKey atomically replaces keyID with a freshly-generated key
+// that inherits the old key's name, scopes, and expiry.
+//
+// The TOCTOU fix: previously the handler read the old key, called
+// CreateAPIKey, then called RevokeAPIKey in three separate, non-atomic
+// operations. Two concurrent rotate calls for the same key would both
+// create a new key before either revoked the old one, leaving two
+// simultaneously active keys.
+//
+// Fix: one pgx.Tx wraps the SELECT FOR UPDATE → INSERT → DELETE.
+// The FOR UPDATE lock on the old key row serialises concurrent rotate
+// calls — the second call blocks until the first commits (which
+// DELETEs the row), then finds pgx.ErrNoRows and returns ErrKeyNotFound.
+// Exactly one new key is issued per rotate call.
+//
+// The INSERT precedes the DELETE so no window exists where zero active
+// keys exist for the workspace (the old key is live until the new one
+// is safely persisted).
+func (s *Store) RotateAPIKey(ctx context.Context, workspaceID, keyID string) (string, *WorkspaceAPIKey, error) {
+	if s.pool == nil {
+		return "", nil, ErrKeyNotFound
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("tenant: begin rotate tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Lock the old key row. Concurrent rotate calls for the same keyID
+	//    will block here; when the first call commits and DELETEs the row,
+	//    the second will find pgx.ErrNoRows → ErrKeyNotFound.
+	var old WorkspaceAPIKey
+	if err := tx.QueryRow(ctx, selectKeyForRotateSQL, keyID, workspaceID).Scan(
+		&old.ID, &old.WorkspaceID, &old.KeyPrefix,
+		&old.Name, &old.Scopes, &old.ExpiresAt, &old.CreatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil, ErrKeyNotFound
+		}
+		return "", nil, fmt.Errorf("tenant: lock key for rotate: %w", err)
+	}
+
+	// 2. Generate and hash the new key. bcrypt is slow (~100ms); doing it
+	//    inside the tx is intentional — the row-lock hold time is bounded
+	//    by this single bcrypt call and is acceptable for a key-rotation
+	//    endpoint that is never on the request hot path.
+	raw, prefix, err := GenerateKey()
+	if err != nil {
+		return "", nil, err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(raw), BcryptCost)
+	if err != nil {
+		return "", nil, fmt.Errorf("tenant: bcrypt: %w", err)
+	}
+
+	// 3. INSERT new key (inherits name, scopes, expiry from old key).
+	fresh := &WorkspaceAPIKey{
+		WorkspaceID: workspaceID,
+		KeyHash:     string(hash),
+		KeyPrefix:   prefix,
+		Name:        old.Name,
+		Scopes:      append([]string{}, old.Scopes...),
+		ExpiresAt:   old.ExpiresAt,
+	}
+	if err := tx.QueryRow(ctx, insertKeySQL,
+		workspaceID, fresh.KeyHash, fresh.KeyPrefix,
+		fresh.Name, fresh.Scopes, fresh.ExpiresAt,
+	).Scan(&fresh.ID, &fresh.CreatedAt); err != nil {
+		return "", nil, fmt.Errorf("tenant: insert rotated key: %w", err)
+	}
+
+	// 4. DELETE the old key. INSERT precedes DELETE so the workspace is
+	//    never left with zero active keys mid-transaction.
+	if _, err := tx.Exec(ctx, revokeKeySQL, old.ID); err != nil {
+		return "", nil, fmt.Errorf("tenant: delete old key during rotate: %w", err)
+	}
+
+	return raw, fresh, tx.Commit(ctx)
 }
 
 const listKeysSQL = `
