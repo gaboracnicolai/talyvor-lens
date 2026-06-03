@@ -95,7 +95,10 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 			&n.GPUType, &n.MaxConcurrent, &n.PricePerToken,
 			&n.LastSeenAt, &n.UptimeSeconds,
 		); err != nil {
-			continue // malformed row — skip, don't abort the whole snapshot
+			// Log rather than silently skip: a scan error means a schema
+			// drift that could silently hollow out the fleet routing table.
+			slog.Warn("controlplane: snapshot: malformed inference_nodes row", slog.String("err", err.Error()))
+			continue
 		}
 		if s.isLive(ctx, "inference", n.ID, n.LastSeenAt) {
 			snap.InferenceNodes = append(snap.InferenceNodes, n)
@@ -119,6 +122,7 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 	for crows.Next() {
 		var n CacheNodeEntry
 		if err := crows.Scan(&n.ID, &n.WorkspaceID, &n.URL, &n.MaxSizeGB, &n.LastSeenAt); err != nil {
+			slog.Warn("controlplane: snapshot: malformed cache_nodes row", slog.String("err", err.Error()))
 			continue
 		}
 		if s.isLive(ctx, "cache", n.ID, n.LastSeenAt) {
@@ -147,6 +151,7 @@ func (s *NodeStore) Snapshot(ctx context.Context) (*NodeSnapshot, error) {
 			&n.ID, &n.WorkspaceID, &n.URL, &n.Model, &n.Dimensions,
 			&n.MaxBatch, &n.SpeedTPS, &n.LastSeenAt, &n.UptimeSeconds,
 		); err != nil {
+			slog.Warn("controlplane: snapshot: malformed embedding_nodes row", slog.String("err", err.Error()))
 			continue
 		}
 		if s.isLive(ctx, "embedding", n.ID, n.LastSeenAt) {

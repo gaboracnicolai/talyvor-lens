@@ -270,9 +270,9 @@ func TestGetNodeStats_UnknownNodeReturnsZero(t *testing.T) {
 func TestDeactivateNode_NotFound(t *testing.T) {
 	miner, _, mock := newMockMiner(t)
 	mock.ExpectExec("UPDATE inference_nodes SET active = FALSE").
-		WithArgs("ghost").
+		WithArgs("ghost", "ws-x").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
-	err := miner.DeactivateNode(context.Background(), "ghost")
+	err := miner.DeactivateNode(context.Background(), "ghost", "ws-x")
 	if !errors.Is(err, ErrNodeNotFound) {
 		t.Fatalf("expected ErrNodeNotFound, got %v", err)
 	}

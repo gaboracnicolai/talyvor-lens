@@ -359,11 +359,16 @@ func scanEmbeddingNodes(rows pgx.Rows) ([]EmbeddingNode, error) {
 // DeactivateEmbeddingNode flips active=false. Same rationale as
 // compute mining: keep history so ledger metadata stays
 // resolvable.
-func (m *EmbeddingMiner) DeactivateEmbeddingNode(ctx context.Context, nodeID string) error {
+//
+// workspaceID is required: the UPDATE is scoped to both id AND workspace_id
+// so that an API key from workspace-A cannot deactivate workspace-B's nodes.
+func (m *EmbeddingMiner) DeactivateEmbeddingNode(ctx context.Context, nodeID, workspaceID string) error {
 	if m.pool == nil {
 		return nil
 	}
-	tag, err := m.pool.Exec(ctx, `UPDATE embedding_nodes SET active = FALSE WHERE id = $1`, nodeID)
+	tag, err := m.pool.Exec(ctx,
+		`UPDATE embedding_nodes SET active = FALSE WHERE id = $1 AND workspace_id = $2`,
+		nodeID, workspaceID)
 	if err != nil {
 		return fmt.Errorf("embedding mining: deactivate: %w", err)
 	}

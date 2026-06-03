@@ -23,10 +23,14 @@ func newMockStore(t *testing.T) (*NodeStore, pgxmock.PgxPoolIface) {
 func TestRecordEmbedHeartbeat_UpdatesRow(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectExec("UPDATE embedding_nodes").
-		WithArgs("node_1", int64(300)).
+		WithArgs("node_1", int64(300), "ws-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	if err := store.RecordEmbedHeartbeat(context.Background(), "node_1", 300); err != nil {
+	found, err := store.RecordEmbedHeartbeat(context.Background(), "node_1", "ws-1", 300)
+	if err != nil {
 		t.Fatalf("RecordEmbedHeartbeat: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found=true when UPDATE affects 1 row")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
@@ -35,8 +39,12 @@ func TestRecordEmbedHeartbeat_UpdatesRow(t *testing.T) {
 
 func TestRecordEmbedHeartbeat_NilPool_NoOp(t *testing.T) {
 	store := newNodeStore(nil, nil)
-	if err := store.RecordEmbedHeartbeat(context.Background(), "x", 0); err != nil {
+	found, err := store.RecordEmbedHeartbeat(context.Background(), "x", "ws", 0)
+	if err != nil {
 		t.Fatalf("expected no error with nil pool, got %v", err)
+	}
+	if found {
+		t.Fatal("expected found=false with nil pool")
 	}
 }
 

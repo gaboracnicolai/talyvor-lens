@@ -229,9 +229,9 @@ func TestGetStats_ReturnsCorrectTotals(t *testing.T) {
 func TestDeactivateEmbeddingNode_NotFound(t *testing.T) {
 	miner, mock := newMockEmbMiner(t)
 	mock.ExpectExec("UPDATE embedding_nodes SET active = FALSE").
-		WithArgs("ghost").
+		WithArgs("ghost", "ws-x").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
-	if err := miner.DeactivateEmbeddingNode(context.Background(), "ghost"); !errors.Is(err, ErrNodeNotFound) {
+	if err := miner.DeactivateEmbeddingNode(context.Background(), "ghost", "ws-x"); !errors.Is(err, ErrNodeNotFound) {
 		t.Fatalf("expected ErrNodeNotFound, got %v", err)
 	}
 }
