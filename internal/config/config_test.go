@@ -119,3 +119,45 @@ func TestLoad_DBSSLModeDisableAllowed(t *testing.T) {
 		t.Errorf("DBSSLMode = %q, want %q", c.DBSSLMode, "disable")
 	}
 }
+
+func TestLoad_NatsTLSDefaultsOff(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.NatsTLS {
+		t.Error("NatsTLS should default to false")
+	}
+	if c.NatsTLSSkipVerify {
+		t.Error("NatsTLSSkipVerify should default to false")
+	}
+}
+
+func TestLoad_NatsTLSEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_NATS_TLS", "true")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.NatsTLS {
+		t.Error("NatsTLS should be true when LENS_NATS_TLS=true")
+	}
+}
+
+func TestLoad_NatsTLSSkipVerifyEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_NATS_TLS", "true")
+	t.Setenv("LENS_NATS_TLS_SKIP_VERIFY", "true")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.NatsTLS {
+		t.Error("NatsTLS should be true")
+	}
+	if !c.NatsTLSSkipVerify {
+		t.Error("NatsTLSSkipVerify should be true when LENS_NATS_TLS_SKIP_VERIFY=true")
+	}
+}
