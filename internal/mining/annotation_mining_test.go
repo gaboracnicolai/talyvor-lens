@@ -98,10 +98,12 @@ func TestCreateTask_HappyPath(t *testing.T) {
 
 func TestSubmitAnnotation_RejectsExpired(t *testing.T) {
 	miner, mock := newMockAnnotator(t)
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT source_workspace, expires_at").
 		WithArgs("t_old").
 		WillReturnRows(pgxmock.NewRows([]string{"source_workspace", "expires_at"}).
 			AddRow("ws_src", time.Now().Add(-time.Hour)))
+	mock.ExpectRollback()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t_old", AnnotatorID: "ws_anno", Decision: "a_better",
 	})
@@ -112,10 +114,12 @@ func TestSubmitAnnotation_RejectsExpired(t *testing.T) {
 
 func TestSubmitAnnotation_RejectsSelfAnnotation(t *testing.T) {
 	miner, mock := newMockAnnotator(t)
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT source_workspace, expires_at").
 		WithArgs("t_self").
 		WillReturnRows(pgxmock.NewRows([]string{"source_workspace", "expires_at"}).
 			AddRow("ws_same", time.Now().Add(time.Hour)))
+	mock.ExpectRollback()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t_self", AnnotatorID: "ws_same", Decision: "a_better",
 	})
@@ -125,6 +129,7 @@ func TestSubmitAnnotation_RejectsSelfAnnotation(t *testing.T) {
 }
 
 func TestSubmitAnnotation_RejectsInvalidDecision(t *testing.T) {
+	// Decision validation is pre-DB; no Begin needed.
 	miner, _ := newMockAnnotator(t)
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t1", AnnotatorID: "ws_a", Decision: "unsure",
@@ -136,14 +141,16 @@ func TestSubmitAnnotation_RejectsInvalidDecision(t *testing.T) {
 
 func TestSubmitAnnotation_InsufficientStake(t *testing.T) {
 	miner, mock := newMockAnnotator(t)
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT source_workspace, expires_at").
 		WithArgs("t1").
 		WillReturnRows(pgxmock.NewRows([]string{"source_workspace", "expires_at"}).
 			AddRow("ws_src", time.Now().Add(time.Hour)))
-	// Stake lookup returns 5 LENS < 10 requirement.
+	// Stake lookup with FOR UPDATE returns 5 LENS < 10 requirement.
 	mock.ExpectQuery("SELECT staked FROM annotator_stakes").
 		WithArgs("ws_anno").
 		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(5.0))
+	mock.ExpectRollback()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t1", AnnotatorID: "ws_anno", Decision: "a_better", Confidence: 4,
 	})
@@ -154,6 +161,7 @@ func TestSubmitAnnotation_InsufficientStake(t *testing.T) {
 
 func TestSubmitAnnotation_RejectsDuplicate(t *testing.T) {
 	miner, mock := newMockAnnotator(t)
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT source_workspace, expires_at").
 		WithArgs("t_dup").
 		WillReturnRows(pgxmock.NewRows([]string{"source_workspace", "expires_at"}).
@@ -165,6 +173,7 @@ func TestSubmitAnnotation_RejectsDuplicate(t *testing.T) {
 	mock.ExpectExec("INSERT INTO annotations").
 		WithArgs("t_dup", "ws_anno", "a_better", 1, 0).
 		WillReturnError(errors.New("ERROR: duplicate key value violates unique constraint (SQLSTATE 23505)"))
+	mock.ExpectRollback()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t_dup", AnnotatorID: "ws_anno", Decision: "a_better",
 	})
@@ -175,22 +184,25 @@ func TestSubmitAnnotation_RejectsDuplicate(t *testing.T) {
 
 func TestSubmitAnnotation_CreditsBaseReward(t *testing.T) {
 	miner, mock := newMockAnnotator(t)
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT source_workspace, expires_at").
 		WithArgs("t_credit").
 		WillReturnRows(pgxmock.NewRows([]string{"source_workspace", "expires_at"}).
 			AddRow("ws_src", time.Now().Add(time.Hour)))
+	// FOR UPDATE stake read inside the outer tx.
 	mock.ExpectQuery("SELECT staked FROM annotator_stakes").
 		WithArgs("ws_anno").
 		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(20.0))
 	mock.ExpectExec("INSERT INTO annotations").
 		WithArgs("t_credit", "ws_anno", "a_better", 4, 5000).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	// Agreement query — only the just-inserted annotation visible.
+	// Agreement query inside the same tx — only the just-inserted row visible.
 	mock.ExpectQuery("SELECT decision FROM annotations WHERE task_id").
 		WithArgs("t_credit").
 		WillReturnRows(pgxmock.NewRows([]string{"decision"}).AddRow("a_better"))
-	// Credit base reward 0.100.
-	expectCreditOrDebit(mock, "ws_anno", 0, 0, 0, 0.100, 0.100, 0.100, 0)
+	// CreditTx runs inside the outer tx (no nested Begin/Commit).
+	expectApplyTx(mock, "ws_anno", 0, 0, 0, 0.100, 0.100, 0.100, 0)
+	mock.ExpectCommit()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t_credit", AnnotatorID: "ws_anno",
 		Decision: "a_better", Confidence: 4, TimeSpentMs: 5000,
@@ -198,10 +210,14 @@ func TestSubmitAnnotation_CreditsBaseReward(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitAnnotation: %v", err)
 	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
 }
 
 func TestSubmitAnnotation_PaysAgreementBonus(t *testing.T) {
 	miner, mock := newMockAnnotator(t)
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT source_workspace, expires_at").
 		WithArgs("t_bonus").
 		WillReturnRows(pgxmock.NewRows([]string{"source_workspace", "expires_at"}).
@@ -213,6 +229,7 @@ func TestSubmitAnnotation_PaysAgreementBonus(t *testing.T) {
 		WithArgs("t_bonus", "ws_anno", "a_better", 5, 3000).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Agreement query — 3 existing "a_better" + this insert → 4 total.
+	// After subtracting the just-inserted row: 3 matches out of 3 others = 100%.
 	mock.ExpectQuery("SELECT decision FROM annotations WHERE task_id").
 		WithArgs("t_bonus").
 		WillReturnRows(pgxmock.NewRows([]string{"decision"}).
@@ -220,14 +237,18 @@ func TestSubmitAnnotation_PaysAgreementBonus(t *testing.T) {
 			AddRow("a_better").
 			AddRow("a_better").
 			AddRow("a_better"))
-	// Base 0.100 + bonus 0.050 = 0.150.
-	expectCreditOrDebit(mock, "ws_anno", 0, 0, 0, 0.150, 0.150, 0.150, 0)
+	// Base 0.100 + bonus 0.050 = 0.150 via CreditTx (no nested Begin/Commit).
+	expectApplyTx(mock, "ws_anno", 0, 0, 0, 0.150, 0.150, 0.150, 0)
+	mock.ExpectCommit()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t_bonus", AnnotatorID: "ws_anno",
 		Decision: "a_better", Confidence: 5, TimeSpentMs: 3000,
 	})
 	if err != nil {
 		t.Fatalf("SubmitAnnotation: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
 	}
 }
 

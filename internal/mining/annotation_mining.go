@@ -233,10 +233,22 @@ func (m *AnnotationMiner) GetPendingTask(ctx context.Context, annotatorWorkspace
 // ─── SubmitAnnotation ────────────────────────────
 
 // SubmitAnnotation validates and inserts a verdict, runs the
-// agreement check, and credits the annotator. The UNIQUE
-// constraint on (task_id, annotator_id) is the source of truth
-// for duplicate rejection — we map that to ErrDuplicateAnnotation.
+// agreement check, and credits the annotator — all inside a single
+// transaction.
+//
+// The TOCTOU fix: previously the stake check and the annotation
+// INSERT were separate, non-atomic pool operations, creating a race
+// where a concurrent Unstake could remove the stake row between the
+// check and the insert (annotator ends up annotating with zero stake)
+// and where a server crash between INSERT and Credit would save the
+// annotation but never pay the reward.
+//
+// Fix: one pgx.Tx wraps the whole flow.  The stake row is read with
+// FOR UPDATE so Unstake's DELETE blocks until this tx commits or
+// rolls back — whichever wins the lock wins the race.  The UNIQUE
+// constraint on (task_id, annotator_id) still handles duplicates.
 func (m *AnnotationMiner) SubmitAnnotation(ctx context.Context, a Annotation) error {
+	// Fast-path input validation — no DB touch.
 	if !validDecisions[a.Decision] {
 		return ErrInvalidDecision
 	}
@@ -250,13 +262,19 @@ func (m *AnnotationMiner) SubmitAnnotation(ctx context.Context, a Annotation) er
 		return nil
 	}
 
-	// 1. Look up the task — checks existence + expiry + source.
-	row := m.pool.QueryRow(ctx, `
-		SELECT source_workspace, expires_at
-		FROM annotation_tasks WHERE id = $1`, a.TaskID)
+	tx, err := m.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("annotation: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Task lookup — expires_at is immutable; no FOR UPDATE needed.
 	var src string
 	var expiresAt time.Time
-	if err := row.Scan(&src, &expiresAt); err != nil {
+	if err := tx.QueryRow(ctx, `
+		SELECT source_workspace, expires_at
+		FROM annotation_tasks WHERE id = $1`, a.TaskID,
+	).Scan(&src, &expiresAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("annotation: task %q not found", a.TaskID)
 		}
@@ -269,57 +287,114 @@ func (m *AnnotationMiner) SubmitAnnotation(ctx context.Context, a Annotation) er
 		return ErrSelfAnnotation
 	}
 
-	// 2. Stake check.
-	staked, err := m.GetStake(ctx, a.AnnotatorID)
-	if err != nil {
-		return err
+	// 2. Stake check with FOR UPDATE — acquires a row-level write lock on the
+	//    annotator_stakes row.  Unstake uses DELETE FROM annotator_stakes WHERE
+	//    workspace_id = $1, which also takes a row-level lock; whichever wins
+	//    the lock wins the race, preventing an annotator from submitting after
+	//    their stake has been withdrawn.  Concurrent SubmitAnnotation calls for
+	//    the same annotator also serialise here, so the stake threshold is
+	//    checked under the same lock that protects the INSERT below.
+	var staked float64
+	stakeErr := tx.QueryRow(ctx,
+		`SELECT staked FROM annotator_stakes WHERE workspace_id = $1 FOR UPDATE`,
+		a.AnnotatorID).Scan(&staked)
+	if errors.Is(stakeErr, pgx.ErrNoRows) {
+		staked = 0
+	} else if stakeErr != nil {
+		return fmt.Errorf("annotation: read stake: %w", stakeErr)
 	}
 	if staked < StakeRequirement {
 		return ErrInsufficientStake
 	}
 
-	// 3. INSERT — UNIQUE constraint catches duplicates.
-	_, err = m.pool.Exec(ctx, `
+	// 3. INSERT annotation — UNIQUE constraint on (task_id, annotator_id)
+	//    catches duplicate submissions.  Runs in the same tx as the stake
+	//    check and credit so INSERT + credit are atomic.
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO annotations (task_id, annotator_id, decision, confidence, time_spent_ms)
 		VALUES ($1, $2, $3, $4, $5)`,
-		a.TaskID, a.AnnotatorID, a.Decision, a.Confidence, a.TimeSpentMs)
-	if err != nil {
+		a.TaskID, a.AnnotatorID, a.Decision, a.Confidence, a.TimeSpentMs,
+	); err != nil {
 		if isUniqueViolation(err) {
 			return ErrDuplicateAnnotation
 		}
 		return fmt.Errorf("annotation: insert: %w", err)
 	}
 
-	// 4. Agreement check + bonus eligibility.
-	agreement, otherCount, err := m.checkAgreementInternal(ctx, a.TaskID, a.Decision)
-	if err != nil {
-		// Don't fail the whole submission for an agreement-stat
-		// error — pay the base reward and move on.
-		return m.ledger.Credit(ctx, a.AnnotatorID, AnnotationBaseReward, TypeAnnotationMine,
-			"annotation submitted (agreement n/a)", map[string]interface{}{
-				"task_id": a.TaskID, "decision": a.Decision,
-			})
+	// 4. Agreement check — runs inside the same tx so it sees the freshly
+	//    inserted row without racing against concurrent annotators.
+	agreement, otherCount, agreementErr := m.checkAgreementTx(ctx, tx, a.TaskID, a.Decision)
+
+	// 5. Credit — inside the same tx so INSERT + credit are atomic.
+	//    On agreement error we still pay the base reward and proceed.
+	earning := AnnotationBaseReward
+	bonusPaid := false
+	if agreementErr == nil {
+		bonusPaid = otherCount >= MinAnnotationsForBonus-1 && agreement >= HighAgreementThreshold
+		if bonusPaid {
+			earning += HighAgreementBonus
+		}
+	}
+	// Round to 6 decimals — IEEE-754 (0.1 + 0.05 → 0.15000000000000002)
+	// otherwise leaks into the ledger.
+	earning = roundTo(earning, 6)
+	desc := "annotation submitted"
+	meta := map[string]interface{}{
+		"task_id":       a.TaskID,
+		"decision":      a.Decision,
+		"agreement":     agreement,
+		"other_count":   otherCount,
+		"bonus_paid":    bonusPaid,
+		"confidence":    a.Confidence,
+		"time_spent_ms": a.TimeSpentMs,
+	}
+	if agreementErr != nil {
+		meta["agreement_error"] = agreementErr.Error()
+		desc = "annotation submitted (agreement n/a)"
+	}
+	if err := m.ledger.CreditTx(ctx, tx, a.AnnotatorID, earning, TypeAnnotationMine, desc, meta); err != nil {
+		return err
 	}
 
-	earning := AnnotationBaseReward
-	bonusEligible := otherCount >= MinAnnotationsForBonus-1 && agreement >= HighAgreementThreshold
-	if bonusEligible {
-		earning += HighAgreementBonus
+	return tx.Commit(ctx)
+}
+
+// checkAgreementTx is the tx-scoped variant of checkAgreementInternal.
+// It reads within the caller's transaction so it sees the freshly-inserted
+// annotation row and does not race against concurrent inserts.
+func (m *AnnotationMiner) checkAgreementTx(ctx context.Context, tx pgx.Tx, taskID, newDecision string) (float64, int, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT decision FROM annotations WHERE task_id = $1`, taskID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("annotation: agreement query: %w", err)
 	}
-	// Round to 6 decimals — IEEE-754 quirks (0.1 + 0.05 →
-	// 0.15000000000000002) otherwise leak into the ledger.
-	earning = roundTo(earning, 6)
-	meta := map[string]interface{}{
-		"task_id":         a.TaskID,
-		"decision":        a.Decision,
-		"agreement":       agreement,
-		"other_count":     otherCount,
-		"bonus_paid":      bonusEligible,
-		"confidence":      a.Confidence,
-		"time_spent_ms":   a.TimeSpentMs,
+	defer rows.Close()
+	var matches, others int
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return 0, 0, fmt.Errorf("annotation: scan agreement: %w", err)
+		}
+		if d == newDecision {
+			matches++
+		}
+		others++
 	}
-	return m.ledger.Credit(ctx, a.AnnotatorID, earning, TypeAnnotationMine,
-		"annotation submitted", meta)
+	if rows.Err() != nil {
+		return 0, 0, rows.Err()
+	}
+	// Subtract the just-inserted row (visible in this tx) from both
+	// numerator and denominator — we measure agreement against the
+	// pre-existing crowd, not including the new annotation itself.
+	matches--
+	others--
+	if matches < 0 {
+		matches = 0
+	}
+	if others <= 0 {
+		return 0, 0, nil
+	}
+	return float64(matches) / float64(others), others, nil
 }
 
 // isUniqueViolation is a tiny helper to dodge importing the
