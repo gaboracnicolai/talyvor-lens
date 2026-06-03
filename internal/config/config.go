@@ -52,12 +52,19 @@ type Config struct {
 	// the legacy LENS_OLLAMA_URL single-endpoint path still works.
 	LocalEndpoints string
 
-	// JWT auth (Item 7). Secret must be ≥32 bytes; empty string
-	// disables JWT minting/validation entirely (the auth manager
-	// will reject any /v1/auth/token call but still accept API
-	// key authentication).
-	JWTSecret string
-	TokenTTL  time.Duration
+	// JWT auth. JWTPrivateKey is a PEM-encoded EC P-256 private key used to
+	// sign and verify tokens (ES256). Generate one with:
+	//
+	//   openssl ecparam -name prime256v1 -genkey -noout | \
+	//     openssl pkcs8 -topk8 -nocrypt -out ec-private.pem
+	//   export LENS_JWT_PRIVATE_KEY=$(cat ec-private.pem)
+	//
+	// Empty string is allowed — Lens generates an ephemeral key at startup for
+	// single-instance dev; production deployments must persist the key so
+	// tokens remain valid across restarts and across instances in an HA cluster.
+	// Env: LENS_JWT_PRIVATE_KEY.
+	JWTPrivateKey string
+	TokenTTL      time.Duration
 
 	// Global rate limits (Item 8). Zero = no global cap; the
 	// per-workspace tier in MultiTierLimiter still applies.
@@ -312,8 +319,8 @@ func Load() (*Config, error) {
 		RedisTLS:          parseBoolEnv("LENS_REDIS_TLS"),
 		RedisTLSSkipVerify: parseBoolEnv("LENS_REDIS_TLS_SKIP_VERIFY"),
 
-		JWTSecret: os.Getenv("LENS_JWT_SECRET"),
-		TokenTTL:  24 * time.Hour,
+		JWTPrivateKey: os.Getenv("LENS_JWT_PRIVATE_KEY"),
+		TokenTTL:      24 * time.Hour,
 
 		HAEnabled: parseBoolEnv("LENS_HA_ENABLED"),
 
@@ -375,11 +382,18 @@ func Load() (*Config, error) {
 		c.TokenTTL = d
 	}
 
-	// Enforce minimum entropy for HS256 signing. Empty secret
-	// is allowed — it just disables the JWT mint path; only a
-	// *too-short* secret is a misconfiguration.
-	if c.JWTSecret != "" && len(c.JWTSecret) < 32 {
-		return nil, fmt.Errorf("LENS_JWT_SECRET must be at least 32 bytes (got %d)", len(c.JWTSecret))
+	// Migration guard: LENS_JWT_SECRET (old HS256) is no longer accepted.
+	// Operators must switch to an EC P-256 private key.
+	if os.Getenv("LENS_JWT_SECRET") != "" {
+		return nil, errors.New(
+			"LENS_JWT_SECRET is no longer supported — Lens now uses ES256 (EC P-256). " +
+				"Generate a key with:\n" +
+				"  openssl ecparam -name prime256v1 -genkey -noout | \\\n" +
+				"    openssl pkcs8 -topk8 -nocrypt -out ec-private.pem\n" +
+				"  export LENS_JWT_PRIVATE_KEY=$(cat ec-private.pem)\n" +
+				"Existing HS256 tokens will not be accepted after the upgrade. " +
+				"Rotate all tokens on the first deployment with the new key.",
+		)
 	}
 
 	if v := os.Getenv("LENS_GLOBAL_RPM"); v != "" {
