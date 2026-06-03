@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"fmt"
 	"encoding/base64"
@@ -392,11 +393,37 @@ func run() error {
 	)
 	_ = multiTierLimiter // exposed for future per-request wiring
 
+	// Parse or generate the EC P-256 JWT signing key (ES256).
+	// Production deployments must set LENS_JWT_PRIVATE_KEY so that tokens
+	// survive restarts and are shared across HA instances. When the env var
+	// is absent we generate an ephemeral key — acceptable for a single-node
+	// dev run but useless for HA (each instance would mint unverifiable tokens).
+	var jwtKey *ecdsa.PrivateKey
+	if cfg.JWTPrivateKey != "" {
+		var keyErr error
+		jwtKey, keyErr = auth.ParseECPrivateKeyPEM(cfg.JWTPrivateKey)
+		if keyErr != nil {
+			logger.Error("failed to parse LENS_JWT_PRIVATE_KEY", slog.String("error", keyErr.Error()))
+			os.Exit(1)
+		}
+		logger.Info("JWT signing: loaded EC P-256 key from LENS_JWT_PRIVATE_KEY",
+			slog.String("kid", auth.JWTKid))
+	} else {
+		var keyErr error
+		jwtKey, keyErr = auth.GenerateECKey()
+		if keyErr != nil {
+			logger.Error("failed to generate ephemeral JWT key", slog.String("error", keyErr.Error()))
+			os.Exit(1)
+		}
+		logger.Warn("JWT signing: using ephemeral EC P-256 key — tokens will not survive a restart; " +
+			"set LENS_JWT_PRIVATE_KEY for production")
+	}
+
 	// Auth manager — unified JWT + workspace-key + global-key
 	// authenticator. Coexists with the legacy auth.AuthMiddleware
 	// (which is still mounted below for backward compat); new
 	// /v1/auth/* routes use authManager directly.
-	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), cfg.JWTSecret, keyStore, tenantStore)
+	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), jwtKey, keyStore, tenantStore)
 
 	// Retry policy + per-provider circuit breaker registry (Item 9).
 	// Coexists with the legacy retry.Do helper.
@@ -749,6 +776,23 @@ func run() error {
 			}
 			writeJSONOK(w, http.StatusOK, nodes)
 		})
+
+		// JWKS — public EC P-256 verification key for the ES256 JWTs
+		// Lens mints. External services fetch this once (or on cache miss)
+		// to verify tokens without holding the private key.
+		// Standard path per RFC 8414 discovery conventions.
+		pub.Get("/v1/auth/jwks", func(w http.ResponseWriter, _ *http.Request) {
+			pub := authManager.PublicKey()
+			if pub == nil {
+				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not configured")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"keys": []any{auth.PublicKeyToJWK(pub, auth.JWTKid)},
+			})
+		})
 	})
 
 	r.Handle("/metrics", metrics.Handler())
@@ -939,8 +983,8 @@ func run() error {
 		// op. /refresh accepts any valid JWT and extends it.
 		// /me echoes the resolved AuthContext for the caller.
 		authed.Post("/v1/auth/token", func(w http.ResponseWriter, req *http.Request) {
-			if authManager.JWTSecret() == "" {
-				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing disabled (no LENS_JWT_SECRET configured)")
+			if authManager.PrivateKey() == nil {
+				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not available")
 				return
 			}
 			// Require global-admin auth via the unified manager.
@@ -964,7 +1008,7 @@ func run() error {
 				return
 			}
 			ttl := auth.ClampTTL(time.Duration(in.TTLHours) * time.Hour)
-			tok, err := auth.GenerateToken(in.WorkspaceID, in.UserID, in.Scopes, authManager.JWTSecret(), ttl)
+			tok, err := auth.GenerateToken(in.WorkspaceID, in.UserID, in.Scopes, authManager.PrivateKey(), ttl)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -1017,8 +1061,8 @@ func run() error {
 		authed.Post("/v1/admin/distill/preview", distillPreview.ServeHTTP)
 
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
-			if authManager.JWTSecret() == "" {
-				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing disabled")
+			if authManager.PrivateKey() == nil {
+				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not available")
 				return
 			}
 			actx, err := authManager.Authenticate(req)
@@ -1027,7 +1071,7 @@ func run() error {
 				return
 			}
 			ttl := auth.ClampTTL(cfg.TokenTTL)
-			tok, err := auth.GenerateToken(actx.WorkspaceID, actx.UserID, actx.Scopes, authManager.JWTSecret(), ttl)
+			tok, err := auth.GenerateToken(actx.WorkspaceID, actx.UserID, actx.Scopes, authManager.PrivateKey(), ttl)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return

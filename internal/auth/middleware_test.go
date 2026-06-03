@@ -1,17 +1,18 @@
 package auth
 
 import (
+	"crypto/ecdsa"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
 
-// newTestManager returns a Manager with a fixed global key and JWT secret,
-// no keyStore, no tenantStore — sufficient for middleware integration tests.
-func newTestManager(globalKey, jwtSecret string) *Manager {
-	return NewManager(globalKey, jwtSecret, newKeyStore(nil), nil)
+// newTestManager returns a Manager with a fixed global key and an optional EC
+// signing key. Pass nil for key when the test doesn't exercise the JWT path.
+// No keyStore, no tenantStore — sufficient for middleware integration tests.
+func newTestManager(globalKey string, key *ecdsa.PrivateKey) *Manager {
+	return NewManager(globalKey, key, newKeyStore(nil), nil)
 }
 
 // sentinel handler that records whether it was called and echoes the auth
@@ -36,7 +37,7 @@ func sentinelHandler(called *bool) http.HandlerFunc {
 // admin key to prove it is no longer blocked at the gate.
 func TestAuthMiddleware_GlobalKey_Reaches_Handler(t *testing.T) {
 	const globalKey = "test-global-key-that-is-long-enough"
-	m := newTestManager(globalKey, "")
+	m := newTestManager(globalKey, nil)
 	ks := newKeyStore(nil)
 
 	var reached bool
@@ -64,7 +65,7 @@ func TestAuthMiddleware_GlobalKey_Reaches_Handler(t *testing.T) {
 // TestAuthMiddleware_GlobalKey_XTalyvorKey checks the alternative header.
 func TestAuthMiddleware_GlobalKey_XTalyvorKey(t *testing.T) {
 	const globalKey = "test-global-key-that-is-long-enough"
-	m := newTestManager(globalKey, "")
+	m := newTestManager(globalKey, nil)
 	ks := newKeyStore(nil)
 
 	var reached bool
@@ -89,11 +90,11 @@ func TestAuthMiddleware_GlobalKey_XTalyvorKey(t *testing.T) {
 // blocked — previously Validate() hashed the raw token string, looked it up
 // in api_keys, got no rows, and returned 401 before the handler ran.
 func TestAuthMiddleware_JWT_Reaches_Handler(t *testing.T) {
-	secret := strings.Repeat("s", 32)
-	m := newTestManager("", secret)
+	key := testKey(t)
+	m := newTestManager("", key)
 	ks := newKeyStore(nil)
 
-	tok, err := GenerateToken("ws_jwt", "user_1", []string{ScopeProxy}, secret, time.Hour)
+	tok, err := GenerateToken("ws_jwt", "user_1", []string{ScopeProxy}, key, time.Hour)
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
@@ -120,11 +121,11 @@ func TestAuthMiddleware_JWT_Reaches_Handler(t *testing.T) {
 // TestAuthMiddleware_JWT_Expired_Blocked proves an expired JWT is correctly
 // rejected even after the Manager fallback.
 func TestAuthMiddleware_JWT_Expired_Blocked(t *testing.T) {
-	secret := strings.Repeat("s", 32)
-	m := newTestManager("", secret)
+	key := testKey(t)
+	m := newTestManager("", key)
 	ks := newKeyStore(nil)
 
-	tok, err := GenerateToken("ws_jwt", "user_1", []string{ScopeProxy}, secret, -time.Hour)
+	tok, err := GenerateToken("ws_jwt", "user_1", []string{ScopeProxy}, key, -time.Hour)
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestAuthMiddleware_JWT_Expired_Blocked(t *testing.T) {
 // TestAuthMiddleware_NoCredential_Returns401 verifies the baseline: no header
 // → 401 immediately, handler never called.
 func TestAuthMiddleware_NoCredential_Returns401(t *testing.T) {
-	m := newTestManager("global", strings.Repeat("s", 32))
+	m := newTestManager("global", nil)
 	ks := newKeyStore(nil)
 
 	var reached bool
@@ -171,7 +172,7 @@ func TestAuthMiddleware_NoCredential_Returns401(t *testing.T) {
 // TestAuthMiddleware_WrongGlobalKey_Returns401 verifies a wrong key is rejected
 // even when a valid global key is configured.
 func TestAuthMiddleware_WrongGlobalKey_Returns401(t *testing.T) {
-	m := newTestManager("correct-key", "")
+	m := newTestManager("correct-key", nil)
 	ks := newKeyStore(nil)
 
 	var reached bool
@@ -197,7 +198,7 @@ func TestAuthMiddleware_WrongGlobalKey_Returns401(t *testing.T) {
 // downstream handlers can use either GetAPIKey or GetAuthContext.
 func TestAuthMiddleware_GlobalKey_StampsAuthContext(t *testing.T) {
 	const globalKey = "test-global-key-that-is-long-enough"
-	m := newTestManager(globalKey, "")
+	m := newTestManager(globalKey, nil)
 	ks := newKeyStore(nil)
 
 	var gotAPIKey *APIKey

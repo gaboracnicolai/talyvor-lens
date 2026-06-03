@@ -11,6 +11,7 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,10 +38,6 @@ const (
 	// days matches the spec — anything longer should use an
 	// API key.
 	MaxTokenTTL = 30 * 24 * time.Hour
-
-	// MinJWTSecretBytes is enforced at config-load. 32 bytes of
-	// real entropy is the floor for HS256.
-	MinJWTSecretBytes = 32
 
 	// jwtCacheTTL is how long a validated token stays in the
 	// validation cache. Tokens are immutable + signed, so this
@@ -117,12 +114,12 @@ func (a *AuthContext) HasScope(scope string) bool {
 
 // ─── token helpers ───────────────────────────────
 
-// GenerateToken signs an HS256 JWT carrying the given scope set.
+// GenerateToken signs an ES256 JWT carrying the given scope set.
 // Caller controls TTL — Manager.GenerateTokenWithCap caps it
 // against MaxTokenTTL at the API-endpoint boundary.
-func GenerateToken(workspaceID, userID string, scopes []string, secret string, ttl time.Duration) (string, error) {
-	if secret == "" {
-		return "", errors.New("auth: jwt secret not configured")
+func GenerateToken(workspaceID, userID string, scopes []string, key *ecdsa.PrivateKey, ttl time.Duration) (string, error) {
+	if key == nil {
+		return "", errors.New("auth: jwt signing key not configured")
 	}
 	now := time.Now()
 	claims := TokenClaims{
@@ -137,30 +134,31 @@ func GenerateToken(workspaceID, userID string, scopes []string, secret string, t
 			Subject:   userID,
 		},
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString([]byte(secret))
+	t := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	t.Header["kid"] = JWTKid
+	signed, err := t.SignedString(key)
 	if err != nil {
 		return "", fmt.Errorf("auth: sign token: %w", err)
 	}
 	return signed, nil
 }
 
-// ValidateToken parses + verifies a signed JWT. Returns the
+// ValidateToken parses + verifies a signed ES256 JWT. Returns the
 // claims when everything checks out, or an error wrapping
 // ErrInvalidAuth when anything fails (signature, expiry, issuer).
-func ValidateToken(tokenString, secret string) (*TokenClaims, error) {
+func ValidateToken(tokenString string, key *ecdsa.PublicKey) (*TokenClaims, error) {
 	if tokenString == "" {
 		return nil, ErrMissingCredentials
 	}
-	if secret == "" {
-		return nil, errors.New("auth: jwt secret not configured")
+	if key == nil {
+		return nil, errors.New("auth: jwt verification key not configured")
 	}
 	parsed, err := jwt.ParseWithClaims(tokenString, &TokenClaims{},
 		func(t *jwt.Token) (interface{}, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			if _, ok := t.Method.(*jwt.SigningMethodECDSA); !ok {
 				return nil, fmt.Errorf("auth: unexpected signing method: %v", t.Header["alg"])
 			}
-			return []byte(secret), nil
+			return key, nil
 		},
 		jwt.WithIssuer(JWTIssuer),
 		jwt.WithExpirationRequired(),
@@ -179,13 +177,14 @@ func ValidateToken(tokenString, secret string) (*TokenClaims, error) {
 
 // Manager is the unified authenticator. Wraps the existing
 // KeyStore (global keys) and tenant.Store (workspace keys), and
-// validates JWTs against the shared secret.
+// validates JWTs against the EC public key.
 //
 // Lifecycle: build once at startup, share across goroutines —
 // the JWT cache uses RWMutex.
 type Manager struct {
 	globalKey   string
-	jwtSecret   string
+	privateKey  *ecdsa.PrivateKey
+	publicKey   *ecdsa.PublicKey
 	keyStore    *KeyStore
 	tenantStore *tenant.Store
 
@@ -198,19 +197,28 @@ type jwtCacheEntry struct {
 	expires time.Time
 }
 
-func NewManager(globalKey, jwtSecret string, keyStore *KeyStore, tenantStore *tenant.Store) *Manager {
+func NewManager(globalKey string, privateKey *ecdsa.PrivateKey, keyStore *KeyStore, tenantStore *tenant.Store) *Manager {
+	var pub *ecdsa.PublicKey
+	if privateKey != nil {
+		pub = &privateKey.PublicKey
+	}
 	return &Manager{
 		globalKey:   globalKey,
-		jwtSecret:   jwtSecret,
+		privateKey:  privateKey,
+		publicKey:   pub,
 		keyStore:    keyStore,
 		tenantStore: tenantStore,
 		jwtCache:    map[string]*jwtCacheEntry{},
 	}
 }
 
-// JWTSecret exposes the configured secret so the /v1/auth/token
+// PrivateKey exposes the EC signing key so the /v1/auth/token
 // endpoint can mint new tokens via GenerateToken.
-func (m *Manager) JWTSecret() string { return m.jwtSecret }
+func (m *Manager) PrivateKey() *ecdsa.PrivateKey { return m.privateKey }
+
+// PublicKey exposes the EC verification key so the /v1/auth/jwks
+// endpoint can publish it as a JWKS document.
+func (m *Manager) PublicKey() *ecdsa.PublicKey { return m.publicKey }
 
 // ─── credential extraction + Authenticate ───────
 
@@ -302,7 +310,7 @@ func (m *Manager) validateJWTCached(token string) (*TokenClaims, error) {
 	}
 	m.mu.RUnlock()
 
-	claims, err := ValidateToken(token, m.jwtSecret)
+	claims, err := ValidateToken(token, m.publicKey)
 	if err != nil {
 		return nil, err
 	}

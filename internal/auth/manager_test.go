@@ -2,30 +2,41 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// testKey generates a fresh EC P-256 key pair for the calling test.
+// It fails the test immediately on any error — callers never see nil.
+func testKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	k, err := GenerateECKey()
+	if err != nil {
+		t.Fatalf("GenerateECKey: %v", err)
+	}
+	return k
+}
+
 // ─── token generation + validation ──────────────
 
 func TestGenerateToken_ProducesValidJWT(t *testing.T) {
-	secret := strings.Repeat("a", 32)
-	tok, err := GenerateToken("ws_1", "user_1", []string{ScopeProxy}, secret, time.Hour)
+	key := testKey(t)
+	tok, err := GenerateToken("ws_1", "user_1", []string{ScopeProxy}, key, time.Hour)
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
-	if strings.Count(tok, ".") != 2 {
-		t.Fatalf("expected 3-segment JWT, got %q", tok)
+	if len(tok) == 0 {
+		t.Fatal("expected non-empty token")
 	}
-	// Round-trip parse
+	// Round-trip parse with the public key.
 	parsed, err := jwt.ParseWithClaims(tok, &TokenClaims{}, func(_ *jwt.Token) (interface{}, error) {
-		return []byte(secret), nil
+		return &key.PublicKey, nil
 	})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -37,12 +48,16 @@ func TestGenerateToken_ProducesValidJWT(t *testing.T) {
 	if claims.Issuer != JWTIssuer {
 		t.Fatalf("expected issuer %q, got %q", JWTIssuer, claims.Issuer)
 	}
+	// kid must be set.
+	if kid, _ := parsed.Header["kid"].(string); kid != JWTKid {
+		t.Fatalf("expected kid %q, got %q", JWTKid, kid)
+	}
 }
 
 func TestValidateToken_AcceptsValid(t *testing.T) {
-	secret := strings.Repeat("b", 32)
-	tok, _ := GenerateToken("ws_v", "user_v", []string{ScopeProxy, ScopeAnalytics}, secret, time.Hour)
-	claims, err := ValidateToken(tok, secret)
+	key := testKey(t)
+	tok, _ := GenerateToken("ws_v", "user_v", []string{ScopeProxy, ScopeAnalytics}, key, time.Hour)
+	claims, err := ValidateToken(tok, &key.PublicKey)
 	if err != nil {
 		t.Fatalf("ValidateToken: %v", err)
 	}
@@ -55,10 +70,10 @@ func TestValidateToken_AcceptsValid(t *testing.T) {
 }
 
 func TestValidateToken_RejectsExpired(t *testing.T) {
-	secret := strings.Repeat("c", 32)
+	key := testKey(t)
 	// Negative TTL → already-expired.
-	tok, _ := GenerateToken("ws_e", "u", []string{ScopeProxy}, secret, -time.Minute)
-	_, err := ValidateToken(tok, secret)
+	tok, _ := GenerateToken("ws_e", "u", []string{ScopeProxy}, key, -time.Minute)
+	_, err := ValidateToken(tok, &key.PublicKey)
 	if err == nil {
 		t.Fatal("expected error for expired token")
 	}
@@ -67,11 +82,13 @@ func TestValidateToken_RejectsExpired(t *testing.T) {
 	}
 }
 
-func TestValidateToken_RejectsWrongSecret(t *testing.T) {
-	tok, _ := GenerateToken("ws_w", "u", []string{ScopeProxy}, strings.Repeat("d", 32), time.Hour)
-	_, err := ValidateToken(tok, strings.Repeat("e", 32))
+func TestValidateToken_RejectsWrongKey(t *testing.T) {
+	signingKey := testKey(t)
+	verifyKey := testKey(t) // different key pair
+	tok, _ := GenerateToken("ws_w", "u", []string{ScopeProxy}, signingKey, time.Hour)
+	_, err := ValidateToken(tok, &verifyKey.PublicKey)
 	if err == nil {
-		t.Fatal("expected error for wrong secret")
+		t.Fatal("expected error for wrong verification key")
 	}
 	if !errors.Is(err, ErrInvalidAuth) {
 		t.Fatalf("expected ErrInvalidAuth, got %v", err)
@@ -79,8 +96,8 @@ func TestValidateToken_RejectsWrongSecret(t *testing.T) {
 }
 
 func TestValidateToken_RejectsWrongIssuer(t *testing.T) {
+	key := testKey(t)
 	// Sign a token claiming a different issuer.
-	secret := []byte(strings.Repeat("f", 32))
 	claims := TokenClaims{
 		WorkspaceID: "ws",
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -88,8 +105,8 @@ func TestValidateToken_RejectsWrongIssuer(t *testing.T) {
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 		},
 	}
-	tok, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
-	_, err := ValidateToken(tok, string(secret))
+	tok, _ := jwt.NewWithClaims(jwt.SigningMethodES256, claims).SignedString(key)
+	_, err := ValidateToken(tok, &key.PublicKey)
 	if err == nil {
 		t.Fatal("expected issuer mismatch to fail")
 	}
@@ -106,7 +123,7 @@ func newReq(authHeader string) *http.Request {
 }
 
 func TestAuthenticate_AcceptsGlobalKey(t *testing.T) {
-	mgr := NewManager("super-secret-admin-key", strings.Repeat("g", 32), nil, nil)
+	mgr := NewManager("super-secret-admin-key", nil, nil, nil)
 	ctx, err := mgr.Authenticate(newReq("super-secret-admin-key"))
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -117,9 +134,9 @@ func TestAuthenticate_AcceptsGlobalKey(t *testing.T) {
 }
 
 func TestAuthenticate_AcceptsValidJWT(t *testing.T) {
-	secret := strings.Repeat("h", 32)
-	mgr := NewManager("", secret, nil, nil)
-	tok, _ := GenerateToken("ws_a", "user_a", []string{ScopeProxy}, secret, time.Hour)
+	key := testKey(t)
+	mgr := NewManager("", key, nil, nil)
+	tok, _ := GenerateToken("ws_a", "user_a", []string{ScopeProxy}, key, time.Hour)
 	ctx, err := mgr.Authenticate(newReq(tok))
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -130,7 +147,8 @@ func TestAuthenticate_AcceptsValidJWT(t *testing.T) {
 }
 
 func TestAuthenticate_RejectsInvalidJWT(t *testing.T) {
-	mgr := NewManager("", strings.Repeat("i", 32), nil, nil)
+	key := testKey(t)
+	mgr := NewManager("", key, nil, nil)
 	_, err := mgr.Authenticate(newReq("a.b.c"))
 	if !errors.Is(err, ErrInvalidAuth) {
 		t.Fatalf("expected ErrInvalidAuth, got %v", err)
@@ -138,7 +156,7 @@ func TestAuthenticate_RejectsInvalidJWT(t *testing.T) {
 }
 
 func TestAuthenticate_RejectsMissingCredentials(t *testing.T) {
-	mgr := NewManager("x", "y", nil, nil)
+	mgr := NewManager("x", nil, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
 	_, err := mgr.Authenticate(r)
 	if !errors.Is(err, ErrMissingCredentials) {
@@ -147,7 +165,7 @@ func TestAuthenticate_RejectsMissingCredentials(t *testing.T) {
 }
 
 func TestAuthenticate_LegacyXAPIKeyHeader(t *testing.T) {
-	mgr := NewManager("legacy-key", strings.Repeat("j", 32), nil, nil)
+	mgr := NewManager("legacy-key", nil, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
 	r.Header.Set("X-API-Key", "legacy-key")
 	ctx, err := mgr.Authenticate(r)
@@ -162,7 +180,7 @@ func TestAuthenticate_LegacyXAPIKeyHeader(t *testing.T) {
 func TestAuthenticate_WorkspaceKeyOpaqueOnError(t *testing.T) {
 	// Without a tenantStore wired, a tlv_ws_ key must be
 	// rejected with ErrInvalidAuth — same shape as "wrong key".
-	mgr := NewManager("", strings.Repeat("k", 32), nil, nil)
+	mgr := NewManager("", nil, nil, nil)
 	_, err := mgr.Authenticate(newReq("tlv_ws_aabbccdd"))
 	if !errors.Is(err, ErrInvalidAuth) {
 		t.Fatalf("expected ErrInvalidAuth, got %v", err)
@@ -172,9 +190,9 @@ func TestAuthenticate_WorkspaceKeyOpaqueOnError(t *testing.T) {
 // ─── JWT cache ──────────────────────────────────
 
 func TestAuthenticate_CachesJWTValidation(t *testing.T) {
-	secret := strings.Repeat("l", 32)
-	mgr := NewManager("", secret, nil, nil)
-	tok, _ := GenerateToken("ws_c", "u", []string{ScopeProxy}, secret, time.Hour)
+	key := testKey(t)
+	mgr := NewManager("", key, nil, nil)
+	tok, _ := GenerateToken("ws_c", "u", []string{ScopeProxy}, key, time.Hour)
 	// First call seeds the cache, second call should hit it.
 	_, _ = mgr.Authenticate(newReq(tok))
 	mgr.mu.RLock()
