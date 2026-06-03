@@ -78,6 +78,11 @@ type EmbeddingNode struct {
 	Active      bool      `json:"active"`
 	Verified    bool      `json:"verified"`
 	CreatedAt   time.Time `json:"created_at"`
+	// NodeSecretHash is the bcrypt hash of the node's shared secret,
+	// set by the HTTP handler before calling RegisterNode. Never
+	// marshalled to JSON (json:"-") so the hash never leaks to API
+	// consumers. Empty string stores NULL via NULLIF in the INSERT.
+	NodeSecretHash string `json:"-"`
 }
 
 // EmbeddingMiningStats is the response shape for the
@@ -196,10 +201,11 @@ func (m *EmbeddingMiner) RegisterNode(ctx context.Context, in EmbeddingNode) (*E
 
 	row := m.pool.QueryRow(ctx, `
 		INSERT INTO embedding_nodes
-			(workspace_id, url, model, dimensions, max_batch, speed_tps)
-		VALUES ($1, $2, $3, $4, $5, $6)
+			(workspace_id, url, model, dimensions, max_batch, speed_tps, node_secret_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''))
 		RETURNING id, created_at`,
 		in.WorkspaceID, in.URL, in.Model, in.Dimensions, in.MaxBatch, in.SpeedTPS,
+		in.NodeSecretHash,
 	)
 	if err := row.Scan(&in.ID, &in.CreatedAt); err != nil {
 		return nil, fmt.Errorf("embedding mining: insert node: %w", err)
