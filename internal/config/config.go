@@ -172,6 +172,16 @@ type Config struct {
 	TLSDomain   string
 	TLSCacheDir string
 
+	// CORSAllowedOrigins is a comma-separated list of origins permitted to make
+	// cross-origin requests to the Lens API. Env: LENS_CORS_ALLOWED_ORIGINS.
+	// Default empty — CORS is disabled and browsers enforce the same-origin
+	// policy, which is correct for server-to-server API gateway deployments.
+	//
+	// Use "*" to allow any origin (fully-public API mode). Use a comma-separated
+	// list to restrict to known frontend deployments, e.g.:
+	//   LENS_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+	CORSAllowedOrigins string
+
 	// RedisTLS controls TLS for the Redis connection.
 	// Env: LENS_REDIS_TLS. Default false.
 	//
@@ -296,6 +306,8 @@ func Load() (*Config, error) {
 
 		TLSDomain:   os.Getenv("LENS_TLS_DOMAIN"),
 		TLSCacheDir: getEnv("LENS_TLS_CACHE_DIR", "/var/cache/lens-tls"),
+
+		CORSAllowedOrigins: os.Getenv("LENS_CORS_ALLOWED_ORIGINS"),
 
 		RedisTLS:          parseBoolEnv("LENS_REDIS_TLS"),
 		RedisTLSSkipVerify: parseBoolEnv("LENS_REDIS_TLS_SKIP_VERIFY"),
