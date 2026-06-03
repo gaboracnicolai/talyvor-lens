@@ -1831,12 +1831,30 @@ func run() error {
 		// ─── Embedding node CRUD (embedding mining) ────
 		authed.Post("/v1/workspaces/{wsID}/embedding-nodes", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
-			var in mining.EmbeddingNode
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			// Decode into an inline struct so we can capture node_secret
+			// without exposing it on mining.EmbeddingNode's JSON shape.
+			var body struct {
+				mining.EmbeddingNode
+				NodeSecret string `json:"node_secret"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			in := body.EmbeddingNode
 			in.WorkspaceID = wsID
+			// Hash the node secret and store the hash — mirrors cache-node
+			// registration. An empty secret is allowed for backwards
+			// compatibility with nodes that pre-date the secret field;
+			// NULLIF in the INSERT stores NULL for an empty hash.
+			if body.NodeSecret != "" {
+				hash, err := bcrypt.GenerateFromPassword([]byte(body.NodeSecret), bcrypt.DefaultCost)
+				if err != nil {
+					writeJSONErr(w, http.StatusInternalServerError, "hash node secret: "+err.Error())
+					return
+				}
+				in.NodeSecretHash = string(hash)
+			}
 			created, err := embeddingMiner.RegisterNode(req.Context(), in)
 			if err != nil {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())

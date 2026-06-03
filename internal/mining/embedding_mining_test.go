@@ -236,6 +236,74 @@ func TestDeactivateEmbeddingNode_NotFound(t *testing.T) {
 	}
 }
 
+// ─── RegisterNode DB path ────────────────────────
+
+// TestRegisterEmbeddingNode_StoresSecretHash verifies that a pre-bcrypt'd
+// NodeSecretHash is forwarded as the 7th INSERT argument (ISO 27001 A.9).
+// The HTTP handler performs the bcrypt step; RegisterNode is responsible
+// only for persisting what it receives.
+func TestRegisterEmbeddingNode_StoresSecretHash(t *testing.T) {
+	miner, mock := newMockEmbMiner(t)
+
+	const (
+		wsID     = "ws_hash"
+		nodeURL  = "http://embed-host:11434"
+		model    = "nomic-embed-text"
+		dims     = 768
+		fakeHash = "$2a$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01"
+	)
+
+	mock.ExpectQuery("INSERT INTO embedding_nodes").
+		WithArgs(wsID, nodeURL, model, dims, 100, 500, fakeHash).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
+			AddRow("emb_test_hash", time.Now()))
+
+	node, err := miner.RegisterNode(context.Background(), EmbeddingNode{
+		WorkspaceID:    wsID,
+		URL:            nodeURL,
+		Model:          model,
+		Dimensions:     dims,
+		NodeSecretHash: fakeHash,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode: %v", err)
+	}
+	if node.ID != "emb_test_hash" {
+		t.Fatalf("expected emb_test_hash, got %s", node.ID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestRegisterEmbeddingNode_EmptySecretPassesEmptyString verifies that when
+// no secret is supplied, the 7th INSERT arg is "" — Postgres NULLIF converts
+// that to NULL so node_secret_hash is stored as NULL (backward compat).
+func TestRegisterEmbeddingNode_EmptySecretPassesEmptyString(t *testing.T) {
+	miner, mock := newMockEmbMiner(t)
+
+	mock.ExpectQuery("INSERT INTO embedding_nodes").
+		WithArgs("ws_nosec", "http://embed:11434", "e5-large", 1024, 100, 500, "").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
+			AddRow("emb_test_null", time.Now()))
+
+	node, err := miner.RegisterNode(context.Background(), EmbeddingNode{
+		WorkspaceID: "ws_nosec",
+		URL:         "http://embed:11434",
+		Model:       "e5-large",
+		Dimensions:  1024,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode: %v", err)
+	}
+	if node.ID != "emb_test_null" {
+		t.Fatalf("expected emb_test_null, got %s", node.ID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 // ─── EmbeddingRates ──────────────────────────────
 
 func TestEmbeddingRates_ExposesKnownModels(t *testing.T) {
