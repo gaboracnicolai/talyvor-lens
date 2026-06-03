@@ -210,6 +210,28 @@ type Config struct {
 	// controlled environments. Has no effect when Redis TLS is not active.
 	RedisTLSSkipVerify bool
 
+	// NatsTLS controls TLS for the NATS connection.
+	// Env: LENS_NATS_TLS. Default false.
+	//
+	// Two ways to enable NATS TLS:
+	//   1. Use tls:// or nats+tls:// in LENS_NATS_URL — the nats client
+	//      detects the scheme automatically and enables TLS without any extra
+	//      configuration.
+	//   2. Set LENS_NATS_TLS=true — Lens forces TLS on the connection even
+	//      when the URL scheme is nats://. Useful when the URL is supplied
+	//      by a secrets manager that always emits nats://.
+	//
+	// Lens logs a startup warning when neither is set, because NATS carries
+	// alert events, session turn events, learner signals, and status updates —
+	// all of which may contain prompt content or workspace metadata.
+	NatsTLS bool
+
+	// NatsTLSSkipVerify disables NATS server certificate verification.
+	// Env: LENS_NATS_TLS_SKIP_VERIFY. Default false.
+	// Only appropriate for self-signed / internal-CA certificates in
+	// controlled environments. Has no effect when NATS TLS is not active.
+	NatsTLSSkipVerify bool
+
 	// DBSSLMode controls TLS for the Postgres connection.
 	// Env: LENS_DB_SSL_MODE. Default "require".
 	//
@@ -316,8 +338,11 @@ func Load() (*Config, error) {
 
 		CORSAllowedOrigins: os.Getenv("LENS_CORS_ALLOWED_ORIGINS"),
 
-		RedisTLS:          parseBoolEnv("LENS_REDIS_TLS"),
+		RedisTLS:           parseBoolEnv("LENS_REDIS_TLS"),
 		RedisTLSSkipVerify: parseBoolEnv("LENS_REDIS_TLS_SKIP_VERIFY"),
+
+		NatsTLS:           parseBoolEnv("LENS_NATS_TLS"),
+		NatsTLSSkipVerify: parseBoolEnv("LENS_NATS_TLS_SKIP_VERIFY"),
 
 		JWTPrivateKey: os.Getenv("LENS_JWT_PRIVATE_KEY"),
 		TokenTTL:      24 * time.Hour,

@@ -22,7 +22,6 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -246,7 +245,7 @@ func run() error {
 		logger.Warn("postgres ping failed", slog.String("err", err.Error()))
 	}
 
-	nc, err := nats.Connect(cfg.NatsURL)
+	nc, err := connectNATS(cfg.NatsURL, cfg, logger)
 	if err != nil {
 		return err
 	}
