@@ -1648,10 +1648,11 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, nodes)
 		})
 
-		// Node heartbeat (Batch 3 Phase 2). Best-effort UPDATE
-		// of last_seen_at + uptime — no auth beyond the
-		// already-applied workspace key.
+		// Node heartbeat (Batch 3 Phase 2). Workspace-scoped UPDATE:
+		// the SQL requires id AND workspace_id so a key from workspace-A
+		// cannot keep alive workspace-B's nodes (cross-workspace hijack fix).
 		authed.Post("/v1/workspaces/{wsID}/nodes/{nodeID}/heartbeat", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
 			nodeID := chi.URLParam(req, "nodeID")
 			var in struct {
 				ActiveRequests int64    `json:"active_requests"`
@@ -1664,11 +1665,16 @@ func run() error {
 			// NodeSnapshots (xDS HA heartbeat reuse).
 			_ = cpHB.Record(req.Context(), "inference", nodeID, in.UptimeSeconds)
 			if pool != nil {
-				if _, err := pool.Exec(req.Context(), `
+				tag, err := pool.Exec(req.Context(), `
 					UPDATE inference_nodes
 					SET last_seen_at = NOW(), uptime_seconds = $2
-					WHERE id = $1`, nodeID, in.UptimeSeconds); err != nil {
+					WHERE id = $1 AND workspace_id = $3`, nodeID, in.UptimeSeconds, wsID)
+				if err != nil {
 					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if tag.RowsAffected() == 0 {
+					writeJSONErr(w, http.StatusNotFound, "node not found")
 					return
 				}
 			}
@@ -1676,8 +1682,9 @@ func run() error {
 		})
 
 		authed.Delete("/v1/workspaces/{wsID}/nodes/{nodeID}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
 			nodeID := chi.URLParam(req, "nodeID")
-			if err := computeMiner.DeactivateNode(req.Context(), nodeID); err != nil {
+			if err := computeMiner.DeactivateNode(req.Context(), nodeID, wsID); err != nil {
 				if errors.Is(err, mining.ErrNodeNotFound) {
 					writeJSONErr(w, http.StatusNotFound, "node not found")
 					return
@@ -1762,13 +1769,15 @@ func run() error {
 		})
 
 		authed.Delete("/v1/workspaces/{wsID}/cache-nodes/{nodeID}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
 			nodeID := chi.URLParam(req, "nodeID")
 			if pool == nil {
 				writeJSONErr(w, http.StatusServiceUnavailable, "DB unavailable")
 				return
 			}
+			// workspace_id scope: prevents cross-workspace node deletion.
 			tag, err := pool.Exec(req.Context(),
-				`UPDATE cache_nodes SET active = FALSE WHERE id = $1`, nodeID)
+				`UPDATE cache_nodes SET active = FALSE WHERE id = $1 AND workspace_id = $2`, nodeID, wsID)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -1781,6 +1790,7 @@ func run() error {
 		})
 
 		authed.Post("/v1/workspaces/{wsID}/cache-nodes/{nodeID}/heartbeat", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
 			nodeID := chi.URLParam(req, "nodeID")
 			var in struct {
 				Entries int     `json:"entries"`
@@ -1799,10 +1809,17 @@ func run() error {
 					writeJSONErr(w, http.StatusInternalServerError, err.Error())
 					return
 				}
-				if _, err := htx.Exec(req.Context(), `
-					UPDATE cache_nodes SET last_seen_at = NOW() WHERE id = $1`, nodeID); err != nil {
+				// workspace_id scope: prevents cross-workspace heartbeat hijack.
+				tag, err := htx.Exec(req.Context(), `
+					UPDATE cache_nodes SET last_seen_at = NOW() WHERE id = $1 AND workspace_id = $2`, nodeID, wsID)
+				if err != nil {
 					_ = htx.Rollback(req.Context())
 					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if tag.RowsAffected() == 0 {
+					_ = htx.Rollback(req.Context())
+					writeJSONErr(w, http.StatusNotFound, "node not found")
 					return
 				}
 				if _, err := htx.Exec(req.Context(), `
@@ -1854,8 +1871,9 @@ func run() error {
 		})
 
 		authed.Delete("/v1/workspaces/{wsID}/embedding-nodes/{nodeID}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
 			nodeID := chi.URLParam(req, "nodeID")
-			if err := embeddingMiner.DeactivateEmbeddingNode(req.Context(), nodeID); err != nil {
+			if err := embeddingMiner.DeactivateEmbeddingNode(req.Context(), nodeID, wsID); err != nil {
 				if errors.Is(err, mining.ErrNodeNotFound) {
 					writeJSONErr(w, http.StatusNotFound, "node not found")
 					return
@@ -1871,6 +1889,7 @@ func run() error {
 		// store so the reconciler can track liveness uniformly across all node
 		// types (migration 0035 added last_seen_at to embedding_nodes).
 		authed.Post("/v1/workspaces/{wsID}/embedding-nodes/{nodeID}/heartbeat", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
 			nodeID := chi.URLParam(req, "nodeID")
 			var in struct {
 				SpeedTPS      int64 `json:"speed_tps"`
@@ -1880,8 +1899,14 @@ func run() error {
 			_ = json.NewDecoder(req.Body).Decode(&in)
 			// Buffer heartbeat in Redis for xDS HA heartbeat reuse.
 			_ = cpHB.Record(req.Context(), "embedding", nodeID, in.UptimeSeconds)
-			if err := cpStore.RecordEmbedHeartbeat(req.Context(), nodeID, in.UptimeSeconds); err != nil {
+			// workspace_id scope: prevents cross-workspace heartbeat hijack.
+			found, err := cpStore.RecordEmbedHeartbeat(req.Context(), nodeID, wsID, in.UptimeSeconds)
+			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if !found {
+				writeJSONErr(w, http.StatusNotFound, "node not found")
 				return
 			}
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})

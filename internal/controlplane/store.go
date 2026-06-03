@@ -53,15 +53,23 @@ func newNodeStore(pool pgxDB, hb *HeartbeatStore) *NodeStore {
 // RecordEmbedHeartbeat refreshes last_seen_at and uptime_seconds for an
 // embedding node. Mirrors the inference-node and cache-node heartbeat
 // handlers in cmd/lens/main.go.
-func (s *NodeStore) RecordEmbedHeartbeat(ctx context.Context, nodeID string, uptimeSeconds int64) error {
+//
+// workspaceID is required: the UPDATE is scoped to both id AND workspace_id
+// so that an API key from workspace-A cannot keep alive workspace-B's nodes.
+// Returns (true, nil) when a row was updated; (false, nil) when no matching
+// row exists (node not found or workspace mismatch — callers should 404).
+func (s *NodeStore) RecordEmbedHeartbeat(ctx context.Context, nodeID, workspaceID string, uptimeSeconds int64) (bool, error) {
 	if s.pool == nil {
-		return nil
+		return false, nil
 	}
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE embedding_nodes
 		SET last_seen_at = NOW(), uptime_seconds = $2
-		WHERE id = $1`, nodeID, uptimeSeconds)
-	return err
+		WHERE id = $1 AND workspace_id = $3`, nodeID, uptimeSeconds, workspaceID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // MarkStaleInactive sets active=FALSE on inference_nodes, cache_nodes, and

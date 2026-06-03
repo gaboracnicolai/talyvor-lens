@@ -491,11 +491,16 @@ func scanNodes(rows pgx.Rows) ([]InferenceNode, error) {
 // DeactivateNode flips active=false. We don't delete — keeping
 // historical rows lets the ledger metadata's node_id references
 // stay resolvable.
-func (m *ComputeMiner) DeactivateNode(ctx context.Context, nodeID string) error {
+//
+// workspaceID is required: the UPDATE is scoped to both id AND workspace_id
+// so that an API key from workspace-A cannot deactivate workspace-B's nodes.
+func (m *ComputeMiner) DeactivateNode(ctx context.Context, nodeID, workspaceID string) error {
 	if m.pool == nil {
 		return nil
 	}
-	tag, err := m.pool.Exec(ctx, `UPDATE inference_nodes SET active = FALSE WHERE id = $1`, nodeID)
+	tag, err := m.pool.Exec(ctx,
+		`UPDATE inference_nodes SET active = FALSE WHERE id = $1 AND workspace_id = $2`,
+		nodeID, workspaceID)
 	if err != nil {
 		return fmt.Errorf("compute mining: deactivate: %w", err)
 	}

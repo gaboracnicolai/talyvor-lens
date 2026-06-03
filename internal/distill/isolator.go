@@ -1,15 +1,23 @@
 package distill
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"time"
 )
+
+// maxWorkerOutputBytes caps the JSON response the parent will read from the
+// worker's stdout. A legitimate PDF conversion of a 10 MiB document produces
+// well under 32 MiB of Markdown; the cap is a defence-in-depth bound against
+// a corrupted or malicious worker writing unbounded output into parent memory.
+const maxWorkerOutputBytes = 32 << 20 // 32 MiB
 
 // DefaultIsolatorTimeout is the wall-clock budget for one worker conversion.
 // 30 s is generous for a 10 MiB PDF on a slow host; tight enough to kill
@@ -106,9 +114,11 @@ func (p *ProcessIsolator) Convert(ctx context.Context, input []byte, format Form
 		cmd.Env = append(cmd.Env, p.ExtraEnv...)
 	}
 
-	// Stderr flows to the parent for observability; stdout carries the JSON
-	// protocol; stdin delivers the request.
-	cmd.Stderr = os.Stderr
+	// Stderr is captured into a buffer and re-emitted via slog so that
+	// document-derived strings in parser error messages (log injection risk)
+	// are not written verbatim to the parent's raw stderr stream.
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -148,10 +158,19 @@ func (p *ProcessIsolator) Convert(ctx context.Context, input []byte, format Form
 
 	// Read the response before Wait; the JSON decoder returns on EOF (worker
 	// closed stdout) even before Wait returns.
+	// io.LimitReader caps parent-side memory: a malformed worker writing
+	// unbounded JSON would otherwise allocate gigabytes in the parent heap.
 	var resp WorkerResponse
-	decodeErr := json.NewDecoder(stdout).Decode(&resp)
+	decodeErr := json.NewDecoder(io.LimitReader(stdout, maxWorkerOutputBytes)).Decode(&resp)
 
 	waitErr := cmd.Wait()
+
+	// Emit any worker stderr via slog rather than raw os.Stderr; this prevents
+	// document-derived strings in parser error messages from being injected into
+	// the parent's structured log output verbatim.
+	if stderrBuf.Len() > 0 {
+		slog.Warn("distill: worker stderr", slog.String("output", stderrBuf.String()))
+	}
 
 	// Decode failure: check whether the context deadline fired first (the most
 	// informative error to surface to the caller).
