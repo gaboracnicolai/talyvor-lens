@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 )
 
@@ -396,5 +397,99 @@ func TestCreateAPIKey_RejectsInvalidScope(t *testing.T) {
 		"ws_z", "n", []string{"billing"}, nil)
 	if !errors.Is(err, ErrInvalidScope) {
 		t.Fatalf("expected ErrInvalidScope, got %v", err)
+	}
+}
+
+// ─── 14) RotateAPIKey ────────────────────────────────
+
+// TestRotateAPIKey_HappyPath checks the full atomic sequence:
+// Begin → SELECT FOR UPDATE (old key) → INSERT (new key) → DELETE (old) → Commit.
+func TestRotateAPIKey_HappyPath(t *testing.T) {
+	store, mock := newMockStore(t)
+	defer mock.Close()
+
+	ctx := context.Background()
+	createdAt := time.Now().Add(-24 * time.Hour)
+
+	mock.ExpectBegin()
+	// Step 1: SELECT FOR UPDATE — returns old key metadata.
+	mock.ExpectQuery("SELECT id, workspace_id, key_prefix, name, scopes, expires_at, created_at").
+		WithArgs("old_key_id", "ws_rotate").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "workspace_id", "key_prefix", "name", "scopes", "expires_at", "created_at",
+		}).AddRow("old_key_id", "ws_rotate", "tlv_ws_abcd1234", "main-key",
+			[]string{"proxy"}, (*time.Time)(nil), createdAt))
+	// Step 2: INSERT new key — returns generated ID + timestamp.
+	mock.ExpectQuery("INSERT INTO workspace_api_keys").
+		WithArgs("ws_rotate", pgxmock.AnyArg(), pgxmock.AnyArg(),
+			"main-key", []string{"proxy"}, (*time.Time)(nil)).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
+			AddRow("new_key_id", time.Now()))
+	// Step 3: DELETE old key.
+	mock.ExpectExec("DELETE FROM workspace_api_keys WHERE id").
+		WithArgs("old_key_id").
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	mock.ExpectCommit()
+
+	raw, fresh, err := store.RotateAPIKey(ctx, "ws_rotate", "old_key_id")
+	if err != nil {
+		t.Fatalf("RotateAPIKey: %v", err)
+	}
+	if !strings.HasPrefix(raw, KeyPrefix) {
+		t.Fatalf("new key missing prefix: %q", raw)
+	}
+	if fresh.ID != "new_key_id" {
+		t.Fatalf("expected new_key_id, got %q", fresh.ID)
+	}
+	if fresh.Name != "main-key" {
+		t.Fatalf("name not inherited: %q", fresh.Name)
+	}
+	if len(fresh.Scopes) != 1 || fresh.Scopes[0] != "proxy" {
+		t.Fatalf("scopes not inherited: %v", fresh.Scopes)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestRotateAPIKey_KeyNotFound checks that a missing key (or a key that
+// belongs to a different workspace) returns ErrKeyNotFound and rolls back.
+func TestRotateAPIKey_KeyNotFound(t *testing.T) {
+	store, mock := newMockStore(t)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id, workspace_id, key_prefix, name, scopes, expires_at, created_at").
+		WithArgs("ghost_id", "ws_rotate").
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	_, _, err := store.RotateAPIKey(context.Background(), "ws_rotate", "ghost_id")
+	if !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("expected ErrKeyNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestRotateAPIKey_WrongWorkspace checks that a key owned by workspace A
+// cannot be rotated by workspace B (AND workspace_id in the query returns
+// ErrNoRows → ErrKeyNotFound).
+func TestRotateAPIKey_WrongWorkspace(t *testing.T) {
+	store, mock := newMockStore(t)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	// The query includes AND workspace_id = $2; supplying the wrong
+	// workspace ID produces ErrNoRows just as a missing key would.
+	mock.ExpectQuery("SELECT id, workspace_id, key_prefix, name, scopes, expires_at, created_at").
+		WithArgs("key_owned_by_ws_a", "ws_b").
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	_, _, err := store.RotateAPIKey(context.Background(), "ws_b", "key_owned_by_ws_a")
+	if !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("expected ErrKeyNotFound for wrong workspace, got %v", err)
 	}
 }
