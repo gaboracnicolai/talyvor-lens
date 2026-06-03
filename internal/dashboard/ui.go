@@ -1057,8 +1057,8 @@ const dashboardHTML = `<!DOCTYPE html>
       }
       panel.style.display = '';
       const cohorts = (d.cohorts || []);
-      const meta = '<p class="muted" style="font-size:12px">' + cohorts.length + ' cohorts · floor ≥' + st.min_samples +
-        ' samples / ≥' + st.min_workspaces + ' workspaces · refreshed ' +
+      const meta = '<p class="muted" style="font-size:12px">' + cohorts.length + ' cohorts · floor ≥' + (parseInt(st.min_samples) || 0) +
+        ' samples / ≥' + (parseInt(st.min_workspaces) || 0) + ' workspaces · refreshed ' +
         (st.last_refresh ? new Date(st.last_refresh).toLocaleTimeString() : '—') + '</p>';
       let body;
       if (cohorts.length === 0) {
@@ -1069,9 +1069,9 @@ const dashboardHTML = `<!DOCTYPE html>
             const cls = c.qualifies ? 'good' : 'warn';
             const label = c.qualifies ? 'active' : 'below floor';
             return '<tr>' +
-              '<td>' + c.feature + '</td>' +
-              '<td>' + c.input_range + '</td>' +
-              '<td class="mono">' + c.model + '</td>' +
+              '<td>' + escapeHTML(c.feature) + '</td>' +
+              '<td>' + escapeHTML(c.input_range) + '</td>' +
+              '<td class="mono">' + escapeHTML(c.model) + '</td>' +
               '<td class="mono">' + (c.avg_quality || 0).toFixed(2) + '</td>' +
               '<td class="mono">' + fmtUSD(c.cost_per_1k) + '</td>' +
               '<td class="mono">' + (c.quality_per_dollar || 0).toFixed(1) + '</td>' +

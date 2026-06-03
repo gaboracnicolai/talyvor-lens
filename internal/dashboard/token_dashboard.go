@@ -231,6 +231,15 @@ const commonHead = `<!DOCTYPE html>
       text-align: center;
     }
   </style>
+  <script>
+  // escapeHTML is defined here in commonHead so every page (tokens, nodes,
+  // economy, oracle) has it available — not just oracle which previously
+  // defined it locally. Duplicate definitions in the oracle page script block
+  // are harmless; the last one wins and both are identical.
+  function escapeHTML(s) {
+    return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  </script>
 </head>`
 
 // commonHeader is the <header>+<nav> chunk every page reuses.
@@ -437,7 +446,7 @@ async function loadHistory(ws) {
       const date = new Date(e.created_at).toLocaleString();
       const sign = e.amount >= 0 ? '+' : '';
       const cls = e.amount >= 0 ? 'accent' : '';
-      return '<tr><td>' + date + '</td><td>' + e.type + '</td>' +
+      return '<tr><td>' + date + '</td><td>' + escapeHTML(e.type) + '</td>' +
              '<td class="' + cls + '">' + sign + fmt(e.amount) + '</td>' +
              '<td>' + fmt(e.balance_after) + '</td></tr>';
     }).join('');
@@ -759,7 +768,7 @@ async function loadConversionRate() {
              '<td>' + (h.fair_rate || 0).toFixed(4) + '</td>' +
              '<td>$' + (h.backing_value || 0).toFixed(4) + '</td>' +
              '<td>' + fmt(h.circulating) + '</td>' +
-             '<td>' + (h.approved_by || '—') + '</td></tr>';
+             '<td>' + escapeHTML(h.approved_by || '—') + '</td></tr>';
     }).join('');
   } catch (e) { console.warn(e); }
 }
