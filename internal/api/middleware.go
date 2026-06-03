@@ -338,6 +338,12 @@ func CORSMiddleware(allowedOrigins string) func(http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Headers",
 					"Authorization, Content-Type, X-Request-ID, X-Talyvor-Key")
+				// Expose the response headers that browser SDK clients need to
+				// read: request tracing ID, rate-limit state, and API version.
+				// Without this, browsers hide all non-safelisted headers from
+				// cross-origin JS even when Access-Control-Allow-Origin is set.
+				w.Header().Set("Access-Control-Expose-Headers",
+					"X-Request-ID, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, X-API-Version")
 				w.Header().Set("Access-Control-Max-Age", "86400")
 				// Vary: Origin tells caches the response differs per origin.
 				w.Header().Add("Vary", "Origin")
