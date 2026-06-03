@@ -593,6 +593,14 @@ func run() error {
 	r.Use(api.APIVersionMiddleware)
 	r.Use(api.GzipMiddleware)
 	r.Use(api.RateLimitHeadersMiddleware)
+	// Security headers on every response: X-Content-Type-Options, X-Frame-Options,
+	// Referrer-Policy, and Content-Security-Policy (tuned for the dashboard's
+	// Google Fonts dependency; all JS/CSS is inline).
+	r.Use(api.SecurityHeadersMiddleware)
+	// CORS: no-op when LENS_CORS_ALLOWED_ORIGINS is unset (default).
+	// Set to a comma-separated list of origins or "*" for public-API mode.
+	// Preflight OPTIONS requests are absorbed here, before auth middleware.
+	r.Use(api.CORSMiddleware(cfg.CORSAllowedOrigins))
 	// HTTP request metrics (Upgrade 11): request count, latency histogram, and
 	// in-flight gauge — labelled by chi route pattern (bounded cardinality).
 	r.Use(metrics.HTTPMiddleware)

@@ -358,3 +358,155 @@ func TestServeOpenAPI_RespondsJSON(t *testing.T) {
 		t.Fatal("expected application/json content type")
 	}
 }
+
+// ─── SecurityHeadersMiddleware ───────────────────
+
+func TestSecurityHeadersMiddleware_SetsAllHeaders(t *testing.T) {
+	h := SecurityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+		t.Errorf("Referrer-Policy = %q, want strict-origin-when-cross-origin", got)
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy must be set")
+	}
+	for _, directive := range []string{
+		"default-src 'self'",
+		"frame-ancestors 'none'",
+		"https://fonts.googleapis.com",
+		"https://fonts.gstatic.com",
+		"base-uri 'self'",
+		"form-action 'self'",
+	} {
+		if !strings.Contains(csp, directive) {
+			t.Errorf("CSP missing directive %q; full value: %s", directive, csp)
+		}
+	}
+}
+
+func TestSecurityHeadersMiddleware_DoesNotBlockDownstream(t *testing.T) {
+	called := false
+	h := SecurityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if !called {
+		t.Fatal("downstream handler was not called")
+	}
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("status = %d, want 418", rec.Code)
+	}
+}
+
+// ─── CORSMiddleware ──────────────────────────────
+
+func TestCORSMiddleware_EmptyOrigins_IsNoOp(t *testing.T) {
+	called := false
+	h := CORSMiddleware("")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("downstream must still be called")
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("no ACAO header should be set when CORS is disabled")
+	}
+}
+
+func TestCORSMiddleware_AllowedOrigin_SetsHeaders(t *testing.T) {
+	h := CORSMiddleware("https://app.example.com")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("ACAO = %q, want https://app.example.com", got)
+	}
+	if rec.Header().Get("Vary") == "" {
+		t.Error("Vary header must be set when ACAO is present")
+	}
+}
+
+func TestCORSMiddleware_DisallowedOrigin_NoHeaders(t *testing.T) {
+	h := CORSMiddleware("https://app.example.com")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "https://other.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("ACAO must not be set for a disallowed origin")
+	}
+}
+
+func TestCORSMiddleware_Wildcard_AllowsAnyOrigin(t *testing.T) {
+	h := CORSMiddleware("*")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "https://random.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://random.example.com" {
+		t.Errorf("wildcard CORS: ACAO = %q, want the actual origin", got)
+	}
+}
+
+func TestCORSMiddleware_Preflight_Returns204(t *testing.T) {
+	h := CORSMiddleware("https://app.example.com")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Should not be reached on preflight.
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/x", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("preflight status = %d, want 204", rec.Code)
+	}
+}
+
+func TestCORSMiddleware_MultipleOrigins_AllAllowed(t *testing.T) {
+	h := CORSMiddleware("https://a.example.com, https://b.example.com")(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+	for _, origin := range []string{"https://a.example.com", "https://b.example.com"} {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != origin {
+			t.Errorf("origin %q: ACAO = %q, want match", origin, got)
+		}
+	}
+}

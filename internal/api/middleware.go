@@ -11,6 +11,9 @@ package api
 //   - APIVersionMiddleware  — X-API-Version on every response
 //   - GzipMiddleware        — opt-in gzip for large JSON bodies
 //   - RateLimitHeaders      — emits X-RateLimit-* on responses
+//   - SecurityHeadersMiddleware — X-Content-Type-Options, X-Frame-Options,
+//     Referrer-Policy, Content-Security-Policy on every response
+//   - CORSMiddleware        — allowlist-based CORS, off by default
 //   - APIError / WriteError — standardised error envelope
 
 import (
@@ -252,6 +255,102 @@ func itoa(n int) string {
 }
 
 func i64toa(n int64) string { return itoa(int(n)) }
+
+// ─── security headers middleware ─────────────────
+
+// SecurityHeadersMiddleware sets defensive HTTP headers on every response.
+//
+//   - X-Content-Type-Options: nosniff — stops browsers from MIME-sniffing a
+//     response away from the declared Content-Type.
+//
+//   - X-Frame-Options: DENY — legacy clickjacking protection for browsers that
+//     don't support CSP frame-ancestors.
+//
+//   - Referrer-Policy: strict-origin-when-cross-origin — sends the full URL as
+//     referrer for same-origin requests (useful for internal analytics) but
+//     strips the path/query on cross-origin navigation.
+//
+//   - Content-Security-Policy — restrict what the browser may load.
+//     The policy is tuned for the Lens dashboard, whose only external resources
+//     are the IBM Plex fonts served by Google Fonts.  All JavaScript and CSS
+//     are inline (no external scripts; nonces are out of scope for now, so
+//     'unsafe-inline' is needed for those two directives).
+func SecurityHeadersMiddleware(next http.Handler) http.Handler {
+	const csp = "default-src 'self'; " +
+		"script-src 'self' 'unsafe-inline'; " +
+		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+		"font-src 'self' https://fonts.gstatic.com; " +
+		"img-src 'self' data:; " +
+		"connect-src 'self'; " +
+		"frame-ancestors 'none'; " +
+		"base-uri 'self'; " +
+		"form-action 'self'"
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Content-Security-Policy", csp)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ─── CORS middleware ──────────────────────────────
+
+// CORSMiddleware sets Access-Control-* headers based on an explicit origin
+// allowlist. Designed for API-gateway deployments where browser clients may
+// call Lens directly from a different origin.
+//
+// allowedOrigins is a comma-separated list of exact origin strings, e.g.
+// "https://app.example.com,https://admin.example.com". Use "*" to allow any
+// origin (public-API mode). An empty string disables CORS entirely — no
+// Access-Control-Allow-Origin header is sent and browsers enforce the default
+// same-origin policy, which is the safest default.
+//
+// Preflight OPTIONS requests are answered with 204 No Content so the browser
+// does not block them on auth middleware that runs later in the chain.
+//
+// The Vary: Origin header is always added when an origin matches, so that
+// CDNs and caches do not serve one origin's CORS-annotated response to a
+// request from a different origin.
+func CORSMiddleware(allowedOrigins string) func(http.Handler) http.Handler {
+	if allowedOrigins == "" {
+		// Fast path: no CORS configured — return identity middleware.
+		return func(next http.Handler) http.Handler { return next }
+	}
+
+	wildcard := allowedOrigins == "*"
+	allowed := make(map[string]struct{})
+	if !wildcard {
+		for _, o := range strings.Split(allowedOrigins, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				allowed[o] = struct{}{}
+			}
+		}
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			_, originAllowed := allowed[origin]
+			if origin != "" && (wildcard || originAllowed) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers",
+					"Authorization, Content-Type, X-Request-ID, X-Talyvor-Key")
+				w.Header().Set("Access-Control-Max-Age", "86400")
+				// Vary: Origin tells caches the response differs per origin.
+				w.Header().Add("Vary", "Origin")
+			}
+			// Absorb preflight requests before they reach auth middleware.
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
 // ─── error envelope ──────────────────────────────
 
