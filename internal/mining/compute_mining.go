@@ -212,7 +212,16 @@ func (m *ComputeMiner) RegisterNode(ctx context.Context, in InferenceNode) (*Inf
 		return &in, nil
 	}
 
-	row := m.pool.QueryRow(ctx, `
+	// Both INSERTs run in one transaction: if metrics seeding fails
+	// the node row is rolled back so RecordServedRequest never
+	// silently no-ops against a metrics-less node.
+	tx, err := m.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("compute mining: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
 		INSERT INTO inference_nodes
 			(workspace_id, url, provider, models, gpu_type, max_concurrent, price_per_token, ed25519_pubkey)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''))
@@ -224,10 +233,13 @@ func (m *ComputeMiner) RegisterNode(ctx context.Context, in InferenceNode) (*Inf
 		return nil, fmt.Errorf("compute mining: insert node: %w", err)
 	}
 	// Seed the metrics row so RecordServedRequest can UPDATE it.
-	if _, err := m.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO node_metrics (node_id) VALUES ($1) ON CONFLICT (node_id) DO NOTHING`,
 		in.ID); err != nil {
 		return nil, fmt.Errorf("compute mining: seed metrics: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("compute mining: commit node registration: %w", err)
 	}
 
 	// Async verification — don't block the registration response.

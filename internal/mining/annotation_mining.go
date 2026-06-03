@@ -404,29 +404,35 @@ func (m *AnnotationMiner) GetStake(ctx context.Context, workspaceID string) (flo
 }
 
 // Stake debits `amount` from the workspace balance and adds it
-// to the stake row (UPSERT). Atomic — the ledger Debit will roll
-// back if there's not enough balance.
+// to the stake row (UPSERT). Both the ledger Debit and the stake
+// UPSERT run inside a single transaction — if either fails the
+// whole thing rolls back, so LENS is never lost in transit.
 func (m *AnnotationMiner) Stake(ctx context.Context, workspaceID string, amount float64) error {
 	if amount <= 0 {
 		return errors.New("annotation: stake amount must be positive")
 	}
-	if err := m.ledger.Debit(ctx, workspaceID, amount, "annotation_stake", "stake for annotation rights", nil); err != nil {
-		return err
-	}
 	if m.pool == nil {
 		return nil
 	}
-	_, err := m.pool.Exec(ctx, `
+	tx, err := m.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("annotation: begin stake tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := m.ledger.DebitTx(ctx, tx, workspaceID, amount, "annotation_stake", "stake for annotation rights", nil); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO annotator_stakes (workspace_id, staked, staked_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (workspace_id) DO UPDATE
 		SET staked = annotator_stakes.staked + EXCLUDED.staked,
 		    staked_at = NOW()`,
-		workspaceID, amount)
-	if err != nil {
+		workspaceID, amount); err != nil {
 		return fmt.Errorf("annotation: upsert stake: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // Unstake returns the full stake to the workspace balance.
@@ -442,13 +448,6 @@ func (m *AnnotationMiner) Stake(ctx context.Context, workspaceID string, amount 
 // the 48h TTL or submit the annotations to free the stake.
 func (m *AnnotationMiner) Unstake(ctx context.Context, workspaceID string) error {
 	if m.pool == nil {
-		return nil
-	}
-	staked, err := m.GetStake(ctx, workspaceID)
-	if err != nil {
-		return err
-	}
-	if staked <= 0 {
 		return nil
 	}
 	// Best-effort in-flight check: count tasks fetched by this
@@ -476,11 +475,36 @@ func (m *AnnotationMiner) Unstake(ctx context.Context, workspaceID string) error
 	// the row count; for now we let unstaking through and rely
 	// on caller policy. (The constraint matters mostly to
 	// prevent stake-yank-after-pay; the credit is irrevocable.)
-	if _, err := m.pool.Exec(ctx,
-		`DELETE FROM annotator_stakes WHERE workspace_id = $1`, workspaceID); err != nil {
+
+	// Atomically delete the stake row and capture the amount.
+	// Using DELETE … RETURNING means concurrent Unstake calls
+	// serialise at the DB: whichever wins the DELETE gets the
+	// amount; subsequent calls find no row and return nil.
+	// Both the delete and the ledger credit run in one transaction
+	// so a crash between them cannot permanently destroy LENS.
+	tx, err := m.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("annotation: begin unstake tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var amount float64
+	err = tx.QueryRow(ctx,
+		`DELETE FROM annotator_stakes WHERE workspace_id = $1 RETURNING staked`,
+		workspaceID).Scan(&amount)
+	if err == pgx.ErrNoRows {
+		return nil // already unstaked by a concurrent call
+	}
+	if err != nil {
 		return fmt.Errorf("annotation: clear stake: %w", err)
 	}
-	return m.ledger.Credit(ctx, workspaceID, staked, "annotation_unstake", "unstake", nil)
+	if amount <= 0 {
+		return tx.Commit(ctx)
+	}
+	if err := m.ledger.CreditTx(ctx, tx, workspaceID, amount, "annotation_unstake", "unstake", nil); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ─── GetAnnotatorStats ───────────────────────────

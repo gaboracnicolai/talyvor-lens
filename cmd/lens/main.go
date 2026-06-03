@@ -82,6 +82,7 @@ import (
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/warmer"
+	"golang.org/x/crypto/bcrypt"
 	"github.com/talyvor/lens/internal/workspace"
 	"github.com/talyvor/lens/migrations"
 )
@@ -1715,20 +1716,42 @@ func run() error {
 				writeJSONErr(w, http.StatusServiceUnavailable, "DB unavailable")
 				return
 			}
-			row := pool.QueryRow(req.Context(), `
+			secretHash, err := bcrypt.GenerateFromPassword([]byte(in.NodeSecret), bcrypt.DefaultCost)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, "hash node secret: "+err.Error())
+				return
+			}
+			// Both INSERTs run in one transaction: if the metrics
+			// seed fails the node row rolls back so heartbeat
+			// UPDATEs never silently no-op against a metrics-less node.
+			tx, err := pool.Begin(req.Context())
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			var id string
+			var createdAt time.Time
+			row := tx.QueryRow(req.Context(), `
 				INSERT INTO cache_nodes (workspace_id, url, max_size_gb, node_secret_hash)
 				VALUES ($1, $2, $3, $4)
 				RETURNING id, created_at`,
-				wsID, strings.TrimRight(in.URL, "/"), in.MaxSizeGB, in.NodeSecret)
-			var id string
-			var createdAt time.Time
+				wsID, strings.TrimRight(in.URL, "/"), in.MaxSizeGB, string(secretHash))
 			if err := row.Scan(&id, &createdAt); err != nil {
+				_ = tx.Rollback(req.Context())
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 			// Seed metrics row so heartbeat UPDATEs have a target.
-			_, _ = pool.Exec(req.Context(),
-				`INSERT INTO cache_node_metrics (node_id) VALUES ($1) ON CONFLICT (node_id) DO NOTHING`, id)
+			if _, err := tx.Exec(req.Context(),
+				`INSERT INTO cache_node_metrics (node_id) VALUES ($1) ON CONFLICT (node_id) DO NOTHING`, id); err != nil {
+				_ = tx.Rollback(req.Context())
+				writeJSONErr(w, http.StatusInternalServerError, "seed metrics: "+err.Error())
+				return
+			}
+			if err := tx.Commit(req.Context()); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			writeJSONOK(w, http.StatusCreated, map[string]any{
 				"id":          id,
 				"workspace_id": wsID,
@@ -1768,12 +1791,21 @@ func run() error {
 			// Buffer heartbeat in Redis for xDS HA heartbeat reuse.
 			_ = cpHB.Record(req.Context(), "cache", nodeID, 0)
 			if pool != nil {
-				if _, err := pool.Exec(req.Context(), `
-					UPDATE cache_nodes SET last_seen_at = NOW() WHERE id = $1`, nodeID); err != nil {
+				// last_seen_at and metrics must move together atomically;
+				// a partial update leaves the node appearing alive with
+				// stale metrics or updated metrics with a stale timestamp.
+				htx, err := pool.Begin(req.Context())
+				if err != nil {
 					writeJSONErr(w, http.StatusInternalServerError, err.Error())
 					return
 				}
-				if _, err := pool.Exec(req.Context(), `
+				if _, err := htx.Exec(req.Context(), `
+					UPDATE cache_nodes SET last_seen_at = NOW() WHERE id = $1`, nodeID); err != nil {
+					_ = htx.Rollback(req.Context())
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if _, err := htx.Exec(req.Context(), `
 					INSERT INTO cache_node_metrics (node_id, entries, size_mb, hit_rate, last_updated)
 					VALUES ($1, $2, $3, $4, NOW())
 					ON CONFLICT (node_id) DO UPDATE
@@ -1782,6 +1814,11 @@ func run() error {
 					    hit_rate = EXCLUDED.hit_rate,
 					    last_updated = NOW()`,
 					nodeID, in.Entries, in.SizeMB, in.HitRate); err != nil {
+					_ = htx.Rollback(req.Context())
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if err := htx.Commit(req.Context()); err != nil {
 					writeJSONErr(w, http.StatusInternalServerError, err.Error())
 					return
 				}

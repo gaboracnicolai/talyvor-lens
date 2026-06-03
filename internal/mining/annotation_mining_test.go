@@ -270,14 +270,39 @@ func TestCheckAgreement_PartialMajority(t *testing.T) {
 
 // ─── Stake ───────────────────────────────────────
 
+// expectApplyTx sets up the four SQL steps that LedgerStore.applyTx
+// executes on a caller-supplied tx (no Begin/Commit — those belong to
+// the caller). Used when testing functions that call DebitTx/CreditTx.
+func expectApplyTx(
+	mock pgxmock.PgxPoolIface,
+	workspaceID string,
+	startingBalance, startingEarned, startingSpent float64,
+	delta, expectedBalance, expectedEarned, expectedSpent float64,
+) {
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs(workspaceID).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
+		WithArgs(workspaceID).
+		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
+			AddRow(startingBalance, startingEarned, startingSpent))
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs(workspaceID, delta, expectedBalance, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs(workspaceID, expectedBalance, expectedEarned, expectedSpent).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+}
+
 func TestStake_DeductsFromBalance(t *testing.T) {
 	miner, mock := newMockAnnotator(t)
-	// LedgerStore.Debit transaction.
-	expectCreditOrDebit(mock, "ws_stake", 15.0, 15.0, 0, -10.0, 5.0, 15.0, 10.0)
-	// Then the stake UPSERT.
+	// Stake() owns the transaction; DebitTx runs inside it without Begin/Commit.
+	mock.ExpectBegin()
+	expectApplyTx(mock, "ws_stake", 15.0, 15.0, 0, -10.0, 5.0, 15.0, 10.0)
 	mock.ExpectExec("INSERT INTO annotator_stakes").
 		WithArgs("ws_stake", 10.0).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
 	if err := miner.Stake(context.Background(), "ws_stake", 10.0); err != nil {
 		t.Fatalf("Stake: %v", err)
 	}

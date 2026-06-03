@@ -31,8 +31,9 @@
 --
 -- SAFE TO RUN: no production data exists. The rename → INSERT → DROP
 -- sequence is a safety net; the INSERT is a no-op on empty tables.
--- The whole migration runs inside one transaction and rolls back cleanly
--- if anything fails.
+-- The migration runner (applyOne) wraps this in its own transaction;
+-- do NOT add BEGIN/COMMIT here or the runner's transaction boundary
+-- is broken (premature COMMIT, schema_migrations write runs outside tx).
 --
 -- INDEX ORDERING NOTE: CREATE INDEX must come AFTER DROP TABLE for each
 -- block. When ALTER TABLE ... RENAME renames the original table to
@@ -45,8 +46,6 @@
 -- maintenance during inserts). Do NOT use CREATE INDEX IF NOT EXISTS here —
 -- it would silently skip on a still-taken name and leave the partitioned
 -- table unindexed.
-
-BEGIN;
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- lens_token_ledger
@@ -204,5 +203,3 @@ CREATE INDEX idx_token_events_modality
 CREATE INDEX idx_token_events_prompt_hash2
     ON token_events (prompt_hash, created_at DESC)
     WHERE prompt_text != '';
-
-COMMIT;
