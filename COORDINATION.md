@@ -2,7 +2,7 @@
 
 **Purpose:** two people build in these repos in parallel, each running Claude / Claude Code. Our Claudes share no memory and cannot see each other's work — **GitHub is the only place our work meets, so GitHub is the single source of truth.** This file is how we avoid double work and handle the seams where our work touches.
 
-**Last synced:** 2026-06-03 — main at 36d8ee3 (collaborator security hardening batch complete)
+**Last synced:** 2026-06-04 — main at f4306ae (#75 — mining node TLS, last of the ISO 27001 hardening batch)
 
 ---
 
@@ -48,6 +48,10 @@ Most of the time we're in different code and won't collide. Collisions happen at
 
 6. **`internal/distill` — existing seam (since #45).** Still applies: sync before building in it.
 
+7. **`internal/ab` — NEW SEAM (since #78).** Collaborator fixed a TOCTOU race in `StartExperiment` (single `Lock/defer Unlock`, `checkActiveCapLocked` helper, two new concurrent tests). **Sync before either side next edits `internal/ab/engine.go`.**
+
+8. **`internal/povi/challenge*` — NEW SEAM (since #79).** Collaborator rewrote the double-slash guard (atomic INSERT claim-first, `ChallengePending` result, new `UpdateResult` on the `challengeStore` interface + `ChallengeStore`). The `Challenge()` call order changed: `Record` before `Slash`. **Sync before either side next edits `challenge.go`, `challenge_store.go`, or `challenge_test.go`.**
+
 ---
 
 ## The rules (short version)
@@ -63,7 +67,7 @@ Most of the time we're in different code and won't collide. Collisions happen at
 
 ## Work ledger — keep current
 
-_(last updated: 2026-06-03, main at 36d8ee3)_
+_(last updated: 2026-06-04, main at f4306ae / #75)_
 
 ### Nicolai + Claude — in progress
 - DISTILL stage 3 request-path integration: PRs #50, #51, #52 are on main (distill-worker image, smoke test, admin preview endpoint). Current status unknown — sync with Nicolai before touching internal/distill or internal/proxy.
@@ -79,12 +83,14 @@ _(last updated: 2026-06-03, main at 36d8ee3)_
 - Code: finish JetBrains plugin
 - Suite: replicate Helm to Track/Docs/Code
 
-### Collaborator (Andrei) — recently landed (since last sync at 0ae7872)
+### Collaborator (Andrei) — recently landed (since last sync at 36d8ee3 / #68)
 
 **Transport security (ISO 27001 A.13):**
 - HTTPS / Let's Encrypt (#56): TLS 1.2/1.3, HSTS, HTTP→HTTPS redirect on `cmd/lens`
 - Postgres TLS (#57, #58): `LENS_DB_SSL_MODE` defaults to `require`; sslmode validated in migrate path; port-80 failure escalated on first boot
 - Redis TLS (#62): `LENS_REDIS_TLS` / `rediss://` enforcement
+- NATS TLS (#69): inter-service messages now encrypted; `NATS_TLS_CERT`/`NATS_TLS_KEY`/`NATS_TLS_CA` env vars; connection refuses on TLS failure
+- Mining node TLS (#75): all three node binaries (`cmd/node`, `cmd/cachenode`, `cmd/embednode`) now support opt-in TLS via env vars (`NODE_TLS_CERT`/`NODE_TLS_KEY` etc.); plain HTTP path logs a startup ⚠️ warning; 12 new tests across the three binaries
 
 **Application security (ISO 27001 A.9, A.14):**
 - HTTP security headers (#63): CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy; CORS `Access-Control-Expose-Headers`
@@ -92,7 +98,18 @@ _(last updated: 2026-06-03, main at 36d8ee3)_
 - [touched for security] Auth middleware fix (#53): `AuthMiddleware` taught to accept global key and JWTs via Manager fallback (required for ES256 wiring)
 - [touched for security] XSS hardening (#49, #66): `escapeHTML` on all client-controlled strings in dashboard `apply*` render functions; `encodeURIComponent` on URL segments; `escapeHTML` definition added to `commonHead` (tokens/nodes pages were missing it)
 - bcrypt on cache node secrets (#66): `node_secret` hashed before DB storage (was plaintext)
+- bcrypt on embedding node secrets (#72): embedding nodes were missed in the first bcrypt pass; `node_secret_hash` now populated consistently across all three node types
 - xDS workspace isolation (#67): all 6 node mutation endpoints (3× heartbeat + 3× DELETE) scoped to `AND workspace_id = $N` — prevents cross-workspace node hijacking
+- Dashboard / admin gate (#73): `/metrics` and `/ha/status` endpoints now require `X-Admin-Key` header; previously open to any caller on the network (ISO 27001 A.9)
+- `X-Request-ID` sanitisation (#74): untrusted header sanitised to alphanumeric + hyphens + underscores, capped at 64 bytes — prevents log injection and oversized ID storage (ISO 27001 A.12.4)
+
+**DB / atomicity / TOCTOU:**
+- DB transaction atomicity (#66): `Stake()`, `Unstake()` (`DELETE…RETURNING` eliminates TOCTOU double-credit), `RegisterNode()`, cache-node registration + heartbeat — all now single `pgx.Tx`
+- API key rotation TOCTOU (#71): `/v1/workspaces/{wsID}/api-keys/{keyID}/rotate` rewritten as single atomic transaction — concurrent calls no longer produce two simultaneously active keys (ISO 27001 A.9)
+- Annotation submission TOCTOU (#70): `SubmitAnnotation()` now wraps task lookup + stake check + insert in `SELECT FOR UPDATE` — concurrent submissions can no longer double-insert (ISO 27001 A.9)
+- Migration 0034 fix (#66): removed stray `BEGIN`/`COMMIT` that broke migration runner transaction boundary (collaborator's own migration)
+- Migration 0038 (#66): new migration — FK index on `marketplace_trades(listing_id)`; `session_turns` FK → `ON DELETE CASCADE`
+- Migration no-transaction marker (#59): `lens:no-transaction` for 0037 `DROP INDEX CONCURRENTLY` — fixes crash on fresh apply
 
 **Resilience / HA / operations (ISO 27001 A.12):**
 - HA bugs (#61): zombie process reaping, `shared_breaker` data race, HA clock-skew
@@ -102,20 +119,16 @@ _(last updated: 2026-06-03, main at 36d8ee3)_
 - Snapshot scan error logging (#67): malformed DB rows now `slog.Warn` instead of silent `continue`
 - Code-review fixes (#54): 7 issues across process isolation, control plane, DB
 
-**DB / concurrency / migrations:**
-- DB transaction atomicity (#66): `Stake()`, `Unstake()` (`DELETE…RETURNING` eliminates TOCTOU double-credit), `RegisterNode()`, cache-node registration + heartbeat — all now single `pgx.Tx`
-- Migration 0034 fix (#66): removed stray `BEGIN`/`COMMIT` that broke migration runner transaction boundary (collaborator's own migration)
-- Migration 0038 (#66): new migration — FK index on `marketplace_trades(listing_id)`; `session_turns` FK → `ON DELETE CASCADE`
-- Migration no-transaction marker (#59): `lens:no-transaction` for 0037 `DROP INDEX CONCURRENTLY` — fixes crash on fresh apply
+### Collaborator (Andrei) — open PRs (pending merge, as of 2026-06-04)
 
-### Collaborator (Andrei) — up next (security hardening remaining)
-- **Dashboard auth gate (A4)** — admin/monitoring dashboard has no authentication. Direct ISO 27001 A.9 gap.
-- **NATS TLS** — inter-service messages travel in plaintext. ISO 27001 A.13.
-- **Mining node TLS** — `cmd/node`, `cmd/cachenode`, `cmd/embednode` serve plain HTTP only. Same gap as `cmd/lens` had before #56.
-- **API key rotation TOCTOU** — `/v1/workspaces/{wsID}/api-keys/{keyID}/rotate` is non-atomic; concurrent calls can produce two simultaneously active keys. ISO 27001 A.9.
-- **Annotation submission TOCTOU** — `SubmitAnnotation()` lacks `SELECT FOR UPDATE` around task lookup + stake check; concurrent submissions can double-insert. Same class as Stake/Unstake race already fixed.
-- **Embedding node `node_secret_hash` always NULL** — cache and inference nodes got bcrypt secrets; embedding nodes do not. Inconsistent auth posture.
-- **`X-Request-ID` log injection** — untrusted client header reflected verbatim in structured logs. Low severity. ISO 27001 A.12.4.
+These were created after a full codebase audit (2026-06-04) and are open PRs on `origin`. Not yet on main.
+
+- **PR #78 — AB engine TOCTOU** (`internal/ab/engine.go`, `engine_test.go`): `StartExperiment` used a double-lock pattern (read lock to check status, release, re-acquire write lock) that allowed two goroutines to race past both the "completed" check and the active-cap check. Fixed by collapsing to a single `Lock/defer Unlock` with a `checkActiveCapLocked` helper. Two new concurrent tests prove the fix.
+- **PR #79 — PoVI double-slash TOCTOU** (`internal/povi/challenge.go`, `challenge_store.go`, `challenge_test.go`): In HA deployments two Lens instances could both pass the `AlreadyChallenged` SELECT and each call `Slash` for the same receipt. Fixed by making `Record` the atomic claim (INSERT; `ON CONFLICT DO NOTHING`; `RowsAffected==0` → `ErrAlreadyChallenged`). `Challenge()` now claims first, then fetches paths, then slashes, then calls new `UpdateResult`. `ChallengePending` added as a transient result state. New test `TestChallenge_NoConcurrentDoubleSlash` (20 goroutines, 1 slash expected).
+- **PR #80 — X-Node-Secret timing oracle** (`cmd/node/server.go`, `cmd/cachenode/server.go`, `cmd/embednode/server.go`): Secret checked with Go's `!=` string operator, which short-circuits on first byte mismatch — allows timing-based byte-by-byte recovery. Replaced with `crypto/subtle.ConstantTimeCompare` on all three node handlers.
+
+### Collaborator (Andrei) — up next
+All previously listed items are now done (#69–#75). No known remaining hardening items. Next priorities follow from whatever Nicolai identifies or from a future audit pass.
 
 ### Done (recently merged — for reference)
 - DISTILL engine + visibility complete: core (#36) + PDF (#37) + cache/savings (#39) + tiers (#41) + vision-OCR fallback (#44) + dashboard/ROI (#47)
@@ -131,6 +144,9 @@ _(last updated: 2026-06-03, main at 36d8ee3)_
 - **`internal/auth` is now a SHARED SEAM** — collaborator's security work (#53, #64–#66) is the first substantive change to auth. Nicolai: sync before next touching `internal/auth`, `Manager`, or `Middleware`. Collaborator: same.
 - **`internal/dashboard` is now a SHARED SEAM** — collaborator's XSS hardening (#49, #66) edited `ui.go` and `token_dashboard.go`. Nicolai: sync before next editing dashboard files.
 - **`internal/distill` shared seam (since #45)** — still applies. Collaborator's process-isolation hardening (#67) also touched `isolator.go`. Sync before either side edits distill.
+- **`internal/ab` is now a SHARED SEAM (since #78, open PR)** — collaborator fixed a TOCTOU race in `StartExperiment`. If Nicolai's roadmap includes any AB engine changes, sync before merging #78 or making further edits to `engine.go`.
+- **`internal/povi/challenge*` is now a SHARED SEAM (since #79, open PR)** — collaborator changed the `challengeStore` interface (added `UpdateResult`) and reordered `Challenge()`. Any PoVI Phase work that touches the challenge flow needs to sync against #79 before starting.
+- **Open PRs #78 / #79 / #80** — all three are ready to review/merge. No conflicts with main known at time of writing (branched from f4306ae).
 - **DISTILL stage 3** — #50/#51/#52 on main. Current Nicolai progress unknown; collaborator should not touch `internal/proxy` or `internal/distill` request-path wiring without syncing first.
 - **Token economy Phases 2–5 (gated)** — collaborator's DB atomicity work (#66) touched `Stake()`/`Unstake()` (token-economy code). Seam #1 applies. Sync before Nicolai starts Phases 2–5.
 - **Ledger lock ordering (resolved, #32)** — global lexicographic ordering in place. No longer open.
