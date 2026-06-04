@@ -80,6 +80,8 @@ Configuration (env vars):
   NODE_PORT             listen port (default: 9090)
   NODE_MAX_CONCURRENT   max parallel inferences (default: 4)
   NODE_PROVIDER_URL     override the local provider endpoint
+  NODE_TLS_CERT         path to TLS certificate file (PEM)
+  NODE_TLS_KEY          path to TLS private key file (PEM)
 `)
 }
 
@@ -134,7 +136,7 @@ func runStart(args []string) {
 			log.Printf("node: Lens challenge pubkey not yet available — Part-3 challenges refused (fail-closed) until a heartbeat re-fetch succeeds")
 		}
 	}
-	httpServer, _ := srv.ListenAndServe(cfg.Port)
+	httpServer, _ := srv.ListenAndServe(cfg.Port, cfg.TLSCertFile, cfg.TLSKeyFile)
 
 	// Heartbeat loop — runs until ctx is cancelled by the
 	// signal handler below.

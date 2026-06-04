@@ -174,17 +174,31 @@ func (s *CacheServer) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // ─── ListenAndServe ──────────────────────────────
 
-func (s *CacheServer) ListenAndServe(port int) (*http.Server, error) {
+// ListenAndServe starts the cache-node HTTP(S) server. When certFile
+// and keyFile are both non-empty the server binds with TLS (ISO 27001
+// A.13); otherwise it falls back to plain HTTP with a startup warning.
+func (s *CacheServer) ListenAndServe(port int, certFile, keyFile string) (*http.Server, error) {
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go func() {
-		log.Printf("✅ Talyvor Cache Node listening on port %d", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("cachenode: HTTP server error: %v", err)
-		}
-	}()
+	if certFile != "" && keyFile != "" {
+		go func() {
+			log.Printf("✅ Talyvor Cache Node listening (TLS) on port %d", port)
+			if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+				log.Printf("cachenode: HTTPS server error: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("⚠️  cachenode TLS is disabled — X-Node-Secret is transmitted in cleartext; " +
+			"set CACHE_NODE_TLS_CERT + CACHE_NODE_TLS_KEY to enable (ISO 27001 A.13)")
+		go func() {
+			log.Printf("✅ Talyvor Cache Node listening on port %d", port)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("cachenode: HTTP server error: %v", err)
+			}
+		}()
+	}
 	return server, nil
 }

@@ -343,3 +343,54 @@ func TestNodeState_RoundTrip(t *testing.T) {
 		t.Fatal("expected empty state after clear")
 	}
 }
+
+// ─── TLS config loading ──────────────────────────
+
+func TestNodeConfig_LoadsTLSEnvVars(t *testing.T) {
+	t.Setenv("NODE_TLS_CERT", "/path/to/cert.pem")
+	t.Setenv("NODE_TLS_KEY", "/path/to/key.pem")
+	cfg := LoadConfig()
+	if cfg.TLSCertFile != "/path/to/cert.pem" {
+		t.Fatalf("expected TLSCertFile, got %q", cfg.TLSCertFile)
+	}
+	if cfg.TLSKeyFile != "/path/to/key.pem" {
+		t.Fatalf("expected TLSKeyFile, got %q", cfg.TLSKeyFile)
+	}
+}
+
+func TestNodeConfig_TLSDefaultsEmpty(t *testing.T) {
+	t.Setenv("NODE_TLS_CERT", "")
+	t.Setenv("NODE_TLS_KEY", "")
+	cfg := LoadConfig()
+	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
+		t.Fatal("expected empty TLS fields when env vars are absent")
+	}
+}
+
+// ─── InferenceServer TLS ─────────────────────────
+
+// TestInferenceServer_ServesOverTLS proves that the handler works
+// correctly when served over TLS. httptest.NewTLSServer handles the
+// cert; the test then verifies /health returns 200 over HTTPS.
+func TestInferenceServer_ServesOverTLS(t *testing.T) {
+	srv := NewInferenceServer(&stubProvider{}, "", NodeConfig{
+		Provider: "ollama", GPUType: "cpu", Models: []string{"llama3"},
+	})
+	ts := httptest.NewTLSServer(srv.Handler())
+	defer ts.Close()
+
+	client := ts.Client() // pre-configured to trust ts's cert
+	resp, err := client.Get(ts.URL + "/health")
+	if err != nil {
+		t.Fatalf("HTTPS GET /health: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["status"] != "healthy" {
+		t.Fatalf("expected healthy, got %v", out["status"])
+	}
+}
+
