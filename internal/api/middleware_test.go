@@ -170,6 +170,71 @@ func TestRequestIDMiddleware_UsesClientHeader(t *testing.T) {
 	}
 }
 
+func TestRequestIDMiddleware_StripsInvalidChars(t *testing.T) {
+	// A crafted header containing a CRLF sequence, a colon, and spaces —
+	// the kinds of characters that cause log injection or header injection.
+	// Only the alphanumeric + hyphen + underscore chars must survive.
+	m := &RequestIDMiddleware{}
+	var seen string
+	h := m.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = RequestIDFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Request-ID", "abc\r\ndef:123 xyz")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	const want = "abcdef123xyz"
+	if seen != want {
+		t.Fatalf("expected %q after sanitisation, got %q", want, seen)
+	}
+	if rec.Header().Get("X-Request-ID") != want {
+		t.Fatalf("response header mismatch: got %q", rec.Header().Get("X-Request-ID"))
+	}
+}
+
+func TestRequestIDMiddleware_CapsAt64Chars(t *testing.T) {
+	m := &RequestIDMiddleware{}
+	var seen string
+	h := m.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = RequestIDFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Request-ID", strings.Repeat("a", 200))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if len(seen) != requestIDMaxLen {
+		t.Fatalf("expected %d chars, got %d (%q)", requestIDMaxLen, len(seen), seen)
+	}
+	if len(rec.Header().Get("X-Request-ID")) != requestIDMaxLen {
+		t.Fatalf("response header len mismatch: %d", len(rec.Header().Get("X-Request-ID")))
+	}
+}
+
+func TestRequestIDMiddleware_EmptyAfterSanitizationMintsUUID(t *testing.T) {
+	// A header that consists entirely of disallowed characters should not
+	// reach the DB as an empty string — the middleware must fall back to
+	// a freshly minted UUID.
+	m := &RequestIDMiddleware{}
+	var seen string
+	h := m.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = RequestIDFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Request-ID", "!!! <script>alert(1)</script> !!!")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if seen == "" {
+		t.Fatal("expected fallback UUID, got empty string")
+	}
+	// A UUID never contains '<' or '!'.
+	if strings.ContainsAny(seen, "<!>") {
+		t.Fatalf("unsafe chars survived sanitisation: %q", seen)
+	}
+}
+
 // ─── APIVersionMiddleware ────────────────────────
 
 func TestAPIVersionMiddleware_StampsHeader(t *testing.T) {
