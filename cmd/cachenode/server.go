@@ -6,6 +6,7 @@ package main
 // /health and /stats.
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,7 +49,7 @@ func (s *CacheServer) Handler() http.Handler {
 // means "no-secret mode" (older-Lens compat), in which case we
 // accept any request.
 func (s *CacheServer) handleCache(w http.ResponseWriter, r *http.Request) {
-	if s.secret != "" && r.Header.Get("X-Node-Secret") != s.secret {
+	if s.secret != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Node-Secret")), []byte(s.secret)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
