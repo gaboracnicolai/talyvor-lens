@@ -60,14 +60,44 @@ type ctxKey string
 
 const requestIDKey ctxKey = "talyvor.request_id"
 
+// requestIDMaxLen is the maximum length (in bytes) we accept from a
+// client-supplied X-Request-ID. Any excess is silently truncated.
+// 64 chars is generous for distributed tracing IDs (UUID = 36 chars)
+// while preventing a client from storing an arbitrarily large string
+// in the DB via PoVI receipt RequestID (ISO 27001 A.12).
+const requestIDMaxLen = 64
+
+// sanitizeRequestID keeps only alphanumeric characters, hyphens, and
+// underscores, then caps the result at requestIDMaxLen. These are the
+// characters used by UUID, ULID, and common trace-ID formats; anything
+// else (newlines, colons, spaces …) would be a footgun if the ID ever
+// reaches a structured log or a downstream service that parses headers.
+// Returns "" when the sanitised value is empty so the caller can fall
+// back to a minted UUID.
+func sanitizeRequestID(raw string) string {
+	var b strings.Builder
+	for _, c := range raw {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' {
+			b.WriteRune(c)
+		}
+		if b.Len() >= requestIDMaxLen {
+			break
+		}
+	}
+	return b.String()
+}
+
 // RequestIDMiddleware sets X-Request-ID. If the client already
-// supplied one we trust it (so distributed tracing works);
-// otherwise we mint a fresh UUID.
+// supplied one it is sanitised (alphanumeric + hyphens + underscores,
+// max 64 chars) and honoured so distributed tracing works. A value
+// that is empty after sanitisation, or absent entirely, causes a fresh
+// UUID to be minted.
 type RequestIDMiddleware struct{}
 
 func (m *RequestIDMiddleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
+		id := sanitizeRequestID(r.Header.Get("X-Request-ID"))
 		if id == "" {
 			id = uuid.NewString()
 		}
