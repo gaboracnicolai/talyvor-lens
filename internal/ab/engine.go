@@ -408,26 +408,17 @@ func (e *Engine) ListExperiments(workspaceID string) []*Experiment {
 // running) and stamps StartedAt on the first transition.
 func (e *Engine) StartExperiment(ctx context.Context, id string) error {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	exp, ok := e.experiments[id]
 	if !ok {
-		e.mu.Unlock()
 		return fmt.Errorf("ab: experiment %q not found", id)
 	}
 	if exp.Status == StatusCompleted {
-		e.mu.Unlock()
 		return errors.New("ab: cannot start a completed experiment — clone it instead")
 	}
-	wsID := exp.WorkspaceID
-	e.mu.Unlock()
-
-	// Active-cap check runs outside the lock so we don't hold it
-	// across the (potentially DB-backed) count.
-	if err := e.checkActiveCap(ctx, wsID, id); err != nil {
+	if err := e.checkActiveCapLocked(exp.WorkspaceID, id); err != nil {
 		return err
 	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	if exp.Status == StatusDraft {
 		now := time.Now().UTC()
 		exp.StartedAt = &now
@@ -484,13 +475,18 @@ func (e *Engine) transitionStatus(ctx context.Context, id string, to ExperimentS
 
 func (e *Engine) checkActiveCap(_ context.Context, workspaceID, excludeID string) error {
 	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.checkActiveCapLocked(workspaceID, excludeID)
+}
+
+// checkActiveCapLocked is the lock-free inner check; callers must hold e.mu.
+func (e *Engine) checkActiveCapLocked(workspaceID, excludeID string) error {
 	active := 0
 	for _, exp := range e.experiments {
 		if exp.WorkspaceID == workspaceID && exp.Status == StatusRunning && exp.ID != excludeID {
 			active++
 		}
 	}
-	e.mu.RUnlock()
 	if active >= MaxActiveExperiments {
 		return fmt.Errorf("ab: workspace already has %d active experiments (max %d)",
 			active, MaxActiveExperiments)

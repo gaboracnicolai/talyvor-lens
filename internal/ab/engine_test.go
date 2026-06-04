@@ -3,6 +3,7 @@ package ab
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -346,4 +347,85 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return digits
+}
+
+// ─── concurrent race-condition tests ──────────────
+
+// TestStartExperiment_CompletedRejectedConcurrently covers the
+// completed-status TOCTOU fix. Before the fix two goroutines could
+// both pass the status check in separate critical sections; the
+// entire check+mutate is now inside one Lock so every concurrent
+// caller must receive an error.
+func TestStartExperiment_CompletedRejectedConcurrently(t *testing.T) {
+	e := NewEngine(nil)
+	exp := sampleExperiment()
+	_ = e.CreateExperiment(context.Background(), exp)
+	_ = e.StartExperiment(context.Background(), exp.ID)
+	_ = e.StopExperiment(context.Background(), exp.ID)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			errs[i] = e.StartExperiment(context.Background(), exp.ID)
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("goroutine %d: expected error starting completed experiment, got nil", i)
+		}
+	}
+	got, ok := e.GetExperiment(exp.ID)
+	if !ok {
+		t.Fatal("experiment not found after concurrent starts")
+	}
+	if got.Status != StatusCompleted {
+		t.Fatalf("status = %s after concurrent starts, want completed", got.Status)
+	}
+}
+
+// TestStartExperiment_ActiveCapHoldsUnderConcurrency covers the
+// active-cap TOCTOU fix. Before the fix goroutines could slip past
+// the cap check and mutate concurrently; cap enforcement is now
+// inside the same write lock as the status mutation, so at most
+// MaxActiveExperiments can ever end up StatusRunning.
+func TestStartExperiment_ActiveCapHoldsUnderConcurrency(t *testing.T) {
+	e := NewEngine(nil)
+	const extra = 5
+	total := MaxActiveExperiments + extra
+
+	ids := make([]string, total)
+	for i := 0; i < total; i++ {
+		exp := sampleExperiment()
+		exp.Name = "concurrent-" + itoa(i)
+		_ = e.CreateExperiment(context.Background(), exp)
+		ids[i] = exp.ID
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(total)
+	for _, id := range ids {
+		id := id
+		go func() {
+			defer wg.Done()
+			_ = e.StartExperiment(context.Background(), id)
+		}()
+	}
+	wg.Wait()
+
+	running := 0
+	for _, id := range ids {
+		if exp, ok := e.GetExperiment(id); ok && exp.Status == StatusRunning {
+			running++
+		}
+	}
+	if running > MaxActiveExperiments {
+		t.Fatalf("cap violated: %d experiments running, max is %d", running, MaxActiveExperiments)
+	}
 }

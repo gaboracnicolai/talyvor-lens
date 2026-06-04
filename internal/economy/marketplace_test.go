@@ -254,6 +254,8 @@ func TestCreateListing_RejectsBelowMinimum(t *testing.T) {
 
 func TestCancelListing_OnlyAllowsSeller(t *testing.T) {
 	store, mock := newStore(t)
+	// SELECT FOR UPDATE is now inside the transaction.
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, seller_id, amount, price_usd").
 		WithArgs("list1").
 		WillReturnRows(pgxmock.NewRows([]string{
@@ -261,9 +263,13 @@ func TestCancelListing_OnlyAllowsSeller(t *testing.T) {
 			"status", "filled_at", "created_at",
 		}).AddRow("list1", "ws_seller", 50.0, 0.10, 0.0,
 			ListingActive, nil, time.Now()))
+	mock.ExpectRollback()
 	err := store.CancelListing(context.Background(), "list1", "ws_imposter")
 	if !errors.Is(err, ErrNotSeller) {
 		t.Fatalf("expected ErrNotSeller, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
 	}
 }
 
@@ -275,8 +281,10 @@ func TestExecuteTrade_TransfersCorrectAmounts(t *testing.T) {
 	// 5% fee on 10 = 0.5 LENS to talyvor. Net to buyer = 9.5.
 	// Unsold = 40 LENS → refund seller.
 	//
-	// All five mutations (3 credits + UPDATE + INSERT) share one transaction
-	// so a failure at any step rolls back everything atomically.
+	// SELECT FOR UPDATE + all five mutations (3 credits + UPDATE + INSERT)
+	// share one transaction so a failure at any step rolls back atomically.
+	mock.ExpectBegin()
+	// Read + lock the listing row inside the transaction (FOR UPDATE).
 	mock.ExpectQuery("SELECT id, seller_id, amount, price_usd").
 		WithArgs("list1").
 		WillReturnRows(pgxmock.NewRows([]string{
@@ -284,14 +292,13 @@ func TestExecuteTrade_TransfersCorrectAmounts(t *testing.T) {
 			"status", "filled_at", "created_at",
 		}).AddRow("list1", "ws_seller", 50.0, 0.10, 0.0,
 			ListingActive, nil, time.Now()))
-	mock.ExpectBegin()
 	// CreditTx buyer 9.5 LENS (no Begin/Commit — inside shared tx).
 	expectCreditInTx(mock, "ws_buyer", 0, 0, 0, 9.5, 9.5, 9.5, 0)
 	// CreditTx talyvor 0.5 LENS fee.
 	expectCreditInTx(mock, TalyvorWorkspace, 0, 0, 0, 0.5, 0.5, 0.5, 0)
 	// CreditTx seller 40 LENS unsold refund.
 	expectCreditInTx(mock, "ws_seller", 0, 0, 0, 40.0, 40.0, 40.0, 0)
-	// Mark listing filled (within same tx).
+	// Mark listing filled — UPDATE now carries AND status='active' guard.
 	mock.ExpectExec("UPDATE marketplace_listings SET status").
 		WithArgs(ListingFilled, "list1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -316,6 +323,9 @@ func TestExecuteTrade_TransfersCorrectAmounts(t *testing.T) {
 
 func TestExecuteTrade_RejectsBuyOwnListing(t *testing.T) {
 	store, mock := newStore(t)
+	// SELECT FOR UPDATE is now inside the transaction; error before commit
+	// triggers the deferred rollback.
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, seller_id, amount, price_usd").
 		WithArgs("list_self").
 		WillReturnRows(pgxmock.NewRows([]string{
@@ -323,9 +333,122 @@ func TestExecuteTrade_RejectsBuyOwnListing(t *testing.T) {
 			"status", "filled_at", "created_at",
 		}).AddRow("list_self", "ws_self", 10.0, 0.10, 0.0,
 			ListingActive, nil, time.Now()))
+	mock.ExpectRollback()
 	_, err := store.ExecuteTrade(context.Background(), "list_self", "ws_self", 1.0)
 	if err == nil {
 		t.Fatal("expected error for buying own listing")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestExecuteTrade_RejectsFilledListing covers the primary race path:
+// the SELECT FOR UPDATE sees a listing that is already 'filled' (another
+// buyer won the lock first) — no credits are issued, no trade is recorded.
+func TestExecuteTrade_RejectsFilledListing(t *testing.T) {
+	store, mock := newStore(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id, seller_id, amount, price_usd").
+		WithArgs("list_filled").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "seller_id", "amount", "price_usd", "min_buy_usd",
+			"status", "filled_at", "created_at",
+		}).AddRow("list_filled", "ws_seller", 10.0, 0.10, 0.0,
+			ListingFilled, nil, time.Now()))
+	mock.ExpectRollback()
+	_, err := store.ExecuteTrade(context.Background(), "list_filled", "ws_buyer", 1.0)
+	if !errors.Is(err, ErrListingNotActive) {
+		t.Fatalf("expected ErrListingNotActive for already-filled listing, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestExecuteTrade_LostRaceGuard covers the defence-in-depth path: the
+// SELECT FOR UPDATE saw 'active', credits were issued inside the transaction,
+// but the AND status='active' guard on the UPDATE returns 0 rows — the
+// whole transaction rolls back and no LENS is transferred to anyone.
+func TestExecuteTrade_LostRaceGuard(t *testing.T) {
+	store, mock := newStore(t)
+	// 50 LENS @ $0.10, buyer pays $1.00 → 10 LENS; unsold 40.
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id, seller_id, amount, price_usd").
+		WithArgs("list_race").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "seller_id", "amount", "price_usd", "min_buy_usd",
+			"status", "filled_at", "created_at",
+		}).AddRow("list_race", "ws_seller", 50.0, 0.10, 0.0,
+			ListingActive, nil, time.Now()))
+	expectCreditInTx(mock, "ws_buyer", 0, 0, 0, 9.5, 9.5, 9.5, 0)
+	expectCreditInTx(mock, TalyvorWorkspace, 0, 0, 0, 0.5, 0.5, 0.5, 0)
+	expectCreditInTx(mock, "ws_seller", 0, 0, 0, 40.0, 40.0, 40.0, 0)
+	// Race lost: UPDATE returns 0 rows → rollback (credits never commit).
+	mock.ExpectExec("UPDATE marketplace_listings SET status").
+		WithArgs(ListingFilled, "list_race").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectRollback()
+	_, err := store.ExecuteTrade(context.Background(), "list_race", "ws_buyer", 1.0)
+	if !errors.Is(err, ErrListingNotActive) {
+		t.Fatalf("expected ErrListingNotActive for lost-race trade, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestCancelListing_Success is the happy-path cancel: seller cancels an
+// active listing, gets the full amount refunded.
+func TestCancelListing_Success(t *testing.T) {
+	store, mock := newStore(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id, seller_id, amount, price_usd").
+		WithArgs("list_cancel").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "seller_id", "amount", "price_usd", "min_buy_usd",
+			"status", "filled_at", "created_at",
+		}).AddRow("list_cancel", "ws_seller", 50.0, 0.10, 0.0,
+			ListingActive, nil, time.Now()))
+	mock.ExpectExec("UPDATE marketplace_listings SET status").
+		WithArgs(ListingCancelled, "list_cancel").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// Refund 50 LENS to seller.
+	expectCreditInTx(mock, "ws_seller", 0, 0, 0, 50.0, 50.0, 50.0, 0)
+	mock.ExpectCommit()
+	if err := store.CancelListing(context.Background(), "list_cancel", "ws_seller"); err != nil {
+		t.Fatalf("CancelListing: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestCancelListing_LostRace covers the double-refund prevention path:
+// a concurrent ExecuteTrade fills the listing between the SELECT FOR UPDATE
+// and the cancel's UPDATE, so the AND status='active' guard returns 0 rows.
+// The cancel must return ErrListingNotActive and not credit any refund.
+func TestCancelListing_LostRace(t *testing.T) {
+	store, mock := newStore(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id, seller_id, amount, price_usd").
+		WithArgs("list_race_cancel").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "seller_id", "amount", "price_usd", "min_buy_usd",
+			"status", "filled_at", "created_at",
+		}).AddRow("list_race_cancel", "ws_seller", 50.0, 0.10, 0.0,
+			ListingActive, nil, time.Now()))
+	// Race lost: UPDATE returns 0 rows — no refund issued.
+	mock.ExpectExec("UPDATE marketplace_listings SET status").
+		WithArgs(ListingCancelled, "list_race_cancel").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectRollback()
+	err := store.CancelListing(context.Background(), "list_race_cancel", "ws_seller")
+	if !errors.Is(err, ErrListingNotActive) {
+		t.Fatalf("expected ErrListingNotActive for lost-race cancel, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
 	}
 }
 
