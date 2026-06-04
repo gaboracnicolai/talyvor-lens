@@ -425,6 +425,23 @@ func run() error {
 	// /v1/auth/* routes use authManager directly.
 	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), jwtKey, keyStore, tenantStore)
 
+	// requireAdmin gates a handler so only the global admin key can reach it
+	// (ISO 27001 A.9 — access control). Used for /metrics and /ha/status,
+	// which expose internal telemetry and cluster topology that should never
+	// be visible to unauthenticated callers.
+	// Returns 401 when no credential is present, 403 when credential is valid
+	// but non-admin, so scrape agents that lack config get a clear signal.
+	requireAdmin := func(next http.Handler) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			actx, err := authManager.Authenticate(r)
+			if err != nil || !actx.IsAdmin {
+				writeJSONErr(w, http.StatusUnauthorized, "admin credentials required")
+				return
+			}
+			next.ServeHTTP(w, r)
+		}
+	}
+
 	// Retry policy + per-provider circuit breaker registry (Item 9).
 	// Coexists with the legacy retry.Do helper.
 	retryPolicy := retry.DefaultPolicy
@@ -684,7 +701,9 @@ func run() error {
 	//   /ha/status — cluster view (this instance + peers) for ops + dashboard
 	r.Get("/livez", haComps.health.Live)
 	r.Get("/readyz", haComps.health.Ready)
-	r.Get("/ha/status", haComps.health.Status)
+	// /ha/status exposes cluster peer list + instance health — admin-only
+	// (ISO 27001 A.9). /livez and /readyz stay public for load balancers.
+	r.Get("/ha/status", requireAdmin(http.HandlerFunc(haComps.health.Status)))
 
 	// OpenAPI spec — public, no auth, no version path prefix.
 	r.Get("/openapi.json", api.ServeOpenAPI)
@@ -795,7 +814,10 @@ func run() error {
 		})
 	})
 
-	r.Handle("/metrics", metrics.Handler())
+	// /metrics exposes Prometheus telemetry — gated to admin key so internal
+	// server stats are not visible to unauthenticated callers (ISO 27001 A.9).
+	// Prometheus scrapers must send: Authorization: Bearer <LENS_API_KEY>.
+	r.Handle("/metrics", requireAdmin(metrics.Handler()))
 
 	apiServer := api.NewServer(
 		pool, redisClient, nc, exactCache, l,
