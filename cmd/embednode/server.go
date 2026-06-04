@@ -174,18 +174,33 @@ func RunBenchmark(ctx context.Context, backend Backend, model string) (int64, er
 
 // ─── ListenAndServe ──────────────────────────────
 
-func (s *EmbedServer) ListenAndServe(port int) (*http.Server, error) {
+// ListenAndServe starts the embedding-node HTTP(S) server. When
+// certFile and keyFile are both non-empty the server binds with TLS
+// (ISO 27001 A.13); otherwise it falls back to plain HTTP with a
+// startup warning.
+func (s *EmbedServer) ListenAndServe(port int, certFile, keyFile string) (*http.Server, error) {
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go func() {
-		log.Printf("✅ Talyvor Embedding Node listening on port %d", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("embednode: HTTP server error: %v", err)
-		}
-	}()
+	if certFile != "" && keyFile != "" {
+		go func() {
+			log.Printf("✅ Talyvor Embedding Node listening (TLS) on port %d", port)
+			if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+				log.Printf("embednode: HTTPS server error: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("⚠️  embednode TLS is disabled — X-Node-Secret is transmitted in cleartext; " +
+			"set EMBED_NODE_TLS_CERT + EMBED_NODE_TLS_KEY to enable (ISO 27001 A.13)")
+		go func() {
+			log.Printf("✅ Talyvor Embedding Node listening on port %d", port)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("embednode: HTTP server error: %v", err)
+			}
+		}()
+	}
 	return server, nil
 }
 

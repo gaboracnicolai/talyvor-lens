@@ -292,3 +292,46 @@ func TestEmbedNodeState_RoundTrip(t *testing.T) {
 		t.Fatal("expected empty state after clear")
 	}
 }
+
+// ─── TLS config loading ──────────────────────────
+
+func TestEmbedNodeConfig_LoadsTLSEnvVars(t *testing.T) {
+	t.Setenv("EMBED_NODE_TLS_CERT", "/certs/embed.pem")
+	t.Setenv("EMBED_NODE_TLS_KEY", "/certs/embed.key")
+	cfg := LoadConfig()
+	if cfg.TLSCertFile != "/certs/embed.pem" {
+		t.Fatalf("expected TLSCertFile, got %q", cfg.TLSCertFile)
+	}
+	if cfg.TLSKeyFile != "/certs/embed.key" {
+		t.Fatalf("expected TLSKeyFile, got %q", cfg.TLSKeyFile)
+	}
+}
+
+func TestEmbedNodeConfig_TLSDefaultsEmpty(t *testing.T) {
+	t.Setenv("EMBED_NODE_TLS_CERT", "")
+	t.Setenv("EMBED_NODE_TLS_KEY", "")
+	cfg := LoadConfig()
+	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
+		t.Fatal("expected empty TLS fields when env vars are absent")
+	}
+}
+
+// ─── EmbedServer TLS ─────────────────────────────
+
+func TestEmbedServer_ServesOverTLS(t *testing.T) {
+	srv := NewEmbedServer(&stubBackend{dim: 4}, "", EmbedNodeConfig{
+		Model: "nomic-embed-text", Dimensions: 768, MaxBatch: 10,
+	}, 100)
+	ts := httptest.NewTLSServer(srv.Handler())
+	defer ts.Close()
+
+	client := ts.Client()
+	resp, err := client.Get(ts.URL + "/health")
+	if err != nil {
+		t.Fatalf("HTTPS GET /health: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+

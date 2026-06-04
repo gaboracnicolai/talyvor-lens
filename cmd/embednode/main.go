@@ -69,6 +69,8 @@ Configuration (env vars):
   EMBED_NODE_MAX_BATCH     max embeddings per request (default: 100)
   EMBED_NODE_BACKEND       local embedding-server URL (default: http://localhost:11434)
   EMBED_NODE_PORT          listen port (default: 9092)
+  EMBED_NODE_TLS_CERT      path to TLS certificate file (PEM)
+  EMBED_NODE_TLS_KEY       path to TLS private key file (PEM)
 `)
 }
 
@@ -116,7 +118,7 @@ func runStart(args []string) {
 	log.Printf("📚 Model: %s (%dD, batch %d)", cfg.Model, cfg.Dimensions, cfg.MaxBatch)
 
 	srv := NewEmbedServer(backend, state.NodeSecret, cfg, speedTPS)
-	httpServer, _ := srv.ListenAndServe(cfg.Port)
+	httpServer, _ := srv.ListenAndServe(cfg.Port, cfg.TLSCertFile, cfg.TLSKeyFile)
 
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	defer hbCancel()

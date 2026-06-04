@@ -77,6 +77,8 @@ Configuration (env vars):
   CACHE_NODE_MAX_GB       Max cache size in GB (default: 10)
   CACHE_NODE_PORT         Listen port (default: 9091)
   CACHE_NODE_SHARE        Allow cross-workspace serving (default: false)
+  CACHE_NODE_TLS_CERT     Path to TLS certificate file (PEM)
+  CACHE_NODE_TLS_KEY      Path to TLS private key file (PEM)
 `)
 }
 
@@ -115,7 +117,7 @@ func runStart(args []string) {
 	}
 
 	srv := NewCacheServer(storage, state.NodeSecret)
-	httpServer, _ := srv.ListenAndServe(cfg.Port)
+	httpServer, _ := srv.ListenAndServe(cfg.Port, cfg.TLSCertFile, cfg.TLSKeyFile)
 
 	// Heartbeat loop.
 	hbCtx, hbCancel := context.WithCancel(context.Background())

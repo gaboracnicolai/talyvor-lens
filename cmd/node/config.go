@@ -27,6 +27,14 @@ type NodeConfig struct {
 	GPUType       string
 	MaxConcurrent int
 	Port          int
+	// TLSCertFile and TLSKeyFile enable HTTPS on the node server
+	// (ISO 27001 A.13). When both are set, the server calls
+	// ListenAndServeTLS; when absent, it falls back to plain HTTP and
+	// logs a startup warning. Self-signed certs are fine for LAN
+	// deployments — the only requirement is that Lens can verify them
+	// (or is configured to skip verification for trusted private nets).
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 // LoadConfig pulls every value from the environment and applies
@@ -42,6 +50,8 @@ func LoadConfig() NodeConfig {
 		GPUType:       defaultStr(os.Getenv("NODE_GPU_TYPE"), "cpu"),
 		MaxConcurrent: parseIntDefault("NODE_MAX_CONCURRENT", 4),
 		Port:          parseIntDefault("NODE_PORT", 9090),
+		TLSCertFile:   os.Getenv("NODE_TLS_CERT"),
+		TLSKeyFile:    os.Getenv("NODE_TLS_KEY"),
 	}
 }
 

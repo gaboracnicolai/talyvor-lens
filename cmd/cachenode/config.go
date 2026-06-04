@@ -24,6 +24,11 @@ type CacheNodeConfig struct {
 	MaxCacheGB   float64
 	Port         int
 	ShareEnabled bool
+	// TLSCertFile and TLSKeyFile enable HTTPS (ISO 27001 A.13).
+	// When both are set, the server calls ListenAndServeTLS; when
+	// absent, it falls back to plain HTTP with a startup warning.
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 // LoadConfig pulls every value from the environment and applies
@@ -38,6 +43,8 @@ func LoadConfig() CacheNodeConfig {
 		MaxCacheGB:   parseFloatDefault("CACHE_NODE_MAX_GB", 10),
 		Port:         parseIntDefault("CACHE_NODE_PORT", 9091),
 		ShareEnabled: parseBoolEnv("CACHE_NODE_SHARE"),
+		TLSCertFile:  os.Getenv("CACHE_NODE_TLS_CERT"),
+		TLSKeyFile:   os.Getenv("CACHE_NODE_TLS_KEY"),
 	}
 }
 

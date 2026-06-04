@@ -240,21 +240,35 @@ func (s *InferenceServer) handleModels(w http.ResponseWriter, r *http.Request) {
 
 // ─── start / shutdown ────────────────────────────
 
-// ListenAndServe is the convenience wrapper main.go uses. Logs
-// the listen address and returns the underlying http.Server so
-// the caller can Shutdown on SIGTERM.
-func (s *InferenceServer) ListenAndServe(port int) (*http.Server, error) {
+// ListenAndServe starts the node HTTP(S) server. When certFile and
+// keyFile are both non-empty the server binds with TLS (ISO 27001
+// A.13 — communications security); otherwise it falls back to plain
+// HTTP and logs a startup warning so operators know the X-Node-Secret
+// is in transit unencrypted. Returns the http.Server so the caller
+// can call Shutdown on SIGTERM.
+func (s *InferenceServer) ListenAndServe(port int, certFile, keyFile string) (*http.Server, error) {
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go func() {
-		log.Printf("✅ Talyvor Node listening on port %d", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("node: HTTP server error: %v", err)
-		}
-	}()
+	if certFile != "" && keyFile != "" {
+		go func() {
+			log.Printf("✅ Talyvor Node listening (TLS) on port %d", port)
+			if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+				log.Printf("node: HTTPS server error: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("⚠️  node TLS is disabled — X-Node-Secret is transmitted in cleartext; " +
+			"set NODE_TLS_CERT + NODE_TLS_KEY to enable (ISO 27001 A.13)")
+		go func() {
+			log.Printf("✅ Talyvor Node listening on port %d", port)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("node: HTTP server error: %v", err)
+			}
+		}()
+	}
 	return server, nil
 }
 

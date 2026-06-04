@@ -265,3 +265,45 @@ func TestCacheNodeState_RoundTrip(t *testing.T) {
 		t.Fatal("expected empty state after clear")
 	}
 }
+
+// ─── TLS config loading ──────────────────────────
+
+func TestCacheNodeConfig_LoadsTLSEnvVars(t *testing.T) {
+	t.Setenv("CACHE_NODE_TLS_CERT", "/certs/cache.pem")
+	t.Setenv("CACHE_NODE_TLS_KEY", "/certs/cache.key")
+	cfg := LoadConfig()
+	if cfg.TLSCertFile != "/certs/cache.pem" {
+		t.Fatalf("expected TLSCertFile, got %q", cfg.TLSCertFile)
+	}
+	if cfg.TLSKeyFile != "/certs/cache.key" {
+		t.Fatalf("expected TLSKeyFile, got %q", cfg.TLSKeyFile)
+	}
+}
+
+func TestCacheNodeConfig_TLSDefaultsEmpty(t *testing.T) {
+	t.Setenv("CACHE_NODE_TLS_CERT", "")
+	t.Setenv("CACHE_NODE_TLS_KEY", "")
+	cfg := LoadConfig()
+	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
+		t.Fatal("expected empty TLS fields when env vars are absent")
+	}
+}
+
+// ─── CacheServer TLS ─────────────────────────────
+
+func TestCacheServer_ServesOverTLS(t *testing.T) {
+	storage := NewCacheStorage(newRedis(t), 1)
+	srv := NewCacheServer(storage, "")
+	ts := httptest.NewTLSServer(srv.Handler())
+	defer ts.Close()
+
+	client := ts.Client()
+	resp, err := client.Get(ts.URL + "/health")
+	if err != nil {
+		t.Fatalf("HTTPS GET /health: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+

@@ -40,6 +40,11 @@ type EmbedNodeConfig struct {
 	MaxBatch    int
 	BackendURL  string
 	Port        int
+	// TLSCertFile and TLSKeyFile enable HTTPS (ISO 27001 A.13).
+	// When both are set, the server calls ListenAndServeTLS; when
+	// absent, it falls back to plain HTTP with a startup warning.
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 // LoadConfig pulls every value from the environment with the
@@ -55,6 +60,8 @@ func LoadConfig() EmbedNodeConfig {
 		MaxBatch:    parseIntDefault("EMBED_NODE_MAX_BATCH", 100),
 		BackendURL:  defaultStr(os.Getenv("EMBED_NODE_BACKEND"), "http://localhost:11434"),
 		Port:        parseIntDefault("EMBED_NODE_PORT", 9092),
+		TLSCertFile: os.Getenv("EMBED_NODE_TLS_CERT"),
+		TLSKeyFile:  os.Getenv("EMBED_NODE_TLS_KEY"),
 	}
 }
 
