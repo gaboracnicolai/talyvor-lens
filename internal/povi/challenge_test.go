@@ -76,8 +76,24 @@ func newMemChallengeStore() *memChallengeStore {
 func (s *memChallengeStore) Record(_ context.Context, c Challenge) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.byID[c.ID] = c
+	if s.challenged[c.RequestID] {
+		return ErrAlreadyChallenged
+	}
 	s.challenged[c.RequestID] = true
+	s.byID[c.ID] = c
+	return nil
+}
+func (s *memChallengeStore) UpdateResult(_ context.Context, id string, result ChallengeResult, slashedAmount float64, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.byID[id]
+	if !ok {
+		return nil // no-op if pool is nil equivalent
+	}
+	c.Result = result
+	c.SlashedAmount = slashedAmount
+	c.Reason = reason
+	s.byID[id] = c
 	return nil
 }
 func (s *memChallengeStore) Get(_ context.Context, id string) (*Challenge, error) {
@@ -271,6 +287,41 @@ func TestChallenger_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestChallenge_NoConcurrentDoubleSlash verifies that when many goroutines race
+// to challenge the same receipt, exactly one slash fires. Without the
+// atomic INSERT claim in Record, all goroutines that pass the AlreadyChallenged
+// SELECT would each call Slash — the HA double-slash TOCTOU.
+func TestChallenge_NoConcurrentDoubleSlash(t *testing.T) {
+	st := steps(20)
+	rec := fixtureReceipt("req-race", st)
+	prov := newHonestProvider("req-race", st)
+	prov.tamper = true // invalid paths → every challenger that gets through will slash
+
+	slasher := &fakeSlasher{amount: 50}
+	store := newMemChallengeStore()
+	urls := func(_ context.Context, _ string) (string, error) { return "http://node:9090", nil }
+	challenger := NewChallenger(urls, prov, slasher, store, 4, 0.5)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_, _ = challenger.Challenge(context.Background(), rec)
+		}()
+	}
+	wg.Wait()
+
+	slasher.mu.Lock()
+	slashCount := len(slasher.calls)
+	slasher.mu.Unlock()
+
+	if slashCount != 1 {
+		t.Fatalf("expected exactly 1 slash, got %d — double-slash TOCTOU still present", slashCount)
+	}
 }
 
 func sameSet(a, b []int) bool {
