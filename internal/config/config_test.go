@@ -161,3 +161,26 @@ func TestLoad_NatsTLSSkipVerifyEnabled(t *testing.T) {
 		t.Error("NatsTLSSkipVerify should be true when LENS_NATS_TLS_SKIP_VERIFY=true")
 	}
 }
+
+func TestLoad_NodeTLSSkipVerifyDefaultsOff(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.NodeTLSSkipVerify {
+		t.Error("NodeTLSSkipVerify should default to false")
+	}
+}
+
+func TestLoad_NodeTLSSkipVerifyEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_NODE_TLS_SKIP_VERIFY", "true")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.NodeTLSSkipVerify {
+		t.Error("NodeTLSSkipVerify should be true when LENS_NODE_TLS_SKIP_VERIFY=true")
+	}
+}

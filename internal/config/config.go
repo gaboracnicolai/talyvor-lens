@@ -232,6 +232,15 @@ type Config struct {
 	// controlled environments. Has no effect when NATS TLS is not active.
 	NatsTLSSkipVerify bool
 
+	// NodeTLSSkipVerify disables TLS certificate verification when Lens
+	// contacts registered nodes (inference, embedding, PoVI challenge).
+	// Env: LENS_NODE_TLS_SKIP_VERIFY. Default false.
+	// Required when nodes present self-signed certificates — the
+	// recommended default for LAN deployments (see NODE_TLS_CERT /
+	// CACHE_NODE_TLS_CERT / EMBED_NODE_TLS_CERT). Has no effect when
+	// nodes serve plain HTTP.
+	NodeTLSSkipVerify bool
+
 	// DBSSLMode controls TLS for the Postgres connection.
 	// Env: LENS_DB_SSL_MODE. Default "require".
 	//
@@ -343,6 +352,8 @@ func Load() (*Config, error) {
 
 		NatsTLS:           parseBoolEnv("LENS_NATS_TLS"),
 		NatsTLSSkipVerify: parseBoolEnv("LENS_NATS_TLS_SKIP_VERIFY"),
+
+		NodeTLSSkipVerify: parseBoolEnv("LENS_NODE_TLS_SKIP_VERIFY"),
 
 		JWTPrivateKey: os.Getenv("LENS_JWT_PRIVATE_KEY"),
 		TokenTTL:      24 * time.Hour,

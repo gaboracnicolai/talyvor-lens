@@ -292,12 +292,17 @@ func run() error {
 	}
 
 	lr := localrouter.New(cfg.OllamaURL)
-	go lr.StartHealthCheck(ctx)
+	lr.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
 
 	// Multi-endpoint local router (additive, see internal/localrouter/multi.go).
 	// Parses LENS_LOCAL_ENDPOINTS; if empty, the registry stays empty and
 	// the admin API can register endpoints dynamically at runtime.
 	localRouterMulti := localrouter.NewRouterFromConfig(pool, cfg.LocalEndpoints)
+	localRouterMulti.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
+	if cfg.NodeTLSSkipVerify {
+		logger.Warn("node TLS certificate verification is disabled (LENS_NODE_TLS_SKIP_VERIFY=true)" +
+			" — only appropriate for self-signed certs on controlled private networks")
+	}
 	localRouterMulti.StartHealthChecks(ctx, localrouter.DefaultHealthCheckInterval)
 	injectionDetector := injection.New(injection.DefaultPolicy())
 	budgetEnforcer := budget.New(pool, budget.BudgetPolicy{MaxOutputTokens: 4096})
@@ -508,6 +513,7 @@ func run() error {
 	// localrouter so any verified GPU node that serves a
 	// cross-workspace request gets credited automatically.
 	computeMiner := mining.NewComputeMiner(tokenLedger, pool)
+	computeMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
 	localRouterMulti.SetOnRequestServed(func(nodeID, requesterWS string, tokens int, latencyMs int64) {
 		// RETIREMENT SWITCH (PoVI Part 3): this is the LEGACY trust-based mint
 		// (mints LENS per served request, no receipt). With Parts 1+2+3 in
@@ -564,6 +570,7 @@ func run() error {
 	// verifies + answers from its retained trace.
 	lensChallengePub, lensChallengePriv := loadOrGenChallengeKey(cfg.POVIChallengeKey, logger)
 	challengeClient := povi.NewChallengeClient(lensChallengePriv, 10*time.Second)
+	challengeClient.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 10*time.Second))
 	challengeStore := povi.NewChallengeStore(pool)
 	poviChallenger := povi.NewChallenger(
 		computeMiner.NodeURL, challengeClient, poviStakeManager, challengeStore,
@@ -577,6 +584,7 @@ func run() error {
 	// proxy wires RecordEmbeddingsServed in the semantic-cache
 	// path in a follow-up.
 	embeddingMiner := mining.NewEmbeddingMiner(tokenLedger, pool)
+	embeddingMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
 	_ = embeddingMiner
 
 	// Annotation mining (Batch 2 Item 4). Proof-of-useful-work
