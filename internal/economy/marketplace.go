@@ -258,13 +258,13 @@ func scanListings(rows pgx.Rows) ([]MarketplaceListing, error) {
 	return out, rows.Err()
 }
 
-// getListing is the private "fetch by ID" helper used by
-// ExecuteTrade + CancelListing. Returns ErrListingNotFound when
-// the row is missing.
-func (s *MarketplaceStore) getListing(ctx context.Context, id string) (*MarketplaceListing, error) {
-	row := s.pool.QueryRow(ctx, `
+// getListingForUpdate reads a listing row inside an existing transaction
+// and acquires a row-level lock (SELECT ... FOR UPDATE). Callers must
+// be inside a transaction. Returns ErrListingNotFound when the row is missing.
+func getListingForUpdate(ctx context.Context, tx pgx.Tx, id string) (*MarketplaceListing, error) {
+	row := tx.QueryRow(ctx, `
 		SELECT id, seller_id, amount, price_usd, min_buy_usd, status, filled_at, created_at
-		FROM marketplace_listings WHERE id = $1`, id)
+		FROM marketplace_listings WHERE id = $1 FOR UPDATE`, id)
 	var l MarketplaceListing
 	if err := row.Scan(&l.ID, &l.SellerID, &l.Amount, &l.PriceUSD,
 		&l.MinBuyUSD, &l.Status, &l.FilledAt, &l.CreatedAt); err != nil {
@@ -285,6 +285,12 @@ func (s *MarketplaceStore) getListing(ctx context.Context, id string) (*Marketpl
 // The trade is "all-or-nothing" — the spec doesn't define
 // partial fills, so a buyer who under-pays the listing amount
 // just buys less LENS and the listing closes filled.
+//
+// TOCTOU safety: the listing row is read inside the transaction
+// with SELECT ... FOR UPDATE so concurrent buyers serialize at the
+// DB level. The UPDATE also carries AND status='active' as a
+// defence-in-depth guard: if RowsAffected==0, the race was lost
+// and the transaction rolls back without issuing any credits.
 func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID string, amountUSD float64) (*MarketplaceTrade, error) {
 	if buyerID == "" {
 		return nil, errors.New("economy: buyer_id required")
@@ -295,7 +301,18 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 	if s.pool == nil {
 		return nil, errors.New("economy: marketplace requires DB")
 	}
-	listing, err := s.getListing(ctx, listingID)
+
+	// All validation + mutations run inside one transaction. The listing row
+	// is locked with SELECT ... FOR UPDATE so that two concurrent buyers
+	// block on the same row: the loser sees status='filled' and returns
+	// ErrListingNotActive before any credits are issued.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("economy: begin trade tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	listing, err := getListingForUpdate(ctx, tx, listingID)
 	if err != nil {
 		return nil, err
 	}
@@ -317,15 +334,6 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 	fee := roundTo(lensAmount*TalyvorFeeRate, 6)
 	netToBuyer := roundTo(lensAmount-fee, 6)
 	priceActual := listing.PriceUSD
-
-	// All mutations (ledger credits + listing update + trade insert) run inside
-	// one transaction. Without this, a failure after the first Credit leaves
-	// the buyer with LENS but no trade record and the listing still active.
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("economy: begin trade tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	meta := map[string]interface{}{
 		"listing_id": listing.ID,
@@ -360,11 +368,18 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 		}
 	}
 
-	// Mark listing filled.
-	if _, err := tx.Exec(ctx,
-		`UPDATE marketplace_listings SET status = $1, filled_at = NOW() WHERE id = $2`,
-		ListingFilled, listing.ID); err != nil {
+	// Mark listing filled. AND status='active' is defence-in-depth: with FOR
+	// UPDATE the status cannot have changed, but the guard catches any edge
+	// case where isolation semantics don't fully serialize.
+	tag, err := tx.Exec(ctx,
+		`UPDATE marketplace_listings SET status = $1, filled_at = NOW()
+		 WHERE id = $2 AND status = 'active'`,
+		ListingFilled, listing.ID)
+	if err != nil {
 		return nil, fmt.Errorf("economy: mark filled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrListingNotActive // lost the race
 	}
 
 	trade := MarketplaceTrade{
@@ -375,13 +390,13 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 		PriceUSD:   priceActual,
 		TalyvorFee: fee,
 	}
-	row := tx.QueryRow(ctx, `
+	tradeRow := tx.QueryRow(ctx, `
 		INSERT INTO marketplace_trades (listing_id, buyer_id, seller_id, amount, price_usd, talyvor_fee)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at`,
 		trade.ListingID, trade.BuyerID, trade.SellerID,
 		trade.Amount, trade.PriceUSD, trade.TalyvorFee)
-	if err := row.Scan(&trade.ID, &trade.CreatedAt); err != nil {
+	if err := tradeRow.Scan(&trade.ID, &trade.CreatedAt); err != nil {
 		return nil, fmt.Errorf("economy: insert trade: %w", err)
 	}
 	return &trade, tx.Commit(ctx)
@@ -389,11 +404,27 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 
 // CancelListing releases the seller's reservation. Only the
 // original seller can cancel — anyone else gets ErrNotSeller.
+//
+// TOCTOU safety: the listing row is read inside the transaction with
+// SELECT ... FOR UPDATE. If a concurrent ExecuteTrade fills the listing
+// between the read and this cancel's commit, the loser (whichever
+// serializes second) sees the updated status and returns ErrListingNotActive
+// without issuing a refund — preventing the double-refund fund-leak.
 func (s *MarketplaceStore) CancelListing(ctx context.Context, listingID, workspaceID string) error {
 	if s.pool == nil {
 		return nil
 	}
-	listing, err := s.getListing(ctx, listingID)
+
+	// UPDATE listing + Credit refund run inside one transaction. The listing
+	// row is locked with SELECT ... FOR UPDATE to serialize concurrent
+	// ExecuteTrade/CancelListing calls and eliminate the double-refund race.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: begin cancel tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	listing, err := getListingForUpdate(ctx, tx, listingID)
 	if err != nil {
 		return err
 	}
@@ -404,18 +435,15 @@ func (s *MarketplaceStore) CancelListing(ctx context.Context, listingID, workspa
 		return ErrListingNotActive
 	}
 
-	// UPDATE listing + Credit refund run inside one transaction so a
-	// failure after the status update still returns the LENS to the seller.
-	tx, err := s.pool.Begin(ctx)
+	// AND status='active' guard: defence-in-depth (see ExecuteTrade comment).
+	tag, err := tx.Exec(ctx,
+		`UPDATE marketplace_listings SET status = $1 WHERE id = $2 AND status = 'active'`,
+		ListingCancelled, listingID)
 	if err != nil {
-		return fmt.Errorf("economy: begin cancel tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if _, err := tx.Exec(ctx,
-		`UPDATE marketplace_listings SET status = $1 WHERE id = $2`,
-		ListingCancelled, listingID); err != nil {
 		return fmt.Errorf("economy: cancel listing: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrListingNotActive // lost the race
 	}
 	if err := s.ledger.CreditTx(ctx, tx, listing.SellerID, listing.Amount,
 		"marketplace_refund", "listing cancelled", map[string]interface{}{
