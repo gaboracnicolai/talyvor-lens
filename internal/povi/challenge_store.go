@@ -31,6 +31,10 @@ const insertChallengeSQL = `INSERT INTO povi_challenges
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (request_id) DO NOTHING`
 
+const updateChallengeSQL = `UPDATE povi_challenges
+SET result=$2, slashed_amount=$3, reason=$4
+WHERE id=$1`
+
 const existsChallengeSQL = `SELECT EXISTS (SELECT 1 FROM povi_challenges WHERE request_id = $1)`
 
 const getChallengeSQL = `SELECT id, request_id, node_id, workspace_id, positions, result, slashed_amount, reason, created_at
@@ -61,17 +65,35 @@ func parsePositions(s string) []int {
 	return out
 }
 
-// Record appends a challenge outcome. Idempotent per request_id (the UNIQUE
-// constraint is the DB-level double-slash backstop).
+// Record atomically claims the receipt by inserting a pending challenge row.
+// Returns ErrAlreadyChallenged when the UNIQUE constraint on request_id fires
+// (RowsAffected == 0 via ON CONFLICT DO NOTHING), meaning another instance
+// already claimed this receipt — the caller must not proceed to Slash.
 func (s *ChallengeStore) Record(ctx context.Context, c Challenge) error {
 	if s.pool == nil {
 		return nil
 	}
-	if _, err := s.pool.Exec(ctx, insertChallengeSQL,
+	tag, err := s.pool.Exec(ctx, insertChallengeSQL,
 		c.ID, c.RequestID, c.NodeID, c.WorkspaceID, joinPositions(c.Positions),
 		string(c.Result), c.SlashedAmount, c.Reason, c.CreatedAt,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("povi: insert challenge: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAlreadyChallenged
+	}
+	return nil
+}
+
+// UpdateResult writes the final outcome (pass/fail/timeout) and slash
+// amount to the previously-claimed pending challenge row.
+func (s *ChallengeStore) UpdateResult(ctx context.Context, id string, result ChallengeResult, slashedAmount float64, reason string) error {
+	if s.pool == nil {
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx, updateChallengeSQL, id, string(result), slashedAmount, reason); err != nil {
+		return fmt.Errorf("povi: update challenge result: %w", err)
 	}
 	return nil
 }

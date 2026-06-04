@@ -124,6 +124,7 @@ const (
 	ChallengePass    ChallengeResult = "pass"
 	ChallengeFail    ChallengeResult = "fail"    // returned an invalid/wrong path
 	ChallengeTimeout ChallengeResult = "timeout" // no response / unreachable
+	ChallengePending ChallengeResult = "pending" // claimed, work in progress
 )
 
 // Challenge is the audit record of one issued challenge.
@@ -139,10 +140,20 @@ type Challenge struct {
 	CreatedAt     time.Time       `json:"created_at"`
 }
 
-// challengeStore persists challenge records (pgChallengeStore is the real impl;
-// tests use an in-memory fake). AlreadyChallenged is the double-slash guard.
+// challengeStore persists challenge records (ChallengeStore is the real impl;
+// tests use an in-memory fake).
+//
+// The double-slash guard works via an atomic INSERT in Record: the UNIQUE
+// constraint on request_id means only one concurrent caller can claim a
+// receipt — the loser gets ErrAlreadyChallenged and never reaches Slash.
+// AlreadyChallenged is a cheap fast-path that avoids unnecessary CPU work
+// (sampling, merkle decode) but is NOT the correctness mechanism.
 type challengeStore interface {
+	// Record atomically claims the receipt. Returns ErrAlreadyChallenged
+	// when the receipt is already claimed (UNIQUE conflict).
 	Record(ctx context.Context, c Challenge) error
+	// UpdateResult persists the final outcome after FetchPaths + optional Slash.
+	UpdateResult(ctx context.Context, id string, result ChallengeResult, slashedAmount float64, reason string) error
 	Get(ctx context.Context, id string) (*Challenge, error)
 	AlreadyChallenged(ctx context.Context, requestID string) (bool, error)
 	List(ctx context.Context, nodeID string) ([]Challenge, error)
@@ -193,8 +204,17 @@ func (c *Challenger) PositionsPerChallenge() int { return c.k }
 
 // Challenge issues one challenge against a recorded receipt: sample K positions,
 // ask the node for the paths, verify each against the receipt's committed root,
-// and slash on any failure / timeout. Double-slash-guarded per request.
+// and slash on any failure / timeout.
+//
+// DOUBLE-SLASH SAFETY: the receipt is claimed atomically via Record (INSERT with
+// UNIQUE constraint on request_id). In HA deployments two concurrent Lens
+// instances may both pass the AlreadyChallenged SELECT and reach Record, but
+// only one INSERT will succeed — the other gets ErrAlreadyChallenged and returns
+// before Slash is called. The AlreadyChallenged call is a cheap fast-path that
+// avoids sampling work when the receipt is already settled; correctness does NOT
+// depend on it.
 func (c *Challenger) Challenge(ctx context.Context, rec StoredReceipt) (*Challenge, error) {
+	// Fast-path: cheap SELECT to skip work for already-settled receipts.
 	done, err := c.store.AlreadyChallenged(ctx, rec.RequestID)
 	if err != nil {
 		return nil, err
@@ -216,9 +236,16 @@ func (c *Challenger) Challenge(ctx context.Context, rec StoredReceipt) (*Challen
 		return nil, err
 	}
 
+	// Atomic claim: INSERT pending row. If another instance already claimed
+	// this receipt, Record returns ErrAlreadyChallenged and we stop here —
+	// no FetchPaths, no Slash. This closes the HA TOCTOU.
 	ch := Challenge{
 		ID: c.idGen(), RequestID: rec.RequestID, NodeID: rec.NodeID,
-		WorkspaceID: rec.WorkspaceID, Positions: positions, CreatedAt: c.now().UTC(),
+		WorkspaceID: rec.WorkspaceID, Positions: positions,
+		Result: ChallengePending, CreatedAt: c.now().UTC(),
+	}
+	if err := c.store.Record(ctx, ch); err != nil {
+		return nil, err // ErrAlreadyChallenged surfaces here in the race case
 	}
 
 	url, _ := c.nodeURL(ctx, rec.NodeID)
@@ -244,7 +271,7 @@ func (c *Challenger) Challenge(ctx context.Context, rec StoredReceipt) (*Challen
 	}
 
 	metrics.POVIChallenge(string(ch.Result))
-	if err := c.store.Record(ctx, ch); err != nil {
+	if err := c.store.UpdateResult(ctx, ch.ID, ch.Result, ch.SlashedAmount, ch.Reason); err != nil {
 		return &ch, err
 	}
 	return &ch, nil
