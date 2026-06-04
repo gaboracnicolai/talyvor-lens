@@ -36,6 +36,12 @@ func NewChallengeClient(lensPriv ed25519.PrivateKey, timeout time.Duration) *Cha
 	}
 }
 
+// SetHTTPClient replaces the underlying HTTP client. main.go calls this
+// to inject a client whose TLS config trusts node certificates (e.g.
+// self-signed certs on LAN deployments, controlled via
+// LENS_NODE_TLS_SKIP_VERIFY).
+func (c *ChallengeClient) SetHTTPClient(client *http.Client) { c.http = client }
+
 // FetchPaths implements PathProvider.
 func (c *ChallengeClient) FetchPaths(ctx context.Context, _, nodeURL, requestID string, positions []int) ([]LeafProof, error) {
 	if nodeURL == "" {

@@ -61,6 +61,16 @@ func New(ollamaURL string) *LocalRouter {
 	}
 }
 
+// SetHTTPClient replaces the underlying HTTP client. main.go calls this
+// to inject a client whose TLS config trusts node certificates (e.g.
+// self-signed certs on LAN deployments, controlled via
+// LENS_NODE_TLS_SKIP_VERIFY).
+func (r *LocalRouter) SetHTTPClient(client *http.Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.httpClient = client
+}
+
 type tagsResponse struct {
 	Models []LocalModel `json:"models"`
 }

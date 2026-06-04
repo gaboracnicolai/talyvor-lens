@@ -116,6 +116,16 @@ func (r *Router) SetOnRequestServed(fn func(nodeID, requestingWorkspace string, 
 	r.onRequestServed = fn
 }
 
+// SetHTTPClient replaces the underlying HTTP client used for health
+// checks and inference calls. main.go calls this to inject a client
+// whose TLS config trusts node certificates (e.g. self-signed certs
+// on LAN deployments, controlled via LENS_NODE_TLS_SKIP_VERIFY).
+func (r *Router) SetHTTPClient(client *http.Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.httpClient = client
+}
+
 // NotifyServed is the proxy-side entry point: "this endpoint
 // just served `tokens` tokens to `requestingWorkspace` in
 // `latencyMs`". When a mining hook is wired it's invoked
