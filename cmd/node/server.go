@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -143,7 +144,7 @@ func (s *InferenceServer) handleInference(w http.ResponseWriter, r *http.Request
 	// operator's running in "registered without secret" mode (e.g.
 	// an older Lens that doesn't issue secrets); we still accept
 	// requests then, but log a warning at startup.
-	if s.secret != "" && r.Header.Get("X-Node-Secret") != s.secret {
+	if s.secret != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Node-Secret")), []byte(s.secret)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
