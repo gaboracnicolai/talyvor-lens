@@ -68,6 +68,7 @@ type Workspace struct {
 	MaxInputTokens      int           `json:"max_input_tokens"`
 	Active              bool          `json:"active"`
 	LoggingPolicy       LoggingPolicy `json:"logging_policy"`
+	DistillPolicy       DistillPolicy `json:"distill_policy"`
 	CreatedAt           time.Time     `json:"created_at"`
 }
 
@@ -92,8 +93,8 @@ func New(pool *pgxpool.Pool) *Manager {
 const insertWorkspaceSQL = `INSERT INTO workspaces (
   id, name, cache_prefix, spend_limit_usd,
   allowed_models, allowed_providers, max_tokens_per_request,
-  max_output_tokens, max_input_tokens, active, logging_policy
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+  max_output_tokens, max_input_tokens, active, logging_policy, distill_policy
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (id) DO UPDATE SET
   name                   = EXCLUDED.name,
   cache_prefix           = EXCLUDED.cache_prefix,
@@ -105,6 +106,7 @@ ON CONFLICT (id) DO UPDATE SET
   max_input_tokens       = EXCLUDED.max_input_tokens,
   active                 = EXCLUDED.active,
   logging_policy         = EXCLUDED.logging_policy,
+  distill_policy         = EXCLUDED.distill_policy,
   updated_at             = NOW()`
 
 const updateLoggingPolicySQL = `UPDATE workspaces
@@ -125,6 +127,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 		ws.CreatedAt = time.Now().UTC()
 	}
 	ws.LoggingPolicy = normalizeLoggingPolicy(ws.LoggingPolicy)
+	ws.DistillPolicy = normalizeDistillPolicy(ws.DistillPolicy)
 
 	stored := ws
 	m.mu.Lock()
@@ -136,6 +139,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 			stored.ID, stored.Name, stored.CachePrefix, stored.SpendLimitUSD,
 			stored.AllowedModels, stored.AllowedProviders, stored.MaxTokensPerRequest,
 			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active, string(stored.LoggingPolicy),
+			string(stored.DistillPolicy),
 		); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
 		}
@@ -311,7 +315,7 @@ func (m *Manager) ScopedCacheKey(wsID, baseKey string) string {
 
 const loadAllSQL = `SELECT id, name, cache_prefix, spend_limit_usd,
   allowed_models, allowed_providers, max_tokens_per_request,
-  max_output_tokens, max_input_tokens, active, logging_policy, created_at
+  max_output_tokens, max_input_tokens, active, logging_policy, distill_policy, created_at
 FROM workspaces
 WHERE active = true`
 
@@ -329,15 +333,16 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 	defer m.mu.Unlock()
 	for rows.Next() {
 		var ws Workspace
-		var policy string
+		var policy, dpolicy string
 		if err := rows.Scan(
 			&ws.ID, &ws.Name, &ws.CachePrefix, &ws.SpendLimitUSD,
 			&ws.AllowedModels, &ws.AllowedProviders, &ws.MaxTokensPerRequest,
-			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &ws.CreatedAt,
+			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &dpolicy, &ws.CreatedAt,
 		); err != nil {
 			return fmt.Errorf("workspace: scan: %w", err)
 		}
 		ws.LoggingPolicy = normalizeLoggingPolicy(LoggingPolicy(policy))
+		ws.DistillPolicy = normalizeDistillPolicy(DistillPolicy(dpolicy))
 		stored := ws
 		m.workspaces[ws.ID] = &stored
 	}

@@ -353,6 +353,15 @@ func run() error {
 	// Upgraded per-request attribution store (Upgrade Batch 1 / Item 3).
 	// Wired as a setter so the existing proxy.New signature stays put.
 	p.SetAttributionStore(attrStore)
+	// DISTILL request-path integration (stage 3, PR #2). The isolated
+	// distill-worker subprocess converts an opted-in request's document to
+	// Markdown before the model call; a Redis-backed conversion cache avoids
+	// re-converting the same document. Inert until a workspace's DistillPolicy
+	// is enabled (default disabled).
+	p.SetDistiller(
+		&distill.ProcessIsolator{WorkerBin: cfg.DistillWorkerBin},
+		cache.NewDistillCache(redisClient, cfg.MaxCacheTTL),
+	)
 	// Per-team / per-sprint budget governance (Upgrade 19). Seed the
 	// in-memory snapshot from token_events, refresh it periodically, then
 	// wire the gate into the proxy hot path. Load is best-effort — a cold
@@ -2424,6 +2433,30 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]any{
 				"ok":             true,
 				"logging_policy": ws.LoggingPolicy,
+			})
+		})
+
+		// Per-workspace DISTILL policy toggle (stage 3, PR #2). Applies
+		// immediately — proxy.serve() reads via GetDistillPolicy on every
+		// request. Default is disabled, so the request path stays inert until an
+		// admin enables a workspace here.
+		authed.Put("/v1/workspaces/{wsID}/distill", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				DistillPolicy workspace.DistillPolicy `json:"distill_policy"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := wsManager.SetDistillPolicy(req.Context(), wsID, in.DistillPolicy); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			ws, _ := wsManager.GetWorkspace(wsID)
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"ok":             true,
+				"distill_policy": ws.DistillPolicy,
 			})
 		})
 

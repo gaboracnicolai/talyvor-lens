@@ -104,6 +104,7 @@ type Proxy struct {
 	keyPool           *keypool.Pool
 	auditExporter     *audit.Exporter
 	guardrails        *guardrails.Engine
+	distiller         *distillIntegration
 	retryConfig       retry.Config
 	httpClient        *http.Client
 	openAIKey         string
@@ -483,6 +484,33 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			return
 		}
 		cachePrompt = wsID + ":" + prompt
+	}
+
+	// DISTILL request-path integration (Upgrade 23). When the workspace + this
+	// request opt in AND a document block is present, convert it to clean
+	// Markdown via the KILLABLE subprocess before the model sees it. This runs
+	// after the workspace gate (so a blocked workspace spends no conversion) and
+	// before guardrails/cache/capability (so they all operate on the distilled
+	// text). INERT-BY-DEFAULT: a non-opted-in request, a request with no
+	// document, or a conversion failure leaves body/prompt/modSet byte-for-byte
+	// unchanged. After a successful distill we re-derive the variables computed
+	// from the body — prompt, modSet (now text-only, so the capability gate
+	// won't redirect to a vision model), and the workspace-scoped cachePrompt.
+	if p.distiller != nil {
+		if nb, np, nm, did := p.distiller.MaybeDistill(ctx, r, body, wsID, modSet); did {
+			body, prompt, modSet = nb, np, nm
+			cachePrompt = prompt
+			if p.workspaceManager != nil {
+				cachePrompt = wsID + ":" + prompt
+			}
+			// modSet is now the post-distill (text-only) set, so the capability
+			// gate + spend below bill the converted text. The X-Talyvor-Modality
+			// header + RequestByModality metric above intentionally keep the
+			// INCOMING modality (what the client sent) — that's the request-mix
+			// signal, and the X-Talyvor-Distill header below tells the client we
+			// converted it.
+			w.Header().Set("X-Talyvor-Distill", "applied")
+		}
 	}
 
 	// Session pickup — header-driven, optional. Empty sessionID means

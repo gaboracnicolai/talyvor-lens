@@ -81,7 +81,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The caller DECLARES the media type; we do not sniff untrusted bytes
 	// in-process. The worker uses an explicit format (DistillAs), so an
 	// undeclared/unsupported type is a 400 rather than a guess.
-	format, ok := formatFromContentType(r.Header.Get("Content-Type"))
+	format, ok := distill.FormatFromMediaType(r.Header.Get("Content-Type"))
 	if !ok {
 		writeErr(w, http.StatusBadRequest,
 			"unsupported or missing Content-Type; declare the document media type (e.g. application/pdf, text/html, text/csv)")
@@ -103,16 +103,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ISOLATED conversion ONLY — the killable subprocess, never in-process.
-	res, err := h.Converter.Convert(r.Context(), body, format)
+	// Orchestrate ties Convert → ApplyTier → Savings; nil cache for a one-off
+	// admin dry-run. The same shared entry the request path uses.
+	tier := distill.Tier(strings.TrimSpace(r.URL.Query().Get("tier")))
+	res, sav, err := distill.Orchestrate(r.Context(), h.Converter, nil, body, format, tier)
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "conversion failed: "+err.Error())
 		return
 	}
-
-	// Parent-side tier (default faithful = identity); pure post-processing of
-	// the converted Markdown. Then measure savings on the len/4 basis.
-	res = distill.ApplyTier(res, distill.Tier(strings.TrimSpace(r.URL.Query().Get("tier"))))
-	sav := distill.ComputeSavings(body, res)
 
 	writeJSON(w, http.StatusOK, response{
 		Markdown:    res.Markdown,
@@ -128,34 +126,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			TokensSaved:          sav.TokensSaved,
 		},
 	})
-}
-
-// formatFromContentType maps a declared media type to a distill.Format. Unknown
-// or empty types return ok=false (the handler answers 400). Parameters such as
-// "; charset=utf-8" are ignored.
-func formatFromContentType(ct string) (distill.Format, bool) {
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	switch strings.ToLower(strings.TrimSpace(ct)) {
-	case "application/pdf":
-		return distill.FormatPDF, true
-	case "text/html", "application/xhtml+xml":
-		return distill.FormatHTML, true
-	case "text/csv":
-		return distill.FormatCSV, true
-	case "application/json":
-		return distill.FormatJSON, true
-	case "text/xml", "application/xml":
-		return distill.FormatXML, true
-	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-		return distill.FormatDOCX, true
-	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-		return distill.FormatXLSX, true
-	case "text/plain", "text/markdown":
-		return distill.FormatText, true
-	}
-	return distill.FormatUnknown, false
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
