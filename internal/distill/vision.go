@@ -57,7 +57,12 @@ type VisionResult struct {
 	Markdown     string
 	InputTokens  int
 	OutputTokens int
-	Model        string // which vision model served it (optional, for attribution)
+	// Model is the vision model that served the OCR. A dispatcher MUST set it on
+	// a successful result: the request path prices the durable 'vision_ocr' spend
+	// row on it, so an empty/unknown model yields an UNPRICED (cost_usd=0) row —
+	// the OCR cost would then not count against budgets. The proxy logs a warning
+	// if it is missing so the gap is observable rather than silent.
+	Model string
 }
 
 // DefaultVisionPrompt instructs the vision model to transcribe a document into
@@ -145,6 +150,9 @@ func visionFallback(ctx context.Context, input []byte, res Result, d VisionDispa
 		InputTokensDistilled: estTokens(vr.Markdown),
 		TokensSaved:          0, // EXPENSIVE path: vision OCR never saves tokens.
 		VisionTokensCost:     cost,
+		VisionInputTokens:    vr.InputTokens,  // the split, for a durable model-priced 'vision_ocr' spend row
+		VisionOutputTokens:   vr.OutputTokens, //
+		VisionModel:          vr.Model,        // which vision model to price the cost against
 		InputBytes:           len(input),
 		OutputBytes:          len(vr.Markdown),
 		CacheHit:             false,

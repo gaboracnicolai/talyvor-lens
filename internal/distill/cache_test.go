@@ -2,6 +2,7 @@ package distill
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -98,6 +99,93 @@ func TestSavings_LenOver4Basis(t *testing.T) {
 	// Verbose HTML (tags + a stripped script) → distillation is a net win.
 	if s.TokensSaved <= 0 {
 		t.Errorf("verbose HTML should save tokens; got %d (raw=%d distilled=%d)", s.TokensSaved, s.InputTokensRaw, s.InputTokensDistilled)
+	}
+}
+
+// Binary-origin formats (PDF/DOCX/XLSX) carry raw bytes that are NOT text
+// tokens; text-ish formats are tokens a model could have been sent.
+func TestFormat_IsBinaryOrigin(t *testing.T) {
+	for _, f := range []Format{FormatPDF, FormatDOCX, FormatXLSX} {
+		if !f.IsBinaryOrigin() {
+			t.Errorf("%s must be binary-origin", f)
+		}
+	}
+	for _, f := range []Format{FormatHTML, FormatCSV, FormatJSON, FormatXML, FormatText, FormatUnknown} {
+		if f.IsBinaryOrigin() {
+			t.Errorf("%s must NOT be binary-origin", f)
+		}
+	}
+}
+
+// Binary-origin at FAITHFUL tier: the binary→text step is a SIZE reduction
+// (bytes), NOT a token saving. There must be NO phantom len(bytes)/4 token
+// saving — the raw baseline is the faithful-text token count, so the tier delta
+// (0 at faithful) is the only token saving. This is the request path's tier.
+func TestComputeSavings_BinaryFaithful_NoPhantomTokens(t *testing.T) {
+	in := make([]byte, 4000) // 4000 binary bytes → len/4 = 1000 PHANTOM "tokens"
+	md := "# Title\n\nshort recovered text"
+	res := ApplyTier(Result{Markdown: md, Format: FormatDOCX}, TierFaithful)
+
+	s := ComputeSavings(in, res)
+	if s.TokensSaved != 0 {
+		t.Errorf("binary at faithful must save 0 tokens (size reduction lives in bytes), not the len(bytes)/4 phantom; got %d", s.TokensSaved)
+	}
+	if s.InputTokensRaw != len(md)/4 {
+		t.Errorf("binary raw baseline must be the faithful-text tokens (%d), NOT len(bytes)/4 (%d); got %d", len(md)/4, len(in)/4, s.InputTokensRaw)
+	}
+	if s.InputBytes != len(in) || s.OutputBytes != len(md) {
+		t.Errorf("byte size-reduction must be carried: in=%d out=%d", s.InputBytes, s.OutputBytes)
+	}
+}
+
+// Binary-origin at a REDUCING tier: the token saving is the tier delta vs the
+// faithful-text baseline (a real saving), and STILL never the raw-bytes phantom.
+func TestComputeSavings_BinaryReducingTier_TierDeltaOnly(t *testing.T) {
+	in := make([]byte, 8000) // large binary; len/4 = 2000 phantom
+	md := "# Title\n\nbody that outline drops\n\n## Section\n\nmore body that outline drops too"
+	res := ApplyTier(Result{Markdown: md, Format: FormatDOCX}, TierOutline) // FaithfulTextTokens = faithful md
+
+	s := ComputeSavings(in, res)
+	faithfulTokens := len(md) / 4
+	if s.InputTokensRaw != faithfulTokens {
+		t.Errorf("raw baseline must be the faithful-text tokens %d; got %d", faithfulTokens, s.InputTokensRaw)
+	}
+	if s.TokensSaved <= 0 {
+		t.Errorf("a reducing tier on binary should save the tier delta (>0); got %d", s.TokensSaved)
+	}
+	if s.TokensSaved != s.InputTokensRaw-s.InputTokensDistilled {
+		t.Errorf("binary tier-delta saving must be faithful minus tiered tokens; got %d", s.TokensSaved)
+	}
+	if phantom := len(in)/4 - s.InputTokensDistilled; s.TokensSaved == phantom {
+		t.Errorf("must NOT use the len(bytes)/4 phantom baseline (%d)", phantom)
+	}
+}
+
+// FaithfulTextTokens must survive the cache JSON round-trip so a cache HIT on a
+// binary-origin document computes the tier-delta savings correctly (not a 0/
+// phantom). The ConverterVersion bump orphans pre-field ("1") entries; this pins
+// that NEW ("2") entries carry the baseline through the cache.
+func TestCache_FaithfulTextTokensSurvivesRoundTrip(t *testing.T) {
+	res := Result{Format: FormatDOCX, Markdown: "# Title\n\nkept body", Tier: TierOutline, FaithfulTextTokens: 200}
+	b, err := json.Marshal(cachedResult{Result: res})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cr cachedResult
+	if err := json.Unmarshal(b, &cr); err != nil {
+		t.Fatal(err)
+	}
+	if cr.Result.FaithfulTextTokens != 200 {
+		t.Fatalf("FaithfulTextTokens lost across the cache round-trip: %d", cr.Result.FaithfulTextTokens)
+	}
+	// On the hit, the binary baseline is the cached FaithfulTextTokens (the tier
+	// delta), never len(bytes)/4.
+	s := computeSavings(make([]byte, 9999), cr.Result, true)
+	if s.InputTokensRaw != 200 {
+		t.Errorf("binary raw baseline on a cache hit must be the cached FaithfulTextTokens 200; got %d", s.InputTokensRaw)
+	}
+	if s.TokensSaved != 200-estTokens(res.Markdown) {
+		t.Errorf("binary saving on a cache hit must be the tier delta (200 - distilled); got %d", s.TokensSaved)
 	}
 }
 

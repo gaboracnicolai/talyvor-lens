@@ -61,10 +61,11 @@ func TestRecordSpend_CostForGPT4o(t *testing.T) {
 	const wantCost = 0.75
 
 	// Column order: workspace_id, provider, model, in, out, team, sprint_id,
-	// feature, cost, prompt, session, request, modality, cost_estimated.
-	// This row is an image request → modality "image", estimated true.
+	// feature, cost, prompt, session, request, modality, cost_estimated,
+	// distill_method. This row is an image request → modality "image", estimated
+	// true; not distilled → distill_method "".
 	pool.ExpectExec(`INSERT INTO token_events`).
-		WithArgs("ws-test", "openai", "gpt-4o", 100000, 50000, "core", "sprint-1", "search", wantCost, "p", "", "", "image", true).
+		WithArgs("ws-test", "openai", "gpt-4o", 100000, 50000, "core", "sprint-1", "search", wantCost, "p", "", "", "image", true, "").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := mgr.RecordSpend(context.Background(), "ws-test", "core", "sprint-1", "search", "gpt-4o", 100000, 50000, "p", "", "", "image", true); err != nil {
@@ -83,7 +84,7 @@ func TestRecordSpend_CostForClaudeHaiku(t *testing.T) {
 	const wantCost = 4.80
 
 	pool.ExpectExec(`INSERT INTO token_events`).
-		WithArgs("ws-test", "anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "", "search", wantCost, "p", "", "", "text", false).
+		WithArgs("ws-test", "anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "", "search", wantCost, "p", "", "", "text", false, "").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := mgr.RecordSpend(context.Background(), "ws-test", "core", "", "search", "claude-haiku-4-5", 1000000, 1000000, "p", "", "", "text", false); err != nil {
@@ -91,6 +92,39 @@ func TestRecordSpend_CostForClaudeHaiku(t *testing.T) {
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet pgxmock expectations: %v", err)
+	}
+}
+
+// RecordSpendWithDistill writes the DISTILL method as the 15th token_events
+// column so the savings story is auditable per request. A 'convert' row carries
+// the distilled request's (lower) count; a 'vision_ocr' row is the OCR sub-call's
+// own model-priced cost — never blended.
+func TestRecordSpendWithDistill_TagsMethod(t *testing.T) {
+	cases := []struct {
+		name, method, modality string
+		estimated              bool
+	}{
+		{"convert", "convert", "document", false},
+		{"vision_ocr", "vision_ocr", "document", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, _, pool := newTestManager(t, nil)
+			pool.ExpectExec(`INSERT INTO token_events`).
+				WithArgs(
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg(), pgxmock.AnyArg(), tc.modality, tc.estimated, tc.method,
+				).
+				WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+			if err := mgr.RecordSpendWithDistill(context.Background(), "ws-test", "core", "", "search", "claude-haiku-4-6", 1000, 40, "", "", "", tc.modality, tc.estimated, tc.method); err != nil {
+				t.Fatalf("RecordSpendWithDistill: %v", err)
+			}
+			if err := pool.ExpectationsWereMet(); err != nil {
+				t.Fatalf("distill_method %q not written as the 15th token_events column: %v", tc.method, err)
+			}
+		})
 	}
 }
 
@@ -110,7 +144,7 @@ func TestRecordSpend_PersistsWorkspaceID(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 		if err := mgr.RecordSpend(context.Background(), ws, "core", "", "search", "gpt-4o", 10, 10, "", "", "", "text", false); err != nil {
@@ -140,7 +174,7 @@ func TestRecordSpend_FiresWarningAlertOverThreshold(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Spend is above warning ($1) but below critical ($10).
@@ -182,7 +216,7 @@ func TestRecordSpend_OpensCircuitOverThreshold(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Spend above CircuitUSD.
@@ -245,9 +279,9 @@ func TestResetCircuit_ClosesOpenCircuit(t *testing.T) {
 // Sanity-check the cost arithmetic with tiny inputs so float rounding is exact.
 func TestCostUSD_KnownValues(t *testing.T) {
 	cases := []struct {
-		model           string
-		inT, outT       int
-		want            float64
+		model     string
+		inT, outT int
+		want      float64
 	}{
 		{"gpt-4o", 1_000_000, 0, 2.50},
 		{"gpt-4o", 0, 1_000_000, 10.00},

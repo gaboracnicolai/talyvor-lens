@@ -132,8 +132,8 @@ func providerForModel(model string) string {
 }
 
 const insertTokenEventSQL = `INSERT INTO token_events
-  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
 
 // RecordSpend takes a `prompt` (or already-redacted equivalent) so the
 // cache warmer can later JOIN prompt_embeddings against token_events to
@@ -155,6 +155,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 // when the cost is a documented estimate rather than exact accounting
 // (multimodal input tokens are estimated).
 func (a *AlertManager) RecordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool) error {
+	// Non-distilled traffic: distill_method is '' (the column default). Existing
+	// callers are unchanged.
+	return a.recordSpend(ctx, workspaceID, team, sprint, feature, model, inputTokens, outputTokens, prompt, sessionID, requestID, modality, estimated, "")
+}
+
+// RecordSpendWithDistill is RecordSpend plus the DISTILL method attribution
+// written to token_events.distill_method: "convert" for a distilled request's
+// (lower-count) spend row, or "vision_ocr" for the OCR sub-call's OWN cost row.
+// Additive — it shares the exact billing/alert path; only the distill_method tag
+// differs, so non-distilled traffic and all existing callers are untouched.
+func (a *AlertManager) RecordSpendWithDistill(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error {
+	return a.recordSpend(ctx, workspaceID, team, sprint, feature, model, inputTokens, outputTokens, prompt, sessionID, requestID, modality, estimated, distillMethod)
+}
+
+func (a *AlertManager) recordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error {
 	cost := costUSD(model, inputTokens, outputTokens)
 	provider := providerForModel(model)
 	if modality == "" {
@@ -162,7 +177,7 @@ func (a *AlertManager) RecordSpend(ctx context.Context, workspaceID, team, sprin
 	}
 
 	if _, err := a.pool.Exec(ctx, insertTokenEventSQL,
-		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, cost, prompt, sessionID, requestID, modality, estimated,
+		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, cost, prompt, sessionID, requestID, modality, estimated, distillMethod,
 	); err != nil {
 		return fmt.Errorf("alerts: insert token_event: %w", err)
 	}

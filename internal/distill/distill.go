@@ -51,6 +51,21 @@ const (
 	FormatUnknown Format = "unknown"
 )
 
+// IsBinaryOrigin reports whether a format's raw bytes are a BINARY container
+// (PDF/DOCX/XLSX) rather than text a model could have been sent directly. It
+// gates the savings basis: for binary-origin inputs, len(bytes)/4 is a PHANTOM
+// token baseline (the bytes were never text tokens), so the binary→text step is
+// a SIZE reduction (bytes), and real token savings come only from the tier delta
+// vs the faithful-text baseline. Text-ish formats keep the raw-text baseline.
+func (f Format) IsBinaryOrigin() bool {
+	switch f {
+	case FormatPDF, FormatDOCX, FormatXLSX:
+		return true
+	default:
+		return false
+	}
+}
+
 // MaxInputBytes bounds a single conversion. 10 MiB comfortably covers the
 // documents that arrive inline in API requests while putting a hard ceiling on
 // the work any one untrusted input can cause.
@@ -79,6 +94,12 @@ type Result struct {
 	// Warnings holds non-fatal structural notes (e.g. a table with ragged
 	// rows). Conversion still succeeds; these are advisory.
 	Warnings []string
+	// FaithfulTextTokens is the token count (len/4 basis) of the FAITHFUL-tier
+	// Markdown, captured before any tier reduction. It is the honest text-token
+	// baseline for binary-origin formats (whose raw bytes are not text tokens),
+	// so computeSavings can measure their savings as the tier delta rather than a
+	// phantom len(bytes)/4 figure. Set by applyTier; carried through the cache.
+	FaithfulTextTokens int
 }
 
 // Method is how a Result's Markdown was produced (its provenance).

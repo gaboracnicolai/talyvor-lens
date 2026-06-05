@@ -23,6 +23,7 @@ type mockVision struct {
 	md       string
 	inTok    int
 	outTok   int
+	model    string // vision model that served it (carried into Savings.VisionModel)
 	err      error
 	panicMsg string // if set, DispatchVision panics (simulates a buggy dispatcher)
 	mutate   bool   // if set, DispatchVision mutates req.Bytes (must not affect caller)
@@ -44,7 +45,27 @@ func (m *mockVision) DispatchVision(_ context.Context, req VisionRequest) (Visio
 	if m.err != nil {
 		return VisionResult{}, m.err
 	}
-	return VisionResult{Markdown: m.md, InputTokens: m.inTok, OutputTokens: m.outTok}, nil
+	return VisionResult{Markdown: m.md, InputTokens: m.inTok, OutputTokens: m.outTok, Model: m.model}, nil
+}
+
+// visionFallback must carry the OCR call's token SPLIT (in/out) and model into
+// Savings so the request path can book a durable, model-priced 'vision_ocr'
+// token_events row (PR #4) — not just the blended VisionTokensCost total.
+func TestVision_SavingsCarriesCostSplitAndModel(t *testing.T) {
+	mv := &mockVision{md: "# OCR\n\nrecovered", inTok: 1000, outTok: 25, model: "claude-haiku-4-6"}
+	_, sav, err := DistillWithCache(context.Background(), nil, buildPDF(), WithVision(mv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sav.VisionInputTokens != 1000 || sav.VisionOutputTokens != 25 {
+		t.Errorf("Savings must carry the OCR token split; in=%d out=%d want 1000/25", sav.VisionInputTokens, sav.VisionOutputTokens)
+	}
+	if sav.VisionModel != "claude-haiku-4-6" {
+		t.Errorf("Savings must carry the vision model for pricing; got %q", sav.VisionModel)
+	}
+	if sav.VisionInputTokens+sav.VisionOutputTokens != sav.VisionTokensCost {
+		t.Errorf("the split must reconcile with VisionTokensCost: %d+%d != %d", sav.VisionInputTokens, sav.VisionOutputTokens, sav.VisionTokensCost)
+	}
 }
 
 // A NeedsVision document + a configured dispatcher routes to the seam, gets OCR'd

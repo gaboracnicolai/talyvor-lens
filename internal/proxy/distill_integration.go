@@ -42,16 +42,35 @@ func (p *Proxy) SetDistiller(converter distill.IsolatedConverter, cache distill.
 // Untrusted document bytes are converted ONLY through the isolated converter;
 // the JSON envelope is parsed in-process (safe — standard encoding/json, the
 // same parsing serve() already does via extractPrompt).
+// visionSpend is the OCR sub-call cost (tokens + the model that served it),
+// surfaced from MaybeDistill so the request path can book a durable, model-priced
+// 'vision_ocr' token_events row distinct from the 'convert' main row. The zero
+// value means no OCR happened.
+type visionSpend struct {
+	model        string
+	inputTokens  int
+	outputTokens int
+}
+
+// recorded reports whether any OCR cost was incurred (and so a vision_ocr row is
+// owed). A zero-token OCR is treated as none.
+func (v visionSpend) recorded() bool { return v.inputTokens > 0 || v.outputTokens > 0 }
+
 // vision is the OPTIONAL live vision-OCR dispatcher (nil = no live vision): when
 // a document is text-less (NeedsVision), it is OCR'd via a vision-capable model
 // and the COST is booked honestly (see the orchestrator's visionFallback). A nil
 // dispatcher keeps the prior behavior — a NeedsVision document passes through.
-func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, body []byte, wsID string, modSet modality.ModalitySet, vision distill.VisionDispatcher) ([]byte, string, modality.ModalitySet, bool) {
+//
+// The returned visionSpend carries the OCR sub-call's token cost + model (summed
+// across any OCR'd blocks) so the caller can record a durable 'vision_ocr' spend
+// row; it is the zero value when no OCR happened.
+func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, body []byte, wsID string, modSet modality.ModalitySet, vision distill.VisionDispatcher) ([]byte, string, modality.ModalitySet, bool, visionSpend) {
+	var ocr visionSpend
 	// Fail-safe: a misconfigured integration is inert, never a panic on the
 	// shared request path (production always wires both, but the inert/graceful
 	// contract must hold regardless).
 	if d == nil || d.converter == nil || d.wsManager == nil {
-		return body, "", modSet, false
+		return body, "", modSet, false, ocr
 	}
 	// Gate 1: a document-or-image block must be present (cheap; already detected
 	// upstream). We include HasImage because some clients send a PDF as an
@@ -60,20 +79,20 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 	// A genuine image (image/png) passes this gate but is filtered out per-block
 	// by FormatFromMediaType, so it is never converted.
 	if !modSet.HasDocument && !modSet.HasImage {
-		return body, "", modSet, false
+		return body, "", modSet, false, ocr
 	}
 	// Gate 2: workspace policy + per-request opt-in.
 	if !d.shouldDistill(r, wsID) {
-		return body, "", modSet, false
+		return body, "", modSet, false, ocr
 	}
 
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
-		return body, "", modSet, false // malformed envelope → leave the normal path to handle it
+		return body, "", modSet, false, ocr // malformed envelope → leave the normal path to handle it
 	}
 	msgs, ok := root["messages"].([]any)
 	if !ok {
-		return body, "", modSet, false
+		return body, "", modSet, false, ocr
 	}
 
 	distilledAny := false
@@ -90,10 +109,17 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 		msgChanged := false
 		for _, bi := range blocks {
 			if block, ok := bi.(map[string]any); ok {
-				if md, ok := d.tryConvertBlock(ctx, block, vision); ok {
+				if md, vs, ok := d.tryConvertBlock(ctx, block, vision); ok {
 					newBlocks = append(newBlocks, map[string]any{"type": "text", "text": md})
 					msgChanged = true
 					distilledAny = true
+					// Accumulate OCR cost across blocks (same provider/model per
+					// request, so summing in/out prices correctly on one row).
+					if vs.recorded() {
+						ocr.model = vs.model
+						ocr.inputTokens += vs.inputTokens
+						ocr.outputTokens += vs.outputTokens
+					}
 					continue
 				}
 			}
@@ -114,19 +140,19 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 
 	if !distilledAny {
 		// Nothing converted (NeedsVision / unsupported / error) → inert.
-		return body, "", modSet, false
+		return body, "", modSet, false, ocr
 	}
 
 	newBody, err := json.Marshal(root)
 	if err != nil {
-		return body, "", modSet, false // marshal failure → fail safe to the original
+		return body, "", modSet, false, ocr // marshal failure → fail safe to the original
 	}
 	// Re-derive everything that was computed from the original body.
 	_, newPrompt, perr := extractPrompt(newBody)
 	if perr != nil {
-		return body, "", modSet, false
+		return body, "", modSet, false, ocr
 	}
-	return newBody, newPrompt, modality.Detect(newBody), true
+	return newBody, newPrompt, modality.Detect(newBody), true, ocr
 }
 
 // shouldDistill applies the policy + per-request opt-in rules: a document is
@@ -150,21 +176,29 @@ func (d *distillIntegration) shouldDistill(r *http.Request, wsID string) bool {
 // document is text-less, the orchestrator OCRs it (NeedsVision resolves to the
 // recovered Markdown, its token cost booked honestly inside Orchestrate); when
 // vision is nil or the OCR fails, the result stays NeedsVision and the block is
-// left untouched.
-func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher) (string, bool) {
+// left untouched. On a successful OCR the returned visionSpend carries the call's
+// real token cost + model so the caller can book a durable 'vision_ocr' row; it
+// is the zero value for a plain text conversion.
+func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher) (string, visionSpend, bool) {
 	raw, mediaType, ok := extractBlockDocument(block)
 	if !ok {
-		return "", false
+		return "", visionSpend{}, false
 	}
 	format, ok := distill.FormatFromMediaType(mediaType)
 	if !ok {
-		return "", false // e.g. image/png — a vision input, not a document
+		return "", visionSpend{}, false // e.g. image/png — a vision input, not a document
 	}
-	res, _, err := distill.Orchestrate(ctx, d.converter, d.cache, vision, raw, format, distill.TierFaithful)
+	res, sav, err := distill.Orchestrate(ctx, d.converter, d.cache, vision, raw, format, distill.TierFaithful)
 	if err != nil || res.NeedsVision || strings.TrimSpace(res.Markdown) == "" {
-		return "", false
+		return "", visionSpend{}, false
 	}
-	return res.Markdown, true
+	// An OCR'd result carries the vision call's real token split + model so the
+	// request path can book it as a distinct, model-priced 'vision_ocr' row.
+	var vs visionSpend
+	if res.Method == distill.MethodVisionOCR {
+		vs = visionSpend{model: sav.VisionModel, inputTokens: sav.VisionInputTokens, outputTokens: sav.VisionOutputTokens}
+	}
+	return res.Markdown, vs, true
 }
 
 // extractBlockDocument pulls the raw bytes + media type from a content block.

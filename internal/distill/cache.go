@@ -10,11 +10,16 @@ import (
 )
 
 // ConverterVersion identifies the conversion-output contract. BUMP IT whenever
-// any converter's Markdown output changes — the conversion cache keys on it, so
-// a bump lands on fresh keys and stale Markdown from an old converter is never
-// served. (Manual + intentional: a content hash of the converter source would
-// be automatic but brittle and noisy; a reviewed version bump is the standard.)
-const ConverterVersion = "1"
+// any converter's Markdown output changes OR the cached Result's shape changes in
+// a way that affects derived values — the conversion cache keys on it, so a bump
+// lands on fresh keys and a stale Result from an old converter is never served.
+// (Manual + intentional: a content hash of the converter source would be
+// automatic but brittle and noisy; a reviewed version bump is the standard.)
+//
+// "2": added Result.FaithfulTextTokens (the binary-savings baseline). Old "1"
+// entries lack it (would deserialize as 0 → a wrong/zero binary tier-delta), so
+// they are orphaned here and recomputed fresh.
+const ConverterVersion = "2"
 
 // Cache is the conversion-cache seam DISTILL depends on. internal/cache's
 // DistillCache satisfies it (Redis-backed; same store as the LLM cache, its own
@@ -35,13 +40,16 @@ type Cache interface {
 // byte-size in the len/4 basis, not a real prompt cost — read InputBytes
 // alongside and interpret those savings as "size reduction", not tokens-not-spent.
 type Savings struct {
-	InputTokensRaw       int  // len(inputBytes)/4
-	InputTokensDistilled int  // len(markdown)/4
-	TokensSaved          int  // raw - distilled (may be negative; 0 when no Markdown delivered; forced non-positive for vision OCR)
-	VisionTokensCost     int  // tokens SPENT by the vision-OCR fallback (a COST, never a saving); 0 unless this Result was OCR'd
-	InputBytes           int  // len(inputBytes)
-	OutputBytes          int  // len(markdown)
-	CacheHit             bool // served from the conversion cache (conversion skipped)
+	InputTokensRaw       int    // text-token baseline: len(inputBytes)/4 for text-ish formats, the faithful-text tokens for binary-origin formats
+	InputTokensDistilled int    // len(markdown)/4
+	TokensSaved          int    // raw - distilled (>=0; 0 when no Markdown delivered or for a vision OCR; for binary, this is the tier delta only — never a raw-bytes phantom)
+	VisionTokensCost     int    // tokens SPENT by the vision-OCR fallback (a COST, never a saving); 0 unless this Result was OCR'd
+	VisionInputTokens    int    // OCR input tokens (the split behind VisionTokensCost); 0 unless OCR'd
+	VisionOutputTokens   int    // OCR output tokens (the split behind VisionTokensCost); 0 unless OCR'd
+	VisionModel          string // the vision model that served the OCR (for durable, model-priced cost attribution); "" unless OCR'd
+	InputBytes           int    // len(inputBytes) — the size-reduction numerator (esp. for binary, where bytes are NOT tokens)
+	OutputBytes          int    // len(markdown) — the size-reduction denominator
+	CacheHit             bool   // served from the conversion cache (conversion skipped)
 }
 
 // ContentHash is the content-addressed cache key input for a document: sha256
@@ -57,12 +65,30 @@ func ContentHash(input []byte) string {
 func estTokens(s string) int { return len(s) / 4 }
 
 func computeSavings(input []byte, res Result, cacheHit bool) Savings {
-	raw := len(input) / 4
 	distilled := estTokens(res.Markdown)
+
+	// The raw token BASELINE depends on origin:
+	//   - text-ish (HTML/CSV/JSON/XML/text): the raw text could have been sent to
+	//     the model as-is, so len(bytes)/4 is a genuine prompt-cost baseline.
+	//   - binary-origin (PDF/DOCX/XLSX): the raw bytes were NEVER text tokens, so
+	//     len(bytes)/4 is a PHANTOM. The honest baseline is the faithful-text
+	//     token count; the binary→text step is a SIZE reduction (InputBytes/
+	//     OutputBytes), and the only token saving is the tier delta vs faithful.
+	raw := len(input) / 4
+	if res.Format.IsBinaryOrigin() {
+		raw = res.FaithfulTextTokens
+	}
+
 	saved := raw - distilled
 	if res.NeedsVision || res.Markdown == "" {
 		// No usable Markdown was delivered (text-less PDF, etc.) — distillation
 		// saved nothing here; any value comes from the later vision path.
+		saved = 0
+	}
+	if saved < 0 {
+		// A binary at faithful tier (raw == distilled) gives 0; a stale/zero
+		// faithful baseline must never produce a NEGATIVE saving — clamp to 0
+		// (conservative: never overclaim, never report a fake loss).
 		saved = 0
 	}
 	return Savings{

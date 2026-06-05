@@ -51,12 +51,12 @@ import (
 )
 
 const (
-	maxBodyBytes                  = 4 << 20 // 4 MiB
-	openAIChatURL                 = "https://api.openai.com/v1/chat/completions"
-	anthropicMessageURL           = "https://api.anthropic.com/v1/messages"
-	googleGenerativeLanguageURL   = "https://generativelanguage.googleapis.com"
-	upstreamTimeout               = 120 * time.Second
-	defaultWorkspaceID            = "default"
+	maxBodyBytes                = 4 << 20 // 4 MiB
+	openAIChatURL               = "https://api.openai.com/v1/chat/completions"
+	anthropicMessageURL         = "https://api.anthropic.com/v1/messages"
+	googleGenerativeLanguageURL = "https://generativelanguage.googleapis.com"
+	upstreamTimeout             = 120 * time.Second
+	defaultWorkspaceID          = "default"
 )
 
 // alertSink is the subset of *alerts.AlertManager that proxy.serve()
@@ -66,6 +66,10 @@ type alertSink interface {
 	IsCircuitOpen(team, feature string) bool
 	GetDowngradeModel(provider, model string) string
 	RecordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool) error
+	// RecordSpendWithDistill is RecordSpend plus the token_events.distill_method
+	// attribution ("convert" / "vision_ocr"). Used only by the DISTILL request
+	// path; non-distilled traffic keeps using RecordSpend.
+	RecordSpendWithDistill(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error
 }
 
 // budgetGate is the subset of *budgets.Service the proxy hot path touches.
@@ -79,16 +83,16 @@ type budgetGate interface {
 }
 
 type Proxy struct {
-	exact            *cache.ExactCache
-	semantic         *cache.SemanticCache
-	embedder         cache.Embedder
-	compressor       *compressor.Compressor
-	router           *router.Router
-	piiDetector      *pii.Detector
-	alertManager     alertSink
-	templateDetector *templates.TemplateDetector
-	scorer           *quality.Scorer
-	abTester         *ab.Tester
+	exact             *cache.ExactCache
+	semantic          *cache.SemanticCache
+	embedder          cache.Embedder
+	compressor        *compressor.Compressor
+	router            *router.Router
+	piiDetector       *pii.Detector
+	alertManager      alertSink
+	templateDetector  *templates.TemplateDetector
+	scorer            *quality.Scorer
+	abTester          *ab.Tester
 	tracker           *attribution.Tracker
 	attrStore         *attribution.Store
 	budgetService     budgetGate
@@ -169,16 +173,16 @@ func New(
 	learners ...*learner.Learner,
 ) *Proxy {
 	p := &Proxy{
-		exact:            exactCache,
-		semantic:         semanticCache,
-		embedder:         embedder,
-		compressor:       compressorImpl,
-		router:           routerImpl,
-		piiDetector:      piiDetector,
-		templateDetector: templateDetector,
-		scorer:           scorer,
-		abTester:         abTester,
-		tracker:          tracker,
+		exact:             exactCache,
+		semantic:          semanticCache,
+		embedder:          embedder,
+		compressor:        compressorImpl,
+		router:            routerImpl,
+		piiDetector:       piiDetector,
+		templateDetector:  templateDetector,
+		scorer:            scorer,
+		abTester:          abTester,
+		tracker:           tracker,
 		workspaceManager:  workspaceManager,
 		localRouter:       localRouter,
 		injectionDetector: injectionDetector,
@@ -496,18 +500,28 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// unchanged. After a successful distill we re-derive the variables computed
 	// from the body — prompt, modSet (now text-only, so the capability gate
 	// won't redirect to a vision model), and the workspace-scoped cachePrompt.
+	// distillMethod tags the spend row written far below ("" = not distilled);
+	// visionOCR carries any OCR sub-call cost to book as its own spend row.
+	distillMethod := ""
+	var visionOCR visionSpend
 	if p.distiller != nil {
 		// The live vision-OCR dispatcher for this request (same provider, scoped
 		// to the workspace allow-list). On a text-less document the orchestrator
 		// uses it to recover text via a vision model and books the cost honestly;
 		// a nil-safe failure path leaves a NeedsVision document untouched.
 		vd := p.newVisionDispatcher(r, cfg, wsID)
-		if nb, np, nm, did := p.distiller.MaybeDistill(ctx, r, body, wsID, modSet, vd); did {
+		if nb, np, nm, did, vs := p.distiller.MaybeDistill(ctx, r, body, wsID, modSet, vd); did {
 			body, prompt, modSet = nb, np, nm
 			cachePrompt = prompt
 			if p.workspaceManager != nil {
 				cachePrompt = wsID + ":" + prompt
 			}
+			// Durable DISTILL attribution for the spend write below: the main
+			// (lower-count) row is tagged 'convert' (the saving is implicit in the
+			// reduced count — never a second write), and any OCR sub-call cost is
+			// booked as its OWN 'vision_ocr' row, never blended.
+			distillMethod = "convert"
+			visionOCR = vs
 			// modSet is now the post-distill (text-only) set, so the capability
 			// gate + spend below bill the converted text. The X-Talyvor-Modality
 			// header + RequestByModality metric above intentionally keep the
@@ -1133,12 +1147,45 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// and the redacted form in full mode when PII was detected.
 			// wsID + sprint travel on this single billing write so spend is
 			// attributable per workspace / team / sprint (see migration 0028);
-			// modality + estimated ride along too (migration 0029).
+			// modality + estimated ride along too (migration 0029). distillMethod
+			// rides along too (migration 0040): "convert" for a distilled request
+			// (the saving is IMPLICIT in this row's lower count), "" otherwise.
 			metrics.SpendRecord(spendSource)
-			if err := p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated); err != nil {
+			var recErr error
+			if distillMethod != "" {
+				recErr = p.alertManager.RecordSpendWithDistill(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated, distillMethod)
+			} else {
+				recErr = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated)
+			}
+			if recErr != nil {
 				slog.Warn("alerts: RecordSpend failed",
-					slog.String("err", err.Error()),
+					slog.String("err", recErr.Error()),
 				)
+			}
+			// The vision-OCR sub-call's cost is its OWN row, tagged 'vision_ocr',
+			// priced on the vision model, flagged estimated — a COST, never a
+			// saving, NEVER blended into the 'convert' row above. The durable
+			// monthly spend cap (SUM(cost_usd) over token_events) then includes it.
+			if visionOCR.recorded() {
+				// The OCR row is a cost_estimated row (document/image token
+				// accounting is approximate), so keep the SpendRecord source label
+				// within its bounded domain (provider_usage|estimated).
+				metrics.SpendRecord("estimated")
+				// A successful OCR must name its model so the cost prices (an empty
+				// model → cost_usd=0, unbudgeted). Production always sets it; warn
+				// loudly if a dispatcher ever doesn't, rather than silently $0.
+				if visionOCR.model == "" {
+					slog.Warn("distill: vision-OCR cost recorded WITHOUT a model — it cannot be priced (cost_usd=0)",
+						slog.String("workspace_id", wsID),
+						slog.Int("ocr_input_tokens", visionOCR.inputTokens),
+						slog.Int("ocr_output_tokens", visionOCR.outputTokens),
+					)
+				}
+				if err := p.alertManager.RecordSpendWithDistill(ctx, wsID, team, sprint, feature, visionOCR.model, visionOCR.inputTokens, visionOCR.outputTokens, "", sessionID, requestID, "document", true, "vision_ocr"); err != nil {
+					slog.Warn("alerts: vision-OCR RecordSpend failed",
+						slog.String("err", err.Error()),
+					)
+				}
 			}
 		}
 		// Feed the in-memory budget totals from the SAME billed cost. This is
