@@ -937,6 +937,13 @@ func run() error {
 		// key/workspace that AuthMiddleware just stamped onto the request.
 		authed.Use(auth.AuthMiddleware(keyStore, authManager))
 		authed.Use(ratelimit.RateLimitMiddleware(rateLimiter))
+		// Tenant isolation: a /v1/workspaces/{wsID}/... route may only be driven
+		// by a credential belonging to that workspace (the global admin key
+		// bypasses). Registered after AuthMiddleware so the resolved identity is
+		// already on the request context. Closes a cross-tenant BOLA/IDOR where
+		// any valid workspace key could act on any {wsID} in the path — read or
+		// rewrite another tenant's config/budgets and mint API keys for it.
+		authed.Use(workspaceIsolationMiddleware)
 
 		apiServer.MountAuthenticated(authed)
 
@@ -1280,7 +1287,29 @@ func run() error {
 		})
 
 		authed.Delete("/v1/workspaces/{wsID}/api-keys/{keyID}", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
 			keyID := chi.URLParam(req, "keyID")
+			// workspaceIsolationMiddleware has already proven the caller owns
+			// {wsID}. RevokeAPIKey operates by keyID alone, so confirm the key
+			// actually belongs to {wsID} before revoking — otherwise a caller
+			// could revoke another tenant's key by passing its ID under their
+			// own workspace path.
+			keys, err := tenantStore.ListAPIKeys(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			owned := false
+			for _, k := range keys {
+				if k.ID == keyID {
+					owned = true
+					break
+				}
+			}
+			if !owned {
+				writeJSONErr(w, http.StatusNotFound, "key not found")
+				return
+			}
 			if err := tenantStore.RevokeAPIKey(req.Context(), keyID); err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -3458,6 +3487,64 @@ func writeJSONOK(w http.ResponseWriter, status int, body any) {
 
 func writeJSONErr(w http.ResponseWriter, status int, msg string) {
 	writeJSONOK(w, status, map[string]string{"error": msg})
+}
+
+// ─── tenant isolation (cross-tenant BOLA guard) ──────────────────
+//
+// The authed group authenticates any valid credential, but the
+// /v1/workspaces/{wsID}/... handlers used to trust the {wsID} path segment
+// outright. A holder of workspace A's key could therefore read/modify
+// workspace B's config and budgets and — worst of all — mint API keys for
+// workspace B (full tenant takeover). These helpers enforce that a caller may
+// only act on its own workspace, with the global admin key exempted.
+
+// workspaceAuthorized is the pure tenant-isolation decision: the global admin
+// (isAdmin) may act on any workspace; every other caller may act only on the
+// workspace its credential belongs to. Deny-by-default — an empty caller
+// workspace never matches a non-empty target.
+func workspaceAuthorized(callerWorkspaceID string, isAdmin bool, targetWorkspaceID string) bool {
+	if isAdmin {
+		return true
+	}
+	return callerWorkspaceID != "" && callerWorkspaceID == targetWorkspaceID
+}
+
+// callerWorkspaceID resolves the authenticated caller's workspace and whether
+// it is the global admin, handling both AuthMiddleware credential paths:
+//   - DB workspace/team keys take the fast path, which populates only the
+//     APIKey context slot (auth.GetAPIKey). These are never admin.
+//   - The global admin key and JWT bearer tokens take the Manager fallback,
+//     which populates the AuthContext slot (auth.GetAuthContext). Only the
+//     global key carries IsAdmin. NOTE: both the global key and JWTs synthesize
+//     an APIKey with ID=="global", so APIKey.ID is NOT a safe admin signal —
+//     AuthContext.IsAdmin is the authoritative one, which is why it is checked
+//     first.
+func callerWorkspaceID(ctx context.Context) (workspaceID string, isAdmin bool) {
+	if actx := auth.GetAuthContext(ctx); actx != nil {
+		return actx.WorkspaceID, actx.IsAdmin
+	}
+	if k := auth.GetAPIKey(ctx); k != nil {
+		return k.WorkspaceID, false
+	}
+	return "", false
+}
+
+// workspaceIsolationMiddleware enforces tenant isolation on every routed
+// request that carries a {wsID} path param. Routes without a {wsID} param
+// (auth, catalog, proxy, global status) pass straight through. chi resolves
+// URL params before a group's Use chain executes, so chi.URLParam(r,"wsID") is
+// populated here.
+func workspaceIsolationMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if wsID := chi.URLParam(r, "wsID"); wsID != "" {
+			callerWS, isAdmin := callerWorkspaceID(r.Context())
+			if !workspaceAuthorized(callerWS, isAdmin, wsID) {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: credential not authorized for this workspace")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // parseSinceParam turns a `?since=<RFC3339>` query value into a
