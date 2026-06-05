@@ -22,13 +22,25 @@ func (f *fakeConv) Convert(_ context.Context, _ []byte, format Format) (Result, 
 	return r, f.err
 }
 
+// mockVisionDispatcher is an in-memory VisionDispatcher for orchestrator tests.
+type mockVisionDispatcher struct {
+	calls int
+	res   VisionResult
+	err   error
+}
+
+func (m *mockVisionDispatcher) DispatchVision(_ context.Context, _ VisionRequest) (VisionResult, error) {
+	m.calls++
+	return m.res, m.err
+}
+
 // Orchestrate ties isolated Convert → ApplyTier → cache → ComputeSavings. With
 // no cache it converts every call and reports honest savings.
 func TestOrchestrate_NoCache_ConvertsAndMeasures(t *testing.T) {
 	in := []byte("<html><body><h1>Hi</h1><p>there</p></body></html>")
 	conv := &fakeConv{res: Result{Markdown: "# Hi\n\nthere"}}
 
-	res, sav, err := Orchestrate(context.Background(), conv, nil, in, FormatHTML, TierFaithful)
+	res, sav, err := Orchestrate(context.Background(), conv, nil, nil, in, FormatHTML, TierFaithful)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +61,7 @@ func TestOrchestrate_NoCache_ConvertsAndMeasures(t *testing.T) {
 // A tier is applied parent-side on the isolated (faithful) output.
 func TestOrchestrate_AppliesTier(t *testing.T) {
 	conv := &fakeConv{res: Result{Markdown: "# Title\n\nbody to drop\n\n## Sec\n\nmore"}}
-	res, _, err := Orchestrate(context.Background(), conv, nil, []byte("x"), FormatHTML, TierOutline)
+	res, _, err := Orchestrate(context.Background(), conv, nil, nil, []byte("x"), FormatHTML, TierOutline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +78,7 @@ func TestOrchestrate_AppliesTier(t *testing.T) {
 func TestOrchestrate_NeedsVisionPassthrough(t *testing.T) {
 	c := &fakeCache{}
 	conv := &fakeConv{res: Result{NeedsVision: true, Markdown: ""}}
-	res, sav, err := Orchestrate(context.Background(), conv, c, []byte("%PDF-scan"), FormatPDF, TierFaithful)
+	res, sav, err := Orchestrate(context.Background(), conv, c, nil, []byte("%PDF-scan"), FormatPDF, TierFaithful)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,20 +93,66 @@ func TestOrchestrate_NeedsVisionPassthrough(t *testing.T) {
 	}
 }
 
+// With a vision dispatcher, a NeedsVision result is OCR'd: the result becomes
+// the OCR text (Method=vision_ocr), the cost is recorded as a COST (never a
+// saving), and the OCR result is NOT cached (deferred).
+func TestOrchestrate_VisionDispatchesOnNeedsVision(t *testing.T) {
+	c := &fakeCache{}
+	conv := &fakeConv{res: Result{NeedsVision: true, Markdown: ""}}
+	vis := &mockVisionDispatcher{res: VisionResult{Markdown: "# Scanned\n\nrecovered text", InputTokens: 1000, OutputTokens: 40}}
+
+	res, sav, err := Orchestrate(context.Background(), conv, c, vis, []byte("%PDF-scan"), FormatPDF, TierFaithful)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vis.calls != 1 {
+		t.Fatalf("vision must be dispatched once for a NeedsVision doc; calls=%d", vis.calls)
+	}
+	if res.NeedsVision || res.Method != MethodVisionOCR || res.Markdown != "# Scanned\n\nrecovered text" {
+		t.Errorf("OCR result wrong: needsVision=%v method=%q md=%q", res.NeedsVision, res.Method, res.Markdown)
+	}
+	if sav.TokensSaved != 0 {
+		t.Errorf("vision OCR is a COST, never a saving; TokensSaved=%d", sav.TokensSaved)
+	}
+	if sav.VisionTokensCost != 1040 {
+		t.Errorf("vision cost must be the real in+out tokens; got %d", sav.VisionTokensCost)
+	}
+	if c.sets != 0 {
+		t.Errorf("an OCR result must NOT be cached in this stage; sets=%d", c.sets)
+	}
+}
+
+// A vision dispatch failure degrades gracefully: the result stays NeedsVision,
+// no fake cost, no Go error (the request path then passes the original through).
+func TestOrchestrate_VisionFailureStaysNeedsVision(t *testing.T) {
+	conv := &fakeConv{res: Result{NeedsVision: true}}
+	vis := &mockVisionDispatcher{err: errors.New("no capable vision model")}
+	res, sav, err := Orchestrate(context.Background(), conv, nil, vis, []byte("%PDF"), FormatPDF, TierFaithful)
+	if err != nil {
+		t.Fatalf("a vision failure must not surface as an error; got %v", err)
+	}
+	if !res.NeedsVision || res.Method == MethodVisionOCR {
+		t.Errorf("on vision failure the result must stay NeedsVision; needsVision=%v method=%q", res.NeedsVision, res.Method)
+	}
+	if sav.VisionTokensCost != 0 {
+		t.Errorf("a failed OCR records zero cost; got %d", sav.VisionTokensCost)
+	}
+}
+
 // Cache miss converts + stores; a second call HITS and skips conversion.
 func TestOrchestrate_CacheMissThenHit(t *testing.T) {
 	c := &fakeCache{}
 	in := []byte("<p>hello cached</p>")
 	conv := &fakeConv{res: Result{Markdown: "hello cached"}}
 
-	r1, s1, err := Orchestrate(context.Background(), conv, c, in, FormatHTML, TierFaithful)
+	r1, s1, err := Orchestrate(context.Background(), conv, c, nil, in, FormatHTML, TierFaithful)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if conv.calls != 1 || c.sets != 1 || s1.CacheHit {
 		t.Fatalf("miss path: calls=%d sets=%d hit=%v", conv.calls, c.sets, s1.CacheHit)
 	}
-	r2, s2, err := Orchestrate(context.Background(), conv, c, in, FormatHTML, TierFaithful)
+	r2, s2, err := Orchestrate(context.Background(), conv, c, nil, in, FormatHTML, TierFaithful)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +169,7 @@ func TestOrchestrate_CacheMissThenHit(t *testing.T) {
 func TestOrchestrate_ConvertError(t *testing.T) {
 	c := &fakeCache{}
 	conv := &fakeConv{err: errors.New("worker exploded")}
-	_, _, err := Orchestrate(context.Background(), conv, c, []byte("x"), FormatPDF, TierFaithful)
+	_, _, err := Orchestrate(context.Background(), conv, c, nil, []byte("x"), FormatPDF, TierFaithful)
 	if err == nil {
 		t.Fatal("expected the conversion error to surface")
 	}

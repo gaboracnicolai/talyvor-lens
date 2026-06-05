@@ -42,7 +42,11 @@ func (p *Proxy) SetDistiller(converter distill.IsolatedConverter, cache distill.
 // Untrusted document bytes are converted ONLY through the isolated converter;
 // the JSON envelope is parsed in-process (safe — standard encoding/json, the
 // same parsing serve() already does via extractPrompt).
-func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, body []byte, wsID string, modSet modality.ModalitySet) ([]byte, string, modality.ModalitySet, bool) {
+// vision is the OPTIONAL live vision-OCR dispatcher (nil = no live vision): when
+// a document is text-less (NeedsVision), it is OCR'd via a vision-capable model
+// and the COST is booked honestly (see the orchestrator's visionFallback). A nil
+// dispatcher keeps the prior behavior — a NeedsVision document passes through.
+func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, body []byte, wsID string, modSet modality.ModalitySet, vision distill.VisionDispatcher) ([]byte, string, modality.ModalitySet, bool) {
 	// Fail-safe: a misconfigured integration is inert, never a panic on the
 	// shared request path (production always wires both, but the inert/graceful
 	// contract must hold regardless).
@@ -86,7 +90,7 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 		msgChanged := false
 		for _, bi := range blocks {
 			if block, ok := bi.(map[string]any); ok {
-				if md, ok := d.tryConvertBlock(ctx, block); ok {
+				if md, ok := d.tryConvertBlock(ctx, block, vision); ok {
 					newBlocks = append(newBlocks, map[string]any{"type": "text", "text": md})
 					msgChanged = true
 					distilledAny = true
@@ -141,9 +145,13 @@ func (d *distillIntegration) shouldDistill(r *http.Request, wsID string) bool {
 
 // tryConvertBlock converts one content block if it is a distillable document.
 // Returns ok=false (block left untouched) for non-documents, images,
-// unsupported types, NeedsVision results, and any conversion error — the
-// graceful path that never fails a request.
-func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any) (string, bool) {
+// unsupported types, an UNRESOLVED NeedsVision result, and any conversion error
+// — the graceful path that never fails a request. When vision is non-nil and the
+// document is text-less, the orchestrator OCRs it (NeedsVision resolves to the
+// recovered Markdown, its token cost booked honestly inside Orchestrate); when
+// vision is nil or the OCR fails, the result stays NeedsVision and the block is
+// left untouched.
+func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher) (string, bool) {
 	raw, mediaType, ok := extractBlockDocument(block)
 	if !ok {
 		return "", false
@@ -152,7 +160,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	if !ok {
 		return "", false // e.g. image/png — a vision input, not a document
 	}
-	res, _, err := distill.Orchestrate(ctx, d.converter, d.cache, raw, format, distill.TierFaithful)
+	res, _, err := distill.Orchestrate(ctx, d.converter, d.cache, vision, raw, format, distill.TierFaithful)
 	if err != nil || res.NeedsVision || strings.TrimSpace(res.Markdown) == "" {
 		return "", false
 	}

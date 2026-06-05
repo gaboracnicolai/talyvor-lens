@@ -78,7 +78,7 @@ func TestMaybeDistill_AnthropicDoc_OptIn(t *testing.T) {
 	d := newDistiller(t, conv, workspace.DistillOptIn)
 	body := anthropicDocBody(t, false)
 
-	newBody, newPrompt, newMod, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+	newBody, newPrompt, newMod, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 	if !did {
 		t.Fatal("opted-in document request must be distilled")
 	}
@@ -105,7 +105,7 @@ func TestMaybeDistill_NotOptedIn_Inert(t *testing.T) {
 	d := newDistiller(t, conv, workspace.DistillOptIn)
 	body := anthropicDocBody(t, false)
 
-	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith(""), body, "ws1", modality.Detect(body))
+	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith(""), body, "ws1", modality.Detect(body), nil)
 	if did {
 		t.Fatal("not-opted-in request must NOT be distilled")
 	}
@@ -122,7 +122,7 @@ func TestMaybeDistill_PolicyDisabled_Inert(t *testing.T) {
 	conv := &fakeDistillConv{res: distill.Result{Markdown: "x"}}
 	d := newDistiller(t, conv, workspace.DistillDisabled)
 	body := anthropicDocBody(t, false)
-	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 	if did || conv.calls != 0 || !bytes.Equal(newBody, body) {
 		t.Errorf("disabled workspace must be fully inert; did=%v calls=%d bodyChanged=%v", did, conv.calls, !bytes.Equal(newBody, body))
 	}
@@ -133,7 +133,7 @@ func TestMaybeDistill_NoDocument_Inert(t *testing.T) {
 	conv := &fakeDistillConv{res: distill.Result{Markdown: "x"}}
 	d := newDistiller(t, conv, workspace.DistillAlways)
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"just text"}]}`)
-	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 	if did || conv.calls != 0 || !bytes.Equal(newBody, body) {
 		t.Errorf("a request with no document must be inert; did=%v calls=%d", did, conv.calls)
 	}
@@ -144,7 +144,7 @@ func TestMaybeDistill_Always_NoHeader(t *testing.T) {
 	conv := &fakeDistillConv{res: distill.Result{Markdown: "# md"}}
 	d := newDistiller(t, conv, workspace.DistillAlways)
 	body := anthropicDocBody(t, false)
-	_, _, _, did := d.MaybeDistill(context.Background(), reqWith(""), body, "ws1", modality.Detect(body))
+	_, _, _, did := d.MaybeDistill(context.Background(), reqWith(""), body, "ws1", modality.Detect(body), nil)
 	if !did {
 		t.Error("DistillAlways must distill a document with no header")
 	}
@@ -155,7 +155,7 @@ func TestMaybeDistill_ConvError_Inert(t *testing.T) {
 	conv := &fakeDistillConv{err: errInjected}
 	d := newDistiller(t, conv, workspace.DistillAlways)
 	body := anthropicDocBody(t, false)
-	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 	if did {
 		t.Fatal("a conversion failure must NOT rewrite the request")
 	}
@@ -164,18 +164,60 @@ func TestMaybeDistill_ConvError_Inert(t *testing.T) {
 	}
 }
 
-// NeedsVision → the document block is left in place (live vision is a later
-// stage); since it's the only doc, the request is inert.
+// With NO live dispatcher (nil), a NeedsVision document is left in place; since
+// it's the only doc, the request is inert (the pre-stage-3 behavior).
 func TestMaybeDistill_NeedsVision_Inert(t *testing.T) {
 	conv := &fakeDistillConv{res: distill.Result{NeedsVision: true, Markdown: ""}}
 	d := newDistiller(t, conv, workspace.DistillAlways)
 	body := anthropicDocBody(t, false)
-	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 	if did {
-		t.Fatal("a NeedsVision document must pass through, not be replaced")
+		t.Fatal("a NeedsVision document must pass through when no dispatcher is wired")
 	}
 	if !bytes.Equal(newBody, body) {
 		t.Error("NeedsVision: body must be unchanged")
+	}
+}
+
+// mockVision is a stub distill.VisionDispatcher for the wiring tests.
+type mockVision struct {
+	res distill.VisionResult
+	err error
+}
+
+func (m mockVision) DispatchVision(context.Context, distill.VisionRequest) (distill.VisionResult, error) {
+	return m.res, m.err
+}
+
+// A NeedsVision document + a LIVE dispatcher → the document block is OCR'd and
+// the recovered Markdown reaches the prompt (the stage-5 seam, live).
+func TestMaybeDistill_NeedsVision_LiveVisionOCR(t *testing.T) {
+	conv := &fakeDistillConv{res: distill.Result{NeedsVision: true}}
+	d := newDistiller(t, conv, workspace.DistillAlways)
+	vis := mockVision{res: distill.VisionResult{Markdown: "# OCR\n\nrecovered text", InputTokens: 900, OutputTokens: 30}}
+	body := anthropicDocBody(t, false)
+	_, newPrompt, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), vis)
+	if !did {
+		t.Fatal("a NeedsVision document with a live dispatcher must be OCR'd and rewritten")
+	}
+	if !strings.Contains(newPrompt, "recovered text") {
+		t.Errorf("OCR'd Markdown must reach the prompt; got %q", newPrompt)
+	}
+}
+
+// A NeedsVision document + a FAILING dispatcher → graceful: the original document
+// block passes through byte-for-byte (a vision outage never fails a request).
+func TestMaybeDistill_NeedsVision_VisionFailureGraceful(t *testing.T) {
+	conv := &fakeDistillConv{res: distill.Result{NeedsVision: true}}
+	d := newDistiller(t, conv, workspace.DistillAlways)
+	vis := mockVision{err: errors.New("no capable model")}
+	body := anthropicDocBody(t, false)
+	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), vis)
+	if did {
+		t.Fatal("a vision failure must NOT rewrite the request")
+	}
+	if !bytes.Equal(newBody, body) {
+		t.Error("vision failure: body must be byte-for-byte unchanged")
 	}
 }
 
@@ -192,7 +234,7 @@ func TestMaybeDistill_OpenAIDataURI(t *testing.T) {
 		}}},
 	}
 	body, _ := json.Marshal(m)
-	_, newPrompt, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+	_, newPrompt, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 	if !did {
 		t.Fatal("OpenAI data-URI document must be distilled")
 	}
@@ -215,7 +257,7 @@ func TestMaybeDistill_ImageNotDistilled(t *testing.T) {
 		}}},
 	}
 	body, _ := json.Marshal(m)
-	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 	if did || conv.calls != 0 {
 		t.Errorf("an image (not a document) must not be distilled; did=%v calls=%d", did, conv.calls)
 	}
@@ -232,7 +274,7 @@ func TestMaybeDistill_NilDeps_Inert(t *testing.T) {
 		{converter: nil, wsManager: nil},
 		{converter: &fakeDistillConv{}, wsManager: nil},
 	} {
-		nb, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+		nb, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 		if did || !bytes.Equal(nb, body) {
 			t.Errorf("nil-deps distiller must be inert; did=%v changed=%v", did, !bytes.Equal(nb, body))
 		}
@@ -245,7 +287,7 @@ func TestMaybeDistill_PreservesStreamFlag(t *testing.T) {
 	conv := &fakeDistillConv{res: distill.Result{Markdown: "# md"}}
 	d := newDistiller(t, conv, workspace.DistillAlways)
 	body := anthropicDocBody(t, true) // stream:true
-	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body))
+	newBody, _, _, did := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), nil)
 	if !did {
 		t.Fatal("should distill")
 	}
