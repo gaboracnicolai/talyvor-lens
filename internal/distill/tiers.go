@@ -50,6 +50,12 @@ func normalizeTier(t Tier) Tier {
 func applyTier(res Result, tier Tier) Result {
 	tier = normalizeTier(tier)
 	res.Tier = tier
+	// Capture the faithful-text token baseline BEFORE any reduction, so
+	// binary-origin savings can be measured as the tier delta (not a phantom
+	// raw-bytes figure). Set on every usable conversion; survives caching.
+	if res.Markdown != "" && !res.NeedsVision {
+		res.FaithfulTextTokens = estTokens(res.Markdown)
+	}
 	if res.Markdown == "" || res.NeedsVision || tier == TierFaithful {
 		return res
 	}

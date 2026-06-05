@@ -20,7 +20,8 @@ import (
 
 // recordingAlertSink counts RecordSpend calls and remembers the most
 // recent prompt payload so tests can verify metadata mode strips the
-// prompt body before persistence.
+// prompt body before persistence. It also captures every spend row (with its
+// distill_method) so DISTILL attribution tests can assert per-row tagging.
 type recordingAlertSink struct {
 	mu            sync.Mutex
 	calls         int
@@ -29,13 +30,33 @@ type recordingAlertSink struct {
 	lastEstimated bool
 	lastInput     int
 	lastOutput    int
+	spends        []recordedSpend
+}
+
+// recordedSpend is one captured token_events write (the fields DISTILL tests
+// assert on).
+type recordedSpend struct {
+	model         string
+	inputTokens   int
+	outputTokens  int
+	modality      string
+	estimated     bool
+	distillMethod string
 }
 
 func (r *recordingAlertSink) IsCircuitOpen(string, string) bool { return false }
 func (r *recordingAlertSink) GetDowngradeModel(_ string, model string) string {
 	return model
 }
-func (r *recordingAlertSink) RecordSpend(_ context.Context, _, _, _, _, _ string, inputTokens, outputTokens int, prompt, _, _, modality string, estimated bool) error {
+func (r *recordingAlertSink) RecordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool) error {
+	return r.record(model, inputTokens, outputTokens, prompt, modality, estimated, "")
+}
+
+func (r *recordingAlertSink) RecordSpendWithDistill(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error {
+	return r.record(model, inputTokens, outputTokens, prompt, modality, estimated, distillMethod)
+}
+
+func (r *recordingAlertSink) record(model string, inputTokens, outputTokens int, prompt, modality string, estimated bool, distillMethod string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
@@ -44,7 +65,24 @@ func (r *recordingAlertSink) RecordSpend(_ context.Context, _, _, _, _, _ string
 	r.lastEstimated = estimated
 	r.lastInput = inputTokens
 	r.lastOutput = outputTokens
+	r.spends = append(r.spends, recordedSpend{
+		model: model, inputTokens: inputTokens, outputTokens: outputTokens,
+		modality: modality, estimated: estimated, distillMethod: distillMethod,
+	})
 	return nil
+}
+
+// spendWithMethod returns the first captured row with the given distill_method
+// (and whether one exists).
+func (r *recordingAlertSink) spendWithMethod(method string) (recordedSpend, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.spends {
+		if s.distillMethod == method {
+			return s, true
+		}
+	}
+	return recordedSpend{}, false
 }
 
 func newLoggingProxy(t *testing.T, policy workspace.LoggingPolicy) (*Proxy, *recordingAlertSink, *httptest.Server) {
