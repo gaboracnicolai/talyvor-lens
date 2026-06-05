@@ -20,12 +20,14 @@ type IsolatedConverter interface {
 // ApplyTier → optional content-addressed cache → honest Savings. It is the
 // generalised form of the preview's logic.
 //
-// cache is optional (nil disables it). A NeedsVision result (text-less/scanned)
-// passes through UNCHANGED and is not cached — the live vision fallback that
-// acts on it is a later stage. A conversion error is returned to the caller
-// (which, on the request path, passes the original request through untouched —
-// distillation never fails a user's request).
-func Orchestrate(ctx context.Context, conv IsolatedConverter, cache Cache, input []byte, format Format, tier Tier) (Result, Savings, error) {
+// cache is optional (nil disables it). vision is the OPTIONAL live vision-OCR
+// dispatcher (nil = no vision): when the isolated conversion yields a
+// NeedsVision result (scanned/text-less), the document is OCR'd via vision and
+// the cost is accounted HONESTLY (a cost, never a saving). A conversion error is
+// returned to the caller (which, on the request path, passes the original
+// request through untouched — distillation never fails a user's request); a
+// VISION failure is NOT an error — the result stays NeedsVision (graceful).
+func Orchestrate(ctx context.Context, conv IsolatedConverter, cache Cache, vision VisionDispatcher, input []byte, format Format, tier Tier) (Result, Savings, error) {
 	// Key the cache on content + converter version + tier (colon-free segments
 	// preserve key injectivity), exactly like DistillWithCache.
 	cacheVer := ConverterVersion + ":" + string(normalizeTier(tier))
@@ -48,6 +50,16 @@ func Orchestrate(ctx context.Context, conv IsolatedConverter, cache Cache, input
 
 	// Parent-side tier on the faithful subprocess output.
 	res = applyTier(res, tier)
+
+	// Vision-OCR fallback: a text-less document + a configured dispatcher → OCR
+	// it. visionFallback records the cost as a COST (Savings.VisionTokensCost,
+	// TokensSaved=0) and degrades gracefully (stays NeedsVision) on failure. The
+	// OCR result is NOT cached in this stage (OCR caching is deferred), so we
+	// return before the cache store.
+	if vision != nil && res.NeedsVision {
+		vr, vsav := visionFallback(ctx, input, res, vision)
+		return vr, vsav, nil
+	}
 
 	// Cache only a real, usable conversion — never a NeedsVision/empty result.
 	if cache != nil && !res.NeedsVision && res.Markdown != "" {

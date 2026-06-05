@@ -497,7 +497,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// from the body — prompt, modSet (now text-only, so the capability gate
 	// won't redirect to a vision model), and the workspace-scoped cachePrompt.
 	if p.distiller != nil {
-		if nb, np, nm, did := p.distiller.MaybeDistill(ctx, r, body, wsID, modSet); did {
+		// The live vision-OCR dispatcher for this request (same provider, scoped
+		// to the workspace allow-list). On a text-less document the orchestrator
+		// uses it to recover text via a vision model and books the cost honestly;
+		// a nil-safe failure path leaves a NeedsVision document untouched.
+		vd := p.newVisionDispatcher(r, cfg, wsID)
+		if nb, np, nm, did := p.distiller.MaybeDistill(ctx, r, body, wsID, modSet, vd); did {
 			body, prompt, modSet = nb, np, nm
 			cachePrompt = prompt
 			if p.workspaceManager != nil {

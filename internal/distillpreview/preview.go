@@ -104,9 +104,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// ISOLATED conversion ONLY — the killable subprocess, never in-process.
 	// Orchestrate ties Convert → ApplyTier → Savings; nil cache for a one-off
-	// admin dry-run. The same shared entry the request path uses.
+	// admin dry-run. nil vision: the preview is a dry-run estimate with no live
+	// provider call, so a scanned document is reported as NeedsVision rather than
+	// OCR'd. The same shared entry the request path uses.
 	tier := distill.Tier(strings.TrimSpace(r.URL.Query().Get("tier")))
-	res, sav, err := distill.Orchestrate(r.Context(), h.Converter, nil, body, format, tier)
+	res, sav, err := distill.Orchestrate(r.Context(), h.Converter, nil, nil, body, format, tier)
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "conversion failed: "+err.Error())
 		return
