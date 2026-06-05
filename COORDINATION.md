@@ -2,7 +2,7 @@
 
 **Purpose:** two people build in these repos in parallel, each running Claude / Claude Code. Our Claudes share no memory and cannot see each other's work — **GitHub is the only place our work meets, so GitHub is the single source of truth.** This file is how we avoid double work and handle the seams where our work touches.
 
-**Last synced:** 2026-06-04 — main at f4306ae (#75 — mining node TLS, last of the ISO 27001 hardening batch)
+**Last synced:** 2026-06-05 — main at afbe241 (DISTILL 100% complete — stage 3 PRs #0–#4 shipped: #50/#51/#52/#83/#85/#86)
 
 ---
 
@@ -66,91 +66,40 @@ Most of the time we're in different code and won't collide. Collisions happen at
 ---
 
 ## Work ledger — keep current
-
-_(last updated: 2026-06-04, main at f4306ae / #75)_
+_(last updated from sync: main at afbe241 — DISTILL 100% COMPLETE)_
 
 ### Nicolai + Claude — in progress
-- DISTILL stage 3 request-path integration: PRs #50, #51, #52 are on main (distill-worker image, smoke test, admin preview endpoint). Current status unknown — sync with Nicolai before touching internal/distill or internal/proxy.
+- Nothing in active build. DISTILL is fully complete (all of stage 3 shipped). Next roadmap item (token economy Phases 2–5) is GATED on a ledger-seam sync with the collaborator. Highest-leverage non-build move: a first pilot customer.
 
-### Nicolai + Claude — up next (the roadmap — his, don't take)
-- ⚠️ **[touched for security by collaborator — see note]** JWT / auth: ES256 JWT (A3) is on main (#64/#65/#66). Collaborator replaced HS256 with EC P-256 asymmetric signing, added `/v1/auth/jwks`, hard-errors on `LENS_JWT_SECRET`. Nicolai does **not** need to rebuild this. If auth behaviour needs changing, sync first.
-- ⚠️ **[touched for security by collaborator — see note]** XSS gaps: dashboard XSS hardened (#49, #66) — `escapeHTML` on all client-controlled strings, `encodeURIComponent` on URL segments, `escapeHTML` added to `commonHead`. Nicolai should verify whether any of his own new code paths have outstanding XSS gaps not covered by this pass.
-- token economy Phases 2–5 (⚠️ GATED — touches ledger/economy code the collaborator is ACTIVELY in; sync seam #1 before starting)
-- SOC2 foundation (codeable groundwork; cert itself = vendor, only when customer requires)
-- PoVI minting go-live: NOT a build — see preconditions section
-- Track: sprint activation · @mentions · budget UI
-- Docs: identity/recipient sync · @mentions
-- Code: finish JetBrains plugin
-- Suite: replicate Helm to Track/Docs/Code
+### Nicolai + Claude — up next (the roadmap — ours, don't take)
+- token economy Phases 2–5 (GATED — touches ledger/economy code the collaborator is ACTIVELY in; sync seam #1 before starting).
+- SOC2/ISO27001 foundation (codeable groundwork; cert via a vendor like Oneleet only when a customer requires it).
+- Replicate the Lens path to the sibling repos (Track / Docs / Code / edge-infra) — after Lens.
+- PoVI minting go-live: NOT a build — see preconditions section.
+- GO-TO-MARKET (the actual constraint): one pilot customer. Decks + one-pager built; the CTA ("run a pilot, see your number") also produces the real DISTILL savings number.
 
-### Collaborator (Andrei) — recently landed (since last sync at 36d8ee3 / #68)
+### Collaborator — recently landed (all merged to main, in our base)
+- Auth-reachability fix (#53): AuthMiddleware(ks, m) — DB fast-path unchanged + Manager fallback so the global admin key + JWTs reach admin routes. ES256 JWT (#64/65/66).
+- Full ISO27001-track hardening pass (#53→#82, ~29 commits): auth/JWT, TLS, TOCTOU, security headers, CORS (#63), DB atomicity, worker hardening (#82 RLIMIT_AS surfaced by our PR#1 isolator test). Our DISTILL surface survived intact.
+- Tenant isolation (#84) — landed mid-our-stage-3, no collision.
+- Earlier: stake-atomicity, pessimistic ledger locking (seam #1 satisfied), lock ordering (#32), atomic ExecuteTrade (#34), partitioning (#21/#29), #28 hardening, rate-limiting (#23), control-plane+Redis (#25), PgBouncer, CI/benchmark.
+- Stated next initiative: read the other 4 repos (infra first); mock-DB / chaos testing / Lynis on the DB server once Lens is fully done — which is NOW.
 
-**Transport security (ISO 27001 A.13):**
-- HTTPS / Let's Encrypt (#56): TLS 1.2/1.3, HSTS, HTTP→HTTPS redirect on `cmd/lens`
-- Postgres TLS (#57, #58): `LENS_DB_SSL_MODE` defaults to `require`; sslmode validated in migrate path; port-80 failure escalated on first boot
-- Redis TLS (#62): `LENS_REDIS_TLS` / `rediss://` enforcement
-- NATS TLS (#69): inter-service messages now encrypted; `NATS_TLS_CERT`/`NATS_TLS_KEY`/`NATS_TLS_CA` env vars; connection refuses on TLS failure
-- Mining node TLS (#75): all three node binaries (`cmd/node`, `cmd/cachenode`, `cmd/embednode`) now support opt-in TLS via env vars (`NODE_TLS_CERT`/`NODE_TLS_KEY` etc.); plain HTTP path logs a startup ⚠️ warning; 12 new tests across the three binaries
-
-**Application security (ISO 27001 A.9, A.14):**
-- HTTP security headers (#63): CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy; CORS `Access-Control-Expose-Headers`
-- [touched for security] JWT ES256 (#64/#65/#66): HS256 → EC P-256 asymmetric signing; `LENS_JWT_PRIVATE_KEY`; `/v1/auth/jwks` endpoint; `LENS_JWT_SECRET` hard-errors at startup
-- [touched for security] Auth middleware fix (#53): `AuthMiddleware` taught to accept global key and JWTs via Manager fallback (required for ES256 wiring)
-- [touched for security] XSS hardening (#49, #66): `escapeHTML` on all client-controlled strings in dashboard `apply*` render functions; `encodeURIComponent` on URL segments; `escapeHTML` definition added to `commonHead` (tokens/nodes pages were missing it)
-- bcrypt on cache node secrets (#66): `node_secret` hashed before DB storage (was plaintext)
-- bcrypt on embedding node secrets (#72): embedding nodes were missed in the first bcrypt pass; `node_secret_hash` now populated consistently across all three node types
-- xDS workspace isolation (#67): all 6 node mutation endpoints (3× heartbeat + 3× DELETE) scoped to `AND workspace_id = $N` — prevents cross-workspace node hijacking
-- Dashboard / admin gate (#73): `/metrics` and `/ha/status` endpoints now require `X-Admin-Key` header; previously open to any caller on the network (ISO 27001 A.9)
-- `X-Request-ID` sanitisation (#74): untrusted header sanitised to alphanumeric + hyphens + underscores, capped at 64 bytes — prevents log injection and oversized ID storage (ISO 27001 A.12.4)
-
-**DB / atomicity / TOCTOU:**
-- DB transaction atomicity (#66): `Stake()`, `Unstake()` (`DELETE…RETURNING` eliminates TOCTOU double-credit), `RegisterNode()`, cache-node registration + heartbeat — all now single `pgx.Tx`
-- API key rotation TOCTOU (#71): `/v1/workspaces/{wsID}/api-keys/{keyID}/rotate` rewritten as single atomic transaction — concurrent calls no longer produce two simultaneously active keys (ISO 27001 A.9)
-- Annotation submission TOCTOU (#70): `SubmitAnnotation()` now wraps task lookup + stake check + insert in `SELECT FOR UPDATE` — concurrent submissions can no longer double-insert (ISO 27001 A.9)
-- Migration 0034 fix (#66): removed stray `BEGIN`/`COMMIT` that broke migration runner transaction boundary (collaborator's own migration)
-- Migration 0038 (#66): new migration — FK index on `marketplace_trades(listing_id)`; `session_turns` FK → `ON DELETE CASCADE`
-- Migration no-transaction marker (#59): `lens:no-transaction` for 0037 `DROP INDEX CONCURRENTLY` — fixes crash on fresh apply
-
-**Resilience / HA / operations (ISO 27001 A.12):**
-- HA bugs (#61): zombie process reaping, `shared_breaker` data race, HA clock-skew
-- Control-plane snapshot fix (#60): rows closed before next `pool.Query` — prevents self-deadlock under pool pressure
-- xDS HA — HeartbeatStore + Redis liveness (#42 + earlier): heartbeat reuse across instances on failover; `isLive()` dual-signal (Redis primary, Postgres fallback)
-- Distill worker hardening (#67): `io.LimitReader(stdout, 32 MiB)` caps parent heap; stderr captured into `bytes.Buffer` + re-emitted via `slog.Warn` (log injection prevention)
-- Snapshot scan error logging (#67): malformed DB rows now `slog.Warn` instead of silent `continue`
-- Code-review fixes (#54): 7 issues across process isolation, control plane, DB
-
-### Collaborator (Andrei) — open PRs (pending merge, as of 2026-06-04)
-
-These were created after a full codebase audit (2026-06-04) and are open PRs on `origin`. Not yet on main.
-
-- **PR #78 — AB engine TOCTOU** (`internal/ab/engine.go`, `engine_test.go`): `StartExperiment` used a double-lock pattern (read lock to check status, release, re-acquire write lock) that allowed two goroutines to race past both the "completed" check and the active-cap check. Fixed by collapsing to a single `Lock/defer Unlock` with a `checkActiveCapLocked` helper. Two new concurrent tests prove the fix.
-- **PR #79 — PoVI double-slash TOCTOU** (`internal/povi/challenge.go`, `challenge_store.go`, `challenge_test.go`): In HA deployments two Lens instances could both pass the `AlreadyChallenged` SELECT and each call `Slash` for the same receipt. Fixed by making `Record` the atomic claim (INSERT; `ON CONFLICT DO NOTHING`; `RowsAffected==0` → `ErrAlreadyChallenged`). `Challenge()` now claims first, then fetches paths, then slashes, then calls new `UpdateResult`. `ChallengePending` added as a transient result state. New test `TestChallenge_NoConcurrentDoubleSlash` (20 goroutines, 1 slash expected).
-- **PR #80 — X-Node-Secret timing oracle** (`cmd/node/server.go`, `cmd/cachenode/server.go`, `cmd/embednode/server.go`): Secret checked with Go's `!=` string operator, which short-circuits on first byte mismatch — allows timing-based byte-by-byte recovery. Replaced with `crypto/subtle.ConstantTimeCompare` on all three node handlers.
-
-### Collaborator (Andrei) — up next
-All previously listed items are now done (#69–#75). No known remaining hardening items. Next priorities follow from whatever Nicolai identifies or from a future audit pass.
-
-### Done (recently merged — for reference)
-- DISTILL engine + visibility complete: core (#36) + PDF (#37) + cache/savings (#39) + tiers (#41) + vision-OCR fallback (#44) + dashboard/ROI (#47)
-- Stake-listing atomicity (a9cd852)
-- Pessimistic locking on ledger writes (extended existing PoVI `FOR UPDATE` pattern)
-- Global lexicographic lock ordering in `Transfer()` (#32)
-- `atomic ExecuteTrade` (#34), hash partitioning (#21, 0034), rate-limiting (#23), control-plane + Redis routing (#25, 0035), multi-process readiness, PgBouncer, CI/benchmark
-
----
+### Done (recently merged to main — drops off both lists)
+- DISTILL 100% COMPLETE — full feature, live in the request path:
+  - Engine + visibility: core (#36) + PDF (#37) + cache/savings (#39) + tiers (#41) + vision-OCR fallback (#44) + dashboard/ROI (#47).
+  - Stage 3: worker shipped (#50) + startup proven on linux/amd64 (#51) + preview endpoint (#52) + request-path opt-in (#83) + live VisionDispatcher (#85) + durable token_events attribution (#86, migration 0040).
+  - Cardinal rules held end-to-end: inert-by-default; isolated killable worker; no double-counting; vision cost never a saving / never free; no phantom binary token savings.
+- Auth-reachability bug (handed to collaborator → fixed in #53).
+- Chart audit items + PgBouncer-safe migrations (#30); minor follow-ups (#35); buffered-output-guardrail fix; cleanup.
 
 ## Open coordination items
-
-- **`internal/auth` is now a SHARED SEAM** — collaborator's security work (#53, #64–#66) is the first substantive change to auth. Nicolai: sync before next touching `internal/auth`, `Manager`, or `Middleware`. Collaborator: same.
-- **`internal/dashboard` is now a SHARED SEAM** — collaborator's XSS hardening (#49, #66) edited `ui.go` and `token_dashboard.go`. Nicolai: sync before next editing dashboard files.
-- **`internal/distill` shared seam (since #45)** — still applies. Collaborator's process-isolation hardening (#67) also touched `isolator.go`. Sync before either side edits distill.
-- **`internal/ab` is now a SHARED SEAM (since #78, open PR)** — collaborator fixed a TOCTOU race in `StartExperiment`. If Nicolai's roadmap includes any AB engine changes, sync before merging #78 or making further edits to `engine.go`.
-- **`internal/povi/challenge*` is now a SHARED SEAM (since #79, open PR)** — collaborator changed the `challengeStore` interface (added `UpdateResult`) and reordered `Challenge()`. Any PoVI Phase work that touches the challenge flow needs to sync against #79 before starting.
-- **Open PRs #78 / #79 / #80** — all three are ready to review/merge. No conflicts with main known at time of writing (branched from f4306ae).
-- **DISTILL stage 3** — #50/#51/#52 on main. Current Nicolai progress unknown; collaborator should not touch `internal/proxy` or `internal/distill` request-path wiring without syncing first.
-- **Token economy Phases 2–5 (gated)** — collaborator's DB atomicity work (#66) touched `Stake()`/`Unstake()` (token-economy code). Seam #1 applies. Sync before Nicolai starts Phases 2–5.
-- **Ledger lock ordering (resolved, #32)** — global lexicographic ordering in place. No longer open.
-- **PgBouncer / migrations seam (handled)** — migrate Job takes explicit `migrations.databaseURL`; pooler untouched.
+- RESOLVED — STAGE 3 BLOCKER (enforced resource isolation): the collaborator's ProcessIsolator (#45) provided the killable, capped subprocess; DISTILL runs untrusted bytes only through it. pdf.go residual contained. Resolved.
+- RESOLVED — DISTILL request-path integration: shipped (#83/#85/#86), additive in internal/proxy, no collision (incl. his #84 mid-arc). His isolator + worker JSON protocol untouched.
+- Token economy Phases 2–5 (gated, next big build) — MUST sync seam #1 (extend the PoVI FOR UPDATE pattern, one global lock order) before starting.
+- CORS / X-Talyvor-Distill (deferred, his file): per-request distill header not in his #63 allowlist (consistent with Batch/Team; works S2S). Workspace DistillPolicy is the CORS-unaffected primary lever. Adding the header = a 1-line sync on his CORS file, not a unilateral edit.
+- costanomaly / dashboard seam — his #28 hardened these; DISTILL panel (#47) additive, didn't touch his render funcs.
+- PgBouncer / migrations seam (handled); ledger lock ordering (resolved by him, #32).
 
 ---
 
