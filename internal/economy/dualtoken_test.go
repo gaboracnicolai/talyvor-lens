@@ -17,11 +17,12 @@ import (
 // result set.
 func pgxNoRows() error { return pgx.ErrNoRows }
 
-// miningTypeArgs is the 5-element arg list GetTotalSupply binds.
+// miningTypeArgs is the arg list GetTotalSupply binds (6 since Stage 2.2
+// added pool_royalty to the minted-supply allow-list).
 func miningTypeArgs() []any {
 	return []any{
 		mining.TypeCacheMine, mining.TypeComputeMine, mining.TypeEmbeddingMine,
-		mining.TypeAnnotationMine, mining.TypePatternMine,
+		mining.TypeAnnotationMine, mining.TypePatternMine, mining.TypePoolRoyalty,
 	}
 }
 

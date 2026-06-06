@@ -179,3 +179,55 @@ func TestPoolRoyalty_NoMinter_PooledHitServesUnchanged(t *testing.T) {
 		t.Error("pooled hit must serve with no royalty minter wired (inert by default)")
 	}
 }
+
+// STAGE 2.2 ISOLATION FROM SPEND — the critical safety property: a served
+// pooled hit, with the royalty minter WIRED and minting, writes ZERO rows to
+// token_events. Every customer spend reader (budgets seed/ReconcileSpent,
+// workspace SpendLimitUSD enforcement, alerts.windowSpend circuit breaker,
+// ROI, costanomaly, forecast, anomaly, tenant month-spend, MCP/API summaries,
+// audit export) reads ONLY token_events and sums cost_usd with no row-type
+// filter — so zero token_events writes proves margin cannot leak into ANY of
+// them, and their results are byte-identical to pre-2.2 for the same traffic.
+// Talyvor's (1−s) margin is DERIVED from pool_royalty_mints (the
+// pool_royalty_margin view), never re-recorded as spend.
+//
+// The live-call leg is the positive control: it proves this sink DOES observe
+// token_events writes when they happen, so the zero on the pooled leg is a
+// real measurement, not a broken probe. (The pooled leg fires the RECORDING
+// minter — the proxy-side contract; the real Minter's write targets are
+// pinned separately in poolroyalty's minter_test via strict pgxmock: claim
+// table + LENS ledger only, never token_events.)
+func TestPoolRoyalty_ServedPooledHit_WritesNoTokenEvents(t *testing.T) {
+	global := true
+	p, wsm, sink, _, calls := newPoolingProxy(t, &global)
+	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
+	_ = wsm.SetCachePoolable(context.Background(), "wsB", true)
+	rec := &recordingRoyaltyMinter{}
+	p.SetRoyaltyMinter(rec)
+
+	// POSITIVE CONTROL: a live (miss) call must record spend via the sink.
+	dispatchWS(t, p, "wsA", "what is 2+2")
+	sink.mu.Lock()
+	liveCalls := sink.calls
+	sink.mu.Unlock()
+	if liveCalls == 0 {
+		t.Fatal("positive control failed: a live call must write a token_events spend row — the probe is broken")
+	}
+
+	// THE PROPERTY: a served pooled hit (royalty MINTED — minter recorded it)
+	// adds NO token_events write. Spend-reader inputs are unchanged.
+	before := atomic.LoadInt64(calls)
+	dispatchWSWithRequestID(t, p, "wsB", "what is 2+2", "req-isolation-1")
+	if atomic.LoadInt64(calls)-before != 0 {
+		t.Fatal("expected a pooled cache hit (no upstream call)")
+	}
+	if got := rec.recorded(); len(got) != 1 {
+		t.Fatalf("the pooled hit must have fired the royalty mint; hits=%d", len(got))
+	}
+	sink.mu.Lock()
+	pooledCalls := sink.calls
+	sink.mu.Unlock()
+	if pooledCalls != liveCalls {
+		t.Errorf("a pooled hit must write ZERO token_events rows: spend writes went %d → %d — margin/royalty leaked into customer spend accounting", liveCalls, pooledCalls)
+	}
+}
