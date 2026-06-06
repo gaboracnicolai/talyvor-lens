@@ -86,6 +86,13 @@ type Config struct {
 	// economy", but mining still runs for own-cache hits).
 	CacheSharingEnabled bool
 
+	// CachePoolableEnabled is the GLOBAL switch for the Phase-2 Stage 2.0
+	// shared-cache governance gate (exact cache). Default false: cross-tenant
+	// pooling is impossible unless this is on AND both the contributing and
+	// requesting workspaces have cache_poolable=true. Inert by default — the
+	// request path is byte-for-byte unchanged when this is off.
+	CachePoolableEnabled bool
+
 	// Pattern mining (Batch 2 Item 5). Deployment-level gate;
 	// must AND with per-workspace opt-in for earnings to fire.
 	PatternMiningEnabled bool
@@ -331,6 +338,7 @@ func Load() (*Config, error) {
 		QualityAutoRetry: parseBoolEnv("LENS_QUALITY_AUTO_RETRY"),
 
 		CacheSharingEnabled:  parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
+		CachePoolableEnabled: parseBoolEnv("LENS_CACHE_POOLABLE_ENABLED"),
 		PatternMiningEnabled: parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
 		POVIMintingEnabled:   parseBoolEnv("LENS_POVI_MINTING_ENABLED"),
 

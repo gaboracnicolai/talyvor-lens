@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
-	"fmt"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -40,13 +40,14 @@ import (
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
-	"github.com/talyvor/lens/internal/costanomaly"
-	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
+	"github.com/talyvor/lens/internal/controlplane"
+	"github.com/talyvor/lens/internal/costanomaly"
 	"github.com/talyvor/lens/internal/dashboard"
 	"github.com/talyvor/lens/internal/dbmigrate"
 	"github.com/talyvor/lens/internal/distill"
@@ -55,6 +56,7 @@ import (
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/eval"
 	"github.com/talyvor/lens/internal/fallback"
+	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/keypool"
@@ -63,14 +65,13 @@ import (
 	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
-	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/pii"
+	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/quality"
-	"github.com/talyvor/lens/internal/controlplane"
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/roi"
@@ -81,9 +82,9 @@ import (
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/warmer"
-	"golang.org/x/crypto/bcrypt"
 	"github.com/talyvor/lens/internal/workspace"
 	"github.com/talyvor/lens/migrations"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func main() {
@@ -362,6 +363,14 @@ func run() error {
 		&distill.ProcessIsolator{WorkerBin: cfg.DistillWorkerBin},
 		cache.NewDistillCache(redisClient, cfg.MaxCacheTTL),
 	)
+	// Phase-2 Stage 2.0 shared-cache governance gate (exact cache). Read-only:
+	// reads the global switch + each workspace's cache_poolable opt-in, mutates
+	// nothing. Inert by default — pooling stays off until LENS_CACHE_POOLABLE_ENABLED
+	// is set AND a workspace opts in (PUT /v1/workspaces/{wsID}/cache-poolable).
+	p.SetPoolGate(cache_pooling.New(
+		func() bool { return cfg.CachePoolableEnabled },
+		wsManager.GetCachePoolable,
+	))
 	// Per-team / per-sprint budget governance (Upgrade 19). Seed the
 	// in-memory snapshot from token_events, refresh it periodically, then
 	// wire the gate into the proxy hot path. Load is best-effort — a cold
@@ -1813,11 +1822,11 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusCreated, map[string]any{
-				"id":          id,
+				"id":           id,
 				"workspace_id": wsID,
-				"url":         in.URL,
-				"max_size_gb": in.MaxSizeGB,
-				"created_at":  createdAt,
+				"url":          in.URL,
+				"max_size_gb":  in.MaxSizeGB,
+				"created_at":   createdAt,
 			})
 		})
 
@@ -2489,6 +2498,31 @@ func run() error {
 			})
 		})
 
+		// Phase-2 Stage 2.0 shared-cache governance gate (exact cache): per-tenant
+		// opt-in for cross-user cache pooling. Default false (private), so the
+		// request path stays inert until an admin opts a workspace in here AND the
+		// global LENS_CACHE_POOLABLE_ENABLED switch is on. This route sits behind
+		// the same auth + #84 workspace-isolation middleware as the /distill route.
+		authed.Put("/v1/workspaces/{wsID}/cache-poolable", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				CachePoolable bool `json:"cache_poolable"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := wsManager.SetCachePoolable(req.Context(), wsID, in.CachePoolable); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			ws, _ := wsManager.GetWorkspace(wsID)
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"ok":             true,
+				"cache_poolable": ws.CachePoolable,
+			})
+		})
+
 		authed.Get("/v1/attribution/branch", func(w http.ResponseWriter, req *http.Request) {
 			branch := req.URL.Query().Get("branch")
 			repository := req.URL.Query().Get("repository")
@@ -2895,10 +2929,10 @@ func run() error {
 		authed.Get("/v1/povi/status", func(w http.ResponseWriter, req *http.Request) {
 			total, verified, _ := poviStore.Stats(req.Context())
 			writeJSONOK(w, http.StatusOK, map[string]any{
-				"minting_enabled": cfg.POVIMintingEnabled,
-				"receipts_total":  total,
+				"minting_enabled":   cfg.POVIMintingEnabled,
+				"receipts_total":    total,
 				"receipts_verified": verified,
-				"attestation_only": true,
+				"attestation_only":  true,
 				"warning": "Receipts are ATTESTATION + TAMPER-EVIDENCE, NOT proof of honest computation. " +
 					"Provisional receipt-based minting is UNSAFE without stake + challenge (Parts 2/3) and is " +
 					"OFF by default; when off, receipts are verified + recorded for audit but NO LENS is minted. " +
@@ -2960,8 +2994,8 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, map[string]any{
-				"stake":    st,
-				"eligible": poviStakeManager.IsEligible(req.Context(), nodeID),
+				"stake":     st,
+				"eligible":  poviStakeManager.IsEligible(req.Context(), nodeID),
 				"min_stake": cfg.POVIMinStake,
 			})
 		})
