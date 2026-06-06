@@ -164,15 +164,18 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 }
 
 // GetPooled is the cross-tenant similarity lookup: it searches ONLY is_poolable
-// rows and returns the cached response plus the contributing workspace. A miss
-// (no row, or below threshold) is (nil, "", nil). The contributor lets the
-// caller verify the contributor's live opt-in before serving; an empty
-// contributor (defensive — should not occur for a poolable row) surfaces as ""
-// so the gate blocks it.
-func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt string) ([]byte, string, error) {
+// rows and returns the cached response, the contributing workspace, the matched
+// row's prompt_embeddings.id, and the similarity score. A miss (no row, or
+// below threshold) is (nil, "", "", 0, nil). The contributor lets the caller
+// verify the contributor's live opt-in before serving; an empty contributor
+// (defensive — should not occur for a poolable row) surfaces as "" so the gate
+// blocks it. The entry id + similarity are Stage-2.1 attribution data for the
+// royalty claim row — NOT an idempotency key (a retried request can re-match a
+// different row: ORDER BY similarity LIMIT 1 over a moving 24h window).
+func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt string) ([]byte, string, string, float64, error) {
 	vec, err := c.embedder.Embed(ctx, prompt)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", 0, err
 	}
 
 	var (
@@ -184,20 +187,20 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt s
 	err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model).
 		Scan(&id, &response, &contributor, &similarity)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, "", nil
+		return nil, "", "", 0, nil
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", 0, err
 	}
 	if similarity < c.threshold {
-		return nil, "", nil
+		return nil, "", "", 0, nil
 	}
 	if _, err := c.pool.Exec(ctx, semanticTouchSQL, id); err != nil {
-		return nil, "", err
+		return nil, "", "", 0, err
 	}
 
 	metrics.CacheHitsTotal.WithLabelValues("semantic_pooled").Inc()
-	return []byte(response), contributor, nil
+	return []byte(response), contributor, id, similarity, nil
 }
 
 // vectorLiteral encodes a vector in pgvector's text format: "[v1,v2,...]".

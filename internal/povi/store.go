@@ -74,19 +74,26 @@ FROM povi_receipts WHERE verified = true AND leaf_count > 0 ORDER BY created_at 
 const statsSQL = `SELECT COUNT(*), COUNT(*) FILTER (WHERE verified) FROM povi_receipts`
 
 // RecordReceipt appends a receipt to the audit trail with its verification
-// outcome. Idempotent per request_id. No-op on a nil pool.
-func (s *Store) RecordReceipt(ctx context.Context, r Receipt, verified bool) error {
+// outcome. Idempotent per request_id: the ON CONFLICT (request_id) DO NOTHING
+// result is surfaced as `inserted` — false means this request_id was already
+// recorded (a REPLAY), and the caller must not act on it again (the mint gate
+// in Processor.Process checks this; same claim/RowsAffected shape as
+// povi_challenges and pool_royalty_mints). A nil pool no-ops and reports
+// inserted=true: with no DB there is no dedup substrate, which preserves the
+// degraded-mode behavior (and matches minting being a non-default test path).
+func (s *Store) RecordReceipt(ctx context.Context, r Receipt, verified bool) (inserted bool, err error) {
 	if s.pool == nil {
-		return nil
+		return true, nil
 	}
 	rootHex := hex.EncodeToString(r.MerkleRoot[:])
-	if _, err := s.pool.Exec(ctx, insertReceiptSQL,
+	tag, err := s.pool.Exec(ctx, insertReceiptSQL,
 		r.RequestID, r.NodeID, r.WorkspaceID, r.Model,
 		r.InputTokens, r.OutputTokens, rootHex, verified, r.Timestamp, r.LeafCount,
-	); err != nil {
-		return fmt.Errorf("povi: insert receipt: %w", err)
+	)
+	if err != nil {
+		return false, fmt.Errorf("povi: insert receipt: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // scanReceipt scans one row in the standard column order.

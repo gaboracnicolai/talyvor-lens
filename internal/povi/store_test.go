@@ -30,8 +30,38 @@ func TestRecordReceipt_Inserts(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	s := newStore(pool)
-	if err := s.RecordReceipt(context.Background(), r, true); err != nil {
+	inserted, err := s.RecordReceipt(context.Background(), r, true)
+	if err != nil {
 		t.Fatalf("RecordReceipt: %v", err)
+	}
+	if !inserted {
+		t.Error("a fresh request_id must report inserted=true")
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// A conflicting request_id (ON CONFLICT DO NOTHING → RowsAffected 0) reports
+// inserted=false — the replay signal Processor.Process uses to refuse a
+// second mint.
+func TestRecordReceipt_DuplicateReportsNotInserted(t *testing.T) {
+	pool := newStorePool(t)
+	r := sampleReceipt()
+	rootHex := hex.EncodeToString(r.MerkleRoot[:])
+
+	pool.ExpectExec(`INSERT INTO povi_receipts`).
+		WithArgs(r.RequestID, r.NodeID, r.WorkspaceID, r.Model,
+			r.InputTokens, r.OutputTokens, rootHex, true, r.Timestamp, 0).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+
+	s := newStore(pool)
+	inserted, err := s.RecordReceipt(context.Background(), r, true)
+	if err != nil {
+		t.Fatalf("RecordReceipt: %v", err)
+	}
+	if inserted {
+		t.Error("a duplicate request_id must report inserted=false (replay)")
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
@@ -82,7 +112,7 @@ func TestStats_CountsTotalAndVerified(t *testing.T) {
 // gracefully when no DB is wired).
 func TestStore_NilPoolIsSafe(t *testing.T) {
 	s := NewStore(nil)
-	if err := s.RecordReceipt(context.Background(), sampleReceipt(), true); err != nil {
+	if _, err := s.RecordReceipt(context.Background(), sampleReceipt(), true); err != nil {
 		t.Errorf("nil-pool RecordReceipt should no-op, got %v", err)
 	}
 	list, err := s.ListReceipts(context.Background(), "ws", 10)

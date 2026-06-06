@@ -3,8 +3,11 @@ package povi
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"testing"
+
+	"github.com/pashagolub/pgxmock/v4"
 )
 
 func staticLookup(pub ed25519.PublicKey) PubKeyLookup {
@@ -116,5 +119,57 @@ func TestProcess_ValidReceipt_MintingOn_ProvisionalMint(t *testing.T) {
 	}
 	if len(m.calls) != 1 || m.calls[0].workspaceID != "ws-owner" {
 		t.Errorf("expected 1 credit to ws-owner, got %+v", m.calls)
+	}
+}
+
+// LATENT-BUG REGRESSION (folded into Stage 2.1): a REPLAYED receipt — same
+// request_id, so RecordReceipt's ON CONFLICT (request_id) DO NOTHING affects 0
+// rows — must NOT mint again, even verified + stake-eligible + minting ON.
+// Before the fix, Process ignored the conflict result and re-credited the
+// ledger on every replay (double-mint). Same claim/RowsAffected guard as
+// povi_challenges and pool_royalty_mints.
+func TestProcess_ReplayedReceipt_MintsExactlyOnce(t *testing.T) {
+	pub, priv, _ := GenerateNodeKey()
+	m := &fakeMinter{}
+	pool := newStorePool(t)
+
+	r := sampleReceipt()
+	r.WorkspaceID = "ws-owner"
+	r.OutputTokens = 1000
+	signed := SignReceipt(priv, r)
+	rootHex := hex.EncodeToString(signed.MerkleRoot[:])
+
+	// First arrival claims the request_id; the replay conflicts.
+	pool.ExpectExec(`INSERT INTO povi_receipts`).
+		WithArgs(signed.RequestID, signed.NodeID, signed.WorkspaceID, signed.Model,
+			signed.InputTokens, signed.OutputTokens, rootHex, true, signed.Timestamp, signed.LeafCount).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectExec(`INSERT INTO povi_receipts`).
+		WithArgs(signed.RequestID, signed.NodeID, signed.WorkspaceID, signed.Model,
+			signed.InputTokens, signed.OutputTokens, rootHex, true, signed.Timestamp, signed.LeafCount).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+
+	p := NewProcessor(newStore(pool), m, staticLookup(pub), alwaysEligible, true)
+
+	res1, err := p.Process(context.Background(), signed)
+	if err != nil {
+		t.Fatalf("first Process: %v", err)
+	}
+	if !res1.Verified || !res1.Minted || len(m.calls) != 1 {
+		t.Fatalf("first arrival must mint once; res=%+v credits=%d", res1, len(m.calls))
+	}
+
+	res2, err := p.Process(context.Background(), signed)
+	if err != nil {
+		t.Fatalf("replay Process: %v", err)
+	}
+	if res2.Minted {
+		t.Error("replayed receipt must NOT mint (request_id already recorded)")
+	}
+	if len(m.calls) != 1 {
+		t.Errorf("ledger credits = %d, want exactly 1 across original + replay", len(m.calls))
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }

@@ -184,3 +184,45 @@ func TestLoad_NodeTLSSkipVerifyEnabled(t *testing.T) {
 		t.Error("NodeTLSSkipVerify should be true when LENS_NODE_TLS_SKIP_VERIFY=true")
 	}
 }
+
+func TestLoad_PoolRoyaltyDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PoolRoyaltyMintingEnabled {
+		t.Error("PoolRoyaltyMintingEnabled should default to false (Stage 2.1 is inert by default)")
+	}
+	if c.PoolRoyaltyShare != 0.5 {
+		t.Errorf("PoolRoyaltyShare = %v, want 0.5 (DefaultRoyaltyShare)", c.PoolRoyaltyShare)
+	}
+}
+
+func TestLoad_PoolRoyaltyParsing(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_POOL_ROYALTY_MINTING_ENABLED", "true")
+	t.Setenv("LENS_POOL_ROYALTY_SHARE", "0.7")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.PoolRoyaltyMintingEnabled {
+		t.Error("PoolRoyaltyMintingEnabled should be true when LENS_POOL_ROYALTY_MINTING_ENABLED=true")
+	}
+	if c.PoolRoyaltyShare != 0.7 {
+		t.Errorf("PoolRoyaltyShare = %v, want 0.7", c.PoolRoyaltyShare)
+	}
+}
+
+func TestLoad_PoolRoyaltyShareInvalidRejected(t *testing.T) {
+	for _, bad := range []string{"1.5", "-0.1", "abc"} {
+		t.Run(bad, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LENS_POOL_ROYALTY_SHARE", bad)
+			if _, err := Load(); err == nil {
+				t.Errorf("Load should reject LENS_POOL_ROYALTY_SHARE=%q (must be in [0,1]); Talyvor net (1−s)×avoided_COGS must stay ≥ 0", bad)
+			}
+		})
+	}
+}
