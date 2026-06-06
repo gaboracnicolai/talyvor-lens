@@ -750,6 +750,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				if c, owner := p.tryExactPooled(ctx, cfg.name, model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled"
 					span.AddEvent("cache.hit.pooled")
+				} else if c, owner := p.trySemanticPooled(ctx, cfg.name, model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+					cached, layer = c, "cache_hit_pooled_semantic"
+					span.AddEvent("cache.hit.pooled_semantic")
 				} else {
 					metrics.RecordCacheMiss("cache_miss")
 				}
@@ -1455,6 +1458,22 @@ func (p *Proxy) trySemantic(ctx context.Context, provider, model, prompt string)
 	return cached
 }
 
+// trySemanticPooled is the cross-tenant SEMANTIC read surface: a similarity
+// search over is_poolable rows only (a separate keyspace from the private
+// search, which filters those out). It embeds the RAW prompt — matching how
+// pooled rows are written — and returns the body plus the contributing
+// workspace. A miss is (nil, "").
+func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model, rawPrompt string) ([]byte, string) {
+	if p.semantic == nil {
+		return nil, ""
+	}
+	body, owner, err := p.semantic.GetPooled(ctx, provider, model, rawPrompt)
+	if err != nil || body == nil {
+		return nil, ""
+	}
+	return body, owner
+}
+
 // poolKeyMarker namespaces the shared (cross-tenant) cache keyspace so it is
 // PROVABLY disjoint from the workspace-private keyspace. A private key is hashed
 // from "wsID:prompt" where wsID comes from the X-Talyvor-Workspace HTTP header
@@ -1505,10 +1524,19 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 		}
 	}
 	if p.semantic != nil && p.embedder != nil {
-		// Semantic cache stays workspace-private (cachePrompt) — semantic pooling
-		// is deferred to Stage 2.0b (needs a provenance migration).
+		// Private (workspace-scoped) semantic entry — embeds the wsID-prefixed
+		// prompt and stores is_poolable=false (default), exactly as before.
 		if vec, err := p.embedder.Embed(ctx, cachePrompt); err == nil {
 			_ = p.semantic.Set(ctx, provider, model, cachePrompt, response, vec)
+		}
+		// Pooled (cross-tenant) semantic copy — opt-in, inert by default. Keyed on
+		// the NUL-sentinel pooled prompt (disjoint hash) but embedding the RAW
+		// prompt so cross-tenant similar prompts match cleanly; tagged with the
+		// contributor + is_poolable=true.
+		if p.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+			if vec, err := p.embedder.Embed(ctx, rawPrompt); err == nil {
+				_ = p.semantic.SetPooled(ctx, provider, model, pooledPromptKey(rawPrompt), wsID, response, vec)
+			}
 		}
 	}
 }
