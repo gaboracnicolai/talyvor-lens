@@ -120,9 +120,9 @@ func TestSlashStake_InsufficientLocked(t *testing.T) {
 // query must count povi_stake_slash rows, not just plain burns.
 func TestGetCirculatingSupply_CountsSlashBurns(t *testing.T) {
 	store, mock := newMockStore(t)
-	// total minted
+	// total minted (incl. pool_royalty since Stage 2.2)
 	mock.ExpectQuery(`amount > 0 AND type IN`).
-		WithArgs(TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine).
+		WithArgs(TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine, TypePoolRoyalty).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(1000.0))
 	// burned: MUST include both plain burns AND stake slashes.
 	mock.ExpectQuery(`SUM\(-amount\)`).

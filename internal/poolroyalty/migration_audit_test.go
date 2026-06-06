@@ -65,6 +65,31 @@ func TestMigrations_PoolRoyaltySchemaInvariants(t *testing.T) {
 	if claimMigration == "" {
 		t.Fatal("no migration defines pool_royalty_mints")
 	}
+
+	// Stage 2.2: the margin read surface must stay a DERIVATION over the claim
+	// rows (margin_usd = avoided_cogs_usd − minted_amount) and must never
+	// write to or read from token_events — margin is revenue, token_events is
+	// customer spend, and the spend readers have no row-type filter.
+	viewRaw, err := migrations.FS.ReadFile("0044_pool_royalty_margin_view.sql")
+	if err != nil {
+		t.Fatalf("read 0044 margin view migration: %v", err)
+	}
+	viewSQL := string(viewRaw)
+	if !regexp.MustCompile(`(?i)CREATE\s+OR\s+REPLACE\s+VIEW\s+pool_royalty_margin`).MatchString(viewSQL) {
+		t.Error("0044 must CREATE OR REPLACE VIEW pool_royalty_margin (idempotent view)")
+	}
+	if !regexp.MustCompile(`(?i)avoided_cogs_usd\s*-\s*minted_amount\s+AS\s+margin_usd`).MatchString(viewSQL) {
+		t.Error("the margin view must DERIVE margin_usd = avoided_cogs_usd - minted_amount (the margin identity) — never store it")
+	}
+	for _, line := range strings.Split(viewSQL, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") {
+			continue // comments may (and do) EXPLAIN why token_events is avoided
+		}
+		if strings.Contains(strings.ToLower(trimmed), "token_events") {
+			t.Errorf("the margin view must not touch token_events (customer spend): %q", trimmed)
+		}
+	}
 	if !regexp.MustCompile(`(?i)request_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE`).MatchString(claimMigration) {
 		t.Error("pool_royalty_mints must declare request_id TEXT NOT NULL UNIQUE — the exactly-once idempotency key")
 	}

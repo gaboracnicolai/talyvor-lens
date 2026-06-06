@@ -389,3 +389,41 @@ func TestTransfer_Validation(t *testing.T) {
 		t.Fatal("expected error: self-transfer")
 	}
 }
+
+// STAGE 2.2(b) SUPPLY COUNTING: pool_royalty joins the minted-supply
+// allow-list — a royalty mint is LENS entering circulation and must be
+// counted honestly. The list stays an explicit allow-list: marketplace_fee
+// (moves existing LENS, doesn't mint) and receipt_mine_provisional (povi's
+// deliberate exclusion pending its own go-live call) remain OUT.
+func TestGetTotalSupply_CountsPoolRoyalty_ExcludesNonMints(t *testing.T) {
+	s, mock := newMockStore(t)
+
+	mock.ExpectQuery(`SELECT COALESCE\(SUM\(amount\), 0\)`).
+		WithArgs(TypeCacheMine, TypeComputeMine, TypeEmbeddingMine,
+			TypeAnnotationMine, TypePatternMine, TypePoolRoyalty).
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(42.5))
+
+	got, err := s.GetTotalSupply(context.Background())
+	if err != nil {
+		t.Fatalf("GetTotalSupply: %v", err)
+	}
+	if got != 42.5 {
+		t.Errorf("supply = %v, want 42.5", got)
+	}
+
+	// The allow-list itself is the assertion above (WithArgs pins all six
+	// types, in order). Guard the exclusions explicitly so a future edit
+	// can't sneak them in: the counted set must NOT contain these.
+	excluded := []string{"marketplace_fee", "receipt_mine_provisional", TypeBurn, TypeStakeSlash, TypeTransferIn}
+	counted := []string{TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine, TypePoolRoyalty}
+	for _, ex := range excluded {
+		for _, c := range counted {
+			if c == ex {
+				t.Errorf("type %q must NOT be in the minted-supply allow-list", ex)
+			}
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}

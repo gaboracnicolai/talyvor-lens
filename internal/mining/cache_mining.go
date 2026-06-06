@@ -362,6 +362,13 @@ const (
 	TypeBurn        = "burn"
 )
 
+// TypePoolRoyalty tags a Pool-B royalty mint (Phase-2 Stage 2.1): a served
+// cross-tenant pooled cache hit credits the contributing workspace
+// s × avoided_COGS. Canonical home is here with the other ledger row types;
+// internal/poolroyalty (the writer) aliases it. Counted in GetTotalSupply
+// since Stage 2.2 — a royalty mint is LENS entering circulation.
+const TypePoolRoyalty = "pool_royalty"
+
 // Transfer atomically debits `from` and credits `to`. Both
 // ledger rows + both balance updates happen inside one
 // transaction so a partial failure can't drop or duplicate LENS.
@@ -489,8 +496,11 @@ func (s *LedgerStore) Burn(ctx context.Context, workspaceID string, amount float
 }
 
 // GetTotalSupply returns the all-time minted LENS — the sum of
-// every credit-side ledger row that came from a mining track.
-// (Transfers don't mint new LENS so they're excluded.)
+// every credit-side ledger row that came from a mining track or the Pool-B
+// royalty mint (Stage 2.2: pool_royalty counted so royalty LENS is honestly
+// in supply). Explicit allow-list: transfers and marketplace_fee move
+// existing LENS (not mints) and stay excluded; receipt_mine_provisional
+// stays excluded per its own go-live treatment (PoVI preconditions).
 func (s *LedgerStore) GetTotalSupply(ctx context.Context) (float64, error) {
 	if s.pool == nil {
 		return 0, nil
@@ -498,9 +508,9 @@ func (s *LedgerStore) GetTotalSupply(ctx context.Context) (float64, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount), 0)
 		FROM lens_token_ledger
-		WHERE amount > 0 AND type IN ($1, $2, $3, $4, $5)`,
+		WHERE amount > 0 AND type IN ($1, $2, $3, $4, $5, $6)`,
 		TypeCacheMine, TypeComputeMine, TypeEmbeddingMine,
-		TypeAnnotationMine, TypePatternMine)
+		TypeAnnotationMine, TypePatternMine, TypePoolRoyalty)
 	var n float64
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("mining: total supply: %w", err)

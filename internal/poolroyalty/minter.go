@@ -28,12 +28,14 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/mining"
 )
 
-// TypePoolRoyalty tags a Pool-B royalty mint in the lens_token_ledger. Like
-// the other mint types it is credit-side; supply dashboards gain it when the
-// flag flips on (see the Stage-2.1 flip-on notes in COORDINATION.md).
-const TypePoolRoyalty = "pool_royalty"
+// TypePoolRoyalty tags a Pool-B royalty mint in the lens_token_ledger. The
+// canonical constant lives in internal/mining with the other ledger row
+// types (and in GetTotalSupply's allow-list since Stage 2.2); this alias
+// keeps the writer-side name local.
+const TypePoolRoyalty = mining.TypePoolRoyalty
 
 // DefaultRoyaltyShare is the default contributor share s of avoided_COGS
 // (LENS_POOL_ROYALTY_SHARE overrides; clamped to [0,1]). With share s the
@@ -45,11 +47,11 @@ const DefaultRoyaltyShare = 0.5
 // must only construct it at the serve point (after the cached body actually
 // went out), never at lookup: a found-but-not-served hit must not mint.
 type ServedHit struct {
-	RequestID            string  // the serving request's X-Talyvor-Request-ID (the idempotency key)
-	RequesterWorkspace   string  // who was served
-	ContributorWorkspace string  // who contributed the entry (owner stamp)
-	Layer                string  // "exact" | "semantic"
-	EntryID              string  // exact: pooled cache key; semantic: prompt_embeddings.id — attribution DATA, not key
+	RequestID            string // the serving request's X-Talyvor-Request-ID (the idempotency key)
+	RequesterWorkspace   string // who was served
+	ContributorWorkspace string // who contributed the entry (owner stamp)
+	Layer                string // "exact" | "semantic"
+	EntryID              string // exact: pooled cache key; semantic: prompt_embeddings.id — attribution DATA, not key
 	Provider             string
 	Model                string
 	Similarity           float64 // semantic hits only; 0 for exact
