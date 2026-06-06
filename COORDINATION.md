@@ -2,7 +2,7 @@
 
 **Purpose:** two people build in these repos in parallel, each running Claude / Claude Code. Our Claudes share no memory and cannot see each other's work — **GitHub is the only place our work meets, so GitHub is the single source of truth.** This file is how we avoid double work and handle the seams where our work touches.
 
-**Last synced:** 2026-06-05 — main at afbe241 (DISTILL 100% complete — stage 3 PRs #0–#4 shipped: #50/#51/#52/#83/#85/#86)
+**Last synced:** _(update at each session start)_
 
 ---
 
@@ -65,14 +65,24 @@ Most of the time we're in different code and won't collide. Collisions happen at
 
 ---
 
+## Product-narrative reframe (v3) — what it changes for the build
+The investor/client deck + 8-yr model were reworked to v3. Three shifts that touch the code:
+1. **Savings are now stated net of our savings-share fee** on every customer-facing surface — gross inference reduction 56–90% → customer net ~40–65%, with mining pushing toward ~99%. Any dashboard/ROI surface should show gross *and* net, never gross-as-if-the-customer-keeps-it.
+2. **Moat = cross-user semantic reuse + cross-provider routing + DISTILL + open-model migration** — explicitly NOT single-provider prefix caching (providers now do that natively, free). Pool-B value comes from *cross-tenant* reuse.
+3. **Enterprise data governance is a hard precondition for cross-user pooling** (private-by-default, opt-in, PII-strip, isolation, deletion, TTL, audit). That is exactly what Phase-2 Stage 2.0 builds, sitting on top of the collaborator's tenant isolation (#84).
+
+---
+
 ## Work ledger — keep current
-_(last updated from sync: main at afbe241 — DISTILL 100% COMPLETE)_
+_(last updated: Jun 2026 — main at afbe241, DISTILL 100% COMPLETE; v3 deck/model reframe; Phase-2 Stage 2.0 governance gate kicked off)_
 
 ### Nicolai + Claude — in progress
-- Nothing in active build. DISTILL is fully complete (all of stage 3 shipped). Next roadmap item (token economy Phases 2–5) is GATED on a ledger-seam sync with the collaborator. Highest-leverage non-build move: a first pilot customer.
+- **Phase-2 Stage 2.0 — shared-cache governance gate.** Makes the cross-user semantic cache safe to pool: private-by-default, opt-in sharing, PII stripping, idempotent/non-sensitive eligibility, per-entry provenance, TTL + deletion + audit. **Cache-layer + request-path only — no ledger writes, no minting → outside seam #1, safe to build now.** Sits on top of the collaborator's tenant isolation (#84) as an additive opt-in path (if it can't stay additive and needs his isolation internals, that's a seam → coordinate, don't silently edit). Inert by default. This is the precondition for Pool-B royalty minting (which IS the ledger seam and stays gated). Highest-leverage non-build move remains a first pilot customer.
 
 ### Nicolai + Claude — up next (the roadmap — ours, don't take)
-- token economy Phases 2–5 (GATED — touches ledger/economy code the collaborator is ACTIVELY in; sync seam #1 before starting).
+- **Phase 2 — Pool-B shared-cache royalty economy**, split into safe-now vs gated:
+  - **Stage 2.0 governance gate (UNGATED — building now):** see in-progress. Cache-layer only; also the v3 enterprise-objection fix.
+  - **Stages 2.1–2.5 (⚠️ GATED — seam #1):** attribution → minting (a cross-tenant cache hit mints `s × avoided_COGS` to the contributing tenant; Burn-and-Mint; Talyvor nets `(1−s)×avoided_COGS ≥ 0`) → PoVI verify / anti-gaming (already built) → USD-pegged redemption. The minting step touches the ledger → **extend the existing PoVI `FOR UPDATE` pattern with one global lock order; sync seam #1 with the collaborator before starting.**
 - SOC2/ISO27001 foundation (codeable groundwork; cert via a vendor like Oneleet only when a customer requires it).
 - Replicate the Lens path to the sibling repos (Track / Docs / Code / edge-infra) — after Lens.
 - PoVI minting go-live: NOT a build — see preconditions section.
@@ -96,7 +106,8 @@ _(last updated from sync: main at afbe241 — DISTILL 100% COMPLETE)_
 ## Open coordination items
 - RESOLVED — STAGE 3 BLOCKER (enforced resource isolation): the collaborator's ProcessIsolator (#45) provided the killable, capped subprocess; DISTILL runs untrusted bytes only through it. pdf.go residual contained. Resolved.
 - RESOLVED — DISTILL request-path integration: shipped (#83/#85/#86), additive in internal/proxy, no collision (incl. his #84 mid-arc). His isolator + worker JSON protocol untouched.
-- Token economy Phases 2–5 (gated, next big build) — MUST sync seam #1 (extend the PoVI FOR UPDATE pattern, one global lock order) before starting.
+- **Phase-2 Stage 2.0 — shared-cache governance gate (UNGATED, building now).** Cache-layer pooling safety: private-by-default, opt-in, PII-strip, idempotent/non-sensitive eligibility, per-entry provenance, TTL/deletion/audit. Sits on the collaborator's tenant isolation (#84) — extend additively, don't duplicate; if it needs his isolation internals, treat as a seam (coordinate). Any new cache-metadata migration follows seam #2 (additive, own file). **No ledger writes → does NOT touch seam #1.** Heads-up to the collaborator that the cache layer is in motion.
+- **⚠️ Phase-2 Stages 2.1–2.5 — Pool-B minting (gated, the next big build at the ledger).** Cross-tenant reuse → mint to the contributing tenant; touches the ledger/economy code the collaborator actively worked (stake atomicity, pessimistic locking, lock ordering). MUST sync seam #1 (extend the existing PoVI `FOR UPDATE` pattern, one global lock order) before starting. The deck "moat" → narrative pressure to make Pool-B real.
 - CORS / X-Talyvor-Distill (deferred, his file): per-request distill header not in his #63 allowlist (consistent with Batch/Team; works S2S). Workspace DistillPolicy is the CORS-unaffected primary lever. Adding the header = a 1-line sync on his CORS file, not a unilateral edit.
 - costanomaly / dashboard seam — his #28 hardened these; DISTILL panel (#47) additive, didn't touch his render funcs.
 - PgBouncer / migrations seam (handled); ledger lock ordering (resolved by him, #32).
