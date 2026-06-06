@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -106,6 +107,21 @@ type Config struct {
 	// LENS_POVI_MINTING_ENABLED in a test/throwaway context — never production
 	// until Parts 2/3 land.
 	POVIMintingEnabled bool
+
+	// PoolRoyaltyMintingEnabled gates the Phase-2 Stage 2.1 Pool-B royalty
+	// mint: a served cross-tenant pooled cache hit mints s × avoided_COGS to
+	// the contributing tenant, exactly once per serving request. DEFAULT
+	// FALSE — with this off, pooled hits serve exactly as Stage 2.0 left
+	// them and NOTHING mints. Minting additionally requires the pooling
+	// gate itself (LENS_CACHE_POOLABLE_ENABLED + both workspaces opted in)
+	// to produce a pooled hit in the first place.
+	PoolRoyaltyMintingEnabled bool
+
+	// PoolRoyaltyShare is s, the contributor's share of avoided_COGS
+	// (Stage 2.1). Env: LENS_POOL_ROYALTY_SHARE. Default 0.5. Must be in
+	// [0,1] so Talyvor's net (1−s) × avoided_COGS stays ≥ 0 (the
+	// Burn-and-Mint invariant).
+	PoolRoyaltyShare float64
 
 	// POVIMinStake is the minimum LENS a node must lock as collateral to be
 	// minting-eligible (Part 2). Env: LENS_POVI_MIN_STAKE. Default 100.
@@ -342,6 +358,8 @@ func Load() (*Config, error) {
 		PatternMiningEnabled: parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
 		POVIMintingEnabled:   parseBoolEnv("LENS_POVI_MINTING_ENABLED"),
 
+		PoolRoyaltyMintingEnabled: parseBoolEnv("LENS_POOL_ROYALTY_MINTING_ENABLED"),
+
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 
 		GuardrailsEnabled: parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
@@ -486,6 +504,18 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_POVI_CHALLENGE_RATE (must be in [0,1]): %s", v)
 		}
 		c.POVIChallengeRate = f
+	}
+	c.PoolRoyaltyShare = 0.5
+	if v := os.Getenv("LENS_POOL_ROYALTY_SHARE"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		// math.IsNaN is load-bearing: ParseFloat("NaN") succeeds and NaN
+		// compares false to every bound, so the range checks alone would
+		// let a balance-poisoning NaN share through. (±Inf is caught by
+		// the range checks.)
+		if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
+			return nil, fmt.Errorf("invalid LENS_POOL_ROYALTY_SHARE (must be in [0,1]): %s", v)
+		}
+		c.PoolRoyaltyShare = f
 	}
 	c.POVISlashFraction = 0.5
 	if v := os.Getenv("LENS_POVI_SLASH_FRACTION"); v != "" {

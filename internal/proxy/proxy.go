@@ -41,6 +41,7 @@ import (
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/pii"
+	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/retry"
@@ -111,6 +112,7 @@ type Proxy struct {
 	guardrails        *guardrails.Engine
 	distiller         *distillIntegration
 	poolGate          *cache_pooling.PoolabilityGate
+	royaltyMinter     royaltySink
 	retryConfig       retry.Config
 	httpClient        *http.Client
 	openAIKey         string
@@ -261,6 +263,21 @@ func (p *Proxy) setAlertSink(sink alertSink) {
 // pooled copy, and the request path never attempts a cross-tenant read.
 func (p *Proxy) SetPoolGate(gate *cache_pooling.PoolabilityGate) {
 	p.poolGate = gate
+}
+
+// royaltySink is the Phase-2 Stage 2.1 Pool-B royalty surface: one call per
+// SERVED cross-tenant pooled hit. *poolroyalty.Minter satisfies it; exactly-
+// once (the request_id claim) and the inert-by-default flag live in the
+// Minter, not here — the proxy only reports what it actually served.
+type royaltySink interface {
+	MintServedHit(ctx context.Context, h poolroyalty.ServedHit) (poolroyalty.Result, error)
+}
+
+// SetRoyaltyMinter enables the Stage 2.1 Pool-B royalty mint. Wired as a
+// setter so proxy.New's signature stays put. When unset (nil), pooled hits
+// serve exactly as Stage 2.0 left them and nothing mints.
+func (p *Proxy) SetRoyaltyMinter(m royaltySink) {
+	p.royaltyMinter = m
 }
 
 // extractResponseContent pulls the assistant text out of an OpenAI-shape
@@ -729,6 +746,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if !piiDetected {
 		var cached []byte
 		var layer string
+		// pooledHit is non-nil ONLY when the response came from the shared
+		// pool — Stage 2.1 royalty attribution, captured at lookup but
+		// consumed exclusively at the SERVE points below. A found-but-not-
+		// served hit (e.g. SSE replay failure falling through to the live
+		// LLM) therefore reports nothing and mints nothing.
+		var pooledHit *poolroyalty.ServedHit
 		span.AddEvent("cache.check.exact")
 		if c := p.tryExact(ctx, cfg.name, model, cachePrompt); c != nil {
 			cached, layer = c, "cache_hit_exact"
@@ -749,9 +772,28 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// whole branch (and its extra cache read) never runs.
 				if c, owner := p.tryExactPooled(ctx, cfg.name, model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled"
+					pooledHit = &poolroyalty.ServedHit{
+						RequestID:            requestID,
+						RequesterWorkspace:   wsID,
+						ContributorWorkspace: owner,
+						Layer:                "exact",
+						EntryID:              p.exact.Key(cfg.name, model, pooledPromptKey(prompt)),
+						Provider:             cfg.name,
+						Model:                model,
+					}
 					span.AddEvent("cache.hit.pooled")
-				} else if c, owner := p.trySemanticPooled(ctx, cfg.name, model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+				} else if c, owner, entryID, sim := p.trySemanticPooled(ctx, cfg.name, model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled_semantic"
+					pooledHit = &poolroyalty.ServedHit{
+						RequestID:            requestID,
+						RequesterWorkspace:   wsID,
+						ContributorWorkspace: owner,
+						Layer:                "semantic",
+						EntryID:              entryID,
+						Provider:             cfg.name,
+						Model:                model,
+						Similarity:           sim,
+					}
 					span.AddEvent("cache.hit.pooled_semantic")
 				} else {
 					metrics.RecordCacheMiss("cache_miss")
@@ -779,6 +821,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				if err := replayAsSSE(w, cfg.name, cached); err == nil {
 					metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
 					metrics.RecordCacheHit(layer)
+					// SERVE point: the replay succeeded, so a pooled hit
+					// (if that's what this was) now earns its royalty.
+					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached)
 					span.SetAttributes(
 						attribute.Bool("lens.cached", true),
 						attribute.Float64("lens.cost_usd", 0),
@@ -786,6 +831,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					span.SetStatus(codes.Ok, "")
 					return
 				}
+				// NOT served: fall through to the live LLM below — the
+				// pooled hit (if any) must NOT mint (claim at serve, not
+				// at lookup).
 				slog.Warn("proxy: cached payload not replayable as SSE; falling through to LLM",
 					slog.String("provider", cfg.name),
 				)
@@ -793,6 +841,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				writeBytes(w, http.StatusOK, cached)
 				metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
 				metrics.RecordCacheHit(layer)
+				// SERVE point: the cached body went out on the wire.
+				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached)
 				span.SetAttributes(
 					attribute.Bool("lens.cached", true),
 					attribute.Float64("lens.cost_usd", 0),
@@ -1462,16 +1512,63 @@ func (p *Proxy) trySemantic(ctx context.Context, provider, model, prompt string)
 // search over is_poolable rows only (a separate keyspace from the private
 // search, which filters those out). It embeds the RAW prompt — matching how
 // pooled rows are written — and returns the body plus the contributing
-// workspace. A miss is (nil, "").
-func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model, rawPrompt string) ([]byte, string) {
+// workspace plus the matched row's id and similarity (Stage-2.1 royalty
+// attribution data). A miss is (nil, "", "", 0).
+func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model, rawPrompt string) ([]byte, string, string, float64) {
 	if p.semantic == nil {
-		return nil, ""
+		return nil, "", "", 0
 	}
-	body, owner, err := p.semantic.GetPooled(ctx, provider, model, rawPrompt)
+	body, owner, entryID, sim, err := p.semantic.GetPooled(ctx, provider, model, rawPrompt)
 	if err != nil || body == nil {
-		return nil, ""
+		return nil, "", "", 0
 	}
-	return body, owner
+	return body, owner, entryID, sim
+}
+
+// mintPooledRoyalty fires the Stage-2.1 Pool-B royalty mint for a SERVED
+// pooled hit. Called ONLY at the serve points (after replayAsSSE succeeds or
+// the cached body was written) — never at lookup. hit is nil for private hits
+// and for non-pooled traffic, making this a no-op on every pre-Stage-2.1
+// path; a nil royaltyMinter (flag off / not wired) is equally inert.
+//
+// avoided_COGS is what the requester's live call would have cost, priced with
+// the existing estimated-tokens convention (len/4 — the proxy.go:1091 shape).
+// Exactly-once enforcement lives in the Minter's request_id claim row; mint
+// failure is logged and never affects the already-served response (the claim
+// rolls back with the credit, so a later retry can still mint).
+func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHit, prompt string, served []byte) {
+	if p.royaltyMinter == nil || hit == nil {
+		return
+	}
+	hit.AvoidedCOGSUSD = alerts.CostUSD(hit.Model, len(prompt)/4, len(served)/4)
+	// The serve already happened — a client disconnect after receiving the
+	// response must not cancel the contributor's royalty mid-transaction.
+	// WithoutCancel keeps the request's values (trace) but detaches its
+	// cancellation; the mint is synchronous-after-flush, so it adds no
+	// client-visible latency either way.
+	res, err := p.royaltyMinter.MintServedHit(context.WithoutCancel(ctx), *hit)
+	if err != nil {
+		// On a clean error the tx rolled back (claim + credit together) and a
+		// retry can mint; on an ambiguous commit error the claim may have
+		// persisted, in which case the retry is suppressed — deflationary
+		// either way, never a double-mint.
+		slog.Warn("poolroyalty: mint failed (response already served; claim rolled back or commit ambiguous — a retry may mint, and can never double-mint)",
+			slog.String("request_id", hit.RequestID),
+			slog.String("contributor", hit.ContributorWorkspace),
+			slog.String("requester", hit.RequesterWorkspace),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if res.Minted {
+		slog.Info("poolroyalty: royalty minted",
+			slog.String("request_id", hit.RequestID),
+			slog.String("contributor", hit.ContributorWorkspace),
+			slog.String("requester", hit.RequesterWorkspace),
+			slog.String("layer", hit.Layer),
+			slog.Float64("amount", res.Amount),
+		)
+	}
 }
 
 // poolKeyMarker namespaces the shared (cross-tenant) cache keyspace so it is

@@ -29,8 +29,9 @@ func TestSemanticCache_SetPooled_TagsContributor(t *testing.T) {
 	}
 }
 
-// GetPooled filters is_poolable=true and returns the response + contributor on a
-// hit above threshold.
+// GetPooled filters is_poolable=true and returns the response + contributor +
+// the matched row's id (Stage 2.1 attribution: the entry identity rides on the
+// royalty claim row as DATA — it is NOT part of the idempotency key).
 func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 
@@ -45,12 +46,18 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 		WithArgs(id).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	body, owner, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
+	body, owner, entryID, sim, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(body) != "pooled_payload" || owner != "wsA" {
 		t.Fatalf("got (%q, %q), want (pooled_payload, wsA)", body, owner)
+	}
+	if entryID != id {
+		t.Fatalf("entryID = %q, want the matched prompt_embeddings.id %q", entryID, id)
+	}
+	if sim != 0.95 {
+		t.Fatalf("similarity = %v, want 0.95 (royalty-claim attribution data)", sim)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet: %v", err)
@@ -66,9 +73,9 @@ func TestSemanticCache_GetPooled_BelowThreshold(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 				AddRow("id1", "x", "wsA", 0.5),
 		)
-	body, owner, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
-	if err != nil || body != nil || owner != "" {
-		t.Fatalf("below threshold must miss; got (%q,%q,%v)", body, owner, err)
+	body, owner, entryID, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
+	if err != nil || body != nil || owner != "" || entryID != "" {
+		t.Fatalf("below threshold must miss; got (%q,%q,%q,%v)", body, owner, entryID, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet: %v", err)
@@ -86,7 +93,7 @@ func TestSemanticCache_GetPooled_EmptyContributor(t *testing.T) {
 				AddRow("id1", "x", "", 0.99),
 		)
 	mock.ExpectExec(`UPDATE prompt_embeddings`).WithArgs("id1").WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	body, owner, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
+	body, owner, _, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
 	if err != nil {
 		t.Fatal(err)
 	}

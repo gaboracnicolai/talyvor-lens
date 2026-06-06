@@ -75,10 +75,18 @@ func (p *Processor) Process(ctx context.Context, r Receipt) (ProcessResult, erro
 
 	metrics.POVIReceipt(verified)
 
+	// firstRecord is the replay guard: RecordReceipt's ON CONFLICT result.
+	// A receipt whose request_id was already recorded is a REPLAY — it is
+	// still verified and reported, but it must never mint a second time
+	// (the claim/RowsAffected shape shared with povi_challenges and
+	// pool_royalty_mints). A nil store can't dedup and reports true.
+	firstRecord := true
 	if p.store != nil {
-		if err := p.store.RecordReceipt(ctx, r, verified); err != nil {
+		inserted, err := p.store.RecordReceipt(ctx, r, verified)
+		if err != nil {
 			return ProcessResult{}, err
 		}
+		firstRecord = inserted
 	}
 
 	res := ProcessResult{Verified: verified, Reason: reason}
@@ -87,7 +95,14 @@ func (p *Processor) Process(ctx context.Context, r Receipt) (ProcessResult, erro
 		// active stake ≥ min). An unstaked/under-staked node's receipt is
 		// recorded but ineligible to mint — even if minting is enabled.
 		res.StakeEligible = p.stakeEligible(ctx, r.NodeID)
-		if res.StakeEligible {
+		switch {
+		case !res.StakeEligible:
+			if res.Reason == "" {
+				res.Reason = "node not stake-eligible — receipt recorded but ineligible to mint"
+			}
+		case !firstRecord:
+			res.Reason = "duplicate receipt (request_id already recorded) — replay, not minting"
+		default:
 			// MintFromReceipt is itself gated: it no-ops when mintingEnabled is
 			// false, so this never mints by default.
 			minted, amount, err := MintFromReceipt(ctx, p.minter, r, p.mintingEnabled)
@@ -95,8 +110,6 @@ func (p *Processor) Process(ctx context.Context, r Receipt) (ProcessResult, erro
 				return res, err
 			}
 			res.Minted, res.Amount = minted, amount
-		} else if res.Reason == "" {
-			res.Reason = "node not stake-eligible — receipt recorded but ineligible to mint"
 		}
 	}
 	return res, nil

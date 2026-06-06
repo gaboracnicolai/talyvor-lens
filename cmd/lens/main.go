@@ -68,6 +68,7 @@ import (
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/pii"
+	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/proxy"
@@ -526,6 +527,22 @@ func run() error {
 	tokenLedger := mining.NewLedgerStore(pool)
 	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
 	_ = cacheMiner // hooks into the cache-hit path in a follow-up wire-up
+
+	// Phase-2 Stage 2.1 Pool-B royalty mint: a SERVED cross-tenant pooled hit
+	// mints s × avoided_COGS to the contributing tenant, exactly once per
+	// serving request (UNIQUE(request_id) claim + CreditTx in one tx — extends
+	// the existing FOR UPDATE ledger discipline, no advisory lock). Inert by
+	// default: with LENS_POOL_ROYALTY_MINTING_ENABLED=false (the default) the
+	// Minter no-ops before touching the DB, and pooled hits serve exactly as
+	// Stage 2.0 left them.
+	p.SetRoyaltyMinter(poolroyalty.NewMinter(
+		pool, tokenLedger, cfg.PoolRoyaltyShare,
+		func() bool { return cfg.PoolRoyaltyMintingEnabled },
+	))
+	if cfg.PoolRoyaltyMintingEnabled {
+		logger.Warn("poolroyalty: Pool-B royalty minting is ENABLED — served cross-tenant pooled hits mint LENS to contributors",
+			slog.Float64("royalty_share", cfg.PoolRoyaltyShare))
+	}
 
 	// Compute mining (Batch 2 Item 2). Wires its hook into the
 	// localrouter so any verified GPU node that serves a
