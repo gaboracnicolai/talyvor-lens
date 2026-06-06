@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -507,7 +508,11 @@ func Load() (*Config, error) {
 	c.PoolRoyaltyShare = 0.5
 	if v := os.Getenv("LENS_POOL_ROYALTY_SHARE"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
-		if err != nil || f < 0 || f > 1 {
+		// math.IsNaN is load-bearing: ParseFloat("NaN") succeeds and NaN
+		// compares false to every bound, so the range checks alone would
+		// let a balance-poisoning NaN share through. (±Inf is caught by
+		// the range checks.)
+		if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
 			return nil, fmt.Errorf("invalid LENS_POOL_ROYALTY_SHARE (must be in [0,1]): %s", v)
 		}
 		c.PoolRoyaltyShare = f

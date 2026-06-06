@@ -226,3 +226,13 @@ func TestLoad_PoolRoyaltyShareInvalidRejected(t *testing.T) {
 		})
 	}
 }
+
+// NaN parses without error and compares false to every bound — the [0,1]
+// validation must reject it explicitly or a NaN share reaches the mint math.
+func TestLoad_PoolRoyaltyShareNaNRejected(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_POOL_ROYALTY_SHARE", "NaN")
+	if _, err := Load(); err == nil {
+		t.Error("Load must reject LENS_POOL_ROYALTY_SHARE=NaN (it bypasses range comparisons and corrupts balances as NaN×COGS)")
+	}
+}

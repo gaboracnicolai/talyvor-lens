@@ -1541,9 +1541,18 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 		return
 	}
 	hit.AvoidedCOGSUSD = alerts.CostUSD(hit.Model, len(prompt)/4, len(served)/4)
-	res, err := p.royaltyMinter.MintServedHit(ctx, *hit)
+	// The serve already happened — a client disconnect after receiving the
+	// response must not cancel the contributor's royalty mid-transaction.
+	// WithoutCancel keeps the request's values (trace) but detaches its
+	// cancellation; the mint is synchronous-after-flush, so it adds no
+	// client-visible latency either way.
+	res, err := p.royaltyMinter.MintServedHit(context.WithoutCancel(ctx), *hit)
 	if err != nil {
-		slog.Warn("poolroyalty: mint failed (response already served; claim rolled back — a retry can mint)",
+		// On a clean error the tx rolled back (claim + credit together) and a
+		// retry can mint; on an ambiguous commit error the claim may have
+		// persisted, in which case the retry is suppressed — deflationary
+		// either way, never a double-mint.
+		slog.Warn("poolroyalty: mint failed (response already served; claim rolled back or commit ambiguous — a retry may mint, and can never double-mint)",
 			slog.String("request_id", hit.RequestID),
 			slog.String("contributor", hit.ContributorWorkspace),
 			slog.String("requester", hit.RequesterWorkspace),

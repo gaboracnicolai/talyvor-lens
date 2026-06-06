@@ -265,3 +265,38 @@ func TestRoyaltyShare_InvariantAndClamping(t *testing.T) {
 		}
 	}
 }
+
+// NaN HARDENING (diff-review finding): strconv.ParseFloat("NaN") parses
+// without error and every <,>,<= comparison on NaN is false — so an
+// unguarded NaN share (or NaN avoided_COGS) would sail through the clamp and
+// the amount<=0 guard into CreditTx, permanently corrupting the contributor's
+// balance (NaN propagates through every subsequent bal+delta). NaN and ±Inf
+// must be neutralized at both layers.
+func TestMintServedHit_NaNAndInfNeverReachTheLedger(t *testing.T) {
+	pool := newMockPool(t) // NO expectations: any DB call fails the test
+	ledger := &fakeLedger{}
+
+	if m := NewMinter(pool, ledger, math.NaN(), enabledOn); m.Share() != 0 {
+		t.Errorf("NewMinter(NaN).Share() = %v, want 0 (deflationary-safe)", m.Share())
+	}
+	if m := NewMinter(pool, ledger, math.Inf(1), enabledOn); m.Share() != 1 {
+		t.Errorf("NewMinter(+Inf).Share() = %v, want 1 (clamped)", m.Share())
+	}
+	if m := NewMinter(pool, ledger, math.Inf(-1), enabledOn); m.Share() != 0 {
+		t.Errorf("NewMinter(-Inf).Share() = %v, want 0 (clamped)", m.Share())
+	}
+
+	// Even with a valid share, a non-finite avoided_COGS must not credit.
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	for _, bad := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		h := sampleHit()
+		h.AvoidedCOGSUSD = bad
+		res, err := m.MintServedHit(context.Background(), h)
+		if err != nil || res.Minted {
+			t.Errorf("AvoidedCOGSUSD=%v must not mint; res=%+v err=%v", bad, res, err)
+		}
+	}
+	if len(ledger.calls) != 0 {
+		t.Fatalf("non-finite values must NEVER reach CreditTx; credits=%d", len(ledger.calls))
+	}
+}

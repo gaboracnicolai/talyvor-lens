@@ -23,6 +23,7 @@ package poolroyalty
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/jackc/pgx/v5"
 
@@ -94,9 +95,12 @@ type Minter struct {
 
 // NewMinter builds a Minter. share is clamped to [0,1] so the Burn-and-Mint
 // invariant (Talyvor nets (1−s) × avoided_COGS ≥ 0) cannot be violated by
-// config. enabled is read per call so the flag stays live without rewiring.
+// config. NaN is explicitly forced to 0 — every comparison on NaN is false,
+// so without the IsNaN check a NaN share would sail through the clamp and
+// poison the mint math (NaN × COGS = NaN, which also defeats amount <= 0).
+// enabled is read per call so the flag stays live without rewiring.
 func NewMinter(db txBeginner, ledger ledgerCreditTx, share float64, enabled func() bool) *Minter {
-	if share < 0 {
+	if math.IsNaN(share) || share < 0 {
 		share = 0
 	}
 	if share > 1 {
@@ -127,7 +131,10 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 		return Result{}, nil
 	}
 	amount := m.share * h.AvoidedCOGSUSD
-	if amount <= 0 {
+	// Non-finite amounts must NEVER reach the ledger: a NaN or ±Inf written
+	// to lens_token_balances poisons the balance permanently (every later
+	// bal+delta stays non-finite). amount <= 0 alone does NOT catch NaN.
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
 		return Result{}, nil
 	}
 
