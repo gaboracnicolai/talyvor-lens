@@ -30,6 +30,7 @@ import (
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
@@ -109,6 +110,7 @@ type Proxy struct {
 	auditExporter     *audit.Exporter
 	guardrails        *guardrails.Engine
 	distiller         *distillIntegration
+	poolGate          *cache_pooling.PoolabilityGate
 	retryConfig       retry.Config
 	httpClient        *http.Client
 	openAIKey         string
@@ -251,6 +253,14 @@ func (p *Proxy) SetBudgetService(s *budgets.Service) {
 
 func (p *Proxy) setAlertSink(sink alertSink) {
 	p.alertManager = sink
+}
+
+// SetPoolGate enables the Phase-2 Stage 2.0 shared-cache governance gate. Wired
+// as a setter so proxy.New's signature stays put. When unset (nil), the pooled
+// path is fully inert: storeCaches still owner-tags private entries but writes no
+// pooled copy, and the request path never attempts a cross-tenant read.
+func (p *Proxy) SetPoolGate(gate *cache_pooling.PoolabilityGate) {
+	p.poolGate = gate
 }
 
 // extractResponseContent pulls the assistant text out of an OpenAI-shape
@@ -728,6 +738,21 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			if c := p.trySemantic(ctx, cfg.name, model, cachePrompt); c != nil {
 				cached, layer = c, "cache_hit_semantic"
 				span.AddEvent("cache.hit.semantic")
+			} else if p.poolGate.Participant(wsID) {
+				// Private miss + this workspace opted into pooling: a poolable
+				// requester may be served an entry CONTRIBUTED by another poolable
+				// workspace, found under the un-prefixed pooled key. The serve
+				// requires the contributor to ALSO be opted in (verified via the
+				// owner stamped on the entry) — gated by MaybeAllowPooledHit, which
+				// needs global + requester + contributor all true. Inert by
+				// default: Participant is false when the gate is nil/off, so this
+				// whole branch (and its extra cache read) never runs.
+				if c, owner := p.tryExactPooled(ctx, cfg.name, model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+					cached, layer = c, "cache_hit_pooled"
+					span.AddEvent("cache.hit.pooled")
+				} else {
+					metrics.RecordCacheMiss("cache_miss")
+				}
 			} else {
 				// Both exact and semantic missed — a true cache miss. Symmetric
 				// with the RecordCacheHit calls below.
@@ -1101,8 +1126,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		if shouldCache {
 			// Cache against the workspace-scoped (uncompressed) prompt +
 			// originally requested model so repeat callers in the same
-			// workspace get cache hits but other workspaces don't.
-			p.storeCaches(ctx, cfg.name, model, cachePrompt, upstreamBody)
+			// workspace get cache hits but other workspaces don't. The raw
+			// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
+			p.storeCaches(ctx, cfg.name, model, cachePrompt, prompt, wsID, upstreamBody)
 		}
 		eventPrompt := prompt
 		if piiDetected {
@@ -1290,7 +1316,7 @@ func (p *Proxy) tryLocalRouting(
 	_, _ = w.Write(formatted)
 
 	if !piiDetected {
-		p.storeCaches(ctx, provider, model, cachePrompt, formatted)
+		p.storeCaches(ctx, provider, model, cachePrompt, prompt, wsID, formatted)
 	}
 	eventPrompt := prompt
 	if piiDetected {
@@ -1429,13 +1455,60 @@ func (p *Proxy) trySemantic(ctx context.Context, provider, model, prompt string)
 	return cached
 }
 
-func (p *Proxy) storeCaches(ctx context.Context, provider, model, prompt string, response []byte) {
+// poolKeyMarker namespaces the shared (cross-tenant) cache keyspace so it is
+// PROVABLY disjoint from the workspace-private keyspace. A private key is hashed
+// from "wsID:prompt" where wsID comes from the X-Talyvor-Workspace HTTP header
+// (which cannot contain NUL); the marker's NUL bytes therefore can never appear
+// at the start of a private key's pre-image. Without this, a tenant could craft
+// a raw prompt equal to "victimWsID:victimPrompt" and collide with the victim's
+// PRIVATE key — reading a private entry that has no intentionally-pooled twin
+// (e.g. one written before the victim opted in). The marker makes that
+// impossible by construction, independent of the downstream consent check.
+const poolKeyMarker = "\x00pool\x00"
+
+// pooledPromptKey is the key material for the shared pool: the raw prompt under
+// the reserved marker. Two poolable workspaces sending the same prompt land on
+// the same pooled key (intended sharing); it can never equal a private key.
+func pooledPromptKey(prompt string) string { return poolKeyMarker + prompt }
+
+// tryExactPooled looks up the shared POOLED key (marker + raw prompt, no wsID)
+// and returns the cached body plus the contributing workspace recorded on it.
+// It is the cross-tenant read surface: a separate keyspace from the
+// workspace-private keys tryExact uses, so it can never leak a private entry. A
+// miss is (nil, "").
+func (p *Proxy) tryExactPooled(ctx context.Context, provider, model, rawPrompt string) ([]byte, string) {
+	if p.exact == nil {
+		return nil, ""
+	}
+	body, owner, err := p.exact.GetWithOwner(ctx, provider, model, pooledPromptKey(rawPrompt))
+	if err != nil || body == nil {
+		return nil, ""
+	}
+	return body, owner
+}
+
+// storeCaches writes the response to the workspace-private exact key (now
+// owner-tagged via SetWithOwner — additive, the private key is unchanged) and to
+// the semantic cache. When the contributing workspace has opted into pooling AND
+// the global switch is on, it ALSO writes a copy under the un-prefixed pooled
+// key, tagged with the contributor — the only cross-tenant-readable surface.
+// Inert by default: a nil/off gate writes no pooled copy. Callers gate this on
+// !piiDetected, so a PII-flagged entry is never stored, hence never pooled.
+func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, rawPrompt, wsID string, response []byte) {
 	if p.exact != nil {
-		_ = p.exact.Set(ctx, provider, model, prompt, response)
+		// Private (workspace-scoped) entry — today's behavior, now owner-stamped.
+		_ = p.exact.SetWithOwner(ctx, provider, model, cachePrompt, wsID, response)
+		// Pooled (cross-tenant) copy under the reserved, namespace-disjoint pooled
+		// key — opt-in, inert by default.
+		if p.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+			_ = p.exact.SetWithOwner(ctx, provider, model, pooledPromptKey(rawPrompt), wsID, response)
+		}
 	}
 	if p.semantic != nil && p.embedder != nil {
-		if vec, err := p.embedder.Embed(ctx, prompt); err == nil {
-			_ = p.semantic.Set(ctx, provider, model, prompt, response, vec)
+		// Semantic cache stays workspace-private (cachePrompt) — semantic pooling
+		// is deferred to Stage 2.0b (needs a provenance migration).
+		if vec, err := p.embedder.Embed(ctx, cachePrompt); err == nil {
+			_ = p.semantic.Set(ctx, provider, model, cachePrompt, response, vec)
 		}
 	}
 }

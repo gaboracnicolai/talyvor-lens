@@ -386,8 +386,9 @@ func (s *StreamHandler) serve(
 	}
 	if shouldCache {
 		// Use the workspace-scoped prompt for the cache key so streamed
-		// responses respect tenant isolation just like buffered ones.
-		s.proxy.storeCaches(storeCtx, provider, model, cachePrompt, cached)
+		// responses respect tenant isolation just like buffered ones. The raw
+		// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
+		s.proxy.storeCaches(storeCtx, provider, model, cachePrompt, prompt, sc.wsID, cached)
 	}
 	eventPrompt := prompt
 	if piiDetected && s.proxy.piiDetector != nil {
