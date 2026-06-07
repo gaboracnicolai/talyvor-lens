@@ -125,6 +125,8 @@ These were each evaluated on first principles and deliberately deferred. Logged 
     (4) The defensible moat is the controls + trust layer (exactly-once-under-failure, programmable caps/holdbacks, fraud-bounding, enterprise-trustable audit) — i.e. the Pool-B muscle — not the ledger itself, which anyone can run.
   Context: this space is live (e.g. Meta acquired Moltbook, an agent identity/directory social network, Mar 2026 — bought for the agent-identity/directory concept, while the ecosystem itself judged the 'social' layer froth and the agent runtime the real asset). Sequenced as a separate-product evaluation far after the Talyvor engine + suite; logged so it isn't lost.
 
+- **Poisoning posture — DECIDED: Option C (caps + economics + tamper-evidence + in-window holdback); Option A (content-addressed snapshots, keyed by answer_sha256) is the build-on-customer-demand upgrade for forever-adjudicability; Option B rejected. Full rationale in ROADMAP.md.** The caps (per-pair + per-entry, both on main) make C's bounded-exposure claim arithmetically true, which is why C is sufficient now.
+
 ### Collaborator — recently landed (all merged to main, in our base)
 - Auth-reachability fix (#53): AuthMiddleware(ks, m) — DB fast-path unchanged + Manager fallback so the global admin key + JWTs reach admin routes. ES256 JWT (#64/65/66).
 - Full ISO27001-track hardening pass (#53→#82, ~29 commits): auth/JWT, TLS, TOCTOU, security headers, CORS (#63), DB atomicity, worker hardening (#82 RLIMIT_AS surfaced by our PR#1 isolator test). Our DISTILL surface survived intact.
