@@ -102,6 +102,20 @@ _(last updated: Jun 2026 — Phase-2 Stage 2.1 Pool-B royalty mint complete (mig
   - A 2-symbol alphabet (binary/Morse) as an intermediate form to cut tokens — INVERTS the goal: few symbol-TYPES means many tokens, because the tokenizer shatters a long 2-symbol stream into many tiny tokens. Normal-language tokens are cheap precisely BECAUSE the vocabulary is large (each token packs more meaning). Round-tripping through binary adds two lossy conversions and the model never sees it anyway (it's converted back to normal language first), so it buys nothing.
   THE ONE LEGITIMATE 'Talyvor alphabet' — a CUSTOM TOKENIZER trained on Talyvor's own traffic, inside a Phase-6 Talyvor-trained model: make the multi-word patterns our customers repeat into single tokens. This genuinely cuts tokens — but the win comes from MORE vocabulary (not fewer symbols) and from TRAINING the model to use it (not secrecy), so it lives in the Phase-6 specialized-model project where alphabet and model are co-designed. Logged so the full idea is captured and correctly resolved.
 
+### Future — reasoned-through ideas, parked (not current work; sequenced after the full engine)
+
+These were each evaluated on first principles and deliberately deferred. Logged so the reasoning isn't lost and they aren't re-litigated from scratch.
+
+- **Phase-6 — specialized small model trained on Talyvor's own data.** A small model trained on Talyvor's real consumption + verification traffic is plausibly better-for-our-workload than general OSS models, and is a genuine proprietary asset. It is an ML-research program (a second company muscle), NOT a backend build task; 'beat all OSS on quality+perf+size at once' is frontier-lab effort and is not the claim.
+
+- **Phase-6 — custom tokenizer (the one legitimate 'Talyvor alphabet').** Co-designed with the Phase-6 model: make the multi-word patterns our customers repeat into single tokens, cutting token count. The win comes from MORE vocabulary and from TRAINING the model to use it — not from fewer symbols and not from secrecy. Only works on a model we train. (This is the real form of the earlier 2-symbol-alphabet idea, which was rejected: few symbol-types -> more tokens, because the tokenizer shatters the stream.)
+
+- **Phase-6-adjacent — small-local-by-default + route-to-bigger for hard queries.** The honest version of a 'local brain': run a small local model for easy traffic and ESCALATE hard queries to a larger model. Uses the routing primitive Lens already has. A small local model cannot match a frontier model across-the-board with no escalation — the gap is scale/compute, not connectivity.
+
+- **Required gate before any real-customer minting flip-on — external security/crypto audit.** Before LENS_POOL_ROYALTY_MINTING_ENABLED is ever set true for a paying customer, the minting + ledger path gets an external security/crypto audit (vendor + legal). This is a hard precondition on issuance, not optional polish — it sits at the end of the Phase-2 audit, before Phase 3.
+
+- **Frontend-architecture mandates (bake in when the frontend is scoped).** The frontend is built ONCE as a full production-grade product, only after the engine is at 100% with a FROZEN, versioned API contract. Mandates: (1) consume a versioned stable API contract with additive rendering (new fields never break old screens); (2) a shared app shell + design system, with each suite product (Lens/Track/Docs/Code) as a module on it, so the whole suite reuses one frontend. Honest counterweight on record: this build-purity order trades time-to-first-sellable-product for cleanliness; the binding company constraint remains the first referenceable customer who needs a screen.
+
 ### Collaborator — recently landed (all merged to main, in our base)
 - Auth-reachability fix (#53): AuthMiddleware(ks, m) — DB fast-path unchanged + Manager fallback so the global admin key + JWTs reach admin routes. ES256 JWT (#64/65/66).
 - Full ISO27001-track hardening pass (#53→#82, ~29 commits): auth/JWT, TLS, TOCTOU, security headers, CORS (#63), DB atomicity, worker hardening (#82 RLIMIT_AS surfaced by our PR#1 isolator test). Our DISTILL surface survived intact.
