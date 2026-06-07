@@ -440,6 +440,9 @@ func TestMintServedHit_OverCap_RollsBackClaimAndCredit(t *testing.T) {
 	if res.Minted || !res.Capped {
 		t.Errorf("res=%+v, want Capped=true Minted=false", res)
 	}
+	if res.CapReason != "per_pair" {
+		t.Errorf("CapReason = %q, want per_pair", res.CapReason)
+	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet (must roll back, never commit): %v", err)
 	}
@@ -539,5 +542,136 @@ func TestMintServedHit_OverCap_RollsBackHeldCredit(t *testing.T) {
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet (must roll back, never commit): %v", err)
+	}
+}
+
+// ─── per-ENTRY cap (2.3b follow-up) ───
+
+// UNDER per-entry cap (per-pair disabled): the entry COUNT (incl. just-inserted
+// row) is <= cap → commit.
+func TestMintServedHit_UnderEntryCap_Mints(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	m.SetCap(0, 24*time.Hour)      // per-pair OFF
+	m.SetEntryCap(5, 24*time.Hour) // per-entry ON
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints\s+WHERE entry_id`).
+		WithArgs("lens:exact:deadbeef", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(5)))
+	pool.ExpectCommit()
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil || !res.Minted || res.Capped {
+		t.Fatalf("under entry-cap must mint; res=%+v err=%v", res, err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
+	}
+}
+
+// AT per-entry cap+1: Capped with reason "per_entry"; claim+credit rolled back.
+func TestMintServedHit_OverEntryCap_RollsBackWithReason(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	m.SetCap(0, 24*time.Hour)
+	m.SetEntryCap(5, 24*time.Hour)
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints\s+WHERE entry_id`).
+		WithArgs("lens:exact:deadbeef", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(6)))
+	pool.ExpectRollback()
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil {
+		t.Fatalf("entry cap-hit must not error: %v", err)
+	}
+	if res.Minted || !res.Capped || res.CapReason != "per_entry" {
+		t.Errorf("res=%+v, want Capped=true Minted=false CapReason=per_entry", res)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
+	}
+}
+
+// BOTH caps enabled, DETERMINISTIC ORDER: per-pair is checked first, so a serve
+// that breaches per-pair reports "per_pair" and the per-entry COUNT is never
+// even run (no query expectation for it).
+func TestMintServedHit_BothCaps_PerPairCheckedFirst(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	m.SetCap(3, 24*time.Hour)      // per-pair ON
+	m.SetEntryCap(5, 24*time.Hour) // per-entry ON
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints\s+WHERE requester_workspace_id`).
+		WithArgs("wsB", "wsA", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(4))) // breaches per-pair
+	pool.ExpectRollback() // no per-entry COUNT expectation — must not run
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Capped || res.CapReason != "per_pair" {
+		t.Errorf("res=%+v, want per_pair (checked first)", res)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet (per-entry COUNT must NOT run when per-pair already capped): %v", err)
+	}
+}
+
+// BOTH enabled, per-pair PASSES then per-entry breaches → reason "per_entry".
+func TestMintServedHit_BothCaps_EntryBreachesAfterPairPasses(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	m.SetCap(10, 24*time.Hour)
+	m.SetEntryCap(5, 24*time.Hour)
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints\s+WHERE requester_workspace_id`).
+		WithArgs("wsB", "wsA", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(4))) // under per-pair (10)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints\s+WHERE entry_id`).
+		WithArgs("lens:exact:deadbeef", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(6))) // over per-entry (5)
+	pool.ExpectRollback()
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Capped || res.CapReason != "per_entry" {
+		t.Errorf("res=%+v, want per_entry (per-pair passed, per-entry breached)", res)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
+	}
+}
+
+// DISABLED: per-entry == 0 → no entry COUNT runs (byte-identical to pre-feature).
+func TestMintServedHit_EntryCapDisabled_NoCount(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn) // neither cap set → both 0
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectCommit() // straight to commit — NO COUNT of either kind
+
+	if res, err := m.MintServedHit(context.Background(), sampleHit()); err != nil || !res.Minted {
+		t.Fatalf("both caps disabled must mint byte-identically; res=%+v err=%v", res, err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
 	}
 }

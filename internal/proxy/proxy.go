@@ -1588,7 +1588,8 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 	if res.Capped {
 		// 2.3b: serve-but-skip, same shape as the no-hash gate — the customer
 		// was served before the mint ran; the pair's window budget is spent.
-		slog.Info("poolroyalty: mint skipped — per-pair window cap reached (serve unaffected; exposure bounded)",
+		slog.Info("poolroyalty: mint skipped — window cap reached (serve unaffected; exposure bounded)",
+			slog.String("cap", res.CapReason),
 			slog.String("request_id", hit.RequestID),
 			slog.String("contributor", hit.ContributorWorkspace),
 			slog.String("requester", hit.RequesterWorkspace),

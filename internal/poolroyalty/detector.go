@@ -88,13 +88,13 @@ type VolumeFlag struct {
 // flag means "review this pair," never proof of collusion (two close
 // legitimate partners look identical to two workspaces with one owner).
 type SelfDealingFlag struct {
-	ContributorWorkspace   string
-	RequesterWorkspace     string
-	PairMints              int
-	PairMintedUSD          float64
-	FracOfContributorFlow  float64
-	FracOfRequesterFlow    float64
-	Flagged                bool
+	ContributorWorkspace  string
+	RequesterWorkspace    string
+	PairMints             int
+	PairMintedUSD         float64
+	FracOfContributorFlow float64
+	FracOfRequesterFlow   float64
+	Flagged               bool
 }
 
 // SimilarityFlag is one (contributor, entry) semantic cluster with its
