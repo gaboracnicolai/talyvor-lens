@@ -535,10 +535,16 @@ func run() error {
 	// default: with LENS_POOL_ROYALTY_MINTING_ENABLED=false (the default) the
 	// Minter no-ops before touching the DB, and pooled hits serve exactly as
 	// Stage 2.0 left them.
-	p.SetRoyaltyMinter(poolroyalty.NewMinter(
+	royaltyMinter := poolroyalty.NewMinter(
 		pool, tokenLedger, cfg.PoolRoyaltyShare,
 		func() bool { return cfg.PoolRoyaltyMintingEnabled },
-	))
+	)
+	// 2.3b primitive #1: the per-pair rolling-window mint cap — bounds any
+	// party's worst case to cap × s × avoided_COGS per pair per window.
+	// 0 (default) disables; exact under concurrency via the after-CreditTx
+	// count inside the existing mint tx (no new lock).
+	royaltyMinter.SetCap(cfg.PoolMintCapPerPair, cfg.PoolMintCapWindow)
+	p.SetRoyaltyMinter(royaltyMinter)
 	if cfg.PoolRoyaltyMintingEnabled {
 		logger.Warn("poolroyalty: Pool-B royalty minting is ENABLED — served cross-tenant pooled hits mint LENS to contributors",
 			slog.Float64("royalty_share", cfg.PoolRoyaltyShare))

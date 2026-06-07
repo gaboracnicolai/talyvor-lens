@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -80,6 +81,7 @@ func SHA256Hex(b []byte) string {
 type Result struct {
 	Minted        bool    // a claim was taken and the contributor credited
 	AlreadyMinted bool    // the request_id was already claimed — exactly-once suppression
+	Capped        bool    // the per-pair window cap was reached — claim+credit rolled back (2.3b)
 	Amount        float64 // LENS credited (s × avoided_COGS) when Minted
 }
 
@@ -104,6 +106,20 @@ const insertClaimSQL = `INSERT INTO pool_royalty_mints
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (request_id) DO NOTHING`
 
+// capCountSQL is the 2.3b per-pair cap count, run INSIDE the mint tx AFTER
+// CreditTx. The ordering is the whole trick: every mint for a given
+// (requester, contributor) pair must take the SAME contributor-balance
+// FOR UPDATE inside CreditTx, so concurrent serves of one pair serialize
+// there — and under READ COMMITTED each statement snapshots fresh, so a
+// count run after the lock was acquired always sees every prior committed
+// mint for the pair. Exact under concurrency with ZERO new locks. The count
+// includes the just-inserted claim row, so n > cap means "this would be the
+// (cap+1)th". The window rides as microseconds (driver-proof interval).
+// Access path: idx_pool_royalty_mints_requester (requester, created_at DESC).
+const capCountSQL = `SELECT COUNT(*) FROM pool_royalty_mints
+WHERE requester_workspace_id = $1 AND contributor_workspace_id = $2
+  AND created_at > now() - ($3::bigint * interval '1 microsecond')`
+
 // Minter mints s × avoided_COGS to the contributor, exactly once per serving
 // request. Construct via NewMinter; the zero/nil Minter is inert.
 type Minter struct {
@@ -111,6 +127,25 @@ type Minter struct {
 	ledger  ledgerCreditTx
 	share   float64
 	enabled func() bool
+
+	// 2.3b per-pair cap: max mints per (requester, contributor) per rolling
+	// window. 0 = disabled (the default) — the cap branch is skipped
+	// entirely and mint behavior is byte-identical to pre-cap.
+	capPerPair int
+	capWindow  time.Duration
+}
+
+// SetCap configures the per-pair rolling-window mint cap (2.3b primitive #1).
+// perPair 0 disables (the default). The cap is what makes the bounded-
+// exposure posture arithmetic: any party's worst case is
+// cap × s × avoided_COGS per pair per window. Additive setter so existing
+// construction sites stay unchanged.
+func (m *Minter) SetCap(perPair int, window time.Duration) {
+	if perPair < 0 {
+		perPair = 0
+	}
+	m.capPerPair = perPair
+	m.capWindow = window
 }
 
 // NewMinter builds a Minter. share is clamped to [0,1] so the Burn-and-Mint
@@ -198,6 +233,22 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	desc := fmt.Sprintf("pool royalty: %s pooled hit served to %s", h.Layer, h.RequesterWorkspace)
 	if err := m.ledger.CreditTx(ctx, tx, h.ContributorWorkspace, amount, TypePoolRoyalty, desc, meta); err != nil {
 		return Result{}, fmt.Errorf("poolroyalty: credit contributor: %w", err)
+	}
+	// 2.3b per-pair cap — checked AFTER CreditTx on purpose: the credit just
+	// acquired the contributor-balance FOR UPDATE, which serializes every
+	// mint for this pair, making this count exact under concurrency (see
+	// capCountSQL). Over the cap → return Capped and let the deferred
+	// rollback discard the claim AND the credit atomically (the same path
+	// AlreadyMinted uses). Skipped entirely when disabled (capPerPair == 0).
+	if m.capPerPair > 0 {
+		var n int64
+		if err := tx.QueryRow(ctx, capCountSQL,
+			h.RequesterWorkspace, h.ContributorWorkspace, m.capWindow.Microseconds()).Scan(&n); err != nil {
+			return Result{}, fmt.Errorf("poolroyalty: cap count: %w", err)
+		}
+		if n > int64(m.capPerPair) {
+			return Result{Capped: true}, nil
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, fmt.Errorf("poolroyalty: commit mint: %w", err)

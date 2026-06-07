@@ -117,6 +117,20 @@ type Config struct {
 	// to produce a pooled hit in the first place.
 	PoolRoyaltyMintingEnabled bool
 
+	// PoolMintCapPerPair is the Pool-B mint cap (2.3b primitive #1): the max
+	// royalty mints per (requester, contributor) pair per rolling window.
+	// 0 (default) = cap disabled. The cap is what bounds any gaming vector's
+	// worst case to cap × s × avoided_COGS per pair per window — the
+	// arithmetic behind the Option-C deterrence + bounded-exposure posture.
+	// Env: LENS_POOL_MINT_CAP_PER_PAIR.
+	PoolMintCapPerPair int
+
+	// PoolMintCapWindow is the rolling window the per-pair cap counts over
+	// (no period anchor, no state — matches the SpendLimitUSD rolling-window
+	// precedent). Only consulted when the cap is enabled. Default 24h.
+	// Env: LENS_POOL_MINT_CAP_WINDOW (Go duration, e.g. 48h).
+	PoolMintCapWindow time.Duration
+
 	// PoolRoyaltyShare is s, the contributor's share of avoided_COGS
 	// (Stage 2.1). Env: LENS_POOL_ROYALTY_SHARE. Default 0.5. Must be in
 	// [0,1] so Talyvor's net (1−s) × avoided_COGS stays ≥ 0 (the
@@ -504,6 +518,22 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_POVI_CHALLENGE_RATE (must be in [0,1]): %s", v)
 		}
 		c.POVIChallengeRate = f
+	}
+	c.PoolMintCapPerPair = 0
+	if v := os.Getenv("LENS_POOL_MINT_CAP_PER_PAIR"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_POOL_MINT_CAP_PER_PAIR (must be ≥ 0; 0 disables): %s", v)
+		}
+		c.PoolMintCapPerPair = n
+	}
+	c.PoolMintCapWindow = 24 * time.Hour
+	if v := os.Getenv("LENS_POOL_MINT_CAP_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v) // Go duration units, e.g. 48h
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_POOL_MINT_CAP_WINDOW (Go duration > 0, e.g. 48h): %s", v)
+		}
+		c.PoolMintCapWindow = d
 	}
 	c.PoolRoyaltyShare = 0.5
 	if v := os.Getenv("LENS_POOL_ROYALTY_SHARE"); v != "" {
