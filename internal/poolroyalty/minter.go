@@ -22,6 +22,8 @@ package poolroyalty
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
 
@@ -56,6 +58,22 @@ type ServedHit struct {
 	Model                string
 	Similarity           float64 // semantic hits only; 0 for exact
 	AvoidedCOGSUSD       float64 // what the requester's live call would have cost (estimated-tokens semantics)
+
+	// Stage 2.3.0 evidence hashes — UNSALTED hex(sha256(...)) over the raw
+	// bytes, computed AT SERVE (both cache stores are mutable underneath the
+	// mint; a later hash could bind different bytes). Empty means the serve
+	// could not capture them (e.g. a none-LoggingPolicy requester) — and the
+	// gate below then refuses to mint: an unadjudicable mint is never created.
+	AnswerSHA256 string // hex(sha256(served response bytes))
+	PromptSHA256 string // hex(sha256(raw requester prompt bytes))
+}
+
+// SHA256Hex is the house content hash: hex(sha256(b)), UNSALTED — no
+// provider:model prefix (the salted identities already live on the claim row
+// via entry_id). Used for both Stage-2.3.0 evidence hashes.
+func SHA256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // Result is the outcome of one mint attempt.
@@ -82,8 +100,8 @@ type ledgerCreditTx interface {
 // NOTHING + a RowsAffected check is the exactly-once guard (povi_challenges
 // pattern). id and created_at take their column defaults.
 const insertClaimSQL = `INSERT INTO pool_royalty_mints
-    (request_id, requester_workspace_id, contributor_workspace_id, layer, entry_id, provider, model, similarity, avoided_cogs_usd, minted_amount)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    (request_id, requester_workspace_id, contributor_workspace_id, layer, entry_id, provider, model, similarity, avoided_cogs_usd, minted_amount, answer_sha256, prompt_sha256)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (request_id) DO NOTHING`
 
 // Minter mints s × avoided_COGS to the contributor, exactly once per serving
@@ -132,6 +150,15 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	if h.RequestID == "" || h.ContributorWorkspace == "" || h.ContributorWorkspace == h.RequesterWorkspace {
 		return Result{}, nil
 	}
+	// NO HASH -> NO MINT (Stage 2.3.0, the privacy-coherence gate): a serve
+	// whose evidence hashes could not be captured still serves and caches
+	// normally, but writes no claim row and mints nothing — an unadjudicable
+	// mint must never exist. WRITE-PATH ONLY: pre-2.3.0 rows with '' hashes
+	// are historical data this gate never scans. Deflationary direction,
+	// like every other defensive no-op here.
+	if h.AnswerSHA256 == "" || h.PromptSHA256 == "" {
+		return Result{}, nil
+	}
 	amount := m.share * h.AvoidedCOGSUSD
 	// Non-finite amounts must NEVER reach the ledger: a NaN or ±Inf written
 	// to lens_token_balances poisons the balance permanently (every later
@@ -148,7 +175,8 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 
 	tag, err := tx.Exec(ctx, insertClaimSQL,
 		h.RequestID, h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
-		h.EntryID, h.Provider, h.Model, h.Similarity, h.AvoidedCOGSUSD, amount)
+		h.EntryID, h.Provider, h.Model, h.Similarity, h.AvoidedCOGSUSD, amount,
+		h.AnswerSHA256, h.PromptSHA256)
 	if err != nil {
 		return Result{}, fmt.Errorf("poolroyalty: insert mint claim: %w", err)
 	}

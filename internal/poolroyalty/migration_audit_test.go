@@ -96,4 +96,15 @@ func TestMigrations_PoolRoyaltySchemaInvariants(t *testing.T) {
 	if strings.Contains(strings.ToUpper(claimMigration), "PARTITION BY") {
 		t.Error("pool_royalty_mints must stay UNPARTITIONED: partitioning would force the UNIQUE key to include the partition key, breaking UNIQUE(request_id)")
 	}
+
+	// Stage 2.3.0: the serve-time evidence hashes. Both columns must exist,
+	// additive with DEFAULT '' so pre-2.3.0 rows stay readable ('' = historical
+	// "not captured"; the no-hash-no-mint gate applies only to NEW serves, in
+	// the write path — never to existing rows).
+	for _, col := range []string{"answer_sha256", "prompt_sha256"} {
+		re := regexp.MustCompile(`(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+` + col + `\s+TEXT\s+NOT\s+NULL\s+DEFAULT\s+''`)
+		if !re.MatchString(claimMigration) {
+			t.Errorf("pool_royalty_mints must gain %s via additive ADD COLUMN IF NOT EXISTS ... TEXT NOT NULL DEFAULT '' (Stage 2.3.0 evidence hash)", col)
+		}
+	}
 }

@@ -125,7 +125,8 @@ func TestMarginIdentity_MatchesShareArithmetic(t *testing.T) {
 		pool.ExpectBegin()
 		pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
 			WithArgs(h.RequestID, h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
-				h.EntryID, h.Provider, h.Model, h.Similarity, a, minted).
+				h.EntryID, h.Provider, h.Model, h.Similarity, a, minted,
+				h.AnswerSHA256, h.PromptSHA256).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 		pool.ExpectCommit()
 

@@ -823,7 +823,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					metrics.RecordCacheHit(layer)
 					// SERVE point: the replay succeeded, so a pooled hit
 					// (if that's what this was) now earns its royalty.
-					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached)
+					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
 					span.SetAttributes(
 						attribute.Bool("lens.cached", true),
 						attribute.Float64("lens.cost_usd", 0),
@@ -842,7 +842,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
 				metrics.RecordCacheHit(layer)
 				// SERVE point: the cached body went out on the wire.
-				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached)
+				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
 				span.SetAttributes(
 					attribute.Bool("lens.cached", true),
 					attribute.Float64("lens.cost_usd", 0),
@@ -1536,10 +1536,35 @@ func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model, rawPromp
 // Exactly-once enforcement lives in the Minter's request_id claim row; mint
 // failure is logged and never affects the already-served response (the claim
 // rolls back with the credit, so a later retry can still mint).
-func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHit, prompt string, served []byte) {
+func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHit, prompt string, served []byte, loggingPolicy workspace.LoggingPolicy) {
 	if p.royaltyMinter == nil || hit == nil {
 		return
 	}
+	// Stage 2.3.0 — NO HASH -> NO MINT (the privacy-coherence gate): a
+	// none-LoggingPolicy requester forbids persisting content-derived
+	// artifacts, so we capture no evidence hashes and fire no mint at all.
+	// The serve itself already happened and is unaffected. Defense in depth:
+	// the Minter independently refuses empty-hash hits.
+	if loggingPolicy == workspace.LoggingNone {
+		slog.Info("poolroyalty: mint skipped — requester logging policy 'none' forbids evidence capture (no hash, no mint)",
+			slog.String("request_id", hit.RequestID),
+			slog.String("contributor", hit.ContributorWorkspace),
+		)
+		return
+	}
+	// Evidence hashes, computed AT SERVE over the served cache-entry bytes
+	// (on the SSE branch the wire format is synthesized FROM these bytes —
+	// the entry, not the frames, is the adjudicable artifact): both cache
+	// stores are mutable underneath the mint (Redis SET overwrite/TTL;
+	// semantic upsert replaces response), so only a serve-time hash binds
+	// the adjudicable content. Unsalted pure content hashes — the salted
+	// identities already live on the claim row via entry_id. NOTE the
+	// privacy posture: metadata-policy requesters persist NO prompt text,
+	// but DO persist this prompt digest (pseudonymous, same class as the
+	// existing prompt_embeddings.prompt_hash) — only policy 'none' opts a
+	// workspace out of digests, at the cost of its pooled serves not minting.
+	hit.AnswerSHA256 = poolroyalty.SHA256Hex(served)
+	hit.PromptSHA256 = poolroyalty.SHA256Hex([]byte(prompt))
 	hit.AvoidedCOGSUSD = alerts.CostUSD(hit.Model, len(prompt)/4, len(served)/4)
 	// The serve already happened — a client disconnect after receiving the
 	// response must not cancel the contributor's royalty mid-transaction.

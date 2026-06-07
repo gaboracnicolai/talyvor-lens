@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/talyvor/lens/internal/poolroyalty"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // recordingRoyaltyMinter records every ServedHit the proxy reports. The
@@ -229,5 +230,68 @@ func TestPoolRoyalty_ServedPooledHit_WritesNoTokenEvents(t *testing.T) {
 	sink.mu.Unlock()
 	if pooledCalls != liveCalls {
 		t.Errorf("a pooled hit must write ZERO token_events rows: spend writes went %d → %d — margin/royalty leaked into customer spend accounting", liveCalls, pooledCalls)
+	}
+}
+
+// STAGE 2.3.0 — EVIDENCE HASHES AT SERVE: a served pooled hit carries
+// UNSALTED hex(sha256(...)) of the exact served bytes and the raw requester
+// prompt, computed at the serve moment (the cache stores are mutable
+// underneath the mint — Redis SET / semantic upsert overwrite — so only a
+// serve-time hash binds the adjudicable bytes).
+func TestPoolRoyalty_ServedHit_CarriesUnsaltedEvidenceHashes(t *testing.T) {
+	global := true
+	p, wsm, _, _, calls := newPoolingProxy(t, &global)
+	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
+	_ = wsm.SetCachePoolable(context.Background(), "wsB", true)
+	rec := &recordingRoyaltyMinter{}
+	p.SetRoyaltyMinter(rec)
+
+	dispatchWS(t, p, "wsA", "what is 2+2") // live: caches + pooled write of okResp
+	before := atomic.LoadInt64(calls)
+	dispatchWSWithRequestID(t, p, "wsB", "what is 2+2", "req-hash-1")
+	if atomic.LoadInt64(calls)-before != 0 {
+		t.Fatal("expected a pooled cache hit")
+	}
+
+	hits := rec.recorded()
+	if len(hits) != 1 {
+		t.Fatalf("hits=%d, want 1", len(hits))
+	}
+	if want := poolroyalty.SHA256Hex([]byte(okResp)); hits[0].AnswerSHA256 != want {
+		t.Errorf("AnswerSHA256 = %q, want unsalted sha256 of the served bytes %q", hits[0].AnswerSHA256, want)
+	}
+	if want := poolroyalty.SHA256Hex([]byte("what is 2+2")); hits[0].PromptSHA256 != want {
+		t.Errorf("PromptSHA256 = %q, want unsalted sha256 of the raw prompt %q", hits[0].PromptSHA256, want)
+	}
+}
+
+// STAGE 2.3.0 — NO HASH → NO MINT, the privacy-coherence gate at the proxy:
+// a requester whose LoggingPolicy is 'none' forbids persisting content-
+// derived artifacts, so the serve captures no hashes and fires NO mint at
+// all — but the request itself still serves from the pool (customer gets
+// the answer + savings; there is simply no royalty event). Defense in depth:
+// the Minter independently refuses empty-hash hits (tested in poolroyalty).
+func TestPoolRoyalty_NoneLoggingPolicy_ServesButNeverMints(t *testing.T) {
+	global := true
+	p, wsm, _, _, calls := newPoolingProxy(t, &global)
+	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
+	// wsNone: pooling participant whose logging policy forbids evidence capture.
+	if err := wsm.RegisterWorkspace(context.Background(), workspace.Workspace{
+		ID: "wsNone", Name: "wsNone", Active: true, LoggingPolicy: workspace.LoggingNone,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = wsm.SetCachePoolable(context.Background(), "wsNone", true)
+	rec := &recordingRoyaltyMinter{}
+	p.SetRoyaltyMinter(rec)
+
+	dispatchWS(t, p, "wsA", "what is 2+2") // live: seeds the pooled entry
+	before := atomic.LoadInt64(calls)
+	dispatchWSWithRequestID(t, p, "wsNone", "what is 2+2", "req-none-1") // pooled hit must still SERVE
+	if atomic.LoadInt64(calls)-before != 0 {
+		t.Fatal("none-policy requester must still be served from the pool (no upstream call)")
+	}
+	if got := rec.recorded(); len(got) != 0 {
+		t.Errorf("none-policy serve must fire NO mint (no hash → no mint); hits=%d (%+v)", len(got), got)
 	}
 }
