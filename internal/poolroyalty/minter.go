@@ -30,7 +30,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
 )
 
@@ -39,6 +38,11 @@ import (
 // types (and in GetTotalSupply's allow-list since Stage 2.2); this alias
 // keeps the writer-side name local.
 const TypePoolRoyalty = mining.TypePoolRoyalty
+
+// TypePoolRoyaltyHeld is the mint-time HELD credit type (Stage 2.3a) —
+// uncounted by supply; the counted TypePoolRoyalty row is written at
+// finalize by the sweeper. Canonical constant lives in mining.
+const TypePoolRoyaltyHeld = mining.TypePoolRoyaltyHeld
 
 // DefaultRoyaltyShare is the default contributor share s of avoided_COGS
 // (LENS_POOL_ROYALTY_SHARE overrides; clamped to [0,1]). With share s the
@@ -91,19 +95,20 @@ type txBeginner interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-// ledgerCreditTx is the minimal composable-credit surface the mint needs;
-// *mining.LedgerStore satisfies it exactly, so this package stays decoupled
-// from the ledger package (and tests pass a fake).
+// ledgerCreditTx is the minimal composable-credit surface the mint needs —
+// since Stage 2.3a this is the HELD credit (the mint never writes spendable
+// balance; the finalize sweeper does, after the holdback window).
+// *mining.LedgerStore satisfies it exactly.
 type ledgerCreditTx interface {
-	CreditTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, txType, description string, metadata map[string]interface{}) error
+	CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, txType, description string, metadata map[string]interface{}) error
 }
 
 // insertClaimSQL claims the serving request: ON CONFLICT (request_id) DO
 // NOTHING + a RowsAffected check is the exactly-once guard (povi_challenges
 // pattern). id and created_at take their column defaults.
 const insertClaimSQL = `INSERT INTO pool_royalty_mints
-    (request_id, requester_workspace_id, contributor_workspace_id, layer, entry_id, provider, model, similarity, avoided_cogs_usd, minted_amount, answer_sha256, prompt_sha256)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    (request_id, requester_workspace_id, contributor_workspace_id, layer, entry_id, provider, model, similarity, avoided_cogs_usd, minted_amount, answer_sha256, prompt_sha256, status, finalize_after)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'held', now() + ($13::bigint * interval '1 microsecond'))
 ON CONFLICT (request_id) DO NOTHING`
 
 // capCountSQL is the 2.3b per-pair cap count, run INSIDE the mint tx AFTER
@@ -133,6 +138,21 @@ type Minter struct {
 	// entirely and mint behavior is byte-identical to pre-cap.
 	capPerPair int
 	capWindow  time.Duration
+
+	// 2.3a holdback: new mints land status='held' with finalize_after =
+	// now() + holdWindow; the finalize sweeper settles them. Defaults 72h.
+	holdWindow time.Duration
+}
+
+// SetHoldbackWindow configures the held->finalizable delay (Stage 2.3a).
+// Non-positive values keep the 72h default. The TRIGGER that settles a held
+// mint is decoupled from this ledger mechanism — the timed sweeper is the
+// initial trigger; billing settlement can replace it without touching the
+// mint path.
+func (m *Minter) SetHoldbackWindow(d time.Duration) {
+	if d > 0 {
+		m.holdWindow = d
+	}
 }
 
 // SetCap configures the per-pair rolling-window mint cap (2.3b primitive #1).
@@ -161,7 +181,7 @@ func NewMinter(db txBeginner, ledger ledgerCreditTx, share float64, enabled func
 	if share > 1 {
 		share = 1
 	}
-	return &Minter{db: db, ledger: ledger, share: share, enabled: enabled}
+	return &Minter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour}
 }
 
 // Share returns the clamped contributor royalty share s.
@@ -211,7 +231,7 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	tag, err := tx.Exec(ctx, insertClaimSQL,
 		h.RequestID, h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
 		h.EntryID, h.Provider, h.Model, h.Similarity, h.AvoidedCOGSUSD, amount,
-		h.AnswerSHA256, h.PromptSHA256)
+		h.AnswerSHA256, h.PromptSHA256, m.holdWindow.Microseconds())
 	if err != nil {
 		return Result{}, fmt.Errorf("poolroyalty: insert mint claim: %w", err)
 	}
@@ -231,8 +251,13 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 		"royalty_share":        m.share,
 	}
 	desc := fmt.Sprintf("pool royalty: %s pooled hit served to %s", h.Layer, h.RequesterWorkspace)
-	if err := m.ledger.CreditTx(ctx, tx, h.ContributorWorkspace, amount, TypePoolRoyalty, desc, meta); err != nil {
-		return Result{}, fmt.Errorf("poolroyalty: credit contributor: %w", err)
+	// Stage 2.3a: the mint credits HELD, not spendable — the LENS becomes
+	// spendable (and supply-counted, via the TypePoolRoyalty row the sweeper
+	// writes) only at finalize. Same position, same tx, same contributor-
+	// balance FOR UPDATE as the old CreditTx — the cap COUNT below still
+	// rides that lock, so its exactness proof is unchanged.
+	if err := m.ledger.CreditHeldTx(ctx, tx, h.ContributorWorkspace, amount, TypePoolRoyaltyHeld, desc, meta); err != nil {
+		return Result{}, fmt.Errorf("poolroyalty: credit contributor (held): %w", err)
 	}
 	// 2.3b per-pair cap — checked AFTER CreditTx on purpose: the credit just
 	// acquired the contributor-balance FOR UPDATE, which serializes every
@@ -253,8 +278,9 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, fmt.Errorf("poolroyalty: commit mint: %w", err)
 	}
-	// A royalty mint is LENS entering circulation — mirror Credit()'s supply
-	// metric (CreditTx deliberately doesn't emit it; the standalone Credit does).
-	metrics.MintedTokens(amount)
+	// NOTE (2.3a): metrics.MintedTokens moved to the finalize sweeper — a
+	// held mint hasn't entered circulation yet; the counter must agree with
+	// the SQL supply stat, which counts the TypePoolRoyalty row written at
+	// finalize.
 	return Result{Minted: true, Amount: amount}, nil
 }

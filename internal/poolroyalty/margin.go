@@ -51,12 +51,15 @@ type MarginReader struct {
 // NewMarginReader builds a reader over the main pool (or any marginDB).
 func NewMarginReader(db marginDB) *MarginReader { return &MarginReader{db: db} }
 
+// REALIZED margin counts FINAL rows only (Stage 2.3a): held rows are
+// pending (their minted side may yet be revoked) and revoked rows carry
+// fraudulent attribution — counting either overstates realized margin.
 const marginSummarySQL = `SELECT COUNT(*),
        COALESCE(SUM(avoided_cogs_usd), 0),
        COALESCE(SUM(minted_amount), 0),
        COALESCE(SUM(margin_usd), 0)
 FROM pool_royalty_margin
-WHERE created_at >= $1`
+WHERE status = 'final' AND created_at >= $1`
 
 // marginDimensions is the allow-list for MarginBy. The dimension is
 // interpolated into SQL (GROUP BY can't be parameterized), so ONLY these
@@ -96,7 +99,7 @@ func (r *MarginReader) MarginBy(ctx context.Context, dimension string, since tim
        COALESCE(SUM(minted_amount), 0),
        COALESCE(SUM(margin_usd), 0)
 FROM pool_royalty_margin
-WHERE created_at >= $1
+WHERE status = 'final' AND created_at >= $1
 GROUP BY ` + dimension + `
 ORDER BY 5 DESC`
 	rows, err := r.db.Query(ctx, sql, since)

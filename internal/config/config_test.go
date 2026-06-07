@@ -281,3 +281,34 @@ func TestLoad_PoolMintCapInvalidRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_PoolHoldbackWindowDefaultAndParsing(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PoolHoldbackWindow != 72*time.Hour {
+		t.Errorf("PoolHoldbackWindow = %v, want 72h default", c.PoolHoldbackWindow)
+	}
+	t.Setenv("LENS_POOL_HOLDBACK_WINDOW", "48h")
+	c2, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c2.PoolHoldbackWindow != 48*time.Hour {
+		t.Errorf("PoolHoldbackWindow = %v, want 48h", c2.PoolHoldbackWindow)
+	}
+}
+
+func TestLoad_PoolHoldbackWindowInvalidRejected(t *testing.T) {
+	for _, bad := range []string{"0s", "-1h", "tomorrow"} {
+		t.Run(bad, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LENS_POOL_HOLDBACK_WINDOW", bad)
+			if _, err := Load(); err == nil {
+				t.Errorf("Load must reject LENS_POOL_HOLDBACK_WINDOW=%q", bad)
+			}
+		})
+	}
+}

@@ -544,7 +544,23 @@ func run() error {
 	// 0 (default) disables; exact under concurrency via the after-CreditTx
 	// count inside the existing mint tx (no new lock).
 	royaltyMinter.SetCap(cfg.PoolMintCapPerPair, cfg.PoolMintCapWindow)
+	// 2.3a holdback: mints credit HELD; the sweeper below settles them after
+	// this window. Trigger-agnostic — billing settlement can replace the
+	// timed sweeper later without touching the mint path.
+	royaltyMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
 	p.SetRoyaltyMinter(royaltyMinter)
+
+	// Stage-2.3a finalize sweeper: settles due held mints (held → spendable;
+	// supply counts here via the TypePoolRoyalty row FinalizeHeldTx writes).
+	// Mirrors the povi-challenge loop: leader-elected, minute tick.
+	// Registered UNCONDITIONALLY — never gated on the minting flag: committed
+	// held rows must finalize even if minting is later disabled, or
+	// contributor LENS strands in held forever. With minting off and no held
+	// rows, each sweep is a single cheap indexed SELECT.
+	finalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger)
+	go haComps.leader.Run(ctx, "pool-royalty-finalize", 30*time.Second, func(lctx context.Context) {
+		finalizeSweeper.StartScheduler(lctx, time.Minute)
+	})
 	if cfg.PoolRoyaltyMintingEnabled {
 		logger.Warn("poolroyalty: Pool-B royalty minting is ENABLED — served cross-tenant pooled hits mint LENS to contributors",
 			slog.Float64("royalty_share", cfg.PoolRoyaltyShare))

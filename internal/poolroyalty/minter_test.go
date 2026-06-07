@@ -34,7 +34,7 @@ type fakeLedger struct {
 	err   error
 }
 
-func (f *fakeLedger) CreditTx(_ context.Context, _ pgx.Tx, workspaceID string, amount float64, txType, _ string, _ map[string]interface{}) error {
+func (f *fakeLedger) CreditHeldTx(_ context.Context, _ pgx.Tx, workspaceID string, amount float64, txType, _ string, _ map[string]interface{}) error {
 	f.calls = append(f.calls, creditCall{workspaceID: workspaceID, amount: amount, txType: txType})
 	return f.err
 }
@@ -76,7 +76,7 @@ func TestMintServedHit_ExactlyOncePerRequestID(t *testing.T) {
 	// First serve: claim row inserted → credit → commit.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectCommit()
 
@@ -93,15 +93,15 @@ func TestMintServedHit_ExactlyOncePerRequestID(t *testing.T) {
 	if len(ledger.calls) != 1 {
 		t.Fatalf("ledger credits = %d, want 1", len(ledger.calls))
 	}
-	if c := ledger.calls[0]; c.workspaceID != "wsA" || c.amount != 1.0 || c.txType != TypePoolRoyalty {
-		t.Errorf("credit = %+v, want wsA / 1.0 / %s", c, TypePoolRoyalty)
+	if c := ledger.calls[0]; c.workspaceID != "wsA" || c.amount != 1.0 || c.txType != TypePoolRoyaltyHeld {
+		t.Errorf("credit = %+v, want wsA / 1.0 / %s", c, TypePoolRoyaltyHeld)
 	}
 
 	// Retry with the SAME request_id: UNIQUE conflict → no credit, no commit of
 	// any ledger write. The claim insert wrote nothing, so the tx just ends.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 	pool.ExpectRollback()
 
@@ -136,7 +136,7 @@ func TestMintServedHit_ReusedRequestID_SuppressesNeverInflates(t *testing.T) {
 
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsC", "semantic", "emb-row-9", "openai", "gpt-4o", 0.97, 2.0, 1.0, tAnswerHash, tPromptHash).
+		WithArgs("req-1", "wsB", "wsC", "semantic", "emb-row-9", "openai", "gpt-4o", 0.97, 2.0, 1.0, tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0)) // claim already taken
 	pool.ExpectRollback()
 
@@ -165,7 +165,7 @@ func TestMintServedHit_CreditFailureRollsBackClaim(t *testing.T) {
 
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectRollback() // claim + credit roll back together
 
@@ -385,7 +385,7 @@ func TestAnswerHash_TamperEvidence_OverwriteDetectable(t *testing.T) {
 // the 2.3.0 evidence hashes) — shared by the cap tests below.
 func capExpectClaim(pool pgxmock.PgxPoolIface) {
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 
@@ -507,5 +507,37 @@ func TestMintServedHit_CappedThenLaterWindow_SameRequestIDMints(t *testing.T) {
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet: %v", err)
+	}
+}
+
+// STAGE 2.3a — CAP ROLLBACK DISCARDS THE HELD CREDIT: identical to the
+// over-cap rollback test, now asserting against the HELD-credit flow — the
+// held credit sits inside the same tx (before the cap COUNT, whose exactness
+// rides the FOR UPDATE the held credit acquires), so Result{Capped} +
+// deferred Rollback discard claim AND held credit together. held_balance is
+// provably unchanged because NO Commit ever happens (pgxmock would fail on
+// an unexpected Commit) and the fake ledger's call is rolled back with the tx.
+func TestMintServedHit_OverCap_RollsBackHeldCredit(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	m.SetCap(3, 24*time.Hour)
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints`).
+		WithArgs("wsB", "wsA", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(4)))
+	pool.ExpectRollback() // claim + HELD credit discarded together; no Commit
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil || res.Minted || !res.Capped {
+		t.Fatalf("capped serve must roll back the held credit; res=%+v err=%v", res, err)
+	}
+	if len(ledger.calls) != 1 || ledger.calls[0].txType != TypePoolRoyaltyHeld {
+		t.Errorf("the (rolled-back) credit must have been the HELD type; calls=%+v", ledger.calls)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet (must roll back, never commit): %v", err)
 	}
 }
