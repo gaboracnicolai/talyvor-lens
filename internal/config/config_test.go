@@ -236,3 +236,48 @@ func TestLoad_PoolRoyaltyShareNaNRejected(t *testing.T) {
 		t.Error("Load must reject LENS_POOL_ROYALTY_SHARE=NaN (it bypasses range comparisons and corrupts balances as NaN×COGS)")
 	}
 }
+
+func TestLoad_PoolMintCapDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PoolMintCapPerPair != 0 {
+		t.Errorf("PoolMintCapPerPair = %d, want 0 (cap disabled by default — opt-in)", c.PoolMintCapPerPair)
+	}
+	if c.PoolMintCapWindow != 24*time.Hour {
+		t.Errorf("PoolMintCapWindow = %v, want 24h default", c.PoolMintCapWindow)
+	}
+}
+
+func TestLoad_PoolMintCapParsing(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_POOL_MINT_CAP_PER_PAIR", "500")
+	t.Setenv("LENS_POOL_MINT_CAP_WINDOW", "48h")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PoolMintCapPerPair != 500 || c.PoolMintCapWindow != 48*time.Hour {
+		t.Errorf("got cap=%d window=%v, want 500/48h", c.PoolMintCapPerPair, c.PoolMintCapWindow)
+	}
+}
+
+func TestLoad_PoolMintCapInvalidRejected(t *testing.T) {
+	for name, env := range map[string][2]string{
+		"negative cap":    {"LENS_POOL_MINT_CAP_PER_PAIR", "-1"},
+		"non-numeric cap": {"LENS_POOL_MINT_CAP_PER_PAIR", "many"},
+		"zero window":     {"LENS_POOL_MINT_CAP_WINDOW", "0s"},
+		"negative window": {"LENS_POOL_MINT_CAP_WINDOW", "-1h"},
+		"bad window":      {"LENS_POOL_MINT_CAP_WINDOW", "fortnight"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(env[0], env[1])
+			if _, err := Load(); err == nil {
+				t.Errorf("Load must reject %s=%q", env[0], env[1])
+			}
+		})
+	}
+}

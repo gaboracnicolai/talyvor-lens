@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -325,7 +326,7 @@ func TestSHA256Hex_KnownVectors(t *testing.T) {
 // hashes could not be captured must write ZERO claim rows and mint NOTHING —
 // an unadjudicable mint must never be created. The request itself still
 // serves (the proxy never blocks on minting). This gate is WRITE-PATH ONLY:
-// historical pre-2.3.0 rows with '' hashes are existing data the gate never
+// historical pre-2.3.0 rows with " hashes are existing data the gate never
 // scans, so backfill can't misfire.
 func TestMintServedHit_NoHashNoMint(t *testing.T) {
 	pool := newMockPool(t) // NO expectations: any DB call fails the test
@@ -376,4 +377,135 @@ func TestAnswerHash_TamperEvidence_OverwriteDetectable(t *testing.T) {
 	}
 	// adjudicator's check: recorded != hash(current entry) => entry changed
 	// since the serve — tamper-evident, adverse-inference signal.
+}
+
+// ─── 2.3b primitive #1: the per-pair mint cap ───
+
+// capArgs is the claim-insert arg tuple sampleHit() produces (12 args incl.
+// the 2.3.0 evidence hashes) — shared by the cap tests below.
+func capExpectClaim(pool pgxmock.PgxPoolIface) {
+	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+}
+
+// UNDER CAP: the after-CreditTx count (which includes the just-inserted row)
+// is ≤ cap → the mint commits exactly as before.
+func TestMintServedHit_UnderCap_Mints(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	m.SetCap(3, 24*time.Hour)
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints`).
+		WithArgs("wsB", "wsA", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(3))) // 3rd of 3 — at cap, allowed
+	pool.ExpectCommit()
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil || !res.Minted || res.Capped {
+		t.Fatalf("under-cap mint must succeed; res=%+v err=%v", res, err)
+	}
+	if len(ledger.calls) != 1 {
+		t.Errorf("credits=%d want 1", len(ledger.calls))
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
+	}
+}
+
+// AT CAP+1: the count exceeds the cap → Result{Capped}, and the deferred
+// rollback discards the claim insert AND the credit atomically (the same
+// rollback path AlreadyMinted uses). Zero net rows, zero mint; the customer
+// was already served before the mint ran.
+func TestMintServedHit_OverCap_RollsBackClaimAndCredit(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	m.SetCap(3, 24*time.Hour)
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints`).
+		WithArgs("wsB", "wsA", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(4))) // would be the 4th — over
+	pool.ExpectRollback()
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil {
+		t.Fatalf("cap-hit must not error (serve-but-skip): %v", err)
+	}
+	if res.Minted || !res.Capped {
+		t.Errorf("res=%+v, want Capped=true Minted=false", res)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet (must roll back, never commit): %v", err)
+	}
+}
+
+// CAP DISABLED (PerPair==0, the default): the cap branch never runs — NO
+// COUNT statement is issued — and mint behavior is byte-identical to pre-cap
+// regardless of prior volume. Asserted by the absence of any COUNT
+// expectation: pgxmock fails on any unexpected query.
+func TestMintServedHit_CapDisabled_NoCountByteIdentical(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn) // SetCap never called → 0 → disabled
+
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectCommit() // straight to commit — no COUNT in between
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil || !res.Minted {
+		t.Fatalf("disabled-cap mint must be byte-identical to pre-cap; res=%+v err=%v", res, err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
+	}
+}
+
+// WINDOW ROLL + UN-CLAIM SEMANTICS (pinned intentionally): a serve capped in
+// window W rolled back — which UN-CLAIMS its request_id. The SAME request_id
+// in a LATER window (count back under cap) may then mint: the cap is a
+// per-window bound; later windows have fresh budget. The claim insert
+// succeeds again (RowsAffected 1) precisely because the capped attempt's
+// rollback left no row behind.
+func TestMintServedHit_CappedThenLaterWindow_SameRequestIDMints(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+	m.SetCap(3, 24*time.Hour)
+
+	// Window W: capped → rollback (un-claims req-1).
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints`).
+		WithArgs("wsB", "wsA", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(4)))
+	pool.ExpectRollback()
+
+	// Later window: same request_id; claim inserts cleanly (no conflict —
+	// the rollback left nothing), count is back under cap → mints.
+	pool.ExpectBegin()
+	capExpectClaim(pool)
+	pool.ExpectQuery(`SELECT COUNT\(\*\) FROM pool_royalty_mints`).
+		WithArgs("wsB", "wsA", (24 * time.Hour).Microseconds()).
+		WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(int64(1)))
+	pool.ExpectCommit()
+
+	if res, err := m.MintServedHit(context.Background(), sampleHit()); err != nil || !res.Capped {
+		t.Fatalf("window W attempt must be Capped; res=%+v err=%v", res, err)
+	}
+	if res, err := m.MintServedHit(context.Background(), sampleHit()); err != nil || !res.Minted {
+		t.Fatalf("later-window same-request_id attempt must mint; res=%+v err=%v", res, err)
+	}
+	if len(ledger.calls) != 2 { // CreditTx ran both times; first was rolled back
+		t.Errorf("credit calls=%d want 2 (first discarded by rollback)", len(ledger.calls))
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
+	}
 }
