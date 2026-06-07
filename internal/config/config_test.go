@@ -312,3 +312,61 @@ func TestLoad_PoolHoldbackWindowInvalidRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_DetectorThresholdDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DetectVolumeMinMints != 50 || c.DetectVolumeMaxRequesters != 2 {
+		t.Errorf("volume defaults = %d/%d, want 50/2", c.DetectVolumeMinMints, c.DetectVolumeMaxRequesters)
+	}
+	if c.DetectBilateralMinFrac != 0.9 || c.DetectBilateralMinMints != 20 {
+		t.Errorf("bilateral defaults = %v/%d, want 0.9/20", c.DetectBilateralMinFrac, c.DetectBilateralMinMints)
+	}
+	if c.DetectSimilarityMinSample != 30 || c.DetectSimilarityMaxStddev != 0.02 {
+		t.Errorf("similarity defaults = %d/%v, want 30/0.02", c.DetectSimilarityMinSample, c.DetectSimilarityMaxStddev)
+	}
+}
+
+func TestLoad_DetectorThresholdParsing(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_DETECT_VOLUME_MIN_MINTS", "100")
+	t.Setenv("LENS_DETECT_VOLUME_MAX_REQUESTERS", "3")
+	t.Setenv("LENS_DETECT_BILATERAL_MIN_FRAC", "0.95")
+	t.Setenv("LENS_DETECT_BILATERAL_MIN_MINTS", "40")
+	t.Setenv("LENS_DETECT_SIMILARITY_MIN_SAMPLE", "50")
+	t.Setenv("LENS_DETECT_SIMILARITY_MAX_STDDEV", "0.01")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DetectVolumeMinMints != 100 || c.DetectVolumeMaxRequesters != 3 ||
+		c.DetectBilateralMinFrac != 0.95 || c.DetectBilateralMinMints != 40 ||
+		c.DetectSimilarityMinSample != 50 || c.DetectSimilarityMaxStddev != 0.01 {
+		t.Errorf("parsed = %+v", c)
+	}
+}
+
+func TestLoad_DetectorThresholdInvalidRejected(t *testing.T) {
+	for name, env := range map[string][2]string{
+		"neg volume mints":      {"LENS_DETECT_VOLUME_MIN_MINTS", "-1"},
+		"bad volume mints":      {"LENS_DETECT_VOLUME_MIN_MINTS", "lots"},
+		"neg max requesters":    {"LENS_DETECT_VOLUME_MAX_REQUESTERS", "-1"},
+		"frac > 1":              {"LENS_DETECT_BILATERAL_MIN_FRAC", "1.5"},
+		"frac NaN":              {"LENS_DETECT_BILATERAL_MIN_FRAC", "NaN"},
+		"frac negative":         {"LENS_DETECT_BILATERAL_MIN_FRAC", "-0.1"},
+		"min sample < 1":        {"LENS_DETECT_SIMILARITY_MIN_SAMPLE", "0"},
+		"stddev negative":       {"LENS_DETECT_SIMILARITY_MAX_STDDEV", "-0.01"},
+		"stddev NaN":            {"LENS_DETECT_SIMILARITY_MAX_STDDEV", "NaN"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(env[0], env[1])
+			if _, err := Load(); err == nil {
+				t.Errorf("Load must reject %s=%q", env[0], env[1])
+			}
+		})
+	}
+}
