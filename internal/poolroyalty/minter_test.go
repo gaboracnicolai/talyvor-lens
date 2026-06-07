@@ -48,8 +48,17 @@ func sampleHit() ServedHit {
 		Provider:             "openai",
 		Model:                "gpt-4o",
 		AvoidedCOGSUSD:       2.0,
+		AnswerSHA256:         tAnswerHash,
+		PromptSHA256:         tPromptHash,
 	}
 }
+
+// Fixed 64-hex evidence hashes for pass-through assertions (the minter treats
+// them opaquely; HASHING correctness is tested via SHA256Hex's known vectors).
+const (
+	tAnswerHash = "1111111111111111111111111111111111111111111111111111111111111111"
+	tPromptHash = "2222222222222222222222222222222222222222222222222222222222222222"
+)
 
 func enabledOn() bool  { return true }
 func enabledOff() bool { return false }
@@ -66,7 +75,7 @@ func TestMintServedHit_ExactlyOncePerRequestID(t *testing.T) {
 	// First serve: claim row inserted → credit → commit.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectCommit()
 
@@ -91,7 +100,7 @@ func TestMintServedHit_ExactlyOncePerRequestID(t *testing.T) {
 	// any ledger write. The claim insert wrote nothing, so the tx just ends.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 	pool.ExpectRollback()
 
@@ -126,7 +135,7 @@ func TestMintServedHit_ReusedRequestID_SuppressesNeverInflates(t *testing.T) {
 
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsC", "semantic", "emb-row-9", "openai", "gpt-4o", 0.97, 2.0, 1.0).
+		WithArgs("req-1", "wsB", "wsC", "semantic", "emb-row-9", "openai", "gpt-4o", 0.97, 2.0, 1.0, tAnswerHash, tPromptHash).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0)) // claim already taken
 	pool.ExpectRollback()
 
@@ -155,7 +164,7 @@ func TestMintServedHit_CreditFailureRollsBackClaim(t *testing.T) {
 
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectRollback() // claim + credit roll back together
 
@@ -299,4 +308,72 @@ func TestMintServedHit_NaNAndInfNeverReachTheLedger(t *testing.T) {
 	if len(ledger.calls) != 0 {
 		t.Fatalf("non-finite values must NEVER reach CreditTx; credits=%d", len(ledger.calls))
 	}
+}
+
+// STAGE 2.3.0 — SHA256Hex is the house hex(sha256(...)) over RAW bytes,
+// UNSALTED (no provider:model prefix — pure content identity). Known vectors.
+func TestSHA256Hex_KnownVectors(t *testing.T) {
+	if got := SHA256Hex([]byte("abc")); got != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Errorf("SHA256Hex(abc) = %q", got)
+	}
+	if got := SHA256Hex(nil); got != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Errorf("SHA256Hex(empty) = %q", got)
+	}
+}
+
+// NO HASH → NO MINT (the privacy-coherence gate): a live serve whose evidence
+// hashes could not be captured must write ZERO claim rows and mint NOTHING —
+// an unadjudicable mint must never be created. The request itself still
+// serves (the proxy never blocks on minting). This gate is WRITE-PATH ONLY:
+// historical pre-2.3.0 rows with '' hashes are existing data the gate never
+// scans, so backfill can't misfire.
+func TestMintServedHit_NoHashNoMint(t *testing.T) {
+	pool := newMockPool(t) // NO expectations: any DB call fails the test
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+
+	noAnswer := sampleHit()
+	noAnswer.AnswerSHA256 = ""
+	if res, err := m.MintServedHit(context.Background(), noAnswer); err != nil || res.Minted {
+		t.Errorf("missing answer hash must not mint; res=%+v err=%v", res, err)
+	}
+
+	noPrompt := sampleHit()
+	noPrompt.PromptSHA256 = ""
+	if res, err := m.MintServedHit(context.Background(), noPrompt); err != nil || res.Minted {
+		t.Errorf("missing prompt hash must not mint; res=%+v err=%v", res, err)
+	}
+
+	if len(ledger.calls) != 0 {
+		t.Fatalf("no-hash serves must NEVER credit; credits=%d", len(ledger.calls))
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("no-hash serves must NEVER touch the DB: %v", err)
+	}
+}
+
+// TAMPER-EVIDENCE (the anti-evidence-destruction property, semantic path):
+// the pooled semantic upsert OVERWRITES response on re-contribution
+// (semanticUpsertPooledSQL: ON CONFLICT (prompt_hash) DO UPDATE SET response
+// = EXCLUDED.response), so a contributor can replace their own entry's bytes
+// after a serve. The hash recorded AT SERVE makes that detectable: the
+// recorded hash stays bound to the served bytes (deterministic), and any
+// overwrite yields a different current-entry hash — recorded ≠ current
+// proves the entry changed since the serve.
+func TestAnswerHash_TamperEvidence_OverwriteDetectable(t *testing.T) {
+	served := []byte(`{"choices":[{"message":{"content":"the honest answer"}}]}`)
+	recorded := SHA256Hex(served) // what 2.3.0 stores at serve time
+
+	// determinism: the recorded hash is reproducible from the served bytes
+	if SHA256Hex(served) != recorded {
+		t.Fatal("SHA256Hex must be deterministic over the served bytes")
+	}
+
+	// a later overwrite (poisoner replacing their entry) changes the bytes
+	overwritten := []byte(`{"choices":[{"message":{"content":"evidence destroyed"}}]}`)
+	if SHA256Hex(overwritten) == recorded {
+		t.Fatal("distinct entry bytes must yield a different hash")
+	}
+	// adjudicator's check: recorded != hash(current entry) => entry changed
+	// since the serve — tamper-evident, adverse-inference signal.
 }
