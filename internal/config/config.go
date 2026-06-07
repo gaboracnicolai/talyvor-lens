@@ -131,6 +131,17 @@ type Config struct {
 	// Env: LENS_POOL_MINT_CAP_WINDOW (Go duration, e.g. 48h).
 	PoolMintCapWindow time.Duration
 
+	// PoolHoldbackWindow is the Stage-2.3a holdback: a pool-royalty mint
+	// credits HELD balance, and only becomes spendable (and supply-counted)
+	// when the finalize sweeper settles it after this window. Default 72h —
+	// sized so the statistical gaming vectors (detectable in hours from the
+	// durable claim rows) are comfortably inside it. TRIGGER-AGNOSTIC by
+	// design: the ledger ops (CreditHeldTx/FinalizeHeldTx/RevokeHeldTx) don't
+	// know what fires them — the timed sweeper is just the initial trigger,
+	// and billing settlement can replace it later without ledger changes.
+	// Env: LENS_POOL_HOLDBACK_WINDOW (Go duration).
+	PoolHoldbackWindow time.Duration
+
 	// PoolRoyaltyShare is s, the contributor's share of avoided_COGS
 	// (Stage 2.1). Env: LENS_POOL_ROYALTY_SHARE. Default 0.5. Must be in
 	// [0,1] so Talyvor's net (1−s) × avoided_COGS stays ≥ 0 (the
@@ -534,6 +545,14 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_POOL_MINT_CAP_WINDOW (Go duration > 0, e.g. 48h): %s", v)
 		}
 		c.PoolMintCapWindow = d
+	}
+	c.PoolHoldbackWindow = 72 * time.Hour
+	if v := os.Getenv("LENS_POOL_HOLDBACK_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v) // Go duration units, e.g. 72h
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_POOL_HOLDBACK_WINDOW (Go duration > 0, e.g. 72h): %s", v)
+		}
+		c.PoolHoldbackWindow = d
 	}
 	c.PoolRoyaltyShare = 0.5
 	if v := os.Getenv("LENS_POOL_ROYALTY_SHARE"); v != "" {

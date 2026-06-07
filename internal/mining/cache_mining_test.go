@@ -414,7 +414,7 @@ func TestGetTotalSupply_CountsPoolRoyalty_ExcludesNonMints(t *testing.T) {
 	// The allow-list itself is the assertion above (WithArgs pins all six
 	// types, in order). Guard the exclusions explicitly so a future edit
 	// can't sneak them in: the counted set must NOT contain these.
-	excluded := []string{"marketplace_fee", "receipt_mine_provisional", TypeBurn, TypeStakeSlash, TypeTransferIn}
+	excluded := []string{"marketplace_fee", "receipt_mine_provisional", TypeBurn, TypeStakeSlash, TypeTransferIn, TypePoolRoyaltyHeld, TypePoolRoyaltyRevoked}
 	counted := []string{TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine, TypePoolRoyalty}
 	for _, ex := range excluded {
 		for _, c := range counted {

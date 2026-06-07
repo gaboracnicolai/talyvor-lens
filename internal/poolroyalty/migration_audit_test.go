@@ -107,4 +107,38 @@ func TestMigrations_PoolRoyaltySchemaInvariants(t *testing.T) {
 			t.Errorf("pool_royalty_mints must gain %s via additive ADD COLUMN IF NOT EXISTS ... TEXT NOT NULL DEFAULT '' (Stage 2.3.0 evidence hash)", col)
 		}
 	}
+
+	// Stage 2.3a: the holdback columns. status defaults 'final' so every
+	// pre-2.3a row is correctly grandfathered (they were minted straight to
+	// spendable); finalize_after is nullable (final rows have no window);
+	// the sweep gets a partial index over the small transient held set; and
+	// held_balance is a NEW column with the 0032/0036 idiom — NEVER the
+	// locked_balance collateral column.
+	if !regexp.MustCompile(`(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+status\s+TEXT\s+NOT\s+NULL\s+DEFAULT\s+'final'`).MatchString(claimMigration) {
+		t.Error("pool_royalty_mints must gain status TEXT NOT NULL DEFAULT 'final' (grandfathers pre-2.3a rows)")
+	}
+	if !regexp.MustCompile(`(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+finalize_after\s+TIMESTAMPTZ`).MatchString(claimMigration) {
+		t.Error("pool_royalty_mints must gain finalize_after TIMESTAMPTZ (nullable; NULL on final rows)")
+	}
+	if !regexp.MustCompile(`(?is)CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS[^;]*ON\s+pool_royalty_mints\s*\(finalize_after\)[^;]*WHERE\s+status\s*=\s*'held'`).MatchString(claimMigration) {
+		t.Error("the finalize sweep needs the partial index ON pool_royalty_mints (finalize_after) WHERE status = 'held'")
+	}
+
+	var heldMigration string
+	entries2, _ := migrations.FS.ReadDir(".")
+	for _, e := range entries2 {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		raw, _ := migrations.FS.ReadFile(e.Name())
+		if strings.Contains(string(raw), "held_balance") {
+			heldMigration += string(raw)
+		}
+	}
+	if !regexp.MustCompile(`(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+held_balance\s+DOUBLE\s+PRECISION\s+NOT\s+NULL\s+DEFAULT\s+0`).MatchString(heldMigration) {
+		t.Error("lens_token_balances must gain held_balance DOUBLE PRECISION NOT NULL DEFAULT 0 (the 0032 idiom; never co-tenant locked_balance)")
+	}
+	if !regexp.MustCompile(`(?i)CHECK\s*\(held_balance\s*>=\s*0\)\s*NOT\s+VALID`).MatchString(heldMigration) {
+		t.Error("held_balance needs the 0036-style CHECK (held_balance >= 0) NOT VALID")
+	}
 }
