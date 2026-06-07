@@ -45,9 +45,9 @@ func TestVolumeFlagged(t *testing.T) {
 func TestBilateralFlagged(t *testing.T) {
 	th := sampleThresholds()
 	cases := []struct {
-		pairMints      int
-		fracC, fracR   float64
-		want           bool
+		pairMints    int
+		fracC, fracR float64
+		want         bool
 	}{
 		{100, 1.0, 1.0, true},   // fully bilateral
 		{100, 0.95, 0.92, true}, // both above 0.9
@@ -73,11 +73,11 @@ func TestSimilarityFlagged(t *testing.T) {
 		stddev                float64
 		want                  bool
 	}{
-		{40, 38, 0.01, true},   // tight + mostly-distinct prompts = engineered
-		{40, 40, 0.0, true},    // perfectly tight, all distinct
-		{40, 38, 0.10, false},  // distinct but spread wide = organic-ish
-		{40, 2, 0.01, false},   // tight but the SAME prompt re-asked = organic
-		{20, 19, 0.01, false},  // below min sample (HAVING also guards, belt+braces)
+		{40, 38, 0.01, true},  // tight + mostly-distinct prompts = engineered
+		{40, 40, 0.0, true},   // perfectly tight, all distinct
+		{40, 38, 0.10, false}, // distinct but spread wide = organic-ish
+		{40, 2, 0.01, false},  // tight but the SAME prompt re-asked = organic
+		{20, 19, 0.01, false}, // below min sample (HAVING also guards, belt+braces)
 	}
 	for _, c := range cases {
 		if got := th.similarityFlagged(c.hits, c.distinctPrompts, c.stddev); got != c.want {

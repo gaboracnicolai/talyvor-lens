@@ -141,4 +141,22 @@ func TestMigrations_PoolRoyaltySchemaInvariants(t *testing.T) {
 	if !regexp.MustCompile(`(?i)CHECK\s*\(held_balance\s*>=\s*0\)\s*NOT\s+VALID`).MatchString(heldMigration) {
 		t.Error("held_balance needs the 0036-style CHECK (held_balance >= 0) NOT VALID")
 	}
+
+	// Per-entry cap (2.3b follow-up): the hot-path entry_id COUNT REQUIRES an
+	// (entry_id, created_at) index — without it every mint seq-scans. Pinned
+	// here so it can't be dropped.
+	var entryIdxMigration string
+	entries3, _ := migrations.FS.ReadDir(".")
+	for _, e := range entries3 {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		raw, _ := migrations.FS.ReadFile(e.Name())
+		if strings.Contains(string(raw), "idx_pool_royalty_mints_entry") {
+			entryIdxMigration += string(raw)
+		}
+	}
+	if !regexp.MustCompile(`(?is)CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+idx_pool_royalty_mints_entry\s+ON\s+pool_royalty_mints\s*\(entry_id,\s*created_at\)`).MatchString(entryIdxMigration) {
+		t.Error("the per-entry cap requires CREATE INDEX IF NOT EXISTS idx_pool_royalty_mints_entry ON pool_royalty_mints (entry_id, created_at) — hot-path COUNT must not seq-scan")
+	}
 }

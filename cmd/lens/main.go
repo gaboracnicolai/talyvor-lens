@@ -544,6 +544,9 @@ func run() error {
 	// 0 (default) disables; exact under concurrency via the after-CreditTx
 	// count inside the existing mint tx (no new lock).
 	royaltyMinter.SetCap(cfg.PoolMintCapPerPair, cfg.PoolMintCapWindow)
+	// 2.3b per-ENTRY cap — bounds one entry_id's mints across all contributors
+	// (ownership churn). 0 (default) disables. Shares the per-pair window.
+	royaltyMinter.SetEntryCap(cfg.PoolMintCapPerEntry, cfg.PoolMintCapWindow)
 	// 2.3a holdback: mints credit HELD; the sweeper below settles them after
 	// this window. Trigger-agnostic — billing settlement can replace the
 	// timed sweeper later without touching the mint path.

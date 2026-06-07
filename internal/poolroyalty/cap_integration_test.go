@@ -371,3 +371,160 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 		t.Fatalf("realized margin=%v want %v", sum.MarginUSD, want)
 	}
 }
+
+// PER-ENTRY CAP — common-case exactness under concurrency (real PG, -race).
+// N concurrent serves of ONE entry from the SAME contributor against a cap of
+// K → exactly K mint. They serialize on the shared contributor-balance row
+// (CreditHeldTx's FOR UPDATE), so the after-credit entry COUNT is exact —
+// identical mechanism to per-pair. (The churn-straddle over-count is the
+// accepted residual and is NOT asserted as exact — see the entryCountSQL
+// comment; option (a).)
+func TestEntryCapExactness_ConcurrentSameContributor_Integration(t *testing.T) {
+	url := os.Getenv("LENS_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG entry-cap exactness test")
+	}
+	ctx := context.Background()
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 25
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	entryCapResetSchema(t, pool, ctx)
+
+	const capK = 5
+	const concurrent = 25
+	ledger := mining.NewLedgerStore(pool)
+	m := NewMinter(pool, ledger, 0.5, func() bool { return true })
+	m.SetCap(0, time.Hour) // per-pair OFF — isolate the per-entry cap
+	m.SetEntryCap(capK, time.Hour)
+
+	var wg sync.WaitGroup
+	results := make([]Result, concurrent)
+	for i := 0; i < concurrent; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			h := ServedHit{
+				RequestID:          fmt.Sprintf("entry-race-%02d", i),
+				RequesterWorkspace: "wsB", ContributorWorkspace: "wsA",
+				Layer: "exact", EntryID: "the-one-entry", Provider: "openai", Model: "gpt-4o",
+				AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
+			}
+			results[i], _ = m.MintServedHit(ctx, h)
+		}(i)
+	}
+	wg.Wait()
+	var minted, capped int
+	for _, r := range results {
+		if r.Minted {
+			minted++
+		} else if r.Capped {
+			capped++
+			if r.CapReason != "per_entry" {
+				t.Errorf("capped reason = %q, want per_entry", r.CapReason)
+			}
+		}
+	}
+	if minted != capK || capped != concurrent-capK {
+		t.Fatalf("EXACTNESS: minted=%d capped=%d, want %d/%d (common-case serializes on one owner row)", minted, capped, capK, concurrent-capK)
+	}
+	var rows int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM pool_royalty_mints WHERE entry_id='the-one-entry'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != capK {
+		t.Fatalf("claim rows for entry = %d, want exactly %d", rows, capK)
+	}
+}
+
+// REVOKED COUNTS TOWARD THE ENTRY CAP — the don't-refund-on-revoke property
+// (the critical correctness test for this stage). Seed cap-worth of mints,
+// REVOKE some, then assert a further mint is STILL capped: revoked rows still
+// consume the entry's budget, so revocation can't reopen the exposure.
+func TestEntryCap_RevokedStillCounts_Integration(t *testing.T) {
+	url := os.Getenv("LENS_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("LENS_TEST_DATABASE_URL not set — skipping")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	entryCapResetSchema(t, pool, ctx)
+
+	const capK = 5
+	ledger := mining.NewLedgerStore(pool)
+	m := NewMinter(pool, ledger, 0.5, func() bool { return true })
+	m.SetCap(0, time.Hour)
+	m.SetEntryCap(capK, time.Hour)
+
+	// Mint exactly capK on the entry (across two contributors, simulating churn).
+	for i := 0; i < capK; i++ {
+		contrib := "wsA"
+		if i >= 2 {
+			contrib = "wsCHURN" // ownership churned mid-window
+		}
+		h := ServedHit{
+			RequestID: fmt.Sprintf("rev-%d", i), RequesterWorkspace: "wsB", ContributorWorkspace: contrib,
+			Layer: "semantic", EntryID: "e-rev", Provider: "openai", Model: "gpt-4o",
+			AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
+		}
+		if res, err := m.MintServedHit(ctx, h); err != nil || !res.Minted {
+			t.Fatalf("seed mint %d: res=%+v err=%v", i, res, err)
+		}
+	}
+	// Revoke 3 of them (status='revoked' + burn from held).
+	for i := 0; i < 3; i++ {
+		tx, _ := pool.Begin(ctx)
+		if _, err := tx.Exec(ctx, `UPDATE pool_royalty_mints SET status='revoked' WHERE request_id=$1`, fmt.Sprintf("rev-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		_ = tx.Commit(ctx)
+	}
+	// A further serve must STILL be capped — revoked rows still consume budget.
+	h := ServedHit{
+		RequestID: "rev-after", RequesterWorkspace: "wsB", ContributorWorkspace: "wsA",
+		Layer: "semantic", EntryID: "e-rev", Provider: "openai", Model: "gpt-4o",
+		AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
+	}
+	res, err := m.MintServedHit(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Capped || res.CapReason != "per_entry" {
+		t.Fatalf("res=%+v — revoked mints MUST still count toward the entry cap (no budget refund on revoke)", res)
+	}
+	var total int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM pool_royalty_mints WHERE entry_id='e-rev'`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != capK { // the rev-after attempt rolled back; capK committed (3 revoked + 2 active)
+		t.Fatalf("entry rows = %d, want %d (revoked rows remain, consuming budget)", total, capK)
+	}
+}
+
+func entryCapResetSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
+	t.Helper()
+	for _, ddl := range []string{
+		`DROP VIEW IF EXISTS pool_royalty_margin`,
+		`DROP TABLE IF EXISTS pool_royalty_mints`,
+		`DROP TABLE IF EXISTS lens_token_ledger`,
+		`DROP TABLE IF EXISTS lens_token_balances`,
+		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0, held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
+		`CREATE TABLE pool_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, requester_workspace_id TEXT NOT NULL, contributor_workspace_id TEXT NOT NULL, layer TEXT NOT NULL, entry_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', similarity DOUBLE PRECISION NOT NULL DEFAULT 0, avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount DOUBLE PRECISION NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '', prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'final', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE INDEX IF NOT EXISTS idx_pool_royalty_mints_entry ON pool_royalty_mints (entry_id, created_at)`,
+	} {
+		if _, err := pool.Exec(ctx, ddl); err != nil {
+			t.Fatalf("schema: %v", err)
+		}
+	}
+}

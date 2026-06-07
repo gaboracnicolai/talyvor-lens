@@ -85,7 +85,8 @@ func SHA256Hex(b []byte) string {
 type Result struct {
 	Minted        bool    // a claim was taken and the contributor credited
 	AlreadyMinted bool    // the request_id was already claimed — exactly-once suppression
-	Capped        bool    // the per-pair window cap was reached — claim+credit rolled back (2.3b)
+	Capped        bool    // a window cap was reached — claim+credit rolled back (2.3b)
+	CapReason     string  // when Capped: "per_pair" | "per_entry" (which cap fired)
 	Amount        float64 // LENS credited (s × avoided_COGS) when Minted
 }
 
@@ -125,6 +126,20 @@ const capCountSQL = `SELECT COUNT(*) FROM pool_royalty_mints
 WHERE requester_workspace_id = $1 AND contributor_workspace_id = $2
   AND created_at > now() - ($3::bigint * interval '1 microsecond')`
 
+// entryCountSQL is the per-ENTRY cap count (2.3b follow-up): mints for one
+// entry_id across ALL contributors in the window. Like capCountSQL it has NO
+// status filter — it counts held + final + REVOKED. That is DELIBERATE and
+// the OPPOSITE of the detectors' exclude-revoked: a cap must count revoked so
+// revoking a mint does NOT refund cap budget (else an abuser whose mints were
+// revoked could immediately re-mint up to the cap again, reopening the exact
+// exposure the revoke closed). Detection excludes revoked to avoid re-flagging
+// an already-actioned party; a cap includes it to consume budget permanently
+// on abuse. Hot-path: rides idx_pool_royalty_mints_entry (entry_id,created_at)
+// from migration 0047 — never seq-scans.
+const entryCountSQL = `SELECT COUNT(*) FROM pool_royalty_mints
+WHERE entry_id = $1
+  AND created_at > now() - ($2::bigint * interval '1 microsecond')`
+
 // Minter mints s × avoided_COGS to the contributor, exactly once per serving
 // request. Construct via NewMinter; the zero/nil Minter is inert.
 type Minter struct {
@@ -136,8 +151,9 @@ type Minter struct {
 	// 2.3b per-pair cap: max mints per (requester, contributor) per rolling
 	// window. 0 = disabled (the default) — the cap branch is skipped
 	// entirely and mint behavior is byte-identical to pre-cap.
-	capPerPair int
-	capWindow  time.Duration
+	capPerPair  int
+	capPerEntry int
+	capWindow   time.Duration
 
 	// 2.3a holdback: new mints land status='held' with finalize_after =
 	// now() + holdWindow; the finalize sweeper settles them. Defaults 72h.
@@ -165,7 +181,25 @@ func (m *Minter) SetCap(perPair int, window time.Duration) {
 		perPair = 0
 	}
 	m.capPerPair = perPair
-	m.capWindow = window
+	if window > 0 {
+		m.capWindow = window
+	}
+}
+
+// SetEntryCap configures the per-ENTRY rolling-window mint cap (2.3b
+// follow-up). perEntry 0 disables (the default). Shares the same window as
+// the per-pair cap when that window is set; the explicit window arg here keeps
+// the setter self-contained for tests. Closes per-pair ≠ per-entry: one
+// entry_id can accrue mints across contributors via ownership churn, which the
+// per-pair cap does not bound.
+func (m *Minter) SetEntryCap(perEntry int, window time.Duration) {
+	if perEntry < 0 {
+		perEntry = 0
+	}
+	m.capPerEntry = perEntry
+	if window > 0 {
+		m.capWindow = window
+	}
 }
 
 // NewMinter builds a Minter. share is clamped to [0,1] so the Burn-and-Mint
@@ -181,7 +215,7 @@ func NewMinter(db txBeginner, ledger ledgerCreditTx, share float64, enabled func
 	if share > 1 {
 		share = 1
 	}
-	return &Minter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour}
+	return &Minter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour, capWindow: 24 * time.Hour}
 }
 
 // Share returns the clamped contributor royalty share s.
@@ -272,7 +306,29 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 			return Result{}, fmt.Errorf("poolroyalty: cap count: %w", err)
 		}
 		if n > int64(m.capPerPair) {
-			return Result{Capped: true}, nil
+			return Result{Capped: true, CapReason: "per_pair"}, nil
+		}
+	}
+	// 2.3b per-ENTRY cap — a SECOND after-credit COUNT, keyed on entry_id
+	// across all contributors. Checked AFTER per-pair (deterministic order:
+	// if both would cap, per-pair wins and this query never runs). OPTION (a),
+	// NO new lock: this is a lock-free SELECT; the tx still holds exactly ONE
+	// lock (the contributor-balance FOR UPDATE in CreditHeldTx), so there is
+	// no #32 lock-ordering surface. RESIDUAL (accepted): concurrent serves of
+	// the same entry that STRADDLE an ownership-churn instant credit different
+	// contributors (different balance rows, no shared lock) and may over-count
+	// by the instantaneous concurrency — sub-cent, churn-only, economically
+	// negligible. The common case (no churn mid-burst) reads one current owner
+	// and serializes on that one balance row, so it is exact-for-free like
+	// per-pair. A cap is an economic bound, not an accounting invariant.
+	if m.capPerEntry > 0 {
+		var n int64
+		if err := tx.QueryRow(ctx, entryCountSQL,
+			h.EntryID, m.capWindow.Microseconds()).Scan(&n); err != nil {
+			return Result{}, fmt.Errorf("poolroyalty: entry cap count: %w", err)
+		}
+		if n > int64(m.capPerEntry) {
+			return Result{Capped: true, CapReason: "per_entry"}, nil
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {

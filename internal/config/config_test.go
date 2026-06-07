@@ -370,3 +370,34 @@ func TestLoad_DetectorThresholdInvalidRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_PoolMintCapPerEntry(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PoolMintCapPerEntry != 0 {
+		t.Errorf("PoolMintCapPerEntry default = %d, want 0 (disabled)", c.PoolMintCapPerEntry)
+	}
+	t.Setenv("LENS_POOL_MINT_CAP_PER_ENTRY", "200")
+	c2, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c2.PoolMintCapPerEntry != 200 {
+		t.Errorf("PoolMintCapPerEntry = %d, want 200", c2.PoolMintCapPerEntry)
+	}
+}
+
+func TestLoad_PoolMintCapPerEntryInvalidRejected(t *testing.T) {
+	for _, bad := range []string{"-1", "lots"} {
+		t.Run(bad, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LENS_POOL_MINT_CAP_PER_ENTRY", bad)
+			if _, err := Load(); err == nil {
+				t.Errorf("Load must reject LENS_POOL_MINT_CAP_PER_ENTRY=%q", bad)
+			}
+		})
+	}
+}

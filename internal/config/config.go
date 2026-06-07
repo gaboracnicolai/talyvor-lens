@@ -125,6 +125,14 @@ type Config struct {
 	// Env: LENS_POOL_MINT_CAP_PER_PAIR.
 	PoolMintCapPerPair int
 
+	// PoolMintCapPerEntry is the Pool-B per-ENTRY mint cap (2.3b follow-up):
+	// max royalty mints per entry_id per rolling window, across ALL
+	// contributors (semantic ownership churn lets one entry_id accrue mints
+	// under different contributor identities over the window, so the per-pair
+	// cap alone doesn't bound per-entry exposure). 0 (default) = disabled.
+	// Shares PoolMintCapWindow. Env: LENS_POOL_MINT_CAP_PER_ENTRY.
+	PoolMintCapPerEntry int
+
 	// PoolMintCapWindow is the rolling window the per-pair cap counts over
 	// (no period anchor, no state — matches the SpendLimitUSD rolling-window
 	// precedent). Only consulted when the cap is enabled. Default 24h.
@@ -549,6 +557,14 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_POOL_MINT_CAP_PER_PAIR (must be ≥ 0; 0 disables): %s", v)
 		}
 		c.PoolMintCapPerPair = n
+	}
+	c.PoolMintCapPerEntry = 0
+	if v := os.Getenv("LENS_POOL_MINT_CAP_PER_ENTRY"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_POOL_MINT_CAP_PER_ENTRY (must be >= 0; 0 disables): %s", v)
+		}
+		c.PoolMintCapPerEntry = n
 	}
 	c.PoolMintCapWindow = 24 * time.Hour
 	if v := os.Getenv("LENS_POOL_MINT_CAP_WINDOW"); v != "" {
