@@ -142,6 +142,18 @@ type Config struct {
 	// Env: LENS_POOL_HOLDBACK_WINDOW (Go duration).
 	PoolHoldbackWindow time.Duration
 
+	// Detector thresholds (Stage 2.3b) — tune the FLAGGED boolean of the
+	// on-demand DetectorReader; they never affect the raw metrics it returns
+	// and never trigger any action (detection only surfaces; revoke stays the
+	// deliberate 2.3a operator decision). All have sensible defaults so the
+	// detectors are usable out of the box.
+	DetectVolumeMinMints      int     // LENS_DETECT_VOLUME_MIN_MINTS (default 50)
+	DetectVolumeMaxRequesters int     // LENS_DETECT_VOLUME_MAX_REQUESTERS (default 2)
+	DetectBilateralMinFrac    float64 // LENS_DETECT_BILATERAL_MIN_FRAC (default 0.9, [0,1])
+	DetectBilateralMinMints   int     // LENS_DETECT_BILATERAL_MIN_MINTS (default 20)
+	DetectSimilarityMinSample int     // LENS_DETECT_SIMILARITY_MIN_SAMPLE (default 30, >=1)
+	DetectSimilarityMaxStddev float64 // LENS_DETECT_SIMILARITY_MAX_STDDEV (default 0.02, >=0)
+
 	// PoolRoyaltyShare is s, the contributor's share of avoided_COGS
 	// (Stage 2.1). Env: LENS_POOL_ROYALTY_SHARE. Default 0.5. Must be in
 	// [0,1] so Talyvor's net (1−s) × avoided_COGS stays ≥ 0 (the
@@ -553,6 +565,56 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_POOL_HOLDBACK_WINDOW (Go duration > 0, e.g. 72h): %s", v)
 		}
 		c.PoolHoldbackWindow = d
+	}
+	// Detector thresholds (Stage 2.3b) — defaults, then env overrides with
+	// range validation (the NaN/negative lesson).
+	c.DetectVolumeMinMints = 50
+	if v := os.Getenv("LENS_DETECT_VOLUME_MIN_MINTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_DETECT_VOLUME_MIN_MINTS (must be >= 0): %s", v)
+		}
+		c.DetectVolumeMinMints = n
+	}
+	c.DetectVolumeMaxRequesters = 2
+	if v := os.Getenv("LENS_DETECT_VOLUME_MAX_REQUESTERS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_DETECT_VOLUME_MAX_REQUESTERS (must be >= 0): %s", v)
+		}
+		c.DetectVolumeMaxRequesters = n
+	}
+	c.DetectBilateralMinFrac = 0.9
+	if v := os.Getenv("LENS_DETECT_BILATERAL_MIN_FRAC"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
+			return nil, fmt.Errorf("invalid LENS_DETECT_BILATERAL_MIN_FRAC (must be in [0,1]): %s", v)
+		}
+		c.DetectBilateralMinFrac = f
+	}
+	c.DetectBilateralMinMints = 20
+	if v := os.Getenv("LENS_DETECT_BILATERAL_MIN_MINTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_DETECT_BILATERAL_MIN_MINTS (must be >= 0): %s", v)
+		}
+		c.DetectBilateralMinMints = n
+	}
+	c.DetectSimilarityMinSample = 30
+	if v := os.Getenv("LENS_DETECT_SIMILARITY_MIN_SAMPLE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("invalid LENS_DETECT_SIMILARITY_MIN_SAMPLE (must be >= 1): %s", v)
+		}
+		c.DetectSimilarityMinSample = n
+	}
+	c.DetectSimilarityMaxStddev = 0.02
+	if v := os.Getenv("LENS_DETECT_SIMILARITY_MAX_STDDEV"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || math.IsNaN(f) || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_DETECT_SIMILARITY_MAX_STDDEV (must be >= 0): %s", v)
+		}
+		c.DetectSimilarityMaxStddev = f
 	}
 	c.PoolRoyaltyShare = 0.5
 	if v := os.Getenv("LENS_POOL_ROYALTY_SHARE"); v != "" {
