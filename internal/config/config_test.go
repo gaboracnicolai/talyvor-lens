@@ -401,3 +401,22 @@ func TestLoad_PoolMintCapPerEntryInvalidRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_LXCShadowSpendEnabledDefaultsOffAndParses(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LXCShadowSpendEnabled {
+		t.Error("LXCShadowSpendEnabled must DEFAULT FALSE (first live-serving-path change — inert until deliberately enabled)")
+	}
+	t.Setenv("LENS_LXC_SHADOW_SPEND_ENABLED", "true")
+	c2, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c2.LXCShadowSpendEnabled {
+		t.Error("LENS_LXC_SHADOW_SPEND_ENABLED=true must enable the flag")
+	}
+}

@@ -117,6 +117,16 @@ type Config struct {
 	// to produce a pooled hit in the first place.
 	PoolRoyaltyMintingEnabled bool
 
+	// LXCShadowSpendEnabled gates the Phase-2 Stage 2.4/2.5 SHADOW LXC spend
+	// path — the first live-serving-path change. When ON, an AI call records a
+	// shadow LXC debit (cost_usd / LXCUSDValue) AFTER the response is served,
+	// alongside (never replacing) the cost_usd write. OBSERVATIONAL ONLY: the
+	// debit is non-gating, post-serve, and error-swallowed, so it cannot block,
+	// delay, or alter any request. DEFAULT FALSE — with this off the shadow
+	// path is fully inert (no SpendLXC call at all). Env:
+	// LENS_LXC_SHADOW_SPEND_ENABLED.
+	LXCShadowSpendEnabled bool
+
 	// PoolMintCapPerPair is the Pool-B mint cap (2.3b primitive #1): the max
 	// royalty mints per (requester, contributor) pair per rolling window.
 	// 0 (default) = cap disabled. The cap is what bounds any gaming vector's
@@ -404,6 +414,7 @@ func Load() (*Config, error) {
 		POVIMintingEnabled:   parseBoolEnv("LENS_POVI_MINTING_ENABLED"),
 
 		PoolRoyaltyMintingEnabled: parseBoolEnv("LENS_POOL_ROYALTY_MINTING_ENABLED"),
+		LXCShadowSpendEnabled:     parseBoolEnv("LENS_LXC_SHADOW_SPEND_ENABLED"),
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 
