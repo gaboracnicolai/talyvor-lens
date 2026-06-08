@@ -127,6 +127,16 @@ type Config struct {
 	// LENS_LXC_SHADOW_SPEND_ENABLED.
 	LXCShadowSpendEnabled bool
 
+	// LXCGatingEnabled gates the Phase-2 Stage 2.4/2.5 LXC GATING step — the
+	// pre-serve check that BLOCKS a request (402) when the workspace's LXC
+	// balance can't cover the estimated cost. The first gate that can alter
+	// whether a request succeeds. DEFAULT FALSE. COHERENCE: gating is inert
+	// unless LXCShadowSpendEnabled is ALSO on — gating means "block then
+	// debit," but the only serving-path debit is the shadow path, so gating
+	// without shadow would block with no accounting. Two-flag staging:
+	// shadow=observe, shadow+gating=enforce. Env: LENS_LXC_GATING_ENABLED.
+	LXCGatingEnabled bool
+
 	// PoolMintCapPerPair is the Pool-B mint cap (2.3b primitive #1): the max
 	// royalty mints per (requester, contributor) pair per rolling window.
 	// 0 (default) = cap disabled. The cap is what bounds any gaming vector's
@@ -415,6 +425,7 @@ func Load() (*Config, error) {
 
 		PoolRoyaltyMintingEnabled: parseBoolEnv("LENS_POOL_ROYALTY_MINTING_ENABLED"),
 		LXCShadowSpendEnabled:     parseBoolEnv("LENS_LXC_SHADOW_SPEND_ENABLED"),
+		LXCGatingEnabled:          parseBoolEnv("LENS_LXC_GATING_ENABLED"),
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 

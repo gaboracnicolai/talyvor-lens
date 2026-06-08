@@ -688,6 +688,9 @@ func run() error {
 	// (LENS_LXC_SHADOW_SPEND_ENABLED, default off). The proxy debits LXC
 	// alongside the cost_usd write; void/non-gating, cannot affect serving.
 	p.SetLXCSpendSink(dualToken, func() bool { return cfg.LXCShadowSpendEnabled })
+	// LXC gating (Stage 2.4/2.5) — pre-serve block; inert unless LXCGatingEnabled
+	// AND LXCShadowSpendEnabled are both on. Default off.
+	p.SetLXCGate(dualToken, func() bool { return cfg.LXCGatingEnabled })
 
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or

@@ -118,6 +118,11 @@ type Proxy struct {
 	// is read per-call so the flag stays live. See shadow_lxc.go.
 	lxcSink          lxcSpendSink
 	lxcShadowEnabled func() bool
+
+	// LXC gating (Stage 2.4/2.5) — optional, nil-safe pre-serve block.
+	// Inert unless lxcGatingEnabled() AND lxcShadowEnabled() (see lxc_gate.go).
+	lxcGate          lxcBalanceReader
+	lxcGatingEnabled func() bool
 	retryConfig      retry.Config
 	httpClient       *http.Client
 	openAIKey        string
@@ -627,6 +632,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "budget_blocked").Inc()
 			return
 		}
+	}
+
+	// LXC gating (Stage 2.4/2.5) — pre-serve block when the workspace can't
+	// afford the estimated LXC cost. Sits alongside the budget gate, BEFORE the
+	// upstream call. Inert unless LXCGatingEnabled AND shadow are both on; the
+	// estimate is input-only (under-blocks); a balance-read error fails open.
+	if p.lxcGateBlocks(ctx, wsID, model, prompt, loggingPolicy) {
+		writeError(w, http.StatusPaymentRequired, "insufficient LXC balance for estimated request cost")
+		metrics.RequestsTotal.WithLabelValues(cfg.name, "lxc_blocked").Inc()
+		return
 	}
 
 	// Branch / PR / commit attribution. Extracted up front so we can set
