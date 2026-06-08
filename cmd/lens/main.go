@@ -1157,6 +1157,18 @@ func run() error {
 		}
 		authed.Post("/v1/admin/distill/preview", distillPreview.ServeHTTP)
 
+		// Stage-3 pool-mint adjudication gate — the Revoker's FIRST and ONLY
+		// production caller. Admin-gated (mirrors ApproveRate); the operator
+		// passes an explicitly-chosen subset of held request_ids to revoke. The
+		// writer records the decision BEFORE the burn (record-before-revoke), so
+		// no production revoke can happen without a preceding audit row. Doubly
+		// inert in the current config: needs an admin AND
+		// LENS_POOL_ROYALTY_MINTING_ENABLED (no held rows exist otherwise). Never
+		// a loop — operator-initiated only.
+		royaltyRevoker := poolroyalty.NewRevoker(pool, tokenLedger)
+		royaltyAdjudicator := poolroyalty.NewAdjudicationWriter(pool, royaltyRevoker)
+		authed.Post("/v1/admin/pool-royalty/adjudicate", newAdjudicateHandler(authManager, royaltyAdjudicator))
+
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
 			if authManager.PrivateKey() == nil {
 				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not available")

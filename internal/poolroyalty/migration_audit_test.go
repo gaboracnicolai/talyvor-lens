@@ -159,4 +159,36 @@ func TestMigrations_PoolRoyaltySchemaInvariants(t *testing.T) {
 	if !regexp.MustCompile(`(?is)CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+idx_pool_royalty_mints_entry\s+ON\s+pool_royalty_mints\s*\(entry_id,\s*created_at\)`).MatchString(entryIdxMigration) {
 		t.Error("the per-entry cap requires CREATE INDEX IF NOT EXISTS idx_pool_royalty_mints_entry ON pool_royalty_mints (entry_id, created_at) — hot-path COUNT must not seq-scan")
 	}
+
+	// Stage-3 adjudication record (0048): the audit row binding record→revoke.
+	// Additive new table; TEXT[] capture-at-decision sets; outcome JSONB
+	// (nullable until the revoke completes — the record-before-burn ordering).
+	var adjMigration string
+	entries4, _ := migrations.FS.ReadDir(".")
+	for _, e := range entries4 {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		raw, _ := migrations.FS.ReadFile(e.Name())
+		if strings.Contains(string(raw), "pool_royalty_adjudications") {
+			adjMigration += string(raw)
+		}
+	}
+	if !regexp.MustCompile(`(?is)CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+pool_royalty_adjudications`).MatchString(adjMigration) {
+		t.Error("0048 must CREATE TABLE IF NOT EXISTS pool_royalty_adjudications (the audit record binding record→revoke)")
+	}
+	for _, col := range []string{"flag_type", "resolution_label", "candidate_request_ids", "revoked_request_ids", "decided_by", "outcome", "decided_at"} {
+		if !regexp.MustCompile(`(?i)\b` + col + `\b`).MatchString(adjMigration) {
+			t.Errorf("pool_royalty_adjudications missing column %s", col)
+		}
+	}
+	if !regexp.MustCompile(`(?i)candidate_request_ids\s+TEXT\[\]`).MatchString(adjMigration) {
+		t.Error("candidate_request_ids must be TEXT[] (audit snapshot, captured at decision)")
+	}
+	if !regexp.MustCompile(`(?i)revoked_request_ids\s+TEXT\[\]`).MatchString(adjMigration) {
+		t.Error("revoked_request_ids must be TEXT[]")
+	}
+	if !regexp.MustCompile(`(?i)outcome\s+JSONB`).MatchString(adjMigration) {
+		t.Error("outcome must be JSONB (the RevokeReport, nullable until the revoke completes)")
+	}
 }
