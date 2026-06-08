@@ -137,6 +137,15 @@ type Config struct {
 	// shadow=observe, shadow+gating=enforce. Env: LENS_LXC_GATING_ENABLED.
 	LXCGatingEnabled bool
 
+	// PatternCaptureEnabled gates the Phase-3 routing-pattern CAPTURE WRITE —
+	// the producer for the already-live routing Advisor. When ON, a served
+	// model call persists an anonymized routing observation (post-serve, void)
+	// for OPTED-IN workspaces only. CAPTURE-ONLY and structurally MINT-FREE:
+	// it never reaches ledger.Credit (earning is a separate later stage).
+	// DEFAULT FALSE. Env: LENS_PATTERN_CAPTURE_ENABLED. Separate from
+	// PatternMiningEnabled (which gates the opt-in HTTP route, unchanged).
+	PatternCaptureEnabled bool
+
 	// PoolMintCapPerPair is the Pool-B mint cap (2.3b primitive #1): the max
 	// royalty mints per (requester, contributor) pair per rolling window.
 	// 0 (default) = cap disabled. The cap is what bounds any gaming vector's
@@ -426,6 +435,7 @@ func Load() (*Config, error) {
 		PoolRoyaltyMintingEnabled: parseBoolEnv("LENS_POOL_ROYALTY_MINTING_ENABLED"),
 		LXCShadowSpendEnabled:     parseBoolEnv("LENS_LXC_SHADOW_SPEND_ENABLED"),
 		LXCGatingEnabled:          parseBoolEnv("LENS_LXC_GATING_ENABLED"),
+		PatternCaptureEnabled:     parseBoolEnv("LENS_PATTERN_CAPTURE_ENABLED"),
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 

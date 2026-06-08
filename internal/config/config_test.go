@@ -439,3 +439,22 @@ func TestLoad_LXCGatingEnabledDefaultsOffAndParses(t *testing.T) {
 		t.Error("LENS_LXC_GATING_ENABLED=true must enable the flag")
 	}
 }
+
+func TestLoad_PatternCaptureEnabledDefaultsOffAndParses(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PatternCaptureEnabled {
+		t.Error("PatternCaptureEnabled must DEFAULT FALSE (capture is inert until deliberately enabled)")
+	}
+	t.Setenv("LENS_PATTERN_CAPTURE_ENABLED", "true")
+	c2, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c2.PatternCaptureEnabled {
+		t.Error("LENS_PATTERN_CAPTURE_ENABLED=true must enable the flag")
+	}
+}
