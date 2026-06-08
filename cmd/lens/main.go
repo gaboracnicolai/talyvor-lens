@@ -684,6 +684,10 @@ func run() error {
 	// one-way LENS->LXC conversion + LXC spend path.
 	rateEngine := economy.NewRateEngine(tokenLedger, pool)
 	dualToken := economy.NewDualTokenStore(tokenLedger, pool, rateEngine)
+	// Stage 2.4/2.5 shadow LXC spend — observational, post-serve, flag-gated
+	// (LENS_LXC_SHADOW_SPEND_ENABLED, default off). The proxy debits LXC
+	// alongside the cost_usd write; void/non-gating, cannot affect serving.
+	p.SetLXCSpendSink(dualToken, func() bool { return cfg.LXCShadowSpendEnabled })
 
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or

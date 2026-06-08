@@ -113,12 +113,17 @@ type Proxy struct {
 	distiller         *distillIntegration
 	poolGate          *cache_pooling.PoolabilityGate
 	royaltyMinter     royaltySink
-	retryConfig       retry.Config
-	httpClient        *http.Client
-	openAIKey         string
-	anthropicKey      string
-	googleKey         string
-	learner           *learner.Learner
+
+	// Shadow LXC spend (Stage 2.4/2.5) — optional, nil-safe. lxcShadowEnabled
+	// is read per-call so the flag stays live. See shadow_lxc.go.
+	lxcSink          lxcSpendSink
+	lxcShadowEnabled func() bool
+	retryConfig      retry.Config
+	httpClient       *http.Client
+	openAIKey        string
+	anthropicKey     string
+	googleKey        string
+	learner          *learner.Learner
 
 	// Upstream URLs are unexported and defaulted so tests can swap them
 	// for an httptest server without leaking config to callers.
@@ -1241,6 +1246,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					slog.String("err", recErr.Error()),
 				)
 			}
+			// Shadow LXC debit — INSIDE the logging gate, alongside the durable
+			// cost_usd write, so it fires iff that write fires (a LoggingNone
+			// workspace gets neither; symmetric with the streaming seam, which
+			// returns early on LoggingNone). Void, post-serve, same ctx — cannot
+			// affect the response. Inert unless the flag is on AND a sink wired.
+			p.shadowSpendLXC(ctx, wsID, alerts.CostUSD(upstreamModel, inT, outT))
 			// The vision-OCR sub-call's cost is its OWN row, tagged 'vision_ocr',
 			// priced on the vision model, flagged estimated — a COST, never a
 			// saving, NEVER blended into the 'convert' row above. The durable
@@ -1484,6 +1495,9 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	if p.budgetService != nil {
 		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, alerts.CostUSD(sc.model, inT, outT))
 	}
+	// Shadow LXC debit on the streaming path — same detached ctx as the
+	// streamed cost_usd write above; void, observational.
+	p.shadowSpendLXC(ctx, sc.wsID, alerts.CostUSD(sc.model, inT, outT))
 }
 
 func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []byte {
