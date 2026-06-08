@@ -123,12 +123,17 @@ type Proxy struct {
 	// Inert unless lxcGatingEnabled() AND lxcShadowEnabled() (see lxc_gate.go).
 	lxcGate          lxcBalanceReader
 	lxcGatingEnabled func() bool
-	retryConfig      retry.Config
-	httpClient       *http.Client
-	openAIKey        string
-	anthropicKey     string
-	googleKey        string
-	learner          *learner.Learner
+
+	// Routing-pattern capture (Phase-3) — optional, nil-safe post-serve
+	// producer for the routing Advisor. See pattern_capture.go.
+	patternSink           patternCaptureSink
+	patternCaptureEnabled func() bool
+	retryConfig           retry.Config
+	httpClient            *http.Client
+	openAIKey             string
+	anthropicKey          string
+	googleKey             string
+	learner               *learner.Learner
 
 	// Upstream URLs are unexported and defaulted so tests can swap them
 	// for an httptest server without leaking config to callers.
@@ -1267,6 +1272,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// returns early on LoggingNone). Void, post-serve, same ctx — cannot
 			// affect the response. Inert unless the flag is on AND a sink wired.
 			p.shadowSpendLXC(ctx, wsID, alerts.CostUSD(upstreamModel, inT, outT))
+			// Routing-pattern capture (Phase-3) — post-serve, VOID, structurally
+			// mint-free. Same logging gate + post-serve position as the shadow
+			// debit (a LoggingNone workspace gets neither); the opt-in WRITE gate
+			// is in the sink SQL. cacheHit=false: this is the upstream model-call
+			// path (cache hits short-circuit far earlier). Quality is the
+			// just-scored value; latency is the real request elapsed. Streaming
+			// is deliberately NOT captured (no scored quality on that path —
+			// see pattern_capture.go).
+			// scored = we actually computed a quality score (scorer wired AND
+			// statusCode==200); an unscored/non-200 response must NOT write a
+			// quality=0 row that poisons the Advisor's averages.
+			p.capturePattern(ctx, wsID, feature, upstreamModel, cfg.name,
+				len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false)
 			// The vision-OCR sub-call's cost is its OWN row, tagged 'vision_ocr',
 			// priced on the vision model, flagged estimated — a COST, never a
 			// saving, NEVER blended into the 'convert' row above. The durable

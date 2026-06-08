@@ -691,6 +691,11 @@ func run() error {
 	// LXC gating (Stage 2.4/2.5) — pre-serve block; inert unless LXCGatingEnabled
 	// AND LXCShadowSpendEnabled are both on. Default off.
 	p.SetLXCGate(dualToken, func() bool { return cfg.LXCGatingEnabled })
+	// Phase-3 routing-pattern capture — post-serve, void, mint-free producer
+	// for the routing Advisor. Default off; persists observations for opted-in
+	// workspaces only (SQL gate). NEVER reaches ledger.Credit (earning is a
+	// separate later stage).
+	p.SetPatternCapture(patternMiner, func() bool { return cfg.PatternCaptureEnabled })
 
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or

@@ -171,7 +171,9 @@ func ExtractPattern(
 // ─── earning calculator ──────────────────────────
 
 // PatternEarning computes the LENS payout for a pattern.
-//   base × (1 + rarity × (max - 1)) [+ bonus if rare]
+//
+//	base × (1 + rarity × (max - 1)) [+ bonus if rare]
+//
 // Rounded to 6 decimals like the other mining tracks.
 func PatternEarning(p RoutingPattern) float64 {
 	if p.Rarity < 0 {
@@ -259,7 +261,8 @@ func (m *PatternMiner) IsOptedIn(ctx context.Context, workspaceID string) (bool,
 // ScoreRarity counts how many OTHER workspaces have submitted a
 // pattern with the same (feature, model, provider, input_range,
 // latency_bucket) tuple. First-ever pattern → 1.0.
-//   rarity = 1 / (1 + count_similar_other_workspaces)
+//
+//	rarity = 1 / (1 + count_similar_other_workspaces)
 func (m *PatternMiner) ScoreRarity(ctx context.Context, p RoutingPattern) (float64, error) {
 	if m.pool == nil {
 		return 1.0, nil
@@ -549,4 +552,47 @@ func PatternRates() map[string]float64 {
 		"unique_pattern_bonus":    UniquePatternBonus,
 		"unique_rarity_threshold": UniqueRarityThreshold,
 	}
+}
+
+// ─── RecordPatternObservation (Phase-3 capture write) ──────────────
+//
+// CAPTURE-ONLY. Persists ONE anonymized routing observation and does nothing
+// else. It is structurally MINT-FREE: the body references no ledger and makes
+// no Credit call (contrast RecordPattern, which credits when optedIn). Earning
+// + anti-gaming is a SEPARATE later stage; this method cannot mint by
+// construction, not by configuration.
+//
+// The write is gated on CONSENT in SQL: the conditional INSERT writes a row
+// ONLY when the workspace has opted in (WHERE EXISTS over workspace_pattern_optin),
+// so a non-opted-in workspace gets NO row. Persisted rows are always
+// opted_in=TRUE / earned=0 (only the consented case is ever written) — making
+// them visible to the already-live routing Advisor (which reads opted_in=TRUE)
+// while crediting nothing.
+const insertPatternObservationSQL = `
+INSERT INTO routing_patterns (
+	workspace_id, feature_category, model_used, provider_used,
+	input_token_range, output_quality, latency_bucket,
+	cache_hit_rate, success_rate, sample_count, rarity,
+	opted_in, earned
+)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, TRUE, 0
+WHERE EXISTS (SELECT 1 FROM workspace_pattern_optin WHERE workspace_id = $1)`
+
+// RecordPatternObservation persists a single anonymized routing observation for
+// an OPTED-IN workspace (no-op for others). It never scores rarity, never
+// computes earnings, and NEVER calls the ledger — capture is structurally
+// incapable of minting. Best-effort: the caller invokes it post-serve on a
+// detached context; errors are the caller's to log, not to propagate.
+func (m *PatternMiner) RecordPatternObservation(ctx context.Context, workspaceID string, p RoutingPattern) error {
+	if m == nil || m.pool == nil {
+		return nil
+	}
+	if _, err := m.pool.Exec(ctx, insertPatternObservationSQL,
+		workspaceID, p.FeatureCategory, p.ModelUsed, p.ProviderUsed,
+		p.InputTokenRange, p.OutputQuality, p.LatencyBucket,
+		p.CacheHitRate, p.SuccessRate, p.SampleCount,
+	); err != nil {
+		return fmt.Errorf("pattern mining: insert observation: %w", err)
+	}
+	return nil
 }

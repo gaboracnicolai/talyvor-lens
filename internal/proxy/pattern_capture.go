@@ -1,0 +1,72 @@
+package proxy
+
+import (
+	"context"
+	"log/slog"
+
+	"github.com/talyvor/lens/internal/mining"
+)
+
+// pattern_capture.go — the Phase-3 routing-pattern CAPTURE WRITE: the producer
+// for the already-live routing Advisor (which reads opted_in routing_patterns
+// but had no writer). Post-serve, observational, structurally MINT-FREE.
+//
+// THE SAFETY IS STRUCTURAL: capturePattern returns NOTHING. A void, post-serve,
+// error-swallowed call cannot block, delay, fail, or alter any request — there
+// is no return value a serve path could branch on. Same shape as the
+// shadow-LXC debit and the pooled-royalty mint.
+//
+// CANNOT MINT: the sink is RecordPatternObservation, which persists an
+// anonymized observation and never reaches the ledger (capture and earning are
+// separate; earning is a later stage). The sink interface itself exposes only
+// the capture method — there is no credit/earn method to call.
+//
+// DOUBLE-GATED: capture fires iff PatternCaptureEnabled (this flag) AND the
+// workspace has opted in. The flag gate is here (the proxy); the opt-in gate is
+// in the SQL (RecordPatternObservation's WHERE EXISTS over
+// workspace_pattern_optin) — so a non-opted-in workspace gets NO row even when
+// the flag is on. Default-off ⇒ no sink call at all.
+
+// patternCaptureSink is the minimal capture surface the proxy depends on — one
+// method, persist-only. *mining.PatternMiner.RecordPatternObservation satisfies
+// it. Deliberately exposes NO credit/earn method (cannot mint by construction).
+type patternCaptureSink interface {
+	RecordPatternObservation(ctx context.Context, workspaceID string, p mining.RoutingPattern) error
+}
+
+// SetPatternCapture wires the capture sink + its enable flag (read per-call).
+// The proxy holds both as optional, nil-safe fields.
+func (p *Proxy) SetPatternCapture(sink patternCaptureSink, enabled func() bool) {
+	p.patternSink = sink
+	p.patternCaptureEnabled = enabled
+}
+
+// capturePattern records a routing observation for a just-served request. VOID
+// by design — it cannot affect the response. Called POST-SERVE on a detached
+// context (so client cancellation can't drop the write, and the write can't
+// touch the serve). Errors are logged-and-swallowed.
+//
+// CAPTURE ONLY SCORED RESPONSES: scored is false whenever the response carries
+// no real quality score (a served non-200 passthrough, or no scorer wired). An
+// unscored observation would be written with output_quality=0 and drag down the
+// Advisor's quality average for that model — the same poison the streaming
+// deferral avoids. So unscored ⇒ no capture. This is the unifying invariant:
+// streaming (no scorer on that path) and non-200 (scorer skipped) are both
+// unscored, hence both uncaptured.
+func (p *Proxy) capturePattern(ctx context.Context, workspaceID, feature, model, provider string, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64, cacheHit bool) {
+	if p == nil || p.patternSink == nil || p.patternCaptureEnabled == nil || !p.patternCaptureEnabled() {
+		return
+	}
+	if !scored {
+		return // no real quality score ⇒ don't poison the Advisor with quality=0
+	}
+	pat := mining.ExtractPattern(feature, model, provider, inputTokens, outputTokens, quality, latencyMs, cacheHit)
+	// Detached: post-serve, must outlive client cancellation and cannot affect
+	// the served response. The opt-in WRITE gate lives in the sink's SQL.
+	if err := p.patternSink.RecordPatternObservation(context.WithoutCancel(ctx), workspaceID, pat); err != nil {
+		slog.Warn("pattern capture: observation write failed (observational; serve unaffected)",
+			slog.String("workspace", workspaceID),
+			slog.String("err", err.Error()),
+		)
+	}
+}
