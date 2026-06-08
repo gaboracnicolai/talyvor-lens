@@ -1,11 +1,11 @@
 # Talyvor — Roadmap & Status
 
-_Status board for the Talyvor build. COORDINATION.md remains the operational cross-branch seam doc; this is the strategic/status view. Last updated at Stage 2.3a._
+_Status board for the Talyvor build. COORDINATION.md remains the operational cross-branch seam doc; this is the strategic/status view. Last updated at main 5d52ea7 — Phase-2 BUILD COMPLETE (through LXC gating + PoVI-resolved); what remains before flip-on is not code._
 
 ## How to read this
 The build runs as a relay: prompts composed, run in Claude Code, reviewed, merged. The unit of progress is a "stage" (recon → build → review → merge), not calendar time — wall-clock depends on relay cadence, not engineering size. Effort below is in stages and relative size, deliberately not dates.
 
-## Phase 2 — LENS token economy  [IN PROGRESS]
+## Phase 2 — LENS token economy  [BUILD COMPLETE]
 
 Done & merged on main (all inert behind LENS_POOL_ROYALTY_MINTING_ENABLED=false):
 - DISTILL — complete.
@@ -15,14 +15,21 @@ Done & merged on main (all inert behind LENS_POOL_ROYALTY_MINTING_ENABLED=false)
 - 2.3.0 — serve-time evidence: unsalted answer+prompt hashes per claim row, tamper-evident, no-hash⇒no-mint gate.
 - 2.3b cap (primitive #1) — per-pair rolling-window mint cap, exact under concurrency, zero new locks, CI-guarded by a real-Postgres -race test.
 - 2.3a — holdback/finality ledger: mint credits HELD; leader-elected unconditional sweeper finalizes held→spendable after a configurable window (72h default, trigger swappable to billing later); revoke burns from held; supply counts at FINALIZE; status-aware realized margin.
+- 2.3b detection (#102) — three read-only statistical detectors (volume / self-dealing / similarity) over claim rows; never auto-acts (write-impossible at the type level — the reader's db seam is Query/QueryRow-only); flags INFORM the operator, never trigger.
+- Per-entry cap (#103) — second after-credit COUNT keyed on entry_id (no new lock, no #32 surface); counts revoked (no budget refund on revoke); required hot-path index (migration 0047). Closes per-pair ≠ per-entry.
+- Stage-3 revoke→adjudicate arc — revoke orchestrator (#105, per-row CAS-first held-burn; a finalized mint is NEVER revocable), read-only flag resolver (#106, candidate→held request_ids, candidates-never-verdicts), admin adjudication gate (#107, `POST /v1/admin/pool-royalty/adjudicate`; record-before-burn; the Revoker's FIRST and ONLY production caller; never-auto-act structural; migration 0048).
+- Reward-loop seam test (#108) — mint → finalize → redeem proven end-to-end on real Postgres: held LXC is NOT redeemable; only finalized, spendable LENS converts to LXC.
+- 2.4 / 2.5 — USD-pegged redemption / the LXC spend path: shadow (#109, OBSERVE — post-serve, void, cannot affect serving) then gating (#110, ENFORCE — pre-serve 402 block, gating-requires-shadow, fail-open). Both default-off, staged observe→enforce.
 
-Remaining in Phase 2:
-- 2.3b further detection — statistical concentration detectors (volume / self-dealing / similarity) over claim rows. The cap BOUNDS exposure; these FLAG patterns.
-- Per-entry cap follow-up — semantic ownership churn makes per-pair ≠ per-entry.
+**PHASE-2 BUILD WORK IS COMPLETE.** The full loop — mint → finalize → detect → resolve → revoke → adjudicate → redeem → shadow-spend → gating — is on main, inert behind its flags (`LENS_POOL_ROYALTY_MINTING_ENABLED` / `LXCShadowSpendEnabled` / `LXCGatingEnabled`, all default-off) and real-Postgres -race CI-guarded end to end.
+
+What remains before any flip-on is NOT code:
+- External security/crypto audit (vendor + legal) of the minting/ledger path — a hard precondition on issuance; sits at the end of the Phase-2 audit, before Phase 3.
+- The logged pre-flip caveats: validate connection-pool headroom under high same-workspace concurrency before enabling the LXC shadow/gating flags (the `lxc_balances` FOR UPDATE serialization point); tighten adjudication operator identity beyond the global-key default (`decided_by` is TEXT — a value change, not a schema change).
+
+Decisions on record (resolved — kept for history):
 - Poisoning snapshot decision — DECIDED: Option C (accept finality + economics). Late-discovered poisoning (a bad cached answer reported days/weeks later, after the served content has expired from cache) is NOT recovered per-mint. Rationale: the per-pair AND per-entry caps now bound a poisoned entry's exposure to at most cap × s × avoided_COGS per window on each axis (built, exact, CI-guarded), the per-serve amounts are sub-cent so a single clawback is near-symbolic, tamper-evidence (the 2.3.0 answer hash) provides adverse inference, and the holdback window still catches poisoning detected in-window. UPGRADE PATH (Option A, build only on concrete customer demand): content-addressed snapshots — persist the served bytes keyed by the existing answer_sha256 (a thousand serves of one entry dedupe to one snapshot row; claim rows already point at it), fully enabling adjudication of any mint at any time. Deferred deliberately because it is a real privacy escalation (storing response plaintext, not just digests) whose cost is only worth paying against a concrete 'prove every payout legitimate, forever' procurement requirement; gate it like none-policy (no snapshot ⇒ no mint) when built. Option B (in-window quality-judging) rejected: hot-path cost for only partial coverage.
 - PoVI challenge hookup for pool mints — RESOLVED by the Stage-3 adjudication arc (detect -> resolve -> revoke -> adjudicate). The original ask ('wire the holdback's revoke path to an adjudication trigger') is met: the admin adjudication endpoint (POST /v1/admin/pool-royalty/adjudicate) records a decision and revokes the operator-chosen subset from held via AdjudicationWriter -> RevokeHeldMints -> RevokeHeldTx. Deliberate reframing: 'challenge' was scoped from an automated PoVI-style sampling challenger (which the earlier recon found uses the wrong adjudicator — povi_challenges is node/Merkle/stake-shaped — and which would VIOLATE the never-auto-act invariant) to operator-driven adjudication. The holdback window (finalize_after, 72h) is the contest window; detection/resolver only inform, the operator decides. A third-party challenger role / multi-party dispute protocol was never specified for the pool side and would be net-new design, not a hookup — out of scope unless a customer requires it.
-- 2.4 / 2.5 — USD-pegged redemption (the LXC spend path).
-- Full Phase-2 audit, INCLUDING the external security/crypto audit of the minting/ledger path.
 
 Minting flip-on gate: supply-accounting precondition LIFTED by 2.2. Remaining: anti-gaming machinery complete (2.3 arc), business case, external audit. Minting stays inert until all land.
 
@@ -32,6 +39,8 @@ Minting flip-on gate: supply-accounting precondition LIFTED by 2.2. Remaining: a
 3. Engine to 100% + API contract FROZEN/versioned = definition of done.
 4. THEN the frontend — built ONCE as a full production-grade sellable product (marketing → signup → onboarding → live dashboard → controls → audit/exports). No pilot, no demo. The single biggest discrete chunk; spans the whole suite.
 
+OPEN QUESTION (founder decides at the gate): the locked order freezes the API BEFORE the frontend (engine-100%+freeze -> frontend). Alternative under consideration: freeze AFTER the frontend. Rationale for freezing after: the frontend is the most demanding consumer of the engine's contract; building it against a still-unfrozen engine means any contract problems it surfaces (awkward fields, missing pieces, weak error shapes) are FREE to fix, and the freeze then locks a shape proven against a real consumer rather than frozen on faith. Counterweight: the suite (built before the frontend) would then have been built against an unfrozen engine and may need contract-adjustment too — manageable, but noted. Deferred to the frontend gate.
+
 ## Relative effort (stages & size, NOT dates)
 - Finish Phase 2: ~5–7 more stages of the shape already done. Near, well-scoped.
 - Phases 3–5: unscoped; an unknown multiple of Phase 2.
@@ -39,7 +48,9 @@ Minting flip-on gate: supply-accounting precondition LIFTED by 2.2. Remaining: a
 - Frontend: major; plausibly comparable to a full product backend, spanning all products.
 - Honest gestalt: "near the end of the beginning." Phase 2 is the proof-of-discipline; suite+frontend is the company-build; the parked R&D ideas are a later horizon.
 
-## Parked ideas — reasoned-through, deferred (full reasoning in COORDINATION.md)
+## Parked ideas — APPROVED and COMMITTED future work (full reasoning in COORDINATION.md)
+Deferred, NOT optional: once the engine + suite + frontend are complete, the project returns to ALL approved parked items, in priority order set by the founder. 'Parked' means sequenced-later-and-certain, not 'maybe.' Phase 6, Phase 7, the agent-settlement-rail option, and any other founder-approved idea are committed future phases.
+
 1. Phase-6 specialized small model on Talyvor's own traffic — ML-research program, not a build task.
 2. Phase-6 custom tokenizer (the legitimate "Talyvor alphabet" — more vocabulary, not fewer symbols).
 3. Small-local-by-default + route-to-bigger (the honest "local brain").
