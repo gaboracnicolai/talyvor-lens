@@ -3,6 +3,7 @@ package mining
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -39,6 +40,9 @@ func TestRecordPattern_OverCap_AtomicBlock(t *testing.T) {
 	miner.SetEarnCap(2, time.Hour)
 	expectScoreRarity(mock, "ws_e", 0) // n=0 → rarity 0.0 → earned base 0.001
 	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO pattern_mine_credits").
+		WithArgs("req-over", "ws_e", 0.001).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1)) // claim taken (not a dup)
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_e", "code", "claude", "anthropic", InputBucketMedium,
 			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, true, 0.001).
@@ -49,7 +53,7 @@ func TestRecordPattern_OverCap_AtomicBlock(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(3))) // 3 > cap 2
 	mock.ExpectRollback()
 
-	if err := miner.RecordPattern(context.Background(), "ws_e", earnPattern(), true); err != nil {
+	if err := miner.RecordPattern(context.Background(), "ws_e", earnPattern(), true, "req-over"); err != nil {
 		t.Fatalf("over-cap must serve-but-skip (return nil), got %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -64,6 +68,9 @@ func TestRecordPattern_CapCountError_FailsClosed(t *testing.T) {
 	miner.SetEarnCap(2, time.Hour)
 	expectScoreRarity(mock, "ws_e", 0)
 	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO pattern_mine_credits").
+		WithArgs("req-cap", "ws_e", 0.001).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_e", "code", "claude", "anthropic", InputBucketMedium,
 			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, true, 0.001).
@@ -73,7 +80,7 @@ func TestRecordPattern_CapCountError_FailsClosed(t *testing.T) {
 		WithArgs("ws_e", pgxmock.AnyArg()).WillReturnError(errors.New("db down"))
 	mock.ExpectRollback()
 
-	if err := miner.RecordPattern(context.Background(), "ws_e", earnPattern(), true); err == nil {
+	if err := miner.RecordPattern(context.Background(), "ws_e", earnPattern(), true, "req-cap"); err == nil {
 		t.Fatal("cap-count error must FAIL CLOSED (return error), not credit")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -84,10 +91,15 @@ func TestRecordPattern_CapCountError_FailsClosed(t *testing.T) {
 // REAL-PG -race EXACTNESS (the Pool-B 25-vs-5 proof): N concurrent same-workspace
 // opted-in RecordPattern calls with cap=K → EXACTLY K credit (the cap COUNT rides
 // CreditTx's lens_token_balances FOR UPDATE; the rest cap and roll back).
-func TestRecordPattern_EarnCap_Exactness_Integration(t *testing.T) {
+// earnTestPool spins up the real-PG schema the earn-path integration tests need
+// (routing_patterns + the ledger tables + the S3 pattern_mine_credits claim
+// table). Returns nil + skips when LENS_TEST_DATABASE_URL is unset.
+func earnTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
 	url := os.Getenv("LENS_TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG earn-cap exactness test")
+		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG earn-path test")
+		return nil
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, url)
@@ -99,6 +111,7 @@ func TestRecordPattern_EarnCap_Exactness_Integration(t *testing.T) {
 		`DROP TABLE IF EXISTS routing_patterns`,
 		`DROP TABLE IF EXISTS lens_token_ledger`,
 		`DROP TABLE IF EXISTS lens_token_balances`,
+		`DROP TABLE IF EXISTS pattern_mine_credits`,
 		`CREATE TABLE routing_patterns (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
 			feature_category TEXT NOT NULL, model_used TEXT NOT NULL, provider_used TEXT NOT NULL,
@@ -113,22 +126,38 @@ func TestRecordPattern_EarnCap_Exactness_Integration(t *testing.T) {
 		`CREATE TABLE lens_token_ledger (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
 			amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL,
 			description TEXT, metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		// S3 claim table — composite UNIQUE(request_id, workspace_id).
+		`CREATE TABLE pattern_mine_credits (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			request_id TEXT NOT NULL, workspace_id TEXT NOT NULL, earned DOUBLE PRECISION NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (request_id, workspace_id))`,
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			t.Fatalf("schema: %v", err)
 		}
 	}
+	return pool
+}
+
+func TestRecordPattern_EarnCap_Exactness_Integration(t *testing.T) {
+	pool := earnTestPool(t)
+	if pool == nil {
+		return
+	}
+	ctx := context.Background()
 	miner := NewPatternMiner(newLedgerStore(pool), pool)
 	const N, K = 25, 5
 	miner.SetEarnCap(K, time.Hour)
 
+	// DISTINCT request_ids per call so the CAP (not the claim) is what limits to
+	// K — this test proves S2's cap exactness, not S3's claim dedup.
 	var wg sync.WaitGroup
 	for i := 0; i < N; i++ {
+		req := fmt.Sprintf("req-%d", i)
 		wg.Add(1)
-		go func() {
+		go func(req string) {
 			defer wg.Done()
-			_ = miner.RecordPattern(ctx, "ws_race", earnPattern(), true)
-		}()
+			_ = miner.RecordPattern(ctx, "ws_race", earnPattern(), true, req)
+		}(req)
 	}
 	wg.Wait()
 

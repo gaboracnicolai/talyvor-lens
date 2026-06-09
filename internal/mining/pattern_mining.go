@@ -379,7 +379,18 @@ const earnCapCountSQL = `SELECT COUNT(*) FROM routing_patterns
 WHERE workspace_id = $1 AND earned > 0
   AND created_at > now() - ($2::bigint * interval '1 microsecond')`
 
-func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p RoutingPattern, optedIn bool) error {
+// insertPatternClaimSQL is the S3 idempotency claim: one credit per
+// (request_id, workspace_id). COMPOSITE UNIQUE (not bare request_id like
+// pool_royalty_mints) — request_id is the caller-supplied X-Talyvor-Request-ID,
+// so scoping by workspace stops one workspace from suppressing another's earn
+// by colliding the header, while still deduping a retry/replay within a
+// workspace. ON CONFLICT + RowsAffected()==0 is the exactly-once guard
+// (claim-then-act, mirroring poolroyalty.MintServedHit).
+const insertPatternClaimSQL = `INSERT INTO pattern_mine_credits (request_id, workspace_id, earned)
+VALUES ($1, $2, $3)
+ON CONFLICT (request_id, workspace_id) DO NOTHING`
+
+func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p RoutingPattern, optedIn bool, requestID string) error {
 	p.WorkspaceID = workspaceID
 
 	earned := 0.0
@@ -395,20 +406,46 @@ func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p 
 		earned = PatternEarning(p)
 	}
 
+	// FAIL-CLOSED (mining-layer belt, not just S4's wire-up): an earning credit
+	// is UNCLAIMABLE without a request id (no replay protection), so downgrade it
+	// to a non-earning observation — earned=0 / rarity=0 routes it through the
+	// EXACT same earned<=0 path as any capture/non-earning row (the row still
+	// persists, Advisor-visible; opted_in stays as passed), but nothing is
+	// claimed/credited/capped. Mirrors Pool-B's no-hash→no-mint.
+	if earned > 0 && requestID == "" {
+		earned = 0
+		p.Rarity = 0
+	}
+
 	if m.pool == nil {
 		return nil // no DB — no-op (tests that skip the DB path)
 	}
 
-	// SINGLE TX (S2): the routing_patterns INSERT, the credit, and the cap
-	// COUNT all ride one tx with a deferred rollback, so an over-cap event
-	// discards the row AND the credit atomically, and the cap COUNT rides
-	// CreditTx's balance FOR UPDATE for exactness under concurrent
-	// same-workspace bursts (mirrors poolroyalty.MintServedHit).
+	// SINGLE TX (S2+S3): the idempotency claim, the routing_patterns INSERT, the
+	// credit, and the cap COUNT all ride one tx with a deferred rollback — so
+	// claim+row+credit are atomic (no claimed-but-not-credited or
+	// credited-but-not-claimed split), an over-cap event discards row+credit, and
+	// the cap COUNT rides CreditTx's balance FOR UPDATE for exactness under
+	// concurrent same-workspace bursts (mirrors poolroyalty.MintServedHit).
 	tx, err := m.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("pattern mining: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// CLAIM FIRST (earning only): a replayed (request_id, workspace_id) conflicts
+	// → RowsAffected()==0 → suppress and roll back, writing NOTHING (no claim row,
+	// no routing_patterns row, no credit). Non-earning rows don't claim (a
+	// duplicate capture row is harmless and keeps the claim table to real earns).
+	if optedIn && earned > 0 {
+		tag, err := tx.Exec(ctx, insertPatternClaimSQL, requestID, workspaceID, earned)
+		if err != nil {
+			return fmt.Errorf("pattern mining: claim: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil // already credited this (request_id, workspace_id) — suppress
+		}
+	}
 
 	row := tx.QueryRow(ctx, `
 		INSERT INTO routing_patterns (

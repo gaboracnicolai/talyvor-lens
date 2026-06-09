@@ -174,6 +174,10 @@ func TestRecordPattern_CreditsOptedInWorkspace(t *testing.T) {
 	// ws_opt, same balance/earned); only the sequence gains Begin, the under-cap
 	// COUNT, and Commit. feature_category "code" still persisted on the row.
 	mock.ExpectBegin()
+	// S3 claim-first (earning): RowsAffected 1 = claim taken (not a dup).
+	mock.ExpectExec("INSERT INTO pattern_mine_credits").
+		WithArgs("req1", "ws_opt", 0.001).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_opt", "code", "claude", "anthropic", InputBucketMedium,
 			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, true, 0.001).
@@ -190,7 +194,7 @@ func TestRecordPattern_CreditsOptedInWorkspace(t *testing.T) {
 		InputTokenRange: InputBucketMedium, LatencyBucket: LatencyFast,
 		OutputQuality: 0.85, CacheHitRate: 0.0, SuccessRate: 1.0, SampleCount: 1,
 	}
-	if err := miner.RecordPattern(context.Background(), "ws_opt", pattern, true); err != nil {
+	if err := miner.RecordPattern(context.Background(), "ws_opt", pattern, true, "req1"); err != nil {
 		t.Fatalf("RecordPattern: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -216,7 +220,7 @@ func TestRecordPattern_SkipsCreditWhenNotOptedIn(t *testing.T) {
 		InputTokenRange: InputBucketMedium, LatencyBucket: LatencyFast,
 		OutputQuality: 0.85, CacheHitRate: 0.0, SuccessRate: 1.0, SampleCount: 1,
 	}
-	if err := miner.RecordPattern(context.Background(), "ws_off", pattern, false); err != nil {
+	if err := miner.RecordPattern(context.Background(), "ws_off", pattern, false, "req-off"); err != nil {
 		t.Fatalf("RecordPattern: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
