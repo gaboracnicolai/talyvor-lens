@@ -128,12 +128,17 @@ type Proxy struct {
 	// producer for the routing Advisor. See pattern_capture.go.
 	patternSink           patternCaptureSink
 	patternCaptureEnabled func() bool
-	retryConfig           retry.Config
-	httpClient            *http.Client
-	openAIKey             string
-	anthropicKey          string
-	googleKey             string
-	learner               *learner.Learner
+
+	// Routing-pattern EARNING (S4) — optional, nil-safe. Separate sink from
+	// capture (this one can mint via RecordPattern). See pattern_earn.go.
+	patternEarnSink    patternEarnSink
+	patternEarnEnabled func() bool
+	retryConfig        retry.Config
+	httpClient         *http.Client
+	openAIKey          string
+	anthropicKey       string
+	googleKey          string
+	learner            *learner.Learner
 
 	// Upstream URLs are unexported and defaulted so tests can swap them
 	// for an httptest server without leaking config to callers.
@@ -1283,8 +1288,17 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// scored = we actually computed a quality score (scorer wired AND
 			// statusCode==200); an unscored/non-200 response must NOT write a
 			// quality=0 row that poisons the Advisor's averages.
-			p.capturePattern(ctx, wsID, feature, upstreamModel, cfg.name,
-				len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false)
+			// Routing-pattern earn-or-capture (S4) — mutually exclusive, ONE row.
+			// earnPattern returns true ONLY when it took the corpus row (flag on
+			// AND authenticated non-default workspace AND opted-in); in every
+			// other state (incl. flag-OFF, the first guard) it returns false and
+			// capturePattern runs byte-identical to before. Both are post-flush,
+			// detached, void — neither can affect the served response.
+			if !p.earnPattern(ctx, feature, upstreamModel, cfg.name, prompt, upstreamBody,
+				len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds()) {
+				p.capturePattern(ctx, wsID, feature, upstreamModel, cfg.name,
+					len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false)
+			}
 			// The vision-OCR sub-call's cost is its OWN row, tagged 'vision_ocr',
 			// priced on the vision model, flagged estimated — a COST, never a
 			// saving, NEVER blended into the 'convert' row above. The durable

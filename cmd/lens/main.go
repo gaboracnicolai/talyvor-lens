@@ -706,6 +706,9 @@ func run() error {
 	// workspaces only (SQL gate). NEVER reaches ledger.Credit (earning is a
 	// separate later stage).
 	p.SetPatternCapture(patternMiner, func() bool { return cfg.PatternCaptureEnabled })
+	// S4 routing-pattern EARNING wire-up — the same miner, separate sink + flag.
+	// Default off; flag-off the serve path is byte-identical to capture-only.
+	p.SetPatternEarn(patternMiner, func() bool { return cfg.PatternEarningEnabled })
 
 	r := chi.NewRouter()
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
