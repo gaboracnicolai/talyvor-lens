@@ -46,6 +46,17 @@ const (
 	// bonus fires.
 	UniqueRarityThreshold = 0.7
 
+	// EarnCorroborationFloor is the minimum number of OTHER opted-in
+	// workspaces that must independently produce the same proxy-set tuple
+	// before rarity earns above the base rate. Below it (including the
+	// perverse n=0 unique-pattern case) ScoreRarity returns 0.0 — base rate,
+	// no premium, no bonus. This is the anti-gaming bound: "unique-pays-most"
+	// rewarded exactly the unverifiable/manufacturable patterns; corroboration
+	// by independent workspaces is now required to earn a premium. Mirrors the
+	// routing Advisor's read-side floor (routing.defaultMinWorkspaces = 3);
+	// kept as a separate mining-side constant to avoid cross-package coupling.
+	EarnCorroborationFloor = 3
+
 	// TypePatternMine is the ledger row type for this track.
 	TypePatternMine = "pattern_mine"
 )
@@ -258,30 +269,53 @@ func (m *PatternMiner) IsOptedIn(ctx context.Context, workspaceID string) (bool,
 
 // ─── rarity scoring ──────────────────────────────
 
-// ScoreRarity counts how many OTHER workspaces have submitted a
-// pattern with the same (feature, model, provider, input_range,
-// latency_bucket) tuple. First-ever pattern → 1.0.
+// ScoreRarity counts how many OTHER opted-in workspaces have submitted a
+// pattern with the same PROXY-SET tuple (model, provider, input_range,
+// latency_bucket) — feature_category is deliberately NOT in the key (see the
+// body). Below EarnCorroborationFloor corroborating workspaces (including the
+// first-ever / n=0 case) it returns 0.0; at or above the floor it returns
+// 1/(1+n). An uncorroborated or unverifiable pattern earns no premium.
 //
-//	rarity = 1 / (1 + count_similar_other_workspaces)
+//	rarity = 0.0                              if n < EarnCorroborationFloor
+//	rarity = 1 / (1 + count_other_workspaces) otherwise
 func (m *PatternMiner) ScoreRarity(ctx context.Context, p RoutingPattern) (float64, error) {
 	if m.pool == nil {
-		return 1.0, nil
+		// FAIL-CLOSED: corroboration can't be verified without the DB, so do
+		// NOT pay the premium (was 1.0 — the old "first pattern is maximally
+		// rare" behavior, which is exactly the manufacturable case this bound
+		// removes).
+		return 0.0, nil
 	}
+	// (b) The rarity key is PROXY-SET dimensions ONLY — model_used, provider_used,
+	// input_token_range, latency_bucket. feature_category is DELIBERATELY excluded:
+	// it is the one caller-controlled field (the X-Talyvor-Feature header), so
+	// keying rarity on it would let a workspace manufacture uniqueness by varying
+	// the header. feature_category is still PERSISTED on the row (analytics) — it
+	// just cannot move the score.
 	row := m.pool.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT workspace_id)
 		FROM routing_patterns
 		WHERE opted_in = TRUE
 		  AND workspace_id <> $1
-		  AND feature_category = $2
-		  AND model_used = $3
-		  AND provider_used = $4
-		  AND input_token_range = $5
-		  AND latency_bucket = $6`,
-		p.WorkspaceID, p.FeatureCategory, p.ModelUsed, p.ProviderUsed,
+		  AND model_used = $2
+		  AND provider_used = $3
+		  AND input_token_range = $4
+		  AND latency_bucket = $5`,
+		p.WorkspaceID, p.ModelUsed, p.ProviderUsed,
 		p.InputTokenRange, p.LatencyBucket)
 	var n int
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("pattern mining: rarity: %w", err)
+	}
+	// (c) CROSS-WORKSPACE CORROBORATION FLOOR. n counts OTHER opted-in workspaces
+	// that independently produced the same proxy-set tuple (the earner does NOT
+	// corroborate its own pattern). Below the floor — including the perverse n=0
+	// unique case — rarity is 0.0, so PatternEarning yields the base rate with no
+	// bonus. A pattern must be corroborated by enough OTHER workspaces to earn a
+	// premium; "unique-pays-most" is gone. Mirrors the routing Advisor's read-side
+	// MinWorkspaces floor (see EarnCorroborationFloor).
+	if n < EarnCorroborationFloor {
+		return 0.0, nil
 	}
 	return 1.0 / (1.0 + float64(n)), nil
 }
