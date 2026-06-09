@@ -90,15 +90,15 @@ func dispatchSem(t *testing.T, p *Proxy, wsID, content string) {
 // ── expectation builders mirroring serve()'s semantic-query order ──
 
 func expPrivateMiss(m pgxmock.PgxPoolIface) {
-	m.ExpectQuery(`is_poolable = false`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o").
+	m.ExpectQuery(`is_poolable = false`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 }
 func expPooledMiss(m pgxmock.PgxPoolIface) {
-	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o").
+	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}))
 }
 func expPooledHit(m pgxmock.PgxPoolIface, contributor string) {
-	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o").
+	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 			AddRow("row-1", okResp, contributor, 0.99))
 	m.ExpectExec(`UPDATE prompt_embeddings`).WithArgs("row-1").WillReturnResult(pgxmock.NewResult("UPDATE", 1))

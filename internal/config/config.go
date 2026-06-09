@@ -24,6 +24,31 @@ type Config struct {
 	LogLevel          string
 	OllamaURL         string
 
+	// SemanticCacheRetention is the single sliding window for Postgres
+	// semantic-cache rows (prompt_embeddings). Every cache hit bumps
+	// updated_at = NOW(), so the window restarts on each use. It governs BOTH
+	// halves of a row's life:
+	//   - SERVE: semanticSelectSQL only returns rows with
+	//     updated_at > NOW() − retention, so an entry stays servable for the
+	//     full window and each hit resets it.
+	//   - STORE: a background sweeper DELETEs any row past the window, bounding
+	//     the otherwise-unbounded growth of the table and of its ivfflat
+	//     similarity index from one-off prompts that are never reused.
+	// Because serving and storage share one window, a cached answer can be
+	// served until it is this old — a deliberate reuse-over-freshness tradeoff;
+	// lower this single value to tighten both together.
+	//
+	// Default 21 days (504h). Env: LENS_SEMANTIC_CACHE_RETENTION (Go duration;
+	// units h/m/s — NOT "d"; use "504h" for 21 days). A value <= 0 DISABLES
+	// both halves: rows are served regardless of age and never swept (kept
+	// indefinitely — the pre-retention behavior).
+	SemanticCacheRetention time.Duration
+
+	// SemanticCacheSweepInterval is how often the retention sweeper runs.
+	// Default 1h. Must be > 0. Env: LENS_SEMANTIC_CACHE_SWEEP_INTERVAL (Go
+	// duration). Only consulted when SemanticCacheRetention > 0.
+	SemanticCacheSweepInterval time.Duration
+
 	// AWS Bedrock — all four fields are optional; an empty AccessKeyID
 	// keeps HandleBedrock in 503 graceful-degradation mode. SessionToken
 	// is only set when the deployment uses STS / assumed-role creds.
@@ -741,6 +766,29 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_MAX_CACHE_TTL: %w", err)
 		}
 		c.MaxCacheTTL = d
+	}
+
+	// Semantic-cache retention sweeper. Retention <= 0 disables the sweeper
+	// (rows kept indefinitely); the sweep interval must be > 0 because a
+	// time.Ticker panics on a non-positive duration.
+	c.SemanticCacheRetention = 21 * 24 * time.Hour
+	if v := os.Getenv("LENS_SEMANTIC_CACHE_RETENTION"); v != "" {
+		d, err := time.ParseDuration(v) // Go duration units (h/m/s); e.g. 504h = 21 days
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_SEMANTIC_CACHE_RETENTION (Go duration, e.g. 504h for 21 days): %w", err)
+		}
+		c.SemanticCacheRetention = d
+	}
+	c.SemanticCacheSweepInterval = time.Hour
+	if v := os.Getenv("LENS_SEMANTIC_CACHE_SWEEP_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_SEMANTIC_CACHE_SWEEP_INTERVAL (Go duration, e.g. 1h): %w", err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_SEMANTIC_CACHE_SWEEP_INTERVAL (must be > 0): %s", v)
+		}
+		c.SemanticCacheSweepInterval = d
 	}
 
 	var missing []string

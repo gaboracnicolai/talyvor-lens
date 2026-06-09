@@ -255,7 +255,7 @@ func run() error {
 
 	exactCache := cache.NewExactCache(redisClient, cfg.MaxCacheTTL)
 	openAIEmbedder := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingModel)
-	semanticCache := cache.NewSemanticCache(pool, openAIEmbedder, cfg.SemanticThreshold, cfg.MaxCacheTTL)
+	semanticCache := cache.NewSemanticCache(pool, openAIEmbedder, cfg.SemanticThreshold, cfg.SemanticCacheRetention)
 	promptCompressor := compressor.New()
 	modelRouter := router.New()
 	piiDetector := pii.New()
@@ -350,6 +350,12 @@ func run() error {
 
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
 	go cacheWarmer.Start(ctx, 1*time.Hour)
+
+	// Semantic-cache retention sweeper: deletes prompt_embeddings rows unused
+	// within the retention window (their updated_at is bumped on every hit, so
+	// the timer resets on use). Bounds table + ivfflat-index growth. Inert when
+	// SemanticCacheRetention <= 0 (StartSweeper logs and returns).
+	go semanticCache.StartSweeper(ctx, cfg.SemanticCacheSweepInterval)
 
 	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, guardrailsEngine, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 	// Upgraded per-request attribution store (Upgrade Batch 1 / Item 3).
