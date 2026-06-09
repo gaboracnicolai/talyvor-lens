@@ -121,8 +121,13 @@ func TestPatternEarning_BonusOnlyAboveThreshold(t *testing.T) {
 
 func TestScoreRarity_FirstPattern(t *testing.T) {
 	miner, mock := newMockPatternMiner(t)
+	// RECONCILED for the S1 rarity bound: the rarity key no longer includes
+	// feature_category (5 args, not 6), and a first-ever / uncorroborated
+	// pattern (n=0 < EarnCorroborationFloor) now FLOORS to 0.0 — it used to
+	// return 1.0 (the manufacturable "unique-pays-most" premium this bound
+	// removes).
 	mock.ExpectQuery("SELECT COUNT\\(DISTINCT workspace_id\\)").
-		WithArgs("ws_a", "code", "claude", "anthropic", InputBucketMedium, LatencyFast).
+		WithArgs("ws_a", "claude", "anthropic", InputBucketMedium, LatencyFast).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	rarity, err := miner.ScoreRarity(context.Background(), RoutingPattern{
 		WorkspaceID: "ws_a", FeatureCategory: "code", ModelUsed: "claude",
@@ -131,15 +136,18 @@ func TestScoreRarity_FirstPattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScoreRarity: %v", err)
 	}
-	if rarity != 1.0 {
-		t.Fatalf("first-ever pattern should be rarity 1.0, got %f", rarity)
+	if rarity != 0.0 {
+		t.Fatalf("first-ever/uncorroborated pattern (n=0) must FLOOR to 0.0, got %f", rarity)
 	}
 }
 
 func TestScoreRarity_Common(t *testing.T) {
 	miner, mock := newMockPatternMiner(t)
+	// RECONCILED: feature_category dropped from the rarity key (5 args). n=99
+	// is well above the corroboration floor, so the common-pattern rarity is
+	// unchanged (1/(1+99)=0.01).
 	mock.ExpectQuery("SELECT COUNT\\(DISTINCT workspace_id\\)").
-		WithArgs("ws_a", "chat", "gpt-4o", "openai", InputBucketSmall, LatencyMedium).
+		WithArgs("ws_a", "gpt-4o", "openai", InputBucketSmall, LatencyMedium).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(99))
 	rarity, _ := miner.ScoreRarity(context.Background(), RoutingPattern{
 		WorkspaceID: "ws_a", FeatureCategory: "chat", ModelUsed: "gpt-4o",
@@ -155,18 +163,22 @@ func TestScoreRarity_Common(t *testing.T) {
 
 func TestRecordPattern_CreditsOptedInWorkspace(t *testing.T) {
 	miner, mock := newMockPatternMiner(t)
-	// Rarity scoring — return 0 other workspaces → rarity 1.0.
+	// RECONCILED for the S1 rarity bound. Rarity scoring — feature_category
+	// dropped from the key (5 args); n=0 OTHER workspaces is below the
+	// corroboration floor → rarity FLOORS to 0.0 (was 1.0). feature_category
+	// is still PERSISTED on the INSERT row (analytics), just not scored.
 	mock.ExpectQuery("SELECT COUNT\\(DISTINCT workspace_id\\)").
-		WithArgs("ws_opt", "code", "claude", "anthropic", InputBucketMedium, LatencyFast).
+		WithArgs("ws_opt", "claude", "anthropic", InputBucketMedium, LatencyFast).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	// INSERT pattern row.
+	// INSERT pattern row — rarity 0.0 (floored), earned 0.001 (base, no bonus);
+	// feature_category "code" still persisted.
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_opt", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 1.0, true, 0.015).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, true, 0.001).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("p1", time.Now()))
-	// Credit earning: 0.015 LENS (max rarity + bonus).
-	expectCreditOrDebit(mock, "ws_opt", 0, 0, 0, 0.015, 0.015, 0.015, 0)
+	// Credit earning: 0.001 LENS (base rate — the floored case earns base only).
+	expectCreditOrDebit(mock, "ws_opt", 0, 0, 0, 0.001, 0.001, 0.001, 0)
 
 	pattern := RoutingPattern{
 		FeatureCategory: "code", ModelUsed: "claude", ProviderUsed: "anthropic",
