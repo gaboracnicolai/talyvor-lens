@@ -33,6 +33,14 @@ Decisions on record (resolved — kept for history):
 
 Minting flip-on gate: supply-accounting precondition LIFTED by 2.2. Remaining: anti-gaming machinery complete (2.3 arc), business case, external audit. Minting stays inert until all land.
 
+## Phase 3 — deepen the mineable primitives  [IN PROGRESS]
+
+Pool-B mines ONE thing today (served cross-tenant cached responses). Phase 3 adds the others.
+
+- **Routing-pattern CAPTURE write — DONE on main (PR #113, a9f9d1f).** The producer for the already-live routing Advisor (which read opted_in routing_patterns on the hot path but had no writer — "live consumer, dead producer"). Captures an anonymized routing observation post-serve, **structurally mint-free** (RecordPatternObservation never reaches ledger.Credit; earning is a separate stage), **double-gated + tightened**: fires iff PatternCaptureEnabled (LENS_PATTERN_CAPTURE_ENABLED, default off) AND the workspace opted in (SQL WHERE EXISTS) AND loggingPolicy≠None AND the response was SCORED (a non-200/unscored response writes nothing — no quality=0 Advisor poison). STREAMING deferred (no scored quality there). No migration (writes the existing 0023 columns, earned=0).
+- **Next routing-pattern stage = EARNING + anti-gaming** — has its own flip-on gate. The earning side has ZERO anti-gaming bounds today (free-text rarity tuples, no cap/dedup/idempotency); the anti-gaming controls (cap + idempotency + rarity bound) must be built inert and CI-proven before any pattern-mine earning flag — the same bar Pool-B minting required (see COORDINATION.md "Routing-pattern EARNING gate").
+- **Alternative next stages (per the readiness map):** DISTILL-artifact royalties — the clean second: the generic Pool-B mint kernel (pool_royalty_mints / CreditHeldTx / caps / holdback / adjudication) is reusable, but the distill cache is content-addressed + anonymous, so it needs an owner-stamp + opt-in + served-reuse-event attribution layer (a Pool-B-on-the-distill-cache build). Validator-earning — greenfield + Phase-4-gated (PoVI verify is slash-only; a paid validator presupposes the independent node network and fights never-auto-act).
+
 ## After Phase 2 — locked order (do not reorder)
 1. Phases 3–5 (largely unscoped; Phase-3 reminder: evaluate enterprise/compliance infra).
 2. Full Talyvor suite — Track / Docs / Code + anything that surfaces, each to 100%. Large (~3× a single product backend minus reuse).
@@ -46,7 +54,7 @@ OPEN QUESTION (founder decides at the gate): the locked order freezes the API BE
 - Phases 3–5: unscoped; an unknown multiple of Phase 2.
 - Full suite: large.
 - Frontend: major; plausibly comparable to a full product backend, spanning all products.
-- Honest gestalt: "near the end of the beginning." Phase 2 is the proof-of-discipline; suite+frontend is the company-build; the parked R&D ideas are a later horizon.
+- Honest gestalt: "near the end of the beginning." Phase 2 is the proof-of-discipline; suite+frontend is the company-build; the parked ideas (Phase 6, Phase 7, agent-settlement-rail) are committed future work, sequenced after the frontend — not optional R&D.
 
 ## Parked ideas — APPROVED and COMMITTED future work (full reasoning in COORDINATION.md)
 Deferred, NOT optional: once the engine + suite + frontend are complete, the project returns to ALL approved parked items, in priority order set by the founder. 'Parked' means sequenced-later-and-certain, not 'maybe.' Phase 6, Phase 7, the agent-settlement-rail option, and any other founder-approved idea are committed future phases.
