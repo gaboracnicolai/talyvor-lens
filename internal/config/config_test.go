@@ -478,3 +478,22 @@ func TestLoad_PatternEarnCapDefaultsAndParses(t *testing.T) {
 		t.Errorf("env overrides not applied: %d / %v", c2.PatternEarnCapPerWorkspace, c2.PatternEarnCapWindow)
 	}
 }
+
+func TestLoad_PatternEarningEnabledDefaultsOffAndParses(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PatternEarningEnabled {
+		t.Error("PatternEarningEnabled must DEFAULT FALSE (earning is the live-path flip — inert until enabled)")
+	}
+	t.Setenv("LENS_PATTERN_EARNING_ENABLED", "true")
+	c2, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c2.PatternEarningEnabled {
+		t.Error("LENS_PATTERN_EARNING_ENABLED=true must enable the flag")
+	}
+}

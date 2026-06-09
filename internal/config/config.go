@@ -171,6 +171,15 @@ type Config struct {
 	// PatternMiningEnabled (which gates the opt-in HTTP route, unchanged).
 	PatternCaptureEnabled bool
 
+	// PatternEarningEnabled gates the Phase-3 routing-pattern EARNING wire-up
+	// (S4) — the FIRST pattern-earning stage that touches the serve path. When
+	// ON, an opted-in, authenticated workspace's served request routes into
+	// RecordPattern (credits LENS) instead of the mint-free capture write.
+	// DEFAULT FALSE — flag-off, the serve path is byte-identical to capture-only
+	// today. SEPARATE from PatternCaptureEnabled (capture and earn gate
+	// independently). Env: LENS_PATTERN_EARNING_ENABLED.
+	PatternEarningEnabled bool
+
 	// PoolMintCapPerPair is the Pool-B mint cap (2.3b primitive #1): the max
 	// royalty mints per (requester, contributor) pair per rolling window.
 	// 0 (default) = cap disabled. The cap is what bounds any gaming vector's
@@ -478,6 +487,7 @@ func Load() (*Config, error) {
 		LXCShadowSpendEnabled:     parseBoolEnv("LENS_LXC_SHADOW_SPEND_ENABLED"),
 		LXCGatingEnabled:          parseBoolEnv("LENS_LXC_GATING_ENABLED"),
 		PatternCaptureEnabled:     parseBoolEnv("LENS_PATTERN_CAPTURE_ENABLED"),
+		PatternEarningEnabled:     parseBoolEnv("LENS_PATTERN_EARNING_ENABLED"),
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 

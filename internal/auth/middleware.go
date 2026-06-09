@@ -94,6 +94,14 @@ func GetAPIKey(ctx context.Context) *APIKey {
 	return nil
 }
 
+// WithAPIKey returns a child context carrying ak, readable by GetAPIKey. The
+// middleware stamps the validated credential via the same (unexported) key on
+// every authed path; this exported companion lets other entrypoints and tests
+// set it without reaching the key. Read-only helper — no behavior change.
+func WithAPIKey(ctx context.Context, ak *APIKey) context.Context {
+	return context.WithValue(ctx, apiKeyContextKey{}, ak)
+}
+
 // extractKey looks at Authorization: Bearer first, then X-Talyvor-Key.
 func extractKey(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); h != "" {
