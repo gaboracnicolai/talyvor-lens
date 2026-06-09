@@ -163,22 +163,27 @@ func TestScoreRarity_Common(t *testing.T) {
 
 func TestRecordPattern_CreditsOptedInWorkspace(t *testing.T) {
 	miner, mock := newMockPatternMiner(t)
-	// RECONCILED for the S1 rarity bound. Rarity scoring — feature_category
-	// dropped from the key (5 args); n=0 OTHER workspaces is below the
-	// corroboration floor → rarity FLOORS to 0.0 (was 1.0). feature_category
-	// is still PERSISTED on the INSERT row (analytics), just not scored.
+	// Rarity scoring — feature_category dropped from the key (5 args, S1); n=0
+	// OTHER workspaces is below the corroboration floor → rarity FLOORS to 0.0
+	// → earned = base 0.001. (rarity COUNT runs on the pool, BEFORE the tx.)
 	mock.ExpectQuery("SELECT COUNT\\(DISTINCT workspace_id\\)").
 		WithArgs("ws_opt", "claude", "anthropic", InputBucketMedium, LatencyFast).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	// INSERT pattern row — rarity 0.0 (floored), earned 0.001 (base, no bonus);
-	// feature_category "code" still persisted.
+	// RECONCILED for the S2 single-tx restructure: INSERT + credit + cap COUNT
+	// now ride ONE tx. The CREDIT-EFFECT assertions are UNCHANGED (0.001 LENS to
+	// ws_opt, same balance/earned); only the sequence gains Begin, the under-cap
+	// COUNT, and Commit. feature_category "code" still persisted on the row.
+	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_opt", "code", "claude", "anthropic", InputBucketMedium,
 			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, true, 0.001).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("p1", time.Now()))
-	// Credit earning: 0.001 LENS (base rate — the floored case earns base only).
-	expectCreditOrDebit(mock, "ws_opt", 0, 0, 0, 0.001, 0.001, 0.001, 0)
+	expectApplyTx(mock, "ws_opt", 0, 0, 0, 0.001, 0.001, 0.001, 0) // credit 0.001 (unchanged effect)
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM routing_patterns").
+		WithArgs("ws_opt", pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1))) // 1 ≤ default cap 50000
+	mock.ExpectCommit()
 
 	pattern := RoutingPattern{
 		FeatureCategory: "code", ModelUsed: "claude", ProviderUsed: "anthropic",
@@ -195,13 +200,16 @@ func TestRecordPattern_CreditsOptedInWorkspace(t *testing.T) {
 
 func TestRecordPattern_SkipsCreditWhenNotOptedIn(t *testing.T) {
 	miner, mock := newMockPatternMiner(t)
-	// INSERT with opted_in=false + earned=0 — no rarity scoring,
-	// no credit.
+	// RECONCILED (S2): the persist-only path still wraps in the tx, but runs
+	// ONLY the INSERT (opted_in=false, earned=0) — no rarity scoring, no credit,
+	// no cap COUNT, no MintedTokens. Behavior-identical to before the restructure.
+	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_off", "code", "claude", "anthropic", InputBucketMedium,
 			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, false, 0.0).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("p_off", time.Now()))
+	mock.ExpectCommit()
 
 	pattern := RoutingPattern{
 		FeatureCategory: "code", ModelUsed: "claude", ProviderUsed: "anthropic",
@@ -210,6 +218,9 @@ func TestRecordPattern_SkipsCreditWhenNotOptedIn(t *testing.T) {
 	}
 	if err := miner.RecordPattern(context.Background(), "ws_off", pattern, false); err != nil {
 		t.Fatalf("RecordPattern: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("not-opted-in must be INSERT-only in the tx (no credit, no cap): %v", err)
 	}
 }
 

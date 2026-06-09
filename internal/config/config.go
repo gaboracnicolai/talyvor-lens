@@ -193,6 +193,23 @@ type Config struct {
 	// Env: LENS_POOL_MINT_CAP_WINDOW (Go duration, e.g. 48h).
 	PoolMintCapWindow time.Duration
 
+	// PatternEarnCapPerWorkspace is the S2 routing-pattern EARN cap: max
+	// pattern-mine credits per workspace per rolling window. DELIBERATELY
+	// DEFAULTS to a REAL limit (50000), NOT 0 — pattern-earning is a
+	// self-generated, gamed surface, so it must not be able to exist uncapped
+	// behind a single flag (diverges from Pool-B's default-0 consciously). The
+	// ceiling is anchored to the ATTACK case: with S1's corroboration floor an
+	// attacker can't self-manufacture the premium, so pure-volume abuse earns
+	// only base (0.001) → ~50 LENS/ws/24h max. 0 = explicit ops-disable, never
+	// the default. Inert until S4 wires the earn path. Env:
+	// LENS_PATTERN_EARN_CAP_PER_WORKSPACE.
+	PatternEarnCapPerWorkspace int
+
+	// PatternEarnCapWindow is the rolling window for the pattern earn cap
+	// (matches Pool-B's window precedent). Default 24h. Env:
+	// LENS_PATTERN_EARN_CAP_WINDOW (Go duration).
+	PatternEarnCapWindow time.Duration
+
 	// PoolHoldbackWindow is the Stage-2.3a holdback: a pool-royalty mint
 	// credits HELD balance, and only becomes spendable (and supply-counted)
 	// when the finalize sweeper settles it after this window. Default 72h —
@@ -630,6 +647,24 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_POOL_MINT_CAP_WINDOW (Go duration > 0, e.g. 48h): %s", v)
 		}
 		c.PoolMintCapWindow = d
+	}
+	// S2 routing-pattern earn cap — REAL default (50000), not 0 (see the field
+	// comment); 0 = explicit ops-disable.
+	c.PatternEarnCapPerWorkspace = 50000
+	if v := os.Getenv("LENS_PATTERN_EARN_CAP_PER_WORKSPACE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_PATTERN_EARN_CAP_PER_WORKSPACE (must be ≥ 0; 0 disables): %s", v)
+		}
+		c.PatternEarnCapPerWorkspace = n
+	}
+	c.PatternEarnCapWindow = 24 * time.Hour
+	if v := os.Getenv("LENS_PATTERN_EARN_CAP_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_PATTERN_EARN_CAP_WINDOW (Go duration > 0, e.g. 48h): %s", v)
+		}
+		c.PatternEarnCapWindow = d
 	}
 	c.PoolHoldbackWindow = 72 * time.Hour
 	if v := os.Getenv("LENS_POOL_HOLDBACK_WINDOW"); v != "" {

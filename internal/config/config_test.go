@@ -458,3 +458,23 @@ func TestLoad_PatternCaptureEnabledDefaultsOffAndParses(t *testing.T) {
 		t.Error("LENS_PATTERN_CAPTURE_ENABLED=true must enable the flag")
 	}
 }
+
+func TestLoad_PatternEarnCapDefaultsAndParses(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PatternEarnCapPerWorkspace != 50000 {
+		t.Errorf("PatternEarnCapPerWorkspace must DEFAULT 50000 (real cap, not 0); got %d", c.PatternEarnCapPerWorkspace)
+	}
+	if c.PatternEarnCapWindow != 24*time.Hour {
+		t.Errorf("PatternEarnCapWindow must DEFAULT 24h; got %v", c.PatternEarnCapWindow)
+	}
+	t.Setenv("LENS_PATTERN_EARN_CAP_PER_WORKSPACE", "100")
+	t.Setenv("LENS_PATTERN_EARN_CAP_WINDOW", "48h")
+	c2, _ := Load()
+	if c2.PatternEarnCapPerWorkspace != 100 || c2.PatternEarnCapWindow != 48*time.Hour {
+		t.Errorf("env overrides not applied: %d / %v", c2.PatternEarnCapPerWorkspace, c2.PatternEarnCapWindow)
+	}
+}

@@ -662,6 +662,10 @@ func run() error {
 	// PatternMiningEnabled flag ANDs with the per-workspace
 	// opt-in before earnings fire (RecordPattern's optedIn arg).
 	patternMiner := mining.NewPatternMiner(tokenLedger, pool)
+	// S2 routing-pattern earn cap — overrides the miner's real default from
+	// config. INERT this stage: RecordPattern (the earn path the cap guards) has
+	// no production caller until S4, so the cap never runs live yet.
+	patternMiner.SetEarnCap(cfg.PatternEarnCapPerWorkspace, cfg.PatternEarnCapWindow)
 
 	// Routing intelligence (Upgrade 22). Consumes the opted-in pattern
 	// aggregate to recommend best quality-per-dollar models. OFF by default;
