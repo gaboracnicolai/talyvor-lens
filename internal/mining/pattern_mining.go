@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/metrics"
 )
 
 // ─── constants ───────────────────────────────────
@@ -211,10 +213,42 @@ func PatternEarning(p RoutingPattern) float64 {
 type PatternMiner struct {
 	ledger *LedgerStore
 	pool   pgxDB
+
+	// S2 per-window EARN cap (event count per workspace). Defaulted to a REAL
+	// limit in NewPatternMiner so no miner is uncapped by accident — only a
+	// test can opt out (SetEarnCap(0, …)). Inert until S4 wires the earn path:
+	// RecordPattern has no production caller yet, so the cap never runs live.
+	earnCapPerWorkspace int
+	earnCapWindow       time.Duration
 }
 
+// DefaultPatternEarnCapPerWorkspace bounds manufactured-volume abuse of the
+// self-generated earn path. Anchored to the ATTACK ceiling: with S1's
+// corroboration floor an attacker cannot self-manufacture the premium, so a
+// pure-volume attacker earns only the base rate — 50,000 events × 0.001 LENS =
+// ~50 LENS/workspace/24h max. (A legitimately cross-workspace-corroborated
+// workspace tops out near ~100 LENS/24h — the system rewarding real activity.)
+// 50k sits >10× above plausible legitimate single-workspace qualifying volume,
+// so it never bites organic use: catastrophe-prevention, not fine-tuning.
+const DefaultPatternEarnCapPerWorkspace = 50_000
+
 func NewPatternMiner(ledger *LedgerStore, pool pgxDB) *PatternMiner {
-	return &PatternMiner{ledger: ledger, pool: pool}
+	return &PatternMiner{
+		ledger:              ledger,
+		pool:                pool,
+		earnCapPerWorkspace: DefaultPatternEarnCapPerWorkspace,
+		earnCapWindow:       24 * time.Hour,
+	}
+}
+
+// SetEarnCap overrides the per-window earn cap (events per workspace) from
+// config. perWorkspace = 0 is an explicit ops-disable (NOT the default). A
+// non-positive window keeps the existing window.
+func (m *PatternMiner) SetEarnCap(perWorkspace int, window time.Duration) {
+	m.earnCapPerWorkspace = perWorkspace
+	if window > 0 {
+		m.earnCapWindow = window
+	}
 }
 
 // OptIn flips the workspace flag — patterns recorded after this
@@ -331,6 +365,20 @@ func (m *PatternMiner) ScoreRarity(ctx context.Context, p RoutingPattern) (float
 // opted_in=false) so the workspace can inspect their own
 // pattern history; we just don't compute rarity or credit
 // LENS.
+// earnCapCountSQL is the S2 per-window earn cap — a per-WORKSPACE event count,
+// reusing Pool-B's capCountSQL shape (COUNT over a microsecond window) but over
+// routing_patterns. `earned > 0` counts only actual earn events, excluding the
+// mint-free capture rows (RecordPatternObservation writes earned=0). Run INSIDE
+// the mint tx AFTER CreditTx, so it rides the lens_token_balances FOR UPDATE
+// that serializes same-workspace credits — exact under concurrency, zero new
+// locks (the same trick Pool-B uses). Rides idx_patterns_workspace
+// (workspace_id, created_at DESC); earned>0 is a cheap residual over one
+// workspace's window — no new index, no migration. The count includes the
+// just-inserted in-tx row, so n > cap means "this would be the (cap+1)th".
+const earnCapCountSQL = `SELECT COUNT(*) FROM routing_patterns
+WHERE workspace_id = $1 AND earned > 0
+  AND created_at > now() - ($2::bigint * interval '1 microsecond')`
+
 func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p RoutingPattern, optedIn bool) error {
 	p.WorkspaceID = workspaceID
 
@@ -347,28 +395,43 @@ func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p 
 		earned = PatternEarning(p)
 	}
 
-	if m.pool != nil {
-		row := m.pool.QueryRow(ctx, `
-			INSERT INTO routing_patterns (
-				workspace_id, feature_category, model_used, provider_used,
-				input_token_range, output_quality, latency_bucket,
-				cache_hit_rate, success_rate, sample_count, rarity,
-				opted_in, earned
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-			RETURNING id, created_at`,
-			workspaceID, p.FeatureCategory, p.ModelUsed, p.ProviderUsed,
-			p.InputTokenRange, p.OutputQuality, p.LatencyBucket,
-			p.CacheHitRate, p.SuccessRate, p.SampleCount, p.Rarity,
-			optedIn, earned,
-		)
-		if err := row.Scan(&p.ID, &p.CreatedAt); err != nil {
-			return fmt.Errorf("pattern mining: insert pattern: %w", err)
-		}
+	if m.pool == nil {
+		return nil // no DB — no-op (tests that skip the DB path)
 	}
 
-	if !optedIn || earned <= 0 {
-		return nil
+	// SINGLE TX (S2): the routing_patterns INSERT, the credit, and the cap
+	// COUNT all ride one tx with a deferred rollback, so an over-cap event
+	// discards the row AND the credit atomically, and the cap COUNT rides
+	// CreditTx's balance FOR UPDATE for exactness under concurrent
+	// same-workspace bursts (mirrors poolroyalty.MintServedHit).
+	tx, err := m.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("pattern mining: begin: %w", err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
+		INSERT INTO routing_patterns (
+			workspace_id, feature_category, model_used, provider_used,
+			input_token_range, output_quality, latency_bucket,
+			cache_hit_rate, success_rate, sample_count, rarity,
+			opted_in, earned
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		RETURNING id, created_at`,
+		workspaceID, p.FeatureCategory, p.ModelUsed, p.ProviderUsed,
+		p.InputTokenRange, p.OutputQuality, p.LatencyBucket,
+		p.CacheHitRate, p.SuccessRate, p.SampleCount, p.Rarity,
+		optedIn, earned,
+	)
+	if err := row.Scan(&p.ID, &p.CreatedAt); err != nil {
+		return fmt.Errorf("pattern mining: insert pattern: %w", err)
+	}
+
+	// Not earning (not opted in, or no positive earning) → persist only.
+	if !optedIn || earned <= 0 {
+		return tx.Commit(ctx)
+	}
+
 	meta := map[string]interface{}{
 		"pattern_id":        p.ID,
 		"feature_category":  p.FeatureCategory,
@@ -378,8 +441,35 @@ func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p 
 		"latency_bucket":    p.LatencyBucket,
 		"rarity":            p.Rarity,
 	}
-	return m.ledger.Credit(ctx, workspaceID, earned, TypePatternMine,
-		"pattern shared", meta)
+	// Credit IN-TX (CreditTx, not Credit) — identical balance effect, but it
+	// takes the lens_token_balances FOR UPDATE that the cap COUNT below rides.
+	if err := m.ledger.CreditTx(ctx, tx, workspaceID, earned, TypePatternMine,
+		"pattern shared", meta); err != nil {
+		return fmt.Errorf("pattern mining: credit: %w", err)
+	}
+
+	// Per-window earn cap. Over cap → return nil WITHOUT commit: the deferred
+	// rollback discards the row AND the credit atomically (serve-but-skip,
+	// mirroring Pool-B's Result{Capped}). Cap-count error → return err before
+	// commit → rollback → FAIL CLOSED (no credit when we can't verify the cap).
+	if m.earnCapPerWorkspace > 0 {
+		var n int64
+		if err := tx.QueryRow(ctx, earnCapCountSQL,
+			workspaceID, m.earnCapWindow.Microseconds()).Scan(&n); err != nil {
+			return fmt.Errorf("pattern mining: earn cap count: %w", err)
+		}
+		if n > int64(m.earnCapPerWorkspace) {
+			return nil // over cap — deferred rollback discards row+credit
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("pattern mining: commit: %w", err)
+	}
+	// MintedTokens AFTER commit only — fires on a durable credit, never on a
+	// capped/rolled-back one (CreditTx, unlike Credit, doesn't emit it).
+	metrics.MintedTokens(earned)
+	return nil
 }
 
 // ─── GetContribution ─────────────────────────────
