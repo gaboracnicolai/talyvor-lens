@@ -92,30 +92,11 @@ func TestPatternEarning_RarityMultiplier(t *testing.T) {
 	}
 }
 
-func TestPatternEarning_UniqueBonus(t *testing.T) {
-	// Rarity 1.0 → base × max + bonus = 0.001 × 5 + 0.010 = 0.015.
-	got := PatternEarning(RoutingPattern{Rarity: 1.0})
-	diff := got - 0.015
-	if diff < -1e-9 || diff > 1e-9 {
-		t.Fatalf("expected 0.015, got %f", got)
-	}
-}
-
-func TestPatternEarning_BonusOnlyAboveThreshold(t *testing.T) {
-	// Rarity 0.7 (exactly threshold) → no bonus.
-	atThreshold := PatternEarning(RoutingPattern{Rarity: 0.7})
-	expected := PatternBaseRate * (1.0 + 0.7*4.0) // = 0.001 × 3.8 = 0.0038
-	diff := atThreshold - expected
-	if diff < -1e-9 || diff > 1e-9 {
-		t.Fatalf("expected %f at threshold (no bonus), got %f", expected, atThreshold)
-	}
-
-	// Just above threshold → bonus kicks in.
-	above := PatternEarning(RoutingPattern{Rarity: 0.71})
-	if above <= atThreshold {
-		t.Fatalf("expected bonus above threshold, got %f vs %f", above, atThreshold)
-	}
-}
+// (TestPatternEarning_UniqueBonus + TestPatternEarning_BonusOnlyAboveThreshold
+// removed: they tested the unique-pattern bonus, which was structurally
+// unearnable post-S1 (rarity > 0.7 is unreachable) and has been deleted. Live
+// earnings across the reachable range are pinned by
+// TestPatternEarning_ReachableRange_NoBonus.)
 
 // ─── ScoreRarity ─────────────────────────────────
 
@@ -233,15 +214,17 @@ func TestRecordPattern_SkipsCreditWhenNotOptedIn(t *testing.T) {
 func TestGetContribution_ReturnsTotals(t *testing.T) {
 	miner, mock := newMockPatternMiner(t)
 	last := time.Now().UTC()
+	// RECONCILED: the dead unique-patterns FILTER column + its UniqueRarityThreshold
+	// arg are gone (the metric was structurally always 0 post-S1).
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\),").
-		WithArgs("ws_c", UniqueRarityThreshold).
-		WillReturnRows(pgxmock.NewRows([]string{"count", "uniq", "earned", "last"}).
-			AddRow(125, 7, 0.85, last))
+		WithArgs("ws_c").
+		WillReturnRows(pgxmock.NewRows([]string{"count", "earned", "last"}).
+			AddRow(125, 0.85, last))
 	c, err := miner.GetContribution(context.Background(), "ws_c")
 	if err != nil {
 		t.Fatalf("GetContribution: %v", err)
 	}
-	if c.PatternsShared != 125 || c.UniquePatterns != 7 || c.TotalEarned != 0.85 {
+	if c.PatternsShared != 125 || c.TotalEarned != 0.85 {
 		t.Fatalf("unexpected contribution: %+v", c)
 	}
 }
@@ -319,14 +302,48 @@ func TestIsOptedIn_ReturnsFalseWhenAbsent(t *testing.T) {
 
 // ─── PatternRates ───────────────────────────────
 
-func TestPatternRates_KeysPresent(t *testing.T) {
+func TestPatternRates_TruthfulPostS1(t *testing.T) {
 	r := PatternRates()
-	for _, k := range []string{
-		"base_per_pattern", "rarity_multiplier_max",
-		"unique_pattern_bonus", "unique_rarity_threshold",
-	} {
+	// Only EARNABLE economics are advertised.
+	for _, k := range []string{"base_per_pattern", "rarity_multiplier_max"} {
 		if _, ok := r[k]; !ok {
 			t.Fatalf("missing rate key %q", k)
 		}
+	}
+	// The dead unique-pattern bonus keys are GONE (pins the pre-freeze correction).
+	for _, k := range []string{"unique_pattern_bonus", "unique_rarity_threshold"} {
+		if _, ok := r[k]; ok {
+			t.Fatalf("rate key %q must be REMOVED (the bonus is structurally unearnable post-S1)", k)
+		}
+	}
+	// rarity_multiplier_max is the REACHABLE ceiling (2.0 at the corroboration
+	// floor), not the unreachable 5×.
+	if got := r["rarity_multiplier_max"]; got < 2.0-1e-9 || got > 2.0+1e-9 {
+		t.Fatalf("rarity_multiplier_max must be the reachable 2.0, got %v (5.0 would advertise an unearnable ceiling)", got)
+	}
+	if got := r["base_per_pattern"]; got != PatternBaseRate {
+		t.Fatalf("base_per_pattern = %v, want %v", got, PatternBaseRate)
+	}
+}
+
+// PatternEarning is byte-identical across the REACHABLE rarity range — {0.0}
+// (uncorroborated, floored by ScoreRarity) ∪ (0, 0.25] (corroborated; rarity =
+// 1/(1+n) for n≥EarnCorroborationFloor, max 1/(1+3)=0.25). The removed
+// unique-pattern bonus fired only at rarity>0.7 (unreachable), so for EVERY
+// input a workspace can actually produce, earnings are base × multiplier with
+// NO bonus. This test passes BEFORE and AFTER the bonus-branch deletion — that
+// invariance is the proof the deletion changes no live behavior. It also pins
+// the truthful 2x reachable ceiling (not the old, unreachable 5x).
+func TestPatternEarning_ReachableRange_NoBonus(t *testing.T) {
+	maxReachable := 1.0 / (1.0 + float64(EarnCorroborationFloor)) // 0.25 at floor 3
+	for _, r := range []float64{0.0, 0.05, 0.1, 1.0 / 6.0, 0.2, maxReachable} {
+		got := PatternEarning(RoutingPattern{Rarity: r})
+		want := roundTo(PatternBaseRate*(1.0+r*(RarityMultiplierMax-1.0)), 6) // base × mult, NO bonus
+		if d := got - want; d < -1e-9 || d > 1e-9 {
+			t.Errorf("rarity %v: PatternEarning=%v, want %v (base × multiplier, no bonus)", r, got, want)
+		}
+	}
+	if maxEarn := PatternEarning(RoutingPattern{Rarity: maxReachable}); maxEarn > 0.002+1e-9 {
+		t.Errorf("reachable max earn must be ≤ 0.002 (2× ceiling, not the old 5×); got %v", maxEarn)
 	}
 }

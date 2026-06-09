@@ -35,18 +35,14 @@ const (
 	// Rarity multiplier stacks on top of this.
 	PatternBaseRate = 0.001
 
-	// RarityMultiplierMax is the highest the rarity multiplier
-	// can climb. A perfectly unique pattern earns
-	// PatternBaseRate × RarityMultiplierMax + UniquePatternBonus.
+	// RarityMultiplierMax is the rarity-multiplier coefficient in the earning
+	// formula: earned = PatternBaseRate × (1 + rarity×(RarityMultiplierMax−1)).
+	// NOTE post-S1: the corroboration floor caps reachable rarity at
+	// 1/(1+EarnCorroborationFloor) (= 0.25), so the REACHABLE multiplier ceiling
+	// is 1 + 0.25×(5−1) = 2.0 — the theoretical 5× at rarity 1.0 is unreachable.
+	// (The former unique-pattern bonus, which fired only at rarity > 0.7, was
+	// therefore structurally unearnable and has been removed.)
 	RarityMultiplierMax = 5.0
-
-	// UniquePatternBonus stacks on top when rarity > 0.7 —
-	// rewards "truly novel" patterns disproportionately.
-	UniquePatternBonus = 0.010
-
-	// UniqueRarityThreshold is the rarity floor at which the
-	// bonus fires.
-	UniqueRarityThreshold = 0.7
 
 	// EarnCorroborationFloor is the minimum number of OTHER opted-in
 	// workspaces that must independently produce the same proxy-set tuple
@@ -102,7 +98,6 @@ type RoutingPattern struct {
 type PatternContribution struct {
 	WorkspaceID    string    `json:"workspace_id"`
 	PatternsShared int       `json:"patterns_shared"`
-	UniquePatterns int       `json:"unique_patterns"`
 	TotalEarned    float64   `json:"total_earned"`
 	LastSharedAt   time.Time `json:"last_shared_at,omitempty"`
 }
@@ -197,9 +192,6 @@ func PatternEarning(p RoutingPattern) float64 {
 	}
 	mult := 1.0 + p.Rarity*(RarityMultiplierMax-1.0)
 	earning := PatternBaseRate * mult
-	if p.Rarity > UniqueRarityThreshold {
-		earning += UniquePatternBonus
-	}
 	return roundTo(earning, 6)
 }
 
@@ -520,13 +512,12 @@ func (m *PatternMiner) GetContribution(ctx context.Context, workspaceID string) 
 	}
 	row := m.pool.QueryRow(ctx, `
 		SELECT COUNT(*),
-		       COUNT(*) FILTER (WHERE rarity > $2),
 		       COALESCE(SUM(earned), 0),
 		       COALESCE(MAX(created_at), '1970-01-01'::timestamptz)
 		FROM routing_patterns
 		WHERE workspace_id = $1 AND opted_in = TRUE`,
-		workspaceID, UniqueRarityThreshold)
-	if err := row.Scan(&c.PatternsShared, &c.UniquePatterns, &c.TotalEarned, &c.LastSharedAt); err != nil {
+		workspaceID)
+	if err := row.Scan(&c.PatternsShared, &c.TotalEarned, &c.LastSharedAt); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("pattern mining: contribution: %w", err)
 		}
@@ -705,13 +696,18 @@ func (m *PatternMiner) AggregateCohorts(ctx context.Context) ([]CohortStat, erro
 
 // ─── PatternRates ────────────────────────────────
 
-// PatternRates exports the public rate table.
+// PatternRates exports the public earning rate table (the /v1/tokens/rates
+// promise). It advertises only EARNABLE economics post-S1: the base rate and
+// the REACHABLE multiplier ceiling. The reachable ceiling is computed from the
+// corroboration floor — reachable rarity caps at 1/(1+EarnCorroborationFloor),
+// so rarity_multiplier_max = 1 + thatRarity×(RarityMultiplierMax−1) (= 2.0),
+// NOT the formula's unreachable 5× at rarity 1.0. The former unique-pattern
+// bonus (rarity > 0.7, structurally unearnable) is no longer advertised.
 func PatternRates() map[string]float64 {
+	maxReachableRarity := 1.0 / (1.0 + float64(EarnCorroborationFloor))
 	return map[string]float64{
-		"base_per_pattern":        PatternBaseRate,
-		"rarity_multiplier_max":   RarityMultiplierMax,
-		"unique_pattern_bonus":    UniquePatternBonus,
-		"unique_rarity_threshold": UniqueRarityThreshold,
+		"base_per_pattern":      PatternBaseRate,
+		"rarity_multiplier_max": 1.0 + maxReachableRarity*(RarityMultiplierMax-1.0),
 	}
 }
 
