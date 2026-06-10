@@ -28,11 +28,12 @@ package mining
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/dbjson"
 )
 
 // Stage-2.3a held-balance ledger row types. TypePoolRoyaltyHeld marks the
@@ -92,16 +93,13 @@ func (s *LedgerStore) heldInner(
 		return err
 	}
 
-	metaBuf, err := json.Marshal(metadata)
+	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
 	if err != nil {
 		return fmt.Errorf("mining: marshal metadata: %w", err)
 	}
-	if string(metaBuf) == "null" {
-		metaBuf = []byte("{}")
-	}
 
 	if _, err := tx.Exec(ctx, heldLedgerInsertSQL,
-		workspaceID, delta, balanceAfter, txType, description, metaBuf); err != nil {
+		workspaceID, delta, balanceAfter, txType, description, meta); err != nil {
 		return fmt.Errorf("mining: insert held ledger row: %w", err)
 	}
 	if _, err := tx.Exec(ctx, heldBalanceUpdateSQL, workspaceID, newBal, newHeld, newEarned); err != nil {
