@@ -9,13 +9,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Throwaway Postgres so the LENS_TEST_DATABASE_URL-gated integration
-    # tests (pool-mint-cap exactness + dbmigrate runner) RUN here as standing
-    # regression guards instead of skipping. Both tests create their own
-    # schema/fixtures and touch disjoint tables — no migration step needed.
+    # Throwaway Postgres for two standing regression guards:
+    # (1) the LENS_TEST_DATABASE_URL-gated integration tests (pool-mint-cap
+    #     exactness + dbmigrate runner) — they create their own schema/fixtures
+    #     and touch disjoint tables, no migration step needed;
+    # (2) the real-migration guard below, which applies migrations/*.sql via
+    #     `lens migrate` into its OWN database (lens_migrate_check — the gated
+    #     tests DROP/CREATE their fixture tables, so they must not share a DB
+    #     with a fully-migrated schema) and then re-runs to prove the chain is
+    #     version-tracked idempotent. pgvector image, not plain postgres:
+    #     0001_init.sql needs CREATE EXTENSION vector — same image production
+    #     compose uses.
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: lens_test
           POSTGRES_DB: lens_test
@@ -34,6 +41,26 @@ jobs:
           cache: false
       - name: go vet
         run: go vet ./...
+      # Real-migration regression guard: the ONLY place migrations/*.sql are
+      # executed in automation (the gated tests build their own fixtures, the
+      # dbmigrate integration test uses synthetic MapFS files). Run 1 applies
+      # 0001→0049 from a clean database; run 2 must be a version-tracked
+      # no-op. This is the guard that would have caught the 0037
+      # DROP-INDEX-CONCURRENTLY-on-partitioned-index deploy blocker (#125)
+      # and the 0001 re-run failure (#127) at PR time.
+      - name: real migrations apply + re-run no-op
+        env:
+          PGPASSWORD: lens_test
+          LENS_DATABASE_URL: postgres://postgres:lens_test@localhost:5432/lens_migrate_check?sslmode=disable
+        run: |
+          psql -h localhost -U postgres -d lens_test -c 'CREATE DATABASE lens_migrate_check'
+          go run ./cmd/lens migrate
+          go run ./cmd/lens migrate 2>&1 | tee /tmp/migrate-rerun.log
+          grep -q "already up to date" /tmp/migrate-rerun.log
+          want="$(ls migrations/*.sql | wc -l | tr -d ' ')"
+          got="$(psql -h localhost -U postgres -d lens_migrate_check -tAc 'SELECT count(*) FROM schema_migrations')"
+          echo "schema_migrations: got=$got want=$want"
+          test "$got" = "$want"
       - name: go test
         env:
           LENS_TEST_DATABASE_URL: postgres://postgres:lens_test@localhost:5432/lens_test?sslmode=disable
