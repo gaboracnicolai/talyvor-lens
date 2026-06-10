@@ -1,5 +1,4 @@
 -- 0037_drop_redundant_prompt_hash_idx.sql
--- lens:no-transaction
 --
 -- Drops the redundant single-column index idx_token_events_prompt_hash from
 -- the token_events partitioned table.
@@ -20,12 +19,16 @@
 --   partitions.
 --
 -- SAFE TO RUN:
---   DROP INDEX CONCURRENTLY does not take an AccessExclusiveLock — it runs
---   without blocking reads or writes.  On a partitioned table the parent-level
---   index name corresponds to child partition indexes; Postgres drops them all
---   in one statement.
---   The migration is wrapped in a transaction for the bookkeeping record;
---   DROP INDEX CONCURRENTLY cannot run inside a transaction block, so the
---   DROP is intentionally outside BEGIN/COMMIT.
+--   A partitioned (parent) index CANNOT be dropped CONCURRENTLY — Postgres
+--   rejects it outright ("cannot drop partitioned index ... concurrently").
+--   This file originally used DROP INDEX CONCURRENTLY and therefore failed on
+--   every database where 0034 had partitioned token_events; no database ever
+--   recorded it as applied (#125). The plain DROP below removes the parent
+--   index and all 8 child partition indexes in one fast catalog-only
+--   statement. It takes a brief ACCESS EXCLUSIVE lock on token_events and its
+--   partitions — irrelevant on a fresh database; on a live one, set a
+--   lock_timeout and retry rather than queueing behind long transactions.
+--   Plain DROP INDEX is transaction-safe, so this migration runs on the
+--   default atomic path (SQL + schema_migrations record in one transaction).
 
-DROP INDEX CONCURRENTLY IF EXISTS idx_token_events_prompt_hash;
+DROP INDEX IF EXISTS idx_token_events_prompt_hash;

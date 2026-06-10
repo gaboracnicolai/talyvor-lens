@@ -75,8 +75,11 @@ func TestMigrations_PoolRoyaltySchemaInvariants(t *testing.T) {
 		t.Fatalf("read 0044 margin view migration: %v", err)
 	}
 	viewSQL := string(viewRaw)
-	if !regexp.MustCompile(`(?i)CREATE\s+OR\s+REPLACE\s+VIEW\s+pool_royalty_margin`).MatchString(viewSQL) {
-		t.Error("0044 must CREATE OR REPLACE VIEW pool_royalty_margin (idempotent view)")
+	// Re-run-safe form is DROP IF EXISTS + CREATE, NOT "CREATE OR REPLACE":
+	// 0046 later appends a status column to this view, and OR REPLACE cannot
+	// drop columns — a full-chain replay would die at 0044 with 42P16 (#127).
+	if !regexp.MustCompile(`(?i)DROP\s+VIEW\s+IF\s+EXISTS\s+pool_royalty_margin\s*;\s*CREATE\s+VIEW\s+pool_royalty_margin`).MatchString(viewSQL) {
+		t.Error("0044 must DROP VIEW IF EXISTS + CREATE VIEW pool_royalty_margin (the re-run-safe form; OR REPLACE dies on the 0046 column append during a full replay)")
 	}
 	if !regexp.MustCompile(`(?i)avoided_cogs_usd\s*-\s*minted_amount\s+AS\s+margin_usd`).MatchString(viewSQL) {
 		t.Error("the margin view must DERIVE margin_usd = avoided_cogs_usd - minted_amount (the margin identity) — never store it")
