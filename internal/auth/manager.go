@@ -240,10 +240,10 @@ func extractCredential(r *http.Request) (raw, location string) {
 
 // Authenticate is the single entry point. Tries each credential
 // shape in priority order:
-//   1. JWT bearer (looks like a JWT — 3 segments separated by ".")
-//   2. Workspace key (starts with tenant.KeyPrefix)
-//   3. Global admin key (exact match with LENS_API_KEY)
-//   4. Legacy X-API-Key header → treated as global key fallback
+//  1. JWT bearer (looks like a JWT — 3 segments separated by ".")
+//  2. Workspace key (starts with tenant.KeyPrefix)
+//  3. Global admin key (exact match with LENS_API_KEY)
+//  4. Legacy X-API-Key header → treated as global key fallback
 //
 // Returns ErrMissingCredentials when no credential is present at
 // all, and ErrInvalidAuth (deliberately opaque) for every "we
@@ -356,6 +356,15 @@ func (m *Manager) Middleware(
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// WithAuthContext attaches a resolved AuthContext to ctx — the same slot
+// GetAuthContext reads and AuthMiddleware populates internally. Exported so
+// handlers and tests can inject identity symmetrically with WithAPIKey (the
+// context key type is unexported, so this is the only entry point from outside
+// the package).
+func WithAuthContext(ctx context.Context, actx *AuthContext) context.Context {
+	return context.WithValue(ctx, authContextCtxKey{}, actx)
 }
 
 // GetAuthContext returns the resolved AuthContext, or nil when

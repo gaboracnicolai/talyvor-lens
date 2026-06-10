@@ -1061,6 +1061,14 @@ func run() error {
 				_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
 				return
 			}
+			// Authz (#146): a non-admin may mint a key ONLY for its own
+			// workspace; admin honors the body (empty → the historical "default").
+			eff, _, ok := effectiveWorkspaceID(req, in.WorkspaceID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.WorkspaceID = eff
 			if in.WorkspaceID == "" {
 				in.WorkspaceID = "default"
 			}
@@ -2249,6 +2257,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): a non-admin lists only as ITSELF (the seller is the
+			// caller); admin may list on behalf of any seller via the body.
+			eff, _, ok := effectiveWorkspaceID(req, in.SellerID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.SellerID = eff
 			if in.SellerID == "" {
 				writeJSONErr(w, http.StatusBadRequest, "seller_id required")
 				return
@@ -2275,6 +2291,13 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): the buyer is the CALLER for non-admins; admin honors the body.
+			eff, _, ok := effectiveWorkspaceID(req, in.BuyerWorkspace)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.BuyerWorkspace = eff
 			trade, err := marketplace.ExecuteTrade(req.Context(), id, in.BuyerWorkspace, in.AmountUSD)
 			if err != nil {
 				status := http.StatusBadRequest
@@ -2293,7 +2316,13 @@ func run() error {
 
 		authed.Delete("/v1/marketplace/listings/{id}", func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
-			wsID := req.URL.Query().Get("workspace_id")
+			// Authz (#146): a non-admin may cancel only its OWN listing; admin
+			// may act on any seller via the param.
+			wsID, _, ok := effectiveWorkspaceID(req, req.URL.Query().Get("workspace_id"))
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
 			if wsID == "" {
 				writeJSONErr(w, http.StatusBadRequest, "workspace_id query param required")
 				return
@@ -2312,7 +2341,13 @@ func run() error {
 		})
 
 		authed.Get("/v1/marketplace/trades", func(w http.ResponseWriter, req *http.Request) {
-			wsID := req.URL.Query().Get("workspace_id")
+			// Authz (#146, closes #144): a non-admin reads only its OWN trades;
+			// admin may read any workspace via the param.
+			wsID, _, ok := effectiveWorkspaceID(req, req.URL.Query().Get("workspace_id"))
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
 			if wsID == "" {
 				writeJSONErr(w, http.StatusBadRequest, "workspace_id query param required")
 				return
@@ -3206,6 +3241,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): the policy is written to the CALLER's workspace for
+			// non-admins; admin honors the body (empty → "default").
+			eff, _, ok := effectiveWorkspaceID(req, in.WorkspaceID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.WorkspaceID = eff
 			if in.WorkspaceID == "" {
 				in.WorkspaceID = "default"
 			}
@@ -3276,8 +3319,16 @@ func run() error {
 			if format == "" {
 				format = audit.FormatJSON
 			}
+			// Authz (#146): a non-admin is scoped to its OWN workspace ALWAYS —
+			// an empty workspace_id must never mean "all tenants" for a tenant.
+			// Only the global admin may export across workspaces (empty = all).
+			effWS, _, ok := effectiveWorkspaceID(req, q.Get("workspace_id"))
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
 			filter := audit.ExportFilter{
-				WorkspaceID: q.Get("workspace_id"),
+				WorkspaceID: effWS,
 				Team:        q.Get("team"),
 				Provider:    q.Get("provider"),
 			}
@@ -3330,6 +3381,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "webhook_url required")
 				return
 			}
+			// Authz (#146): non-admin scoped to own workspace; admin honors the
+			// filter (empty workspace = all tenants, admin-only).
+			effWS, _, ok := effectiveWorkspaceID(req, in.Filter.WorkspaceID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.Filter.WorkspaceID = effWS
 			// Fire-and-forget so the caller doesn't block on a slow SIEM.
 			// Use a fresh context detached from the request so cancellation
 			// of the HTTP connection doesn't kill the export mid-flight.
@@ -3456,6 +3515,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): a non-admin may mutate only its OWN prompt; admin
+			// honors the body (empty → "default").
+			eff, _, ok := effectiveWorkspaceID(req, in.WorkspaceID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.WorkspaceID = eff
 			if in.WorkspaceID == "" {
 				in.WorkspaceID = "default"
 			}
@@ -3491,6 +3558,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): a non-admin may roll back only its OWN prompt; admin
+			// honors the body (empty → "default").
+			eff, _, ok := effectiveWorkspaceID(req, in.WorkspaceID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.WorkspaceID = eff
 			if in.WorkspaceID == "" {
 				in.WorkspaceID = "default"
 			}
@@ -3673,6 +3748,31 @@ func callerWorkspaceID(ctx context.Context) (workspaceID string, isAdmin bool) {
 		return k.WorkspaceID, false
 	}
 	return "", false
+}
+
+// effectiveWorkspaceID resolves which workspace a NON-{wsID}-path route may act
+// on, deriving identity from the authenticated credential rather than caller
+// input. It closes the cross-tenant authorization cluster (#146): routes that
+// took workspace_id from a query/body param trusted attacker-chosen input,
+// because workspaceIsolationMiddleware only guards the {wsID} PATH segment.
+//
+//   - A NON-ADMIN caller is ALWAYS forced to its own workspace; `requested`
+//     (whatever the query/body said) is ignored — it can never name another
+//     tenant. An honest caller naming its own workspace is unaffected.
+//   - The global ADMIN honors `requested`; an empty value preserves each
+//     handler's admin-wide semantics (e.g. audit export's all-tenant dump).
+//
+// ok is false ONLY when a non-admin has no resolvable workspace — the caller
+// must 403 rather than fall through to a shared/"default"/all-tenant path.
+func effectiveWorkspaceID(r *http.Request, requested string) (wsID string, isAdmin bool, ok bool) {
+	caller, admin := callerWorkspaceID(r.Context())
+	if admin {
+		return requested, true, true
+	}
+	if caller == "" {
+		return "", false, false
+	}
+	return caller, false, true
 }
 
 // workspaceIsolationMiddleware enforces tenant isolation on every routed
