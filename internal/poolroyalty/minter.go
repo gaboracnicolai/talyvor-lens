@@ -276,15 +276,21 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 		return Result{AlreadyMinted: true}, nil
 	}
 
+	// #145: the requester workspace id is DELIBERATELY omitted from the
+	// contributor's ledger row (description + metadata) — tokens/history echoes
+	// both verbatim, so naming the counterparty there is a cross-tenant identity
+	// leak. The requester stays authoritatively in the admin-only
+	// pool_royalty_mints claim row (inserted above), which is where the detector,
+	// resolver, and per-pair cap read it. The contributor learns it was served,
+	// never by whom.
 	meta := map[string]interface{}{
-		"request_id":           h.RequestID,
-		"request_workspace_id": h.RequesterWorkspace, // CountCacheHitsBenefited's metadata convention
-		"layer":                h.Layer,
-		"entry_id":             h.EntryID,
-		"avoided_cogs_usd":     h.AvoidedCOGSUSD,
-		"royalty_share":        m.share,
+		"request_id":       h.RequestID,
+		"layer":            h.Layer,
+		"entry_id":         h.EntryID,
+		"avoided_cogs_usd": h.AvoidedCOGSUSD,
+		"royalty_share":    m.share,
 	}
-	desc := fmt.Sprintf("pool royalty: %s pooled hit served to %s", h.Layer, h.RequesterWorkspace)
+	desc := fmt.Sprintf("pool royalty: %s pooled hit served", h.Layer)
 	// Stage 2.3a: the mint credits HELD, not spendable — the LENS becomes
 	// spendable (and supply-counted, via the TypePoolRoyalty row the sweeper
 	// writes) only at finalize. Same position, same tx, same contributor-

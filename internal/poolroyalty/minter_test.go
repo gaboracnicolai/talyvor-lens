@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,8 @@ type creditCall struct {
 	workspaceID string
 	amount      float64
 	txType      string
+	desc        string
+	meta        map[string]interface{}
 }
 
 type fakeLedger struct {
@@ -34,8 +37,8 @@ type fakeLedger struct {
 	err   error
 }
 
-func (f *fakeLedger) CreditHeldTx(_ context.Context, _ pgx.Tx, workspaceID string, amount float64, txType, _ string, _ map[string]interface{}) error {
-	f.calls = append(f.calls, creditCall{workspaceID: workspaceID, amount: amount, txType: txType})
+func (f *fakeLedger) CreditHeldTx(_ context.Context, _ pgx.Tx, workspaceID string, amount float64, txType, desc string, meta map[string]interface{}) error {
+	f.calls = append(f.calls, creditCall{workspaceID: workspaceID, amount: amount, txType: txType, desc: desc, meta: meta})
 	return f.err
 }
 
@@ -117,6 +120,62 @@ func TestMintServedHit_ExactlyOncePerRequestID(t *testing.T) {
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// #145: the contributor's HELD ledger row must NOT carry the requester
+// workspace id — not in the description, not in any metadata value. The
+// requester stays ONLY in the admin-only pool_royalty_mints claim row (pinned
+// here via the INSERT args). A contributor reading tokens/history learns it was
+// served, never BY WHOM. This PR changes ZERO economics: same amount, same
+// claim row, same idempotency — only the redundant contributor-facing copy goes.
+func TestMintServedHit_LedgerRowOmitsRequester(t *testing.T) {
+	pool := newMockPool(t)
+	ledger := &fakeLedger{}
+	m := NewMinter(pool, ledger, 0.5, enabledOn)
+
+	// The claim INSERT STILL carries the requester ("wsB") — the authoritative
+	// copy is untouched; only the contributor-facing ledger row is scrubbed.
+	pool.ExpectBegin()
+	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
+		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, 1.0, tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectCommit()
+
+	res, err := m.MintServedHit(context.Background(), sampleHit())
+	if err != nil {
+		t.Fatalf("MintServedHit: %v", err)
+	}
+	// Economics guard: amount unchanged (0.5 × 2.0).
+	if !res.Minted || res.Amount != 1.0 {
+		t.Fatalf("economics changed: Minted=%v Amount=%v, want true/1.0", res.Minted, res.Amount)
+	}
+	if len(ledger.calls) != 1 {
+		t.Fatalf("ledger credits = %d, want 1", len(ledger.calls))
+	}
+	c := ledger.calls[0]
+
+	const requester = "wsB"
+	if strings.Contains(c.desc, requester) {
+		t.Errorf("LEAK: held-row description %q contains the requester %q", c.desc, requester)
+	}
+	for k, v := range c.meta {
+		if s, ok := v.(string); ok && strings.Contains(s, requester) {
+			t.Errorf("LEAK: held-row metadata[%q] = %q contains the requester %q", k, s, requester)
+		}
+	}
+	if _, ok := c.meta["request_workspace_id"]; ok {
+		t.Errorf("LEAK: held-row metadata still carries the request_workspace_id key")
+	}
+	// Sanity: still a recognizable pool-royalty credit to the contributor — we
+	// scrubbed the counterparty, not the row.
+	if c.workspaceID != "wsA" || c.txType != TypePoolRoyaltyHeld {
+		t.Errorf("credit = %+v, want contributor wsA / %s", c, TypePoolRoyaltyHeld)
+	}
+	// The authoritative requester copy survives: the claim INSERT was called
+	// with "wsB" (ExpectationsWereMet verifies it fired with that arg).
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations (claim INSERT must still carry wsB): %v", err)
 	}
 }
 
