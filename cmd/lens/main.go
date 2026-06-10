@@ -1071,18 +1071,7 @@ func run() error {
 			writeJSONOK(w, http.StatusCreated, map[string]bool{"ok": true})
 		})
 
-		authed.Delete("/v1/api/keys/{keyID}", func(w http.ResponseWriter, req *http.Request) {
-			keyID := chi.URLParam(req, "keyID")
-			if err := keyStore.Revoke(req.Context(), keyID); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-		})
+		authed.Delete("/v1/api/keys/{keyID}", newRevokeAPIKeyHandler(keyStore))
 
 		// ─── JWT auth endpoints ────────────────────────
 		// /v1/auth/token mints a JWT — admin-only because issuing
@@ -2684,18 +2673,15 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, got)
 		})
 
-		authed.Get("/v1/sessions/{sessionID}", func(w http.ResponseWriter, req *http.Request) {
-			sessionID := chi.URLParam(req, "sessionID")
-			s, ok := sessionTracker.GetSession(sessionID)
-			if !ok {
-				writeJSONErr(w, http.StatusNotFound, "session not found")
-				return
-			}
-			writeJSONOK(w, http.StatusOK, s)
-		})
+		authed.Get("/v1/sessions/{sessionID}", newSessionGetHandler(sessionTracker))
 
 		authed.Get("/v1/sessions/{sessionID}/summary", func(w http.ResponseWriter, req *http.Request) {
 			sessionID := chi.URLParam(req, "sessionID")
+			// Authz (#146 P3): same IDOR as GET /v1/sessions/{id} — own session only.
+			if sess, ok := sessionTracker.GetSession(sessionID); !ok || !callerOwns(req, sess.WorkspaceID) {
+				writeJSONErr(w, http.StatusNotFound, "session not found")
+				return
+			}
 			summary := sessionTracker.SummariseSession(req.Context(), sessionID)
 			if summary.TurnCount == 0 && summary.StartedAt.IsZero() {
 				writeJSONErr(w, http.StatusNotFound, "session not found")
@@ -2752,15 +2738,7 @@ func run() error {
 			})
 		})
 
-		authed.Get("/v1/batch/status/{requestID}", func(w http.ResponseWriter, req *http.Request) {
-			requestID := chi.URLParam(req, "requestID")
-			job := batchRouter.GetJobByRequestID(requestID)
-			if job == nil {
-				writeJSONErr(w, http.StatusNotFound, "batch job not found")
-				return
-			}
-			writeJSONOK(w, http.StatusOK, job)
-		})
+		authed.Get("/v1/batch/status/{requestID}", newBatchStatusHandler(batchRouter))
 
 		authed.Get("/v1/batch/jobs", func(w http.ResponseWriter, req *http.Request) {
 			// workspace_id filtering happens client-side for now — the
@@ -2826,18 +2804,15 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, summary)
 		})
 
-		authed.Get("/v1/eval/runs/{runID}", func(w http.ResponseWriter, req *http.Request) {
-			runID := chi.URLParam(req, "runID")
-			summary, err := evalPipeline.GetRun(req.Context(), runID)
-			if err != nil {
-				writeJSONErr(w, http.StatusNotFound, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, summary)
-		})
+		authed.Get("/v1/eval/runs/{runID}", newEvalRunGetHandler(evalPipeline))
 
 		authed.Get("/v1/eval/runs/{runID}/results", func(w http.ResponseWriter, req *http.Request) {
 			runID := chi.URLParam(req, "runID")
+			// Authz (#146 P3): same IDOR as GET /v1/eval/runs/{id} — own run only.
+			if run, err := evalPipeline.GetRun(req.Context(), runID); err != nil || run == nil || !callerOwns(req, run.WorkspaceID) {
+				writeJSONErr(w, http.StatusNotFound, "run not found")
+				return
+			}
 			results, err := evalPipeline.GetResults(req.Context(), runID)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -3018,6 +2993,9 @@ func run() error {
 		// an unstaked node still serves, it's just not minting-eligible.
 		authed.Post("/v1/povi/nodes/{nodeID}/stake", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
+			if !requireNodeOwnership(w, req, poviStakeManager, nodeID) {
+				return
+			}
 			var in struct {
 				Amount float64 `json:"amount"`
 			}
@@ -3035,6 +3013,9 @@ func run() error {
 
 		authed.Post("/v1/povi/nodes/{nodeID}/unbond", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
+			if !requireNodeOwnership(w, req, poviStakeManager, nodeID) {
+				return
+			}
 			if err := poviStakeManager.Unbond(req.Context(), nodeID); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
 				return
@@ -3045,6 +3026,9 @@ func run() error {
 
 		authed.Post("/v1/povi/nodes/{nodeID}/release", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
+			if !requireNodeOwnership(w, req, poviStakeManager, nodeID) {
+				return
+			}
 			if err := poviStakeManager.Release(req.Context(), nodeID); err != nil {
 				// Unbonding-not-elapsed is a client error (try again later).
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
@@ -3056,6 +3040,9 @@ func run() error {
 
 		authed.Get("/v1/povi/nodes/{nodeID}/stake", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
+			if !requireNodeOwnership(w, req, poviStakeManager, nodeID) {
+				return
+			}
 			st, err := poviStakeManager.Get(req.Context(), nodeID)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -3092,7 +3079,19 @@ func run() error {
 		})
 
 		authed.Get("/v1/povi/challenges", func(w http.ResponseWriter, req *http.Request) {
-			list, err := challengeStore.List(req.Context(), req.URL.Query().Get("node"))
+			// Authz (#146 P3): node-keyed read. A specific node must be owned by
+			// the caller; the unfiltered list (no node) is admin-only — a tenant
+			// can't enumerate every node's challenges.
+			node := req.URL.Query().Get("node")
+			if node == "" {
+				if _, isAdmin := auth.WorkspaceIdentity(req.Context()); !isAdmin {
+					writeJSONErr(w, http.StatusForbidden, "forbidden: specify a node you own, or use an admin credential")
+					return
+				}
+			} else if !requireNodeOwnership(w, req, poviStakeManager, node) {
+				return
+			}
+			list, err := challengeStore.List(req.Context(), node)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -3100,14 +3099,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, list)
 		})
 
-		authed.Get("/v1/povi/challenges/{id}", func(w http.ResponseWriter, req *http.Request) {
-			ch, err := challengeStore.Get(req.Context(), chi.URLParam(req, "id"))
-			if err != nil {
-				writeJSONErr(w, http.StatusNotFound, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, ch)
-		})
+		authed.Get("/v1/povi/challenges/{id}", newChallengeGetHandler(challengeStore))
 
 		authed.Post("/v1/povi/challenges/issue", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {

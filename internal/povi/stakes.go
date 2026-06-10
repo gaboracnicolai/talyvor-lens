@@ -179,6 +179,14 @@ func (m *StakeManager) ledgerSlashStake(ctx context.Context, tx pgx.Tx, ws strin
 func (m *StakeManager) MinStake() float64           { return m.minStake }
 func (m *StakeManager) UnbondPeriod() time.Duration { return m.unbondPeriod }
 
+// WorkspaceForNode resolves a node's operator workspace (the same lookup the
+// stake ops use internally). Exposed so the request path can enforce ownership
+// BEFORE a stake/unbond/release: a caller may only act on its own node (#146
+// Phase 3). Returns an error when the node is unknown.
+func (m *StakeManager) WorkspaceForNode(ctx context.Context, nodeID string) (string, error) {
+	return m.nodeWS(ctx, nodeID)
+}
+
 // Stake locks `amount` LENS as collateral for a node (topping up an existing
 // active stake, or starting fresh). All reads and writes run in a single
 // transaction so concurrent stakes for the same node serialize correctly.

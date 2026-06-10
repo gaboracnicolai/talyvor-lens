@@ -225,6 +225,34 @@ func (k *KeyStore) Revoke(ctx context.Context, keyID string) error {
 	return nil
 }
 
+const selectKeyWorkspaceSQL = `SELECT workspace_id FROM api_keys WHERE id = $1`
+
+// WorkspaceForKeyID resolves the owning workspace of an API key by its ID, and
+// whether the key exists. Used for the ownership check before a key is revoked
+// (#146 Phase 3): a non-admin may revoke only keys in its OWN workspace. Reads
+// the DB (so it sees keys not in the active cache); falls back to the in-memory
+// cache when no pool is wired (tests). A missing key is (",", false, nil).
+func (k *KeyStore) WorkspaceForKeyID(ctx context.Context, keyID string) (workspaceID string, found bool, err error) {
+	if k.pool == nil {
+		k.mu.RLock()
+		defer k.mu.RUnlock()
+		for _, entry := range k.cache {
+			if entry.key.ID == keyID {
+				return entry.key.WorkspaceID, true, nil
+			}
+		}
+		return "", false, nil
+	}
+	var ws string
+	if scanErr := k.pool.QueryRow(ctx, selectKeyWorkspaceSQL, keyID).Scan(&ws); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("auth: lookup api_key workspace: %w", scanErr)
+	}
+	return ws, true, nil
+}
+
 const loadAllSQL = `SELECT id, key_hash, workspace_id, team, name, active, created_at, last_used_at, expires_at
 FROM api_keys
 WHERE active = true AND (expires_at IS NULL OR expires_at > NOW())`
