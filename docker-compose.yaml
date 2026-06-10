@@ -45,6 +45,22 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # Container hardening (defense-in-depth). Lens is our own static, non-root
+    # (USER lens, uid 65532), CGO-free binary that binds an unprivileged port
+    # (8080) and keeps no on-disk state — so it can run fully locked down:
+    #   - read_only           root filesystem is immutable; an attacker who gets
+    #                          code execution cannot drop a payload or rewrite /lens
+    #   - cap_drop: ALL        the process needs zero Linux capabilities
+    #   - no-new-privileges    blocks privilege escalation via setuid binaries
+    # tmpfs gives the one writable path the runtime may need (temp files); it is
+    # ephemeral and noexec so it can't be used to stage an executable.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
       interval: 10s
@@ -72,6 +88,10 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+    # Safe baseline: block setuid privilege escalation. Not read_only/cap_drop:ALL
+    # because psql needs a writable HOME/tmp and this is a short-lived one-shot.
+    security_opt:
+      - no-new-privileges:true
 
   # PgBouncer sits between Lens and Postgres and multiplexes many application
   # connections onto a small pool of real server connections. Transaction
@@ -100,6 +120,10 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    # Safe baseline only. PgBouncer (Bitnami) renders its config at startup and
+    # needs a writable filesystem, so read_only/cap_drop:ALL would break it.
+    security_opt:
+      - no-new-privileges:true
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -115,6 +139,10 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    # Safe baseline only. Postgres needs capabilities for initdb (chown/setuid)
+    # and a writable data dir, so read_only/cap_drop:ALL would break startup.
+    security_opt:
+      - no-new-privileges:true
 
   redis:
     image: redis:7-alpine
@@ -127,6 +155,10 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    # Safe baseline only. Redis persists the append-only file to /data, so a
+    # read_only root fs would need extra tmpfs wiring; keep it simple and safe.
+    security_opt:
+      - no-new-privileges:true
 
   nats:
     image: nats:2.10-alpine
@@ -139,6 +171,10 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    # Safe baseline only. JetStream (-js) needs a writable store dir, so keep
+    # read_only off here; no-new-privileges is still a free hardening win.
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   pgdata:
