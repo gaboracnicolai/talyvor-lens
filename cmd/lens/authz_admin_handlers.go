@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -51,5 +52,31 @@ func newPoolKeyDeleteHandler(pool poolKeyRemover) http.HandlerFunc {
 			return
 		}
 		writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+	}
+}
+
+// patternAdder is the slice of *injection.Detector the pattern handler needs.
+type patternAdder interface {
+	AddPattern(pattern string) error
+}
+
+// newInjectionPatternAddHandler — POST /v1/api/injection/patterns. The seventh
+// member of the #153 class (folded in): AddPattern mutates the single PROCESS-
+// WIDE injection detector and accepts arbitrary regex (a ReDoS vector), so it
+// is admin-only like the other global-config writes.
+func newInjectionPatternAddHandler(adder patternAdder) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Pattern string `json:"pattern"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if err := adder.AddPattern(in.Pattern); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusCreated, map[string]bool{"ok": true})
 	}
 }

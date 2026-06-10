@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -98,5 +99,53 @@ func TestRequireAdmin_PoolKeyDelete_GateStopsMutation(t *testing.T) {
 	rec = serveDelete(requireAdmin(fakeAuthn{ctx: &auth.AuthContext{IsAdmin: true}}, http.HandlerFunc(newPoolKeyDeleteHandler(adminPool))))
 	if rec.Code != http.StatusOK || !adminPool.removed {
 		t.Errorf("gated admin: status=%d removed=%v, want 200/true", rec.Code, adminPool.removed)
+	}
+}
+
+type fakePatternAdder struct {
+	added   bool
+	pattern string
+}
+
+func (f *fakePatternAdder) AddPattern(p string) error { f.added, f.pattern = true, p; return nil }
+
+func servePost(h http.Handler, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	r := chi.NewRouter()
+	r.Method(http.MethodPost, "/v1/api/injection/patterns", h)
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/api/injection/patterns", strings.NewReader(body)))
+	return rec
+}
+
+// TestRequireAdmin_InjectionPattern_GateStopsMutation — the 7th class member.
+// UNGATED, a non-admin tenant injects a regex into the PROCESS-WIDE detector
+// (the #153 leak + a ReDoS vector); GATED, refused 401 and nothing is added; an
+// admin passes.
+func TestRequireAdmin_InjectionPattern_GateStopsMutation(t *testing.T) {
+	tenant := fakeAuthn{ctx: &auth.AuthContext{IsAdmin: false, WorkspaceID: "wsA"}}
+	const body = `{"pattern":"evil.*"}`
+
+	// Precondition — the handler DOES mutate the global ruleset when reached.
+	ungated := &fakePatternAdder{}
+	rec := servePost(newInjectionPatternAddHandler(ungated), body)
+	if !ungated.added || rec.Code != http.StatusCreated {
+		t.Fatalf("ungated: added=%v code=%d, want true/201 (handler must mutate when reached)", ungated.added, rec.Code)
+	}
+
+	// GATED + non-admin: refused, pattern NOT added.
+	gated := &fakePatternAdder{}
+	rec = servePost(requireAdmin(tenant, http.HandlerFunc(newInjectionPatternAddHandler(gated))), body)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("gated non-admin: status = %d, want 401", rec.Code)
+	}
+	if gated.added {
+		t.Error("global injection ruleset NOT protected: gated non-admin still added a pattern")
+	}
+
+	// GATED + admin: passes, pattern added.
+	adminAdd := &fakePatternAdder{}
+	rec = servePost(requireAdmin(fakeAuthn{ctx: &auth.AuthContext{IsAdmin: true}}, http.HandlerFunc(newInjectionPatternAddHandler(adminAdd))), body)
+	if rec.Code != http.StatusCreated || !adminAdd.added {
+		t.Errorf("gated admin: status=%d added=%v, want 201/true", rec.Code, adminAdd.added)
 	}
 }

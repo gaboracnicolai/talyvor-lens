@@ -1043,20 +1043,7 @@ func run() error {
 
 		authed.Post("/v1/api/keys", newCreateAPIKeyHandler(keyStore))
 
-		authed.Post("/v1/api/injection/patterns", func(w http.ResponseWriter, req *http.Request) {
-			var in struct {
-				Pattern string `json:"pattern"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			if err := injectionDetector.AddPattern(in.Pattern); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, map[string]bool{"ok": true})
-		})
+		authed.Post("/v1/api/injection/patterns", requireAdmin(authManager, http.HandlerFunc(newInjectionPatternAddHandler(injectionDetector))))
 
 		authed.Delete("/v1/api/keys/{keyID}", newRevokeAPIKeyHandler(keyStore))
 
