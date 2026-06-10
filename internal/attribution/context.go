@@ -387,6 +387,100 @@ func (s *Store) GetCostByBranch(ctx context.Context, workspaceID string, since t
 	return out, nil
 }
 
+// ─── #151: workspace-scoped repo/branch reads ───────────────────────────────
+// These back GET /v1/attribution/branch and /top after the #151 re-point. They
+// return the SAME BranchSpend shape the legacy Tracker queries did, but source
+// it from request_attribution (which carries workspace_id) filtered to the
+// caller's workspace — so a tenant sees only its OWN slice of a (possibly
+// shared) repository name, instead of every tenant's spend for that repo.
+
+const branchSpendForWorkspaceSQL = `SELECT
+  branch, pr_number, repo_name,
+  SUM(cost_usd), SUM(input_tokens), SUM(output_tokens),
+  COUNT(*), MIN(created_at), MAX(created_at)
+FROM request_attribution
+WHERE workspace_id = $1 AND branch = $2 AND repo_name = $3
+GROUP BY branch, pr_number, repo_name`
+
+// GetBranchSpendForWorkspace returns aggregated spend for (workspace, branch,
+// repo). (nil, nil) when the workspace has no rows for it — a 404 at the API,
+// not an error. Mirrors the legacy GetBranchSpend's "first aggregated row when a
+// branch maps to multiple PRs" behavior.
+func (s *Store) GetBranchSpendForWorkspace(ctx context.Context, workspaceID, branch, repository string) (*BranchSpend, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	if workspaceID == "" {
+		return nil, errors.New("attribution: workspace_id required")
+	}
+	rows, err := s.pool.Query(ctx, branchSpendForWorkspaceSQL, workspaceID, branch, repository)
+	if err != nil {
+		return nil, fmt.Errorf("attribution: query branch spend (scoped): %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	var bs BranchSpend
+	if err := rows.Scan(
+		&bs.Branch, &bs.PRNumber, &bs.Repository,
+		&bs.TotalCostUSD, &bs.TotalInputTokens, &bs.TotalOutputTokens,
+		&bs.RequestCount, &bs.FirstSeenAt, &bs.LastSeenAt,
+	); err != nil {
+		return nil, fmt.Errorf("attribution: scan branch spend (scoped): %w", err)
+	}
+	return &bs, nil
+}
+
+const topBranchesForWorkspaceSQL = `SELECT
+  branch, pr_number, repo_name,
+  SUM(cost_usd), SUM(input_tokens), SUM(output_tokens),
+  COUNT(*), MIN(created_at), MAX(created_at)
+FROM request_attribution
+WHERE workspace_id = $1 AND repo_name = $2
+  AND created_at > NOW() - INTERVAL '30 days'
+GROUP BY branch, pr_number, repo_name
+ORDER BY SUM(cost_usd) DESC
+LIMIT $3`
+
+// GetTopBranchesForWorkspace returns the workspace's top branches for a repo by
+// spend over the last 30 days (the legacy GetTopBranches window).
+func (s *Store) GetTopBranchesForWorkspace(ctx context.Context, workspaceID, repository string, limit int) ([]BranchSpend, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	if workspaceID == "" {
+		return nil, errors.New("attribution: workspace_id required")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.pool.Query(ctx, topBranchesForWorkspaceSQL, workspaceID, repository, limit)
+	if err != nil {
+		return nil, fmt.Errorf("attribution: query top branches (scoped): %w", err)
+	}
+	defer rows.Close()
+	var out []BranchSpend
+	for rows.Next() {
+		var bs BranchSpend
+		if err := rows.Scan(
+			&bs.Branch, &bs.PRNumber, &bs.Repository,
+			&bs.TotalCostUSD, &bs.TotalInputTokens, &bs.TotalOutputTokens,
+			&bs.RequestCount, &bs.FirstSeenAt, &bs.LastSeenAt,
+		); err != nil {
+			return nil, fmt.Errorf("attribution: scan top branch (scoped): %w", err)
+		}
+		out = append(out, bs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("attribution: iterate top branches (scoped): %w", err)
+	}
+	return out, nil
+}
+
 // Summary is the cross-dimension rollup returned by
 // GET /v1/workspaces/:wsID/attribution/summary?days=N.
 type Summary struct {
