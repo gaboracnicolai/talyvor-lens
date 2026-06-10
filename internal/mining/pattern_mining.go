@@ -373,11 +373,14 @@ WHERE workspace_id = $1 AND earned > 0
 
 // insertPatternClaimSQL is the S3 idempotency claim: one credit per
 // (request_id, workspace_id). COMPOSITE UNIQUE (not bare request_id like
-// pool_royalty_mints) — request_id is the caller-supplied X-Talyvor-Request-ID,
-// so scoping by workspace stops one workspace from suppressing another's earn
-// by colliding the header, while still deduping a retry/replay within a
-// workspace. ON CONFLICT + RowsAffected()==0 is the exactly-once guard
-// (claim-then-act, mirroring poolroyalty.MintServedHit).
+// pool_royalty_mints) — request_id is the SERVER-DERIVED work-product content
+// hash (S4: digest-of-digests over model+prompt+response, never the caller's
+// X-Talyvor-Request-ID header), so identical work yields the same request_id
+// across workspaces by construction; scoping by workspace stops the first
+// earner from suppressing every other workspace's legitimate earn on the same
+// work, while still deduping a retry/replay within a workspace. ON CONFLICT +
+// RowsAffected()==0 is the exactly-once guard (claim-then-act, mirroring
+// poolroyalty.MintServedHit).
 const insertPatternClaimSQL = `INSERT INTO pattern_mine_credits (request_id, workspace_id, earned)
 VALUES ($1, $2, $3)
 ON CONFLICT (request_id, workspace_id) DO NOTHING`

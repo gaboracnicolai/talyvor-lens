@@ -13,8 +13,15 @@ CREATE TABLE IF NOT EXISTS prompt_embeddings (
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
-ALTER TABLE prompt_embeddings
-  ADD CONSTRAINT uq_prompt_hash UNIQUE (prompt_hash);
+-- ADD CONSTRAINT has no IF NOT EXISTS; the DO block makes the re-run a no-op
+-- (42P07/42710 swallowed) instead of killing a replay at the very first file
+-- (#127). Deliberately NOT drop-then-add: that would briefly lose the
+-- uniqueness guarantee under concurrent writes and rebuild the index.
+DO $$ BEGIN
+  ALTER TABLE prompt_embeddings
+    ADD CONSTRAINT uq_prompt_hash UNIQUE (prompt_hash);
+EXCEPTION WHEN duplicate_table OR duplicate_object THEN NULL;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_embeddings_vector
   ON prompt_embeddings

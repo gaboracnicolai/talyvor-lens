@@ -2,11 +2,15 @@
 --
 -- One credit per (request_id, workspace_id): a COMPOSITE UNIQUE, DELIBERATELY
 -- NOT the bare UNIQUE(request_id) of pool_royalty_mints. request_id is the
--- caller-supplied X-Talyvor-Request-ID; a bare global UNIQUE would let workspace
--- A suppress workspace B's legitimate earn by colliding the header (B's ON
--- CONFLICT DO NOTHING returns 0 → B silently earns nothing). Scoping uniqueness
--- per-workspace blocks that griefing seam while still deduping a retry/replay
--- WITHIN a workspace. (Pool-B is safe with bare request_id because its row pairs
+-- SERVER-DERIVED work-product content hash (S4, PR #120):
+-- SHA256Hex(SHA256Hex(model)+SHA256Hex(prompt)+SHA256Hex(response)) — never
+-- the caller's X-Talyvor-Request-ID header. Identical work therefore yields
+-- the SAME request_id across workspaces by construction, so a bare global
+-- UNIQUE would let whichever workspace earns first suppress every other
+-- workspace's legitimate earn on the same work (their ON CONFLICT DO NOTHING
+-- returns 0 → they silently earn nothing). Scoping uniqueness per-workspace
+-- blocks that, while still deduping a retry/replay WITHIN a workspace.
+-- (Pool-B is safe with bare request_id because its row pairs
 -- requester/contributor identity; this is a bare per-request stamp on a
 -- SELF-generated earn, so the workspace must be IN the key.)
 --

@@ -37,6 +37,14 @@ docker compose up -d
 
 Lens is now running at `http://localhost:8080`.
 
+> **Image access:** `ghcr.io/gaboracnicolai/talyvor-lens` is a **private**
+> package by decision — the binary embeds the full migration SQL (the
+> pre-launch token-economy schema), so it is not published anonymously.
+> Deploying hosts either authenticate once
+> (`docker login ghcr.io -u <user>` with a PAT carrying `read:packages`)
+> or build locally from a checkout (`docker compose build`, which the
+> compose file supports out of the box).
+
 Open the dashboard at `http://localhost:8080/dashboard`.
 Check status at `http://localhost:8080/status`.
 

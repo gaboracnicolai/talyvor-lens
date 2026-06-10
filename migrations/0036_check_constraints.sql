@@ -7,23 +7,35 @@
 -- corrupted state.
 --
 -- Uses NOT VALID so the constraint is enforced on NEW writes immediately
--- without a full table scan that would lock the table. Run
+-- without a full table scan that would lock the table.
+--
+-- Re-run-safe via DROP CONSTRAINT IF EXISTS before each ADD (the 0046 idiom;
+-- ADD CONSTRAINT has no IF NOT EXISTS). All constraints are NOT VALID, so the
+-- re-add never scans (#127). Run
 --   VALIDATE CONSTRAINT <name> ON <table>
 -- during a maintenance window to back-fill validation of existing rows.
 
 -- ── lens_token_balances ────────────────────────────────────────────────────
 ALTER TABLE lens_token_balances
+    DROP CONSTRAINT IF EXISTS chk_token_balance_gte_zero;
+ALTER TABLE lens_token_balances
     ADD CONSTRAINT chk_token_balance_gte_zero
         CHECK (balance >= 0) NOT VALID;
 
+ALTER TABLE lens_token_balances
+    DROP CONSTRAINT IF EXISTS chk_token_locked_balance_gte_zero;
 ALTER TABLE lens_token_balances
     ADD CONSTRAINT chk_token_locked_balance_gte_zero
         CHECK (locked_balance >= 0) NOT VALID;
 
 ALTER TABLE lens_token_balances
+    DROP CONSTRAINT IF EXISTS chk_token_lifetime_earned_gte_zero;
+ALTER TABLE lens_token_balances
     ADD CONSTRAINT chk_token_lifetime_earned_gte_zero
         CHECK (lifetime_earned >= 0) NOT VALID;
 
+ALTER TABLE lens_token_balances
+    DROP CONSTRAINT IF EXISTS chk_token_lifetime_spent_gte_zero;
 ALTER TABLE lens_token_balances
     ADD CONSTRAINT chk_token_lifetime_spent_gte_zero
         CHECK (lifetime_spent >= 0) NOT VALID;
@@ -32,14 +44,20 @@ ALTER TABLE lens_token_balances
 -- amount CAN be negative (debits are recorded as negative values).
 -- balance_after is the running balance snapshot and must always be ≥ 0.
 ALTER TABLE lens_token_ledger
+    DROP CONSTRAINT IF EXISTS chk_ledger_balance_after_gte_zero;
+ALTER TABLE lens_token_ledger
     ADD CONSTRAINT chk_ledger_balance_after_gte_zero
         CHECK (balance_after >= 0) NOT VALID;
 
 -- ── povi_stakes ────────────────────────────────────────────────────────────
 ALTER TABLE povi_stakes
+    DROP CONSTRAINT IF EXISTS chk_povi_stake_amount_gte_zero;
+ALTER TABLE povi_stakes
     ADD CONSTRAINT chk_povi_stake_amount_gte_zero
         CHECK (amount >= 0) NOT VALID;
 
+ALTER TABLE povi_stakes
+    DROP CONSTRAINT IF EXISTS chk_povi_slashed_amount_gte_zero;
 ALTER TABLE povi_stakes
     ADD CONSTRAINT chk_povi_slashed_amount_gte_zero
         CHECK (slashed_amount >= 0) NOT VALID;

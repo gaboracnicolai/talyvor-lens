@@ -6,6 +6,12 @@ on:
     paths:
       - 'cmd/**'
       - 'internal/**'
+      # migrations are //go:embed-ded into the lens binary — without this
+      # path a migrations-only merge never reaches :latest and the image's
+      # embedded migration set silently lags the repo (#125 aftermath).
+      - 'migrations/**'
+      - 'go.mod'
+      - 'go.sum'
       - 'Dockerfile'
       - '.github/workflows/images.yaml'
   workflow_dispatch:

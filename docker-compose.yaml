@@ -67,23 +67,26 @@ services:
       timeout: 5s
       retries: 3
 
-  # Schema migrations run once per compose-up. Uses the postgres image
-  # (not the lens binary) since the lens CLI doesn't ship a migrate
-  # subcommand — every migration file is idempotent (IF NOT EXISTS),
-  # so re-applying on every `up` is safe and predictable.
+  # Schema migrations run once per compose-up via the gateway image's own
+  # `lens migrate` subcommand: embedded SQL, version-tracked in
+  # schema_migrations (already-applied versions are skipped — re-running every
+  # `up` is a no-op), fail-loud on error. Same mechanism as the Helm migrate
+  # hook. Connects DIRECT to Postgres, never through PgBouncer — DDL through a
+  # transaction-mode pooler is unsafe.
+  #
+  # The SQL ships inside the image (migrations/embed.go), so a newly authored
+  # migration needs `docker compose build` (or a fresh pull) to be applied.
+  #
+  # Databases bootstrapped by the OLD psql-loop sidecar have a full schema but
+  # an empty schema_migrations — run deploy/migrate-baseline-stamp.sh ONCE
+  # before the first `lens migrate` against such a database.
   migrate:
-    image: postgres:16-alpine
-    entrypoint: ["sh", "-c"]
-    command:
-      - >
-        for f in /migrations/*.sql; do
-          echo "==> Applying $$f";
-          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$f" || exit 1;
-        done
+    image: ghcr.io/gaboracnicolai/talyvor-lens:latest
+    build:
+      context: .
+    command: ["migrate"]
     environment:
-      DATABASE_URL: postgres://lens:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_lens?sslmode=disable
-    volumes:
-      - ./migrations:/migrations:ro
+      LENS_DATABASE_URL: postgres://lens:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_lens?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,25 +100,38 @@ services:
   # connections onto a small pool of real server connections. Transaction
   # pooling mode (one server connection per transaction) is the most efficient
   # mode for OLTP workloads and what Lens is tuned for (LENS_DB_PGBOUNCER=true).
+  # edoburu/pgbouncer (maintained; the previous bitnami/pgbouncer:1 was purged
+  # from Docker Hub in 2025, #126). Its env contract: the [databases] entry key
+  # IS DB_NAME, so lens's .../talyvor_lens connection string resolves directly.
+  # Two non-obvious defaults are overridden deliberately:
+  #   LISTEN_PORT  — image default 5432, we serve on 6432;
+  #   AUTH_TYPE    — image default md5, but Postgres 16 stores SCRAM verifiers;
+  #                  scram-sha-256 makes the entrypoint keep the plaintext
+  #                  password so BOTH legs (client→pgbouncer, pgbouncer→postgres)
+  #                  complete SCRAM.
   pgbouncer:
-    image: bitnami/pgbouncer:1
+    image: edoburu/pgbouncer:v1.25.1-p0
     environment:
-      - POSTGRESQL_HOST=postgres
-      - POSTGRESQL_PORT=5432
-      - POSTGRESQL_DATABASE=talyvor_lens
-      - POSTGRESQL_USERNAME=lens
-      - POSTGRESQL_PASSWORD=${POSTGRES_PASSWORD:-changeme}
-      - PGBOUNCER_PORT=6432
-      - PGBOUNCER_POOL_MODE=transaction
-      - PGBOUNCER_MAX_CLIENT_CONN=1000
-      - PGBOUNCER_DEFAULT_POOL_SIZE=25
-      - PGBOUNCER_MIN_POOL_SIZE=2
-      - PGBOUNCER_SERVER_IDLE_TIMEOUT=600
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=talyvor_lens
+      - DB_USER=lens
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - LISTEN_PORT=6432
+      - AUTH_TYPE=scram-sha-256
+      - POOL_MODE=transaction
+      - MAX_CLIENT_CONN=1000
+      - DEFAULT_POOL_SIZE=25
+      - MIN_POOL_SIZE=2
+      - SERVER_IDLE_TIMEOUT=600
     depends_on:
       postgres:
         condition: service_healthy
+    # psql SELECT 1 through the pooler, not pg_isready: it validates the
+    # [databases] entry + auth + backend end-to-end (pg_isready counts ANY
+    # server response — including "no such database" — as healthy).
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U lens"]
+      test: ["CMD-SHELL", "PGPASSWORD=$$DB_PASSWORD psql -h 127.0.0.1 -p 6432 -U $$DB_USER -d talyvor_lens -tAc 'SELECT 1' >/dev/null"]
       interval: 5s
       timeout: 5s
       retries: 10
