@@ -1,0 +1,25 @@
+-- 0050_workspaces_active_backfill.sql
+--
+-- #129 corrective backfill. RegisterWorkspace used to write the request body's
+-- `active` field, which decodes to false when the field is omitted, OVER the
+-- column's `DEFAULT true`. A row with active=false is invisible to the boot
+-- reload (LoadAll filters `WHERE active = true`), so a registered workspace —
+-- including one that set a LoggingNone privacy policy — silently vanished from
+-- the in-memory map on restart and reverted to the metadata default (a
+-- LoggingNone customer logged again). The code fix forces active=true at
+-- registration; this repairs rows already written false by the bug.
+--
+-- SAFETY OF THE BLANKET PREDICATE (`WHERE NOT active`): as of #129 there is NO
+-- deactivation / delete / SetActive flow anywhere in the codebase — `active` is
+-- READ only by LoadAll's filter and WRITTEN only at registration, so the ONLY
+-- way a row is false is this bug. Reactivating every false row is therefore
+-- correct and lossless. DO NOT reuse this blanket backfill if a real
+-- deactivation flow is ever added — it would wrongly reactivate
+-- deliberately-disabled workspaces; such a future backfill needs a narrower
+-- predicate.
+--
+-- Idempotent: setting active=true WHERE NOT active is a no-op on re-run (no rows
+-- match the second time), so it is safe under the version-tracked migrator and
+-- under any re-application.
+
+UPDATE workspaces SET active = true WHERE NOT active;

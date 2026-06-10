@@ -129,6 +129,24 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	if ws.CreatedAt.IsZero() {
 		ws.CreatedAt = time.Now().UTC()
 	}
+	// Lifecycle is server-controlled, not the caller's to set. An omitted
+	// `active` in the request body decodes to Go's zero value (false); writing
+	// that over the DB's `DEFAULT true` made the row invisible to the boot
+	// reload (LoadAll filters WHERE active=true), silently reverting a
+	// LoggingNone customer's policy to the metadata default on restart (#129).
+	// Force true: there is no deactivation flow today, so true is the only
+	// correct value; if one is ever added, it must NOT go through this path.
+	ws.Active = true
+	// allowed_models/allowed_providers are NOT NULL in the schema; a nil slice
+	// encodes as SQL NULL and 400s a minimal {id,name} registration — including
+	// the boot default-workspace registration (#128). Default to empty (non-nil)
+	// slices, which mean "no restriction" (enforcement is len()>0 && !contains).
+	if ws.AllowedModels == nil {
+		ws.AllowedModels = []string{}
+	}
+	if ws.AllowedProviders == nil {
+		ws.AllowedProviders = []string{}
+	}
 	ws.LoggingPolicy = normalizeLoggingPolicy(ws.LoggingPolicy)
 	ws.DistillPolicy = normalizeDistillPolicy(ws.DistillPolicy)
 
