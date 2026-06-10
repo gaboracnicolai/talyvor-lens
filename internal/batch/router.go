@@ -47,6 +47,7 @@ type BatchRouter struct {
 
 type BatchJob struct {
 	ID          string      `json:"id"`
+	WorkspaceID string      `json:"workspace_id"` // owner; the batch_jobs row already carries it (set at Submit)
 	RequestID   string      `json:"request_id"`
 	PromptHash  string      `json:"prompt_hash"`
 	Provider    string      `json:"provider"`
@@ -182,13 +183,14 @@ func (r *BatchRouter) Submit(ctx context.Context, wsID, model, prompt string, bo
 	}
 
 	job := &BatchJob{
-		ID:        apiResp.ID,
-		RequestID: requestID,
-		Provider:  "anthropic",
-		Model:     model,
-		Prompt:    prompt,
-		Status:    BatchPending,
-		CreatedAt: time.Now().UTC(),
+		ID:          apiResp.ID,
+		WorkspaceID: wsID,
+		RequestID:   requestID,
+		Provider:    "anthropic",
+		Model:       model,
+		Prompt:      prompt,
+		Status:      BatchPending,
+		CreatedAt:   time.Now().UTC(),
 	}
 
 	r.mu.Lock()
