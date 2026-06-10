@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,10 +38,10 @@ func TestSemanticCache_GetNoRowsReturnsNilNil(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1").
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 
-	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello")
+	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1")
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
@@ -56,13 +57,13 @@ func TestSemanticCache_GetBelowThresholdReturnsNilNil(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1").
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "similarity"}).
 				AddRow("11111111-1111-1111-1111-111111111111", "cached", 0.5),
 		)
 
-	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello")
+	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1")
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
@@ -79,7 +80,7 @@ func TestSemanticCache_GetAboveThresholdReturnsResponse(t *testing.T) {
 
 	const id = "11111111-1111-1111-1111-111111111111"
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1").
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "similarity"}).
 				AddRow(id, "cached_payload", 0.95),
@@ -88,7 +89,7 @@ func TestSemanticCache_GetAboveThresholdReturnsResponse(t *testing.T) {
 		WithArgs(id).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello")
+	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -104,7 +105,7 @@ func TestSemanticCache_GetEmbedderErrorPropagates(t *testing.T) {
 	embErr := errors.New("embed failed")
 	c, mock := newTestSemanticCache(t, stubEmbedder{err: embErr}, 0.9)
 
-	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello")
+	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1")
 	if !errors.Is(err, embErr) {
 		t.Fatalf("expected embedder error to propagate, got %v", err)
 	}
@@ -210,10 +211,10 @@ func TestSemanticCache_GetServeWindowUsesRetentionCutoff(t *testing.T) {
 	c := newSemanticCache(mock, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9, retention)
 
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", cutoffMatcher{retention: retention, slack: time.Minute}).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", cutoffMatcher{retention: retention, slack: time.Minute}, "ws-1").
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 
-	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello"); err != nil {
+	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1"); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -233,10 +234,10 @@ func TestSemanticCache_GetServeWindowDisabledServesAllAges(t *testing.T) {
 	c := newSemanticCache(mock, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9, 0)
 
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", zeroTimeMatcher{}).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", zeroTimeMatcher{}, "ws-1").
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 
-	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello"); err != nil {
+	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1"); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -251,7 +252,7 @@ func TestSemanticCache_SetInsertsWithCorrectArgs(t *testing.T) {
 	wantHash := hex.EncodeToString(sum[:])
 
 	mock.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "response_body").
+		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "response_body", "ws-1").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	err := c.Set(
@@ -259,11 +260,48 @@ func TestSemanticCache_SetInsertsWithCorrectArgs(t *testing.T) {
 		"openai", "gpt-4", "hello",
 		[]byte("response_body"),
 		[]float32{0.1, 0.2, 0.3},
+		"ws-1",
 	)
 	if err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// #142: the private Get must scope by workspace_id ($5) — the HARD tenant
+// boundary. The regex pins the WHERE clause; WithArgs pins the caller (wsB) as
+// the bound value. Without this clause isolation rested purely on embedding
+// distance (soft for long prompts); with it, even a near-perfect embedding
+// collision across tenants is excluded before ranking.
+func TestSemanticCache_Get_ScopesByWorkspace(t *testing.T) {
+	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
+	mock.ExpectQuery(`workspace_id = \$5`).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "wsB").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
+
+	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "wsB"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("private Get must bind workspace_id=$5 to the caller (wsB): %v", err)
+	}
+}
+
+// #142 neutrality guard: the POOLED path is deliberate consent-gated cross-tenant
+// sharing — it must NOT gain a workspace_id filter (and the private path MUST
+// have one). Guards against future drift in either direction.
+func TestSemanticCache_PooledPathHasNoWorkspaceFilter(t *testing.T) {
+	// Note: the pooled SELECT legitimately reads contributor_workspace_id (its
+	// attribution column); what it must NOT have is the private boundary FILTER.
+	if strings.Contains(semanticSelectPooledSQL, "AND workspace_id =") {
+		t.Error("pooled lookup must NOT filter workspace_id — it is deliberate cross-tenant sharing")
+	}
+	if !strings.Contains(semanticSelectPooledSQL, "is_poolable = true") {
+		t.Error("pooled lookup must range is_poolable = true")
+	}
+	if !strings.Contains(semanticSelectSQL, "workspace_id = $5") {
+		t.Error("private lookup MUST filter workspace_id ($5) — the #142 hard boundary")
 	}
 }

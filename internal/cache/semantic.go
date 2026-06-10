@@ -71,12 +71,18 @@ func newSemanticCache(pool SemanticDB, embedder Embedder, threshold float64, ret
 // and every row is servable regardless of age. The `is_poolable = false` filter
 // excludes shared-pool rows so a private lookup can never serve a pooled entry
 // (which would bypass the cross-tenant consent check); it is a no-op when
-// pooling is off (every row is is_poolable=false by default).
+// pooling is off (every row is is_poolable=false by default). The
+// `workspace_id = $5` filter (#142) is the HARD tenant boundary: the embedding
+// is only the similarity RANKER, so without this clause isolation rested purely
+// on the wsID: prefix shifting the embedding past threshold (soft for long
+// prompts). A NULL-workspace row (pre-#142, never re-stamped) matches no caller
+// and is correctly excluded — cold, self-healing.
 const semanticSelectSQL = `SELECT id, response, 1 - (embedding <=> $1) AS similarity
 FROM prompt_embeddings
 WHERE provider = $2 AND model = $3
   AND updated_at > $4
   AND is_poolable = false
+  AND workspace_id = $5
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -107,11 +113,12 @@ WHERE id = $1`
 const semanticDeleteStaleSQL = `DELETE FROM prompt_embeddings WHERE updated_at < $1`
 
 const semanticUpsertSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response)
-VALUES ($1, $2, $3, $4, $5)
+  (provider, model, prompt_hash, embedding, response, workspace_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
+  workspace_id = EXCLUDED.workspace_id,
   updated_at = NOW()`
 
 // semanticUpsertPooledSQL writes a shared-pool row: contributor stamped,
@@ -141,7 +148,7 @@ func (c *SemanticCache) freshnessCutoff() time.Time {
 	return time.Now().UTC().Add(-c.retention)
 }
 
-func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt string) ([]byte, error) {
+func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, workspaceID string) ([]byte, error) {
 	vec, err := c.embedder.Embed(ctx, prompt)
 	if err != nil {
 		return nil, err
@@ -152,7 +159,9 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt string)
 		response   string
 		similarity float64
 	)
-	err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff()).
+	// workspace_id is the HARD tenant filter (#142): a private lookup can only
+	// match the caller's own rows; the embedding ranks within that boundary.
+	err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID).
 		Scan(&id, &response, &similarity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -173,14 +182,17 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt string)
 	return []byte(response), nil
 }
 
-func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt string, response []byte, embedding []float32) error {
+func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt string, response []byte, embedding []float32, workspaceID string) error {
 	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + prompt))
 	hash := hex.EncodeToString(sum[:])
 
+	// prompt_hash is unchanged (still sha256 of the wsID-prefixed prompt — the
+	// ON CONFLICT idempotency key); workspace_id is the ADDITIONAL hard-filter
+	// column the private read scopes on (#142).
 	_, err := c.pool.Exec(
 		ctx,
 		semanticUpsertSQL,
-		provider, model, hash, vectorLiteral(embedding), string(response),
+		provider, model, hash, vectorLiteral(embedding), string(response), workspaceID,
 	)
 	return err
 }

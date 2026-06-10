@@ -112,9 +112,9 @@ func TestSemanticCache_PrivateGet_ExcludesPoolable(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1}}, 0.9)
 	// The regex asserts the private SELECT carries the is_poolable=false filter.
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1").
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
-	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello"); err != nil {
+	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
