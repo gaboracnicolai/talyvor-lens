@@ -1,0 +1,49 @@
+# docker-compose.trial.yaml — earn-stack trial overlay (operator tooling).
+#
+# A TEMPLATE used EXPLICITLY, layered on the production compose:
+#
+#   cp .env.production.example .env
+#   echo "LENS_API_KEY=$(openssl rand -hex 32)" >> .env          # gitignored
+#   docker compose -f docker-compose.yaml -f docker-compose.trial.yaml up -d
+#
+# It is intentionally NOT named docker-compose.override.yaml, so it does NOT
+# auto-load — a stray trial overlay must never silently flip earning flags on a
+# real `docker compose up`. (An operator who wants auto-load keeps their own
+# untracked docker-compose.override.yaml.)
+#
+# DISCIPLINE: this rig is for SYNTHETIC trials with valueless tokens — it
+# satisfies NOTHING on the flip-on checklist, which gates real-customer flips.
+# See tools/trial/README.md.
+#
+# Pattern flags are read once at boot (boot-frozen); changing them needs another
+# `up -d`.
+services:
+  lens:
+    environment:
+      # Admin bootstrap credential — value lives in the gitignored .env
+      # (`openssl rand -hex 32`); never inline a key here.
+      - LENS_API_KEY=${LENS_API_KEY:?set LENS_API_KEY in .env (openssl rand -hex 32)}
+      # The three pattern flags. MINING gates the opt-in route (503 without it);
+      # CAPTURE + EARNING gate the two write paths independently.
+      - LENS_PATTERN_MINING_ENABLED=true
+      - LENS_PATTERN_CAPTURE_ENABLED=true
+      - LENS_PATTERN_EARNING_ENABLED=true
+      # Low cap so the S2 per-window cap is observable (scenario d).
+      - LENS_PATTERN_EARN_CAP_PER_WORKSPACE=3
+      - LENS_PATTERN_EARN_CAP_WINDOW=2m
+      # Deterministic mock upstream on the compose network (no real provider spend).
+      - LENS_VLLM_BASE_URL=http://mockvllm:8000
+      # config.Load() presence-checks these; the trial routes only to vLLM/mock.
+      - LENS_OPENAI_API_KEY=dummy-openai-unused
+      - LENS_ANTHROPIC_API_KEY=dummy-anthropic-unused
+      - LENS_LOG_LEVEL=debug
+    depends_on:
+      mockvllm:
+        condition: service_started
+
+  mockvllm:
+    image: python:3.12-alpine
+    volumes:
+      - ./tools/trial/mock_vllm.py:/mock_vllm.py:ro
+    command: ["python3", "/mock_vllm.py"]
+    restart: unless-stopped
