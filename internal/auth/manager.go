@@ -240,10 +240,10 @@ func extractCredential(r *http.Request) (raw, location string) {
 
 // Authenticate is the single entry point. Tries each credential
 // shape in priority order:
-//   1. JWT bearer (looks like a JWT — 3 segments separated by ".")
-//   2. Workspace key (starts with tenant.KeyPrefix)
-//   3. Global admin key (exact match with LENS_API_KEY)
-//   4. Legacy X-API-Key header → treated as global key fallback
+//  1. JWT bearer (looks like a JWT — 3 segments separated by ".")
+//  2. Workspace key (starts with tenant.KeyPrefix)
+//  3. Global admin key (exact match with LENS_API_KEY)
+//  4. Legacy X-API-Key header → treated as global key fallback
 //
 // Returns ErrMissingCredentials when no credential is present at
 // all, and ErrInvalidAuth (deliberately opaque) for every "we
@@ -375,6 +375,23 @@ func GetAuthContext(ctx context.Context) *AuthContext {
 		return v
 	}
 	return nil
+}
+
+// WorkspaceIdentity resolves the authenticated caller's workspace and whether it
+// is the global admin, unifying the two credential slots AuthMiddleware
+// populates: the AuthContext (JWT / global key — the only IsAdmin carrier) takes
+// precedence, then the APIKey (DB workspace/team keys, never admin). Returns
+// ("", false) for an unauthenticated context — fails closed. Handlers in any
+// package use this to derive workspace identity from the credential rather than
+// caller-supplied input (the #146 cross-tenant authorization fix).
+func WorkspaceIdentity(ctx context.Context) (workspaceID string, isAdmin bool) {
+	if actx := GetAuthContext(ctx); actx != nil {
+		return actx.WorkspaceID, actx.IsAdmin
+	}
+	if k := GetAPIKey(ctx); k != nil {
+		return k.WorkspaceID, false
+	}
+	return "", false
 }
 
 // RequireScope produces a middleware that enforces a single
