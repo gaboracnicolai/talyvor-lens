@@ -49,7 +49,7 @@ func newDistillSpendProxy(t *testing.T, conv distill.IsolatedConverter, upstream
 	p.anthropicURL = srv.URL
 	sink := &recordingAlertSink{}
 	p.setAlertSink(sink)
-	p.SetDistiller(conv, nil, nil)
+	p.SetDistiller(conv, nil, nil, nil)
 	return p, sink
 }
 

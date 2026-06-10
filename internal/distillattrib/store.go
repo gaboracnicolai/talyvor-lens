@@ -1,0 +1,62 @@
+// Package distillattrib is the S1 distill attribution store: a durable,
+// MINT-FREE per-(owner, requester, artifact) counter of consented cross-tenant
+// pooled-distill serves.
+//
+// STRUCTURAL INERTNESS: this package imports NO ledger and exposes NO
+// credit/earn method. There is exactly one write — RecordDistillServe — and it
+// can only ever touch the distill_serve_attribution table (migration 0052).
+// Attribution is descriptive, never incentivized (WorkTier doctrine); a future
+// royalty is a separate, gated build that this package cannot reach.
+package distillattrib
+
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// execer is the minimal DB surface the store needs — just Exec. *pgxpool.Pool
+// satisfies it; tests inject a fake to assert the UPSERT shape without a DB.
+// Deliberately Exec-only: no Query/Begin, so this store cannot read or open a
+// transaction, let alone touch a ledger.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// Store records consented cross-tenant distill serves. Nil-safe: a nil store (or
+// nil pool) is a no-op, so attribution is inert until a real pool is wired.
+type Store struct {
+	db execer
+}
+
+// NewStore builds a Store over an Exec-capable pool. Pass nil to keep
+// attribution inert.
+func NewStore(db execer) *Store {
+	if db == nil {
+		return nil
+	}
+	return &Store{db: db}
+}
+
+// upsertSQL is the durable per-tuple counter: one row per
+// (owner, requester, content_hash); each consented serve bumps serve_count and
+// refreshes last_served_at. Mirrors the cache layer's hit_count = hit_count + 1
+// idiom — re-serving the same artifact increments, never appends. NO ledger, NO
+// caps, NO status, NO request_id claim.
+const upsertSQL = `INSERT INTO distill_serve_attribution
+  (owner_workspace_id, requester_workspace_id, content_hash, serve_count)
+VALUES ($1, $2, $3, 1)
+ON CONFLICT (owner_workspace_id, requester_workspace_id, content_hash)
+DO UPDATE SET serve_count    = distill_serve_attribution.serve_count + 1,
+              last_served_at = NOW()`
+
+// RecordDistillServe records (or increments) one consented cross-tenant serve.
+// Returns only an error, for the caller to log-and-swallow — it never mints,
+// credits, or writes anything but the attribution counter. Nil-safe.
+func (s *Store) RecordDistillServe(ctx context.Context, owner, requester, contentHash string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, upsertSQL, owner, requester, contentHash)
+	return err
+}

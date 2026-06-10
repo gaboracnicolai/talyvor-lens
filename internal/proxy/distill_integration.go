@@ -62,16 +62,18 @@ type distillIntegration struct {
 // SetDistiller enables the request-path DISTILL integration. converter is the
 // isolated subprocess (*distill.ProcessIsolator); cache is the optional
 // conversion cache (nil disables it); poolGate gates cross-tenant distill
-// sharing (nil = strictly private). Wired as a setter so proxy.New's signature
-// stays put — when unset, distillation is fully inert, and with poolGate
-// off/nil the distill cache is strictly per-workspace.
-func (p *Proxy) SetDistiller(converter distill.IsolatedConverter, cache distill.Cache, poolGate *cache_pooling.PoolabilityGate) {
+// sharing (nil = strictly private); attribSink is the S1 mint-free attribution
+// sink (nil = attribution off). Wired as a setter so proxy.New's signature stays
+// put — when unset, distillation is fully inert, with poolGate off/nil the cache
+// is strictly per-workspace, and with attribSink nil nothing is attributed.
+func (p *Proxy) SetDistiller(converter distill.IsolatedConverter, cache distill.Cache, poolGate *cache_pooling.PoolabilityGate, attribSink distillAttributionSink) {
 	p.distiller = &distillIntegration{
 		converter: converter,
 		cache:     cache,
 		wsManager: p.workspaceManager,
 		poolGate:  poolGate,
 	}
+	p.distillAttribSink = attribSink
 }
 
 // MaybeDistill returns a possibly-rewritten request body plus the re-derived
@@ -102,13 +104,13 @@ func (v visionSpend) recorded() bool { return v.inputTokens > 0 || v.outputToken
 // The returned visionSpend carries the OCR sub-call's token cost + model (summed
 // across any OCR'd blocks) so the caller can record a durable 'vision_ocr' spend
 // row; it is the zero value when no OCR happened.
-func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, body []byte, wsID string, modSet modality.ModalitySet, vision distill.VisionDispatcher) ([]byte, string, modality.ModalitySet, bool, visionSpend) {
+func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, body []byte, wsID string, modSet modality.ModalitySet, vision distill.VisionDispatcher) ([]byte, string, modality.ModalitySet, bool, visionSpend, []distillServeFact) {
 	var ocr visionSpend
 	// Fail-safe: a misconfigured integration is inert, never a panic on the
 	// shared request path (production always wires both, but the inert/graceful
 	// contract must hold regardless).
 	if d == nil || d.converter == nil || d.wsManager == nil {
-		return body, "", modSet, false, ocr
+		return body, "", modSet, false, ocr, nil
 	}
 	// Gate 1: a document-or-image block must be present (cheap; already detected
 	// upstream). We include HasImage because some clients send a PDF as an
@@ -117,23 +119,25 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 	// A genuine image (image/png) passes this gate but is filtered out per-block
 	// by FormatFromMediaType, so it is never converted.
 	if !modSet.HasDocument && !modSet.HasImage {
-		return body, "", modSet, false, ocr
+		return body, "", modSet, false, ocr, nil
 	}
 	// Gate 2: workspace policy + per-request opt-in.
 	if !d.shouldDistill(r, wsID) {
-		return body, "", modSet, false, ocr
+		return body, "", modSet, false, ocr, nil
 	}
 
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
-		return body, "", modSet, false, ocr // malformed envelope → leave the normal path to handle it
+		return body, "", modSet, false, ocr, nil // malformed envelope → leave the normal path to handle it
 	}
 	msgs, ok := root["messages"].([]any)
 	if !ok {
-		return body, "", modSet, false, ocr
+		return body, "", modSet, false, ocr, nil
 	}
 
 	distilledAny := false
+	var distillFacts []distillServeFact // S1: consented cross-tenant serves to attribute post-flush
+	seenAttrib := map[string]bool{}     // dedup attribution per (owner, hash) within one request
 	for _, mi := range msgs {
 		msg, ok := mi.(map[string]any)
 		if !ok {
@@ -147,10 +151,19 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 		msgChanged := false
 		for _, bi := range blocks {
 			if block, ok := bi.(map[string]any); ok {
-				if md, vs, ok := d.tryConvertBlock(ctx, block, vision, wsID); ok {
+				if md, vs, attrib, ok := d.tryConvertBlock(ctx, block, vision, wsID); ok {
 					newBlocks = append(newBlocks, map[string]any{"type": "text", "text": md})
 					msgChanged = true
 					distilledAny = true
+					// S1: collect the consented cross-tenant serve fact, deduped
+					// per (owner, hash) so two identical blocks in one request count
+					// as one serve event (the store would otherwise double-bump).
+					if attrib != nil {
+						if k := attrib.owner + "\x00" + attrib.hash; !seenAttrib[k] {
+							seenAttrib[k] = true
+							distillFacts = append(distillFacts, *attrib)
+						}
+					}
 					// Accumulate OCR cost across blocks (same provider/model per
 					// request, so summing in/out prices correctly on one row).
 					if vs.recorded() {
@@ -178,19 +191,19 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 
 	if !distilledAny {
 		// Nothing converted (NeedsVision / unsupported / error) → inert.
-		return body, "", modSet, false, ocr
+		return body, "", modSet, false, ocr, nil
 	}
 
 	newBody, err := json.Marshal(root)
 	if err != nil {
-		return body, "", modSet, false, ocr // marshal failure → fail safe to the original
+		return body, "", modSet, false, ocr, nil // marshal failure → fail safe to the original
 	}
 	// Re-derive everything that was computed from the original body.
 	_, newPrompt, perr := extractPrompt(newBody)
 	if perr != nil {
-		return body, "", modSet, false, ocr
+		return body, "", modSet, false, ocr, nil
 	}
-	return newBody, newPrompt, modality.Detect(newBody), true, ocr
+	return newBody, newPrompt, modality.Detect(newBody), true, ocr, distillFacts
 }
 
 // shouldDistill applies the policy + per-request opt-in rules: a document is
@@ -217,14 +230,14 @@ func (d *distillIntegration) shouldDistill(r *http.Request, wsID string) bool {
 // left untouched. On a successful OCR the returned visionSpend carries the call's
 // real token cost + model so the caller can book a durable 'vision_ocr' row; it
 // is the zero value for a plain text conversion.
-func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher, wsID string) (string, visionSpend, bool) {
+func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher, wsID string) (string, visionSpend, *distillServeFact, bool) {
 	raw, mediaType, ok := extractBlockDocument(block)
 	if !ok {
-		return "", visionSpend{}, false
+		return "", visionSpend{}, nil, false
 	}
 	format, ok := distill.FormatFromMediaType(mediaType)
 	if !ok {
-		return "", visionSpend{}, false // e.g. image/png — a vision input, not a document
+		return "", visionSpend{}, nil, false // e.g. image/png — a vision input, not a document
 	}
 
 	hash := distill.ContentHash(raw)
@@ -239,7 +252,16 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 		if b, owner, _ := pooled.GetWithOwner(ctx, distillPoolMarker+hash, cacheVer); len(b) > 0 &&
 			d.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 			if res, ok := distill.UnmarshalCached(b); ok && !res.NeedsVision && strings.TrimSpace(res.Markdown) != "" {
-				return res.Markdown, visionSpend{}, true // cross-tenant serve (consented)
+				// S1 attribution: emit the consented cross-tenant serve fact for
+				// serve() to record post-flush — but SKIP self-serve, where a
+				// poolable producer re-hits its OWN pooled artifact (owner == wsID;
+				// MaybeAllowPooledHit is true there). The skip lives here, the one
+				// place owner + requester are both in hand.
+				var attrib *distillServeFact
+				if owner != wsID {
+					attrib = &distillServeFact{owner: owner, hash: hash}
+				}
+				return res.Markdown, visionSpend{}, attrib, true // cross-tenant serve (consented)
 			}
 		}
 	}
@@ -252,7 +274,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	}
 	res, sav, err := distill.Orchestrate(ctx, d.converter, privateCache, vision, raw, format, distill.TierFaithful)
 	if err != nil || res.NeedsVision || strings.TrimSpace(res.Markdown) == "" {
-		return "", visionSpend{}, false
+		return "", visionSpend{}, nil, false
 	}
 
 	// (3) POOLED WRITE — if the PRODUCER opted in (+ global switch), publish the
@@ -270,7 +292,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	if res.Method == distill.MethodVisionOCR {
 		vs = visionSpend{model: sav.VisionModel, inputTokens: sav.VisionInputTokens, outputTokens: sav.VisionOutputTokens}
 	}
-	return res.Markdown, vs, true
+	return res.Markdown, vs, nil, true // private path → no cross-tenant attribution
 }
 
 // extractBlockDocument pulls the raw bytes + media type from a content block.

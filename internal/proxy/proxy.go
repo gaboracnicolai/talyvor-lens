@@ -129,6 +129,11 @@ type Proxy struct {
 	patternSink           patternCaptureSink
 	patternCaptureEnabled func() bool
 
+	// Distill attribution (S1) — optional, nil-safe post-serve, MINT-FREE
+	// record of a consented cross-tenant pooled-distill serve. See
+	// distill_attribution.go. nil ⇒ attribution off (inert).
+	distillAttribSink distillAttributionSink
+
 	// Routing-pattern EARNING (S4) — optional, nil-safe. Separate sink from
 	// capture (this one can mint via RecordPattern). See pattern_earn.go.
 	patternEarnSink    patternEarnSink
@@ -551,14 +556,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// visionOCR carries any OCR sub-call cost to book as its own spend row.
 	distillMethod := ""
 	var visionOCR visionSpend
+	var distillFacts []distillServeFact // S1: consented cross-tenant serves, recorded post-flush below
 	if p.distiller != nil {
 		// The live vision-OCR dispatcher for this request (same provider, scoped
 		// to the workspace allow-list). On a text-less document the orchestrator
 		// uses it to recover text via a vision model and books the cost honestly;
 		// a nil-safe failure path leaves a NeedsVision document untouched.
 		vd := p.newVisionDispatcher(r, cfg, wsID)
-		if nb, np, nm, did, vs := p.distiller.MaybeDistill(ctx, r, body, wsID, modSet, vd); did {
+		if nb, np, nm, did, vs, dfacts := p.distiller.MaybeDistill(ctx, r, body, wsID, modSet, vd); did {
 			body, prompt, modSet = nb, np, nm
+			distillFacts = dfacts
 			cachePrompt = prompt
 			if p.workspaceManager != nil {
 				cachePrompt = wsID + ":" + prompt
@@ -1299,6 +1306,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				p.capturePattern(ctx, wsID, feature, upstreamModel, cfg.name,
 					len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false)
 			}
+			// S1 distill attribution (MINT-FREE) — record any consented
+			// cross-tenant pooled-distill serves surfaced from MaybeDistill.
+			// Post-flush, void, detached, swallowed (mirrors capturePattern);
+			// self-serve already skipped upstream, LoggingNone suppressed in the
+			// sink. Inert unless an attribution sink is wired.
+			p.recordDistillServes(ctx, wsID, loggingPolicy, distillFacts)
 			// The vision-OCR sub-call's cost is its OWN row, tagged 'vision_ocr',
 			// priced on the vision model, flagged estimated — a COST, never a
 			// saving, NEVER blended into the 'convert' row above. The durable
