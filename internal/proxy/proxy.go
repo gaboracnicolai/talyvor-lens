@@ -22,7 +22,6 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/audit"
@@ -94,7 +93,6 @@ type Proxy struct {
 	alertManager      alertSink
 	templateDetector  *templates.TemplateDetector
 	scorer            *quality.Scorer
-	abTester          *ab.Tester
 	tracker           *attribution.Tracker
 	attrStore         *attribution.Store
 	budgetService     budgetGate
@@ -183,7 +181,6 @@ func New(
 	alertManager *alerts.AlertManager,
 	templateDetector *templates.TemplateDetector,
 	scorer *quality.Scorer,
-	abTester *ab.Tester,
 	tracker *attribution.Tracker,
 	workspaceManager *workspace.Manager,
 	localRouter *localrouter.LocalRouter,
@@ -210,7 +207,6 @@ func New(
 		piiDetector:       piiDetector,
 		templateDetector:  templateDetector,
 		scorer:            scorer,
-		abTester:          abTester,
 		tracker:           tracker,
 		workspaceManager:  workspaceManager,
 		localRouter:       localRouter,
@@ -1371,7 +1367,6 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				time.Since(requestStart),
 			)
 		}
-		p.launchABShadows(cfg.name, model, prompt, body)
 		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
 		span.SetAttributes(
 			attribute.Bool("lens.cached", false),
@@ -1467,47 +1462,6 @@ func (p *Proxy) tryLocalRouting(
 	}
 	metrics.RequestsTotal.WithLabelValues(provider, "local").Inc()
 	return true
-}
-
-// launchABShadows fans out shadow probes for every active A/B test that
-// targets the (provider, requestedModel) pair. Each probe runs in its own
-// goroutine against a fresh background context — never blocks the main
-// response, never caches the result, never logs prompt content.
-func (p *Proxy) launchABShadows(provider, model, prompt string, body []byte) {
-	if p.abTester == nil {
-		return
-	}
-	matching := p.abTester.ActiveTestsFor(provider, model)
-	for _, test := range matching {
-		if !p.abTester.ShouldShadow(test.ID) {
-			continue
-		}
-		apiKey := p.openAIKey
-		if test.Provider == "anthropic" {
-			apiKey = p.anthropicKey
-		}
-		testID := test.ID
-		// Copy body so a concurrent rebuild upstream can't mutate what
-		// the goroutine reads.
-		bodyCopy := append([]byte(nil), body...)
-		go func() {
-			sctx := context.Background()
-			result, err := p.abTester.RunShadow(sctx, testID, prompt, bodyCopy, p.httpClient, apiKey)
-			if err != nil {
-				slog.Warn("ab: shadow probe failed",
-					slog.String("test_id", testID),
-					slog.String("err", err.Error()),
-				)
-				return
-			}
-			if err := p.abTester.RecordResult(sctx, testID, result.Model, *result); err != nil {
-				slog.Warn("ab: RecordResult failed",
-					slog.String("test_id", testID),
-					slog.String("err", err.Error()),
-				)
-			}
-		}()
-	}
 }
 
 func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte, savingsPct float64, piiDetected bool) {

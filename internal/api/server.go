@@ -15,7 +15,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/attribution"
@@ -60,7 +59,6 @@ type Server struct {
 	exactCache       *cache.ExactCache
 	analyser         Analyser
 	alertManager     *alerts.AlertManager
-	abTester         *ab.Tester
 	tracker          *attribution.Tracker
 	wsManager        *workspace.Manager
 	localRouter      *localrouter.LocalRouter
@@ -88,7 +86,6 @@ type serverDeps struct {
 	exactCache       *cache.ExactCache
 	analyser         Analyser
 	alertManager     *alerts.AlertManager
-	abTester         *ab.Tester
 	tracker          *attribution.Tracker
 	wsManager        *workspace.Manager
 	localRouter      *localrouter.LocalRouter
@@ -111,7 +108,6 @@ func newServer(d serverDeps) *Server {
 		exactCache:      d.exactCache,
 		analyser:        d.analyser,
 		alertManager:    d.alertManager,
-		abTester:        d.abTester,
 		tracker:         d.tracker,
 		wsManager:       d.wsManager,
 		localRouter:     d.localRouter,
@@ -128,7 +124,6 @@ func NewServer(
 	exactCache *cache.ExactCache,
 	learnerImpl *learner.Learner,
 	alertManager *alerts.AlertManager,
-	abTester *ab.Tester,
 	tracker *attribution.Tracker,
 	wsManager *workspace.Manager,
 	localRouter *localrouter.LocalRouter,
@@ -150,7 +145,6 @@ func NewServer(
 		exactCache:      exactCache,
 		analyser:        analyser,
 		alertManager:    alertManager,
-		abTester:        abTester,
 		tracker:         tracker,
 		wsManager:       wsManager,
 		localRouter:     localRouter,

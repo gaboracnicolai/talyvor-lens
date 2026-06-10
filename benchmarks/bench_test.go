@@ -70,8 +70,8 @@ func newBenchProxy(b *testing.B, upstreamURL string) (*proxy.Proxy, *cache.Exact
 	p := proxy.New(
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		fallback.New(), nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		fallback.New(), nil, nil, nil,
 		"openai-key", "anthropic-key", "",
 	)
 	// Hot-patch the openai URL via the public field — we don't have a

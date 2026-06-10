@@ -40,7 +40,7 @@ func newGuardrailProxy(t *testing.T, content string) (*Proxy, *guardrails.Engine
 	p := New(
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
-		nil, nil, nil, nil, nil, wsm, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, wsm, nil, nil, nil, nil, nil, nil,
 		fallback.New(), nil, nil, eng,
 		"openai-key", "anthropic-key", "",
 	)
