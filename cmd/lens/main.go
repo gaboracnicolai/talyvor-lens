@@ -469,22 +469,10 @@ func run() error {
 	// /v1/auth/* routes use authManager directly.
 	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), jwtKey, keyStore, tenantStore)
 
-	// requireAdmin gates a handler so only the global admin key can reach it
-	// (ISO 27001 A.9 — access control). Used for /metrics and /ha/status,
-	// which expose internal telemetry and cluster topology that should never
-	// be visible to unauthenticated callers.
-	// Returns 401 when no credential is present, 403 when credential is valid
-	// but non-admin, so scrape agents that lack config get a clear signal.
-	requireAdmin := func(next http.Handler) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			actx, err := authManager.Authenticate(r)
-			if err != nil || !actx.IsAdmin {
-				writeJSONErr(w, http.StatusUnauthorized, "admin credentials required")
-				return
-			}
-			next.ServeHTTP(w, r)
-		}
-	}
+	// requireAdmin (admin-gate) is now a package-level helper in
+	// authz_admin_handlers.go — it takes authManager explicitly so it is
+	// testable over HTTP. Used for /metrics, /ha/status, and the #153
+	// global-config write routes.
 
 	// Retry policy + per-provider circuit breaker registry (Item 9).
 	// Coexists with the legacy retry.Do helper.
@@ -810,7 +798,7 @@ func run() error {
 	r.Get("/readyz", haComps.health.Ready)
 	// /ha/status exposes cluster peer list + instance health — admin-only
 	// (ISO 27001 A.9). /livez and /readyz stay public for load balancers.
-	r.Get("/ha/status", requireAdmin(http.HandlerFunc(haComps.health.Status)))
+	r.Get("/ha/status", requireAdmin(authManager, http.HandlerFunc(haComps.health.Status)))
 
 	// OpenAPI spec — public, no auth, no version path prefix.
 	r.Get("/openapi.json", api.ServeOpenAPI)
@@ -924,7 +912,7 @@ func run() error {
 	// /metrics exposes Prometheus telemetry — gated to admin key so internal
 	// server stats are not visible to unauthenticated callers (ISO 27001 A.9).
 	// Prometheus scrapers must send: Authorization: Bearer <LENS_API_KEY>.
-	r.Handle("/metrics", requireAdmin(metrics.Handler()))
+	r.Handle("/metrics", requireAdmin(authManager, metrics.Handler()))
 
 	apiServer := api.NewServer(
 		pool, redisClient, nc, exactCache, l,
@@ -1623,7 +1611,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, localRouterMulti.List())
 		})
 
-		authed.Post("/v1/local/endpoints", func(w http.ResponseWriter, req *http.Request) {
+		authed.Post("/v1/local/endpoints", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			var in localrouter.LocalEndpoint
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -1639,18 +1627,18 @@ func run() error {
 			// 30s tick.
 			go localRouterMulti.CheckHealth(ctx, &in)
 			writeJSONOK(w, http.StatusCreated, &in)
-		})
+		})))
 
-		authed.Delete("/v1/local/endpoints/{id}", func(w http.ResponseWriter, req *http.Request) {
+		authed.Delete("/v1/local/endpoints/{id}", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
 			if !localRouterMulti.Remove(id) {
 				writeJSONErr(w, http.StatusNotFound, "endpoint not found")
 				return
 			}
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
-		})
+		})))
 
-		authed.Post("/v1/local/endpoints/{id}/check", func(w http.ResponseWriter, req *http.Request) {
+		authed.Post("/v1/local/endpoints/{id}/check", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
 			ep, err := localRouterMulti.CheckHealthByID(req.Context(), id)
 			if err != nil {
@@ -1658,7 +1646,7 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, ep)
-		})
+		})))
 
 		// ─── LENS token endpoints (Batch 2 Item 1) ─────
 		authed.Get("/v1/workspaces/{wsID}/tokens/balance", func(w http.ResponseWriter, req *http.Request) {
@@ -3224,7 +3212,7 @@ func run() error {
 		// API-key pool: enterprise customers attach multiple keys per
 		// provider to escape per-key rate limits. Raw key material is
 		// kept in memory only; the pool's Stats API never returns it.
-		authed.Post("/v1/api/keys/pool", func(w http.ResponseWriter, req *http.Request) {
+		authed.Post("/v1/api/keys/pool", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
 				Provider  string `json:"provider"`
 				Key       string `json:"key"`
@@ -3245,20 +3233,13 @@ func run() error {
 				"provider": pk.Provider,
 				"alias":    pk.Alias,
 			})
-		})
+		})))
 
 		authed.Get("/v1/api/keys/pool", func(w http.ResponseWriter, req *http.Request) {
 			writeJSONOK(w, http.StatusOK, keyPool.Stats())
 		})
 
-		authed.Delete("/v1/api/keys/pool/{keyID}", func(w http.ResponseWriter, req *http.Request) {
-			id := chi.URLParam(req, "keyID")
-			if !keyPool.Remove(id) {
-				writeJSONErr(w, http.StatusNotFound, "key not found")
-				return
-			}
-			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
-		})
+		authed.Delete("/v1/api/keys/pool/{keyID}", requireAdmin(authManager, http.HandlerFunc(newPoolKeyDeleteHandler(keyPool))))
 
 		// Fallback chain inspection and override. The router is in-memory;
 		// updates here are not persisted — restarting the binary resets
@@ -3267,7 +3248,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, fallbackRouter.AllChains())
 		})
 
-		authed.Put("/v1/api/fallback/chains/{provider}", func(w http.ResponseWriter, req *http.Request) {
+		authed.Put("/v1/api/fallback/chains/{provider}", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			provider := chi.URLParam(req, "provider")
 			var targets []fallback.FallbackTarget
 			if err := json.NewDecoder(req.Body).Decode(&targets); err != nil {
@@ -3276,7 +3257,7 @@ func run() error {
 			}
 			fallbackRouter.SetChain(provider, targets)
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
-		})
+		})))
 
 		// Prompt management — named, versioned prompts that teams edit
 		// without redeploys. Every write goes through the Manager so the
