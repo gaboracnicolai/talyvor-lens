@@ -119,6 +119,14 @@ type Config struct {
 	// request path is byte-for-byte unchanged when this is off.
 	CachePoolableEnabled bool
 
+	// DistillPoolableEnabled is the GLOBAL switch for cross-tenant DISTILL-cache
+	// sharing (the document-artifact analogue of CachePoolableEnabled). Default
+	// false: a distill artifact is served only within its producing workspace
+	// unless this is on AND both the owner and requester have
+	// distill_poolable=true. Inert by default — with this off the distill cache
+	// is strictly per-workspace (LENS_DISTILL_POOLABLE_ENABLED).
+	DistillPoolableEnabled bool
+
 	// Pattern mining (Batch 2 Item 5). Deployment-level gate;
 	// must AND with per-workspace opt-in for earnings to fire.
 	PatternMiningEnabled bool
@@ -478,10 +486,11 @@ func Load() (*Config, error) {
 
 		QualityAutoRetry: parseBoolEnv("LENS_QUALITY_AUTO_RETRY"),
 
-		CacheSharingEnabled:  parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
-		CachePoolableEnabled: parseBoolEnv("LENS_CACHE_POOLABLE_ENABLED"),
-		PatternMiningEnabled: parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
-		POVIMintingEnabled:   parseBoolEnv("LENS_POVI_MINTING_ENABLED"),
+		CacheSharingEnabled:    parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
+		CachePoolableEnabled:   parseBoolEnv("LENS_CACHE_POOLABLE_ENABLED"),
+		DistillPoolableEnabled: parseBoolEnv("LENS_DISTILL_POOLABLE_ENABLED"),
+		PatternMiningEnabled:   parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
+		POVIMintingEnabled:     parseBoolEnv("LENS_POVI_MINTING_ENABLED"),
 
 		PoolRoyaltyMintingEnabled: parseBoolEnv("LENS_POOL_ROYALTY_MINTING_ENABLED"),
 		LXCShadowSpendEnabled:     parseBoolEnv("LENS_LXC_SHADOW_SPEND_ENABLED"),

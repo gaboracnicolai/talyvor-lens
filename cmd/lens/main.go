@@ -369,6 +369,15 @@ func run() error {
 	p.SetDistiller(
 		&distill.ProcessIsolator{WorkerBin: cfg.DistillWorkerBin},
 		cache.NewDistillCache(redisClient, cfg.MaxCacheTTL),
+		// Cross-tenant distill-share consent gate (S0). Default private: the
+		// distill cache is wsID-scoped unless LENS_DISTILL_POOLABLE_ENABLED is on
+		// AND both the owner and requester have distill_poolable=true (PUT
+		// /v1/workspaces/{wsID}/distill-poolable). A SEPARATE consent from
+		// cache_poolable — distill artifacts are document-derived.
+		cache_pooling.New(
+			func() bool { return cfg.DistillPoolableEnabled },
+			wsManager.GetDistillPoolable,
+		),
 	)
 	// Phase-2 Stage 2.0 shared-cache governance gate (exact cache). Read-only:
 	// reads the global switch + each workspace's cache_poolable opt-in, mutates
@@ -2599,6 +2608,30 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]any{
 				"ok":             true,
 				"cache_poolable": ws.CachePoolable,
+			})
+		})
+
+		// Per-workspace opt-in for cross-tenant DISTILL-cache sharing (S0). A
+		// separate consent from cache-poolable — distill artifacts are
+		// document-derived. Default false (private); cross-tenant serving also
+		// requires LENS_DISTILL_POOLABLE_ENABLED + the owner's own opt-in.
+		authed.Put("/v1/workspaces/{wsID}/distill-poolable", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				DistillPoolable bool `json:"distill_poolable"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := wsManager.SetDistillPoolable(req.Context(), wsID, in.DistillPoolable); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			ws, _ := wsManager.GetWorkspace(wsID)
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"ok":               true,
+				"distill_poolable": ws.DistillPoolable,
 			})
 		})
 

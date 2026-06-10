@@ -59,6 +59,15 @@ func ContentHash(input []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// CacheVersion is the converter-version + tier discriminator embedded in every
+// distill cache key (so a converter bump or a different tier lands on fresh
+// keys — stale Markdown is never served). Exported so a SECOND keyspace for the
+// same artifact — the cross-tenant pooled distill cache — addresses entries
+// identically to the private path.
+func CacheVersion(tier Tier) string {
+	return ConverterVersion + ":" + string(normalizeTier(tier))
+}
+
 // estTokens mirrors the gateway's billing basis exactly: plain len/4, no
 // minimum (matching the inline len(prompt)/4 used for spend), so a token saved
 // here is the same unit as a token spent elsewhere.
@@ -107,6 +116,27 @@ type cachedResult struct {
 	Result Result `json:"result"`
 }
 
+// MarshalCached / UnmarshalCached expose the cache value wire shape so callers
+// that manage a SECOND keyspace for the same artifact (the cross-tenant pooled
+// distill cache) serialize a Result identically to the private path's internal
+// store — keeping both keyspaces byte-compatible.
+func MarshalCached(res Result) ([]byte, error) {
+	return json.Marshal(cachedResult{Result: res})
+}
+
+// UnmarshalCached parses a cache value back to a Result; ok=false on a corrupt
+// or empty blob (the caller falls through to a fresh conversion).
+func UnmarshalCached(b []byte) (Result, bool) {
+	if len(b) == 0 {
+		return Result{}, false
+	}
+	var cr cachedResult
+	if json.Unmarshal(b, &cr) != nil {
+		return Result{}, false
+	}
+	return cr.Result, true
+}
+
 // DistillWithCache converts input, using c as a conversion cache (nil disables
 // caching). A HIT returns the cached Result without re-converting; a MISS
 // converts and stores the Result. Savings are measured every call (recomputed
@@ -153,7 +183,7 @@ func distillOrCached(ctx context.Context, c Cache, input []byte, o convOptions, 
 	// effectively sha256(ConverterVersion : tier : contentHash). Both
 	// ConverterVersion and the tier are colon-free constants, preserving the
 	// DistillCache.Key injectivity invariant.
-	cacheVer := ConverterVersion + ":" + string(normalizeTier(o.tier))
+	cacheVer := CacheVersion(o.tier)
 
 	if c != nil {
 		if b, err := c.Get(ctx, hash, cacheVer); err == nil && len(b) > 0 {
