@@ -264,7 +264,6 @@ func run() error {
 	alertManager.StartMonitor(ctx)
 	templateDetector := templates.New(pool)
 	qualityScorer := quality.New(pool)
-	abTester := ab.New(pool, qualityScorer)
 	abEngine := ab.NewEngine(pool)
 	abEngine.RunAutoCompleteLoop(ctx, time.Hour)
 	branchTracker := attribution.New(pool)
@@ -358,7 +357,7 @@ func run() error {
 	// SemanticCacheRetention <= 0 (StartSweeper logs and returns).
 	go semanticCache.StartSweeper(ctx, cfg.SemanticCacheSweepInterval)
 
-	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, abTester, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, guardrailsEngine, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, guardrailsEngine, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
 	// Upgraded per-request attribution store (Upgrade Batch 1 / Item 3).
 	// Wired as a setter so the existing proxy.New signature stays put.
 	p.SetAttributionStore(attrStore)
@@ -929,7 +928,7 @@ func run() error {
 
 	apiServer := api.NewServer(
 		pool, redisClient, nc, exactCache, l,
-		alertManager, abTester, branchTracker, wsManager, lr,
+		alertManager, branchTracker, wsManager, lr,
 		anomalyDetector,
 		"0.1.0",
 	)
@@ -2648,29 +2647,6 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, top)
-		})
-
-		authed.Post("/v1/ab/tests", func(w http.ResponseWriter, req *http.Request) {
-			var in ab.ABTest
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			if err := abTester.RegisterTest(in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, map[string]string{"id": in.ID})
-		})
-
-		authed.Get("/v1/ab/tests/{testID}", func(w http.ResponseWriter, req *http.Request) {
-			testID := chi.URLParam(req, "testID")
-			got, ok := abTester.GetResults(testID)
-			if !ok {
-				writeJSONErr(w, http.StatusNotFound, "test not found")
-				return
-			}
-			writeJSONOK(w, http.StatusOK, got)
 		})
 
 		authed.Get("/v1/sessions/{sessionID}", newSessionGetHandler(sessionTracker))

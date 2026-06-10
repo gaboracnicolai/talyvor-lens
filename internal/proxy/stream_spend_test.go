@@ -50,7 +50,7 @@ func newStreamSpendProxy(t *testing.T, sseBody string) (*Proxy, *recordingAlertS
 	p := New(
 		exact, nil, nil,
 		compressor.New(), router.New(), pii.New(),
-		nil, nil, nil, nil, nil, wsm, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, wsm, nil, nil, nil, nil, nil, nil,
 		fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())),
 		"openai-key", "anthropic-key", "",
 	)

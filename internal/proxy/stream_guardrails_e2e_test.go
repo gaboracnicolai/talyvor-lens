@@ -58,7 +58,7 @@ func bufferAwareUpstream(t *testing.T, content string) *httptest.Server {
 func e2eProxy(t *testing.T, eng *guardrails.Engine, upstreamURL string) *Proxy {
 	t.Helper()
 	exact, _ := newExactCacheForTest(t)
-	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, eng, "openai-key", "anthropic-key", "")
+	p := New(exact, nil, nil, compressor.New(), router.New(), pii.New(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fallback.New(), nil, nil, eng, "openai-key", "anthropic-key", "")
 	p.openAIURL = upstreamURL
 	return p
 }

@@ -1,13 +1,8 @@
-// engine.go is the upgraded experimentation system. The original
-// Tester in tester.go keeps its shadow-A/B contract — this file
-// adds a richer model with arbitrary variants, deterministic
-// per-user assignment, async result recording, and a
-// statistical-light analysis pass.
-//
-// The two coexist on purpose: existing proxy call sites use
-// Tester (no breaking changes), new dashboards + endpoints use
-// Engine. The new HTTP routes hand back JSON shapes that the
-// frontend can render directly without translation.
+// engine.go is the per-workspace experimentation system and the sole A/B path:
+// a model with arbitrary variants, deterministic per-user assignment, async
+// result recording, and a statistical-light analysis pass. Its HTTP routes hand
+// back JSON shapes the frontend renders directly. (The legacy global shadow-A/B
+// Tester was retired in #139 — see git history if you need the old contract.)
 
 package ab
 
@@ -24,10 +19,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/dbjson"
 )
+
+// pgxDB is the subset of *pgxpool.Pool the Engine needs. Tests pass nil to skip
+// persistence — the in-memory map is the source of truth either way.
+type pgxDB interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // ─── types ────────────────────────────────────────
 
