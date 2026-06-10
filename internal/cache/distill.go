@@ -69,3 +69,42 @@ func (c *DistillCache) Get(ctx context.Context, contentHash, version string) ([]
 func (c *DistillCache) Set(ctx context.Context, contentHash, version string, value []byte) error {
 	return c.client.Set(ctx, c.Key(contentHash, version), value, c.ttl).Err()
 }
+
+// ownerKey is the parallel Redis key holding the contributing workspace for a
+// POOLED distill artifact (the cross-tenant-sharing analogue of
+// ExactCache.ownerKey). Kept separate from the value key so the plain Get/Set
+// surface stays binary-compatible — only the pooled keyspace pays for it.
+func (c *DistillCache) ownerKey(contentHash, version string) string {
+	return c.Key(contentHash, version) + ":owner"
+}
+
+// SetWithOwner stores the artifact AND stamps `workspaceID` as the contributing
+// owner in a parallel key (same TTL). Used only for the pooled (shared)
+// keyspace, where the serve-time consent check needs the owner's identity to
+// verify the owner's own opt-in (PoolabilityGate.MaybeAllowPooledHit).
+func (c *DistillCache) SetWithOwner(ctx context.Context, contentHash, version, workspaceID string, value []byte) error {
+	if err := c.Set(ctx, contentHash, version, value); err != nil {
+		return err
+	}
+	if workspaceID == "" {
+		return nil
+	}
+	return c.client.Set(ctx, c.ownerKey(contentHash, version), workspaceID, c.ttl).Err()
+}
+
+// GetWithOwner returns the pooled artifact AND the workspace that contributed
+// it (empty when no owner was recorded — e.g. a pre-feature entry, which the
+// consent gate then refuses). A miss is (nil, "", nil).
+func (c *DistillCache) GetWithOwner(ctx context.Context, contentHash, version string) ([]byte, string, error) {
+	body, err := c.Get(ctx, contentHash, version)
+	if err != nil || body == nil {
+		return body, "", err
+	}
+	owner, err := c.client.Get(ctx, c.ownerKey(contentHash, version)).Result()
+	if errors.Is(err, redis.Nil) || err != nil {
+		// No/failed owner read is non-fatal: surface the body with an empty
+		// owner, which the consent gate treats as not-poolable (safe default).
+		return body, "", nil
+	}
+	return body, owner, nil
+}

@@ -1,0 +1,33 @@
+-- 0051_workspace_distill_poolable.sql — distill-cache cross-tenant consent.
+--
+--   distill_poolable — when TRUE, this workspace participates in the shared
+--                      DISTILL cache: the cleaned-Markdown artifacts produced
+--                      from its documents are ALSO written to a pooled keyspace
+--                      (tagged with this workspace as the owner), and on a
+--                      private-cache miss it may be served a pooled artifact
+--                      contributed by ANOTHER distill-poolable workspace. A
+--                      cross-tenant serve additionally requires the global
+--                      switch (LENS_DISTILL_POOLABLE_ENABLED) AND the owner's
+--                      own opt-in — sharing is impossible unless all three hold.
+--
+-- This is a SEPARATE consent from cache_poolable (0041): a distill artifact is
+-- DOCUMENT-derived (the owner's uploaded file), a more sensitive disclosure than
+-- a prompt/response pair, so it gets its own opt-in rather than riding the LLM
+-- cache toggle.
+--
+-- WHY THIS COLUMN EXISTS (#129-adjacent privacy fix): the distill cache was
+-- keyed on document-content-hash ONLY (no workspace scope) and served
+-- cross-tenant with NO consent gate — the only ungated cross-tenant data
+-- surface in the codebase. This release makes the distill cache PRIVATE by
+-- default (wsID-scoped key) and gates all cross-tenant sharing behind this
+-- opt-in + the global switch, mirroring cache_poolable's three-switch model.
+--
+-- Defaults to FALSE: every existing and new workspace is private-by-default, so
+-- one tenant's document-derived Markdown is never served to another until an
+-- admin opts the workspace in (PUT /v1/workspaces/{wsID}/distill-poolable) AND
+-- the operator flips the global switch. Additive, idempotent (ADD COLUMN IF NOT
+-- EXISTS), no row rewrite — lands on the workspaces table beside distill_policy
+-- (0039) and cache_poolable (0041).
+
+ALTER TABLE workspaces
+  ADD COLUMN IF NOT EXISTS distill_poolable BOOLEAN NOT NULL DEFAULT false;

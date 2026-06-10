@@ -30,7 +30,7 @@ type IsolatedConverter interface {
 func Orchestrate(ctx context.Context, conv IsolatedConverter, cache Cache, vision VisionDispatcher, input []byte, format Format, tier Tier) (Result, Savings, error) {
 	// Key the cache on content + converter version + tier (colon-free segments
 	// preserve key injectivity), exactly like DistillWithCache.
-	cacheVer := ConverterVersion + ":" + string(normalizeTier(tier))
+	cacheVer := CacheVersion(tier)
 	hash := ContentHash(input)
 
 	if cache != nil {

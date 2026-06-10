@@ -7,10 +7,44 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/distill"
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/workspace"
 )
+
+// distillPoolMarker namespaces the SHARED (cross-tenant) distill keyspace so it
+// is provably disjoint from every workspace's private keyspace. A private key
+// material is "wsID:contentHash" where wsID comes from the authenticated
+// credential / X-Talyvor-Workspace header (which cannot contain NUL); the
+// marker's leading NUL therefore can never begin a private key's pre-image.
+const distillPoolMarker = "\x00distillpool\x00"
+
+// ownerDistillCache is the pooled-keyspace capability the cross-tenant distill
+// share needs: store/read an artifact stamped with its contributing workspace.
+// *cache.DistillCache satisfies it; a test fake that implements only
+// distill.Cache simply disables pooling (the type assertion fails — nil-safe).
+type ownerDistillCache interface {
+	GetWithOwner(ctx context.Context, contentHash, version string) ([]byte, string, error)
+	SetWithOwner(ctx context.Context, contentHash, version, owner string, value []byte) error
+}
+
+// scopedDistillCache namespaces the distill cache key by prefixing the content
+// hash with a per-workspace scope, making the cache PRIVATE (per-workspace) by
+// default — this is what closes the previously-ungated cross-tenant flow. The
+// "wsID:" prefix can never collide with the pooled keyspace's NUL marker.
+type scopedDistillCache struct {
+	inner distill.Cache
+	scope string // e.g. "ws-123:" — prepended to the content hash
+}
+
+func (s scopedDistillCache) Get(ctx context.Context, contentHash, version string) ([]byte, error) {
+	return s.inner.Get(ctx, s.scope+contentHash, version)
+}
+
+func (s scopedDistillCache) Set(ctx context.Context, contentHash, version string, value []byte) error {
+	return s.inner.Set(ctx, s.scope+contentHash, version, value)
+}
 
 // distillIntegration wires the request path to the DISTILL orchestrator: it
 // converts a document carried in a chat request to clean Markdown via the
@@ -19,20 +53,24 @@ import (
 // is present AND policy + opt-in both allow it AND the conversion succeeds. A
 // conversion failure never fails the user's request.
 type distillIntegration struct {
-	converter distill.IsolatedConverter // *distill.ProcessIsolator (killable subprocess)
-	cache     distill.Cache             // optional conversion cache (may be nil)
-	wsManager *workspace.Manager
+	converter distill.IsolatedConverter      // *distill.ProcessIsolator (killable subprocess)
+	cache     distill.Cache                  // optional conversion cache (may be nil)
+	wsManager *workspace.Manager             //
+	poolGate  *cache_pooling.PoolabilityGate // cross-tenant distill-share consent (nil-safe; nil = private-only)
 }
 
 // SetDistiller enables the request-path DISTILL integration. converter is the
 // isolated subprocess (*distill.ProcessIsolator); cache is the optional
-// conversion cache (nil disables it). Wired as a setter so proxy.New's
-// signature stays put — when unset, distillation is fully inert.
-func (p *Proxy) SetDistiller(converter distill.IsolatedConverter, cache distill.Cache) {
+// conversion cache (nil disables it); poolGate gates cross-tenant distill
+// sharing (nil = strictly private). Wired as a setter so proxy.New's signature
+// stays put — when unset, distillation is fully inert, and with poolGate
+// off/nil the distill cache is strictly per-workspace.
+func (p *Proxy) SetDistiller(converter distill.IsolatedConverter, cache distill.Cache, poolGate *cache_pooling.PoolabilityGate) {
 	p.distiller = &distillIntegration{
 		converter: converter,
 		cache:     cache,
 		wsManager: p.workspaceManager,
+		poolGate:  poolGate,
 	}
 }
 
@@ -109,7 +147,7 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 		msgChanged := false
 		for _, bi := range blocks {
 			if block, ok := bi.(map[string]any); ok {
-				if md, vs, ok := d.tryConvertBlock(ctx, block, vision); ok {
+				if md, vs, ok := d.tryConvertBlock(ctx, block, vision, wsID); ok {
 					newBlocks = append(newBlocks, map[string]any{"type": "text", "text": md})
 					msgChanged = true
 					distilledAny = true
@@ -179,7 +217,7 @@ func (d *distillIntegration) shouldDistill(r *http.Request, wsID string) bool {
 // left untouched. On a successful OCR the returned visionSpend carries the call's
 // real token cost + model so the caller can book a durable 'vision_ocr' row; it
 // is the zero value for a plain text conversion.
-func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher) (string, visionSpend, bool) {
+func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher, wsID string) (string, visionSpend, bool) {
 	raw, mediaType, ok := extractBlockDocument(block)
 	if !ok {
 		return "", visionSpend{}, false
@@ -188,9 +226,43 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	if !ok {
 		return "", visionSpend{}, false // e.g. image/png — a vision input, not a document
 	}
-	res, sav, err := distill.Orchestrate(ctx, d.converter, d.cache, vision, raw, format, distill.TierFaithful)
+
+	hash := distill.ContentHash(raw)
+	cacheVer := distill.CacheVersion(distill.TierFaithful)
+	pooled, _ := d.cache.(ownerDistillCache) // nil when the cache can't carry an owner → pooling off
+
+	// (1) POOLED READ — a cross-tenant artifact may be served ONLY when all
+	//     three hold: the global switch is on, the REQUESTER opted in
+	//     (Participant), AND the OWNER opted in (MaybeAllowPooledHit). With the
+	//     switch off / no opt-in this is skipped and serving stays private.
+	if pooled != nil && d.poolGate.Participant(wsID) {
+		if b, owner, _ := pooled.GetWithOwner(ctx, distillPoolMarker+hash, cacheVer); len(b) > 0 &&
+			d.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+			if res, ok := distill.UnmarshalCached(b); ok && !res.NeedsVision && strings.TrimSpace(res.Markdown) != "" {
+				return res.Markdown, visionSpend{}, true // cross-tenant serve (consented)
+			}
+		}
+	}
+
+	// (2) PRIVATE PATH (default) — a wsID-SCOPED cache, so an artifact is served
+	//     only within its producing workspace. This is the leak fix.
+	var privateCache distill.Cache
+	if d.cache != nil {
+		privateCache = scopedDistillCache{inner: d.cache, scope: wsID + ":"}
+	}
+	res, sav, err := distill.Orchestrate(ctx, d.converter, privateCache, vision, raw, format, distill.TierFaithful)
 	if err != nil || res.NeedsVision || strings.TrimSpace(res.Markdown) == "" {
 		return "", visionSpend{}, false
+	}
+
+	// (3) POOLED WRITE — if the PRODUCER opted in (+ global switch), publish the
+	//     artifact to the shared keyspace stamped with this workspace as owner,
+	//     so other opted-in tenants may be served it. Best-effort; never fails
+	//     the request. NeedsVision/empty already rejected above.
+	if pooled != nil && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+		if b, mErr := distill.MarshalCached(res); mErr == nil {
+			_ = pooled.SetWithOwner(ctx, distillPoolMarker+hash, cacheVer, wsID, b)
+		}
 	}
 	// An OCR'd result carries the vision call's real token split + model so the
 	// request path can book it as a distinct, model-priced 'vision_ocr' row.

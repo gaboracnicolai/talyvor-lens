@@ -37,6 +37,7 @@ func restartTestPool(t *testing.T) *pgxpool.Pool {
 			logging_policy TEXT NOT NULL DEFAULT 'metadata',
 			distill_policy TEXT NOT NULL DEFAULT 'disabled',
 			cache_poolable BOOLEAN NOT NULL DEFAULT false,
+			distill_poolable BOOLEAN NOT NULL DEFAULT false,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	} {
