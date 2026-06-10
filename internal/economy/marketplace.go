@@ -7,7 +7,6 @@ package economy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -687,18 +686,7 @@ func (s *MarketplaceStore) GetEconomyStats(ctx context.Context) (*EconomyStats, 
 	return stats, nil
 }
 
-// ─── tiny helper for typed metadata ──────────────
-
-// jsonMeta is a one-line escape hatch in case future code needs
-// to round-trip metadata through the ledger without thinking
-// about the json shape. Kept here so the package has a single
-// place to evolve the schema.
-func jsonMeta(m map[string]interface{}) []byte {
-	if m == nil {
-		return []byte("{}")
-	}
-	b, _ := json.Marshal(m)
-	return b
-}
-
-var _ = jsonMeta // kept for callers that grow into it
+// Metadata destined for a jsonb column goes through dbjson.Marshal ->
+// dbjson.JSONB (see internal/dbjson), which encodes correctly under both pgx
+// protocols. The former local jsonMeta helper (a dead []byte escape hatch)
+// was removed with #133.

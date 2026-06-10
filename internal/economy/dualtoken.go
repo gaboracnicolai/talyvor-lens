@@ -15,7 +15,6 @@ package economy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -23,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/dbjson"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
 )
@@ -495,11 +495,14 @@ func writeLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, mi
 
 func insertLXCLedger(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter float64,
 	txType, description string, metadata map[string]interface{}) error {
-	metaBuf := mustJSON(metadata)
+	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
+	if err != nil {
+		return fmt.Errorf("economy: marshal lxc ledger metadata: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO lxc_ledger (workspace_id, amount, balance_after, type, description, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
-		workspaceID, delta, balanceAfter, txType, description, metaBuf); err != nil {
+		workspaceID, delta, balanceAfter, txType, description, meta); err != nil {
 		return fmt.Errorf("economy: insert lxc ledger: %w", err)
 	}
 	return nil
@@ -537,23 +540,15 @@ func writeLENSBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, e
 
 func insertLENSLedger(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter float64,
 	txType, description string, metadata map[string]interface{}) error {
-	metaBuf := mustJSON(metadata)
+	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
+	if err != nil {
+		return fmt.Errorf("economy: marshal lens ledger metadata: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO lens_token_ledger (workspace_id, amount, balance_after, type, description, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
-		workspaceID, delta, balanceAfter, txType, description, metaBuf); err != nil {
+		workspaceID, delta, balanceAfter, txType, description, meta); err != nil {
 		return fmt.Errorf("economy: insert lens ledger: %w", err)
 	}
 	return nil
-}
-
-func mustJSON(m map[string]interface{}) []byte {
-	if m == nil {
-		return []byte("{}")
-	}
-	b, err := json.Marshal(m)
-	if err != nil || string(b) == "null" {
-		return []byte("{}")
-	}
-	return b
 }

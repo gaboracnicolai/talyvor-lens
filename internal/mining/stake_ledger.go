@@ -2,13 +2,13 @@ package mining
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/talyvor/lens/internal/dbjson"
 	"github.com/talyvor/lens/internal/metrics"
 )
 
@@ -150,16 +150,13 @@ func (s *LedgerStore) stakeInner(
 		return err
 	}
 
-	metaBuf, err := json.Marshal(metadata)
+	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
 	if err != nil {
 		return fmt.Errorf("mining: marshal metadata: %w", err)
 	}
-	if string(metaBuf) == "null" {
-		metaBuf = []byte("{}")
-	}
 
 	if _, err := tx.Exec(ctx, stakeLedgerInsertSQL,
-		workspaceID, delta, balanceAfter, txType, description, metaBuf); err != nil {
+		workspaceID, delta, balanceAfter, txType, description, meta); err != nil {
 		return fmt.Errorf("mining: insert stake ledger row: %w", err)
 	}
 	if _, err := tx.Exec(ctx, stakeBalanceUpdateSQL, workspaceID, newBal, newLocked); err != nil {

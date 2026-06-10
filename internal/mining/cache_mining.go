@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/dbjson"
 	"github.com/talyvor/lens/internal/metrics"
 )
 
@@ -219,19 +220,19 @@ func (s *LedgerStore) applyTx(
 	}
 	newBal := bal + delta
 
-	metaBuf, err := json.Marshal(metadata)
+	// dbjson.JSONB encodes as JSON text on both pgx protocols — a raw []byte
+	// is inferred as bytea under the SimpleProtocol that LENS_DB_PGBOUNCER
+	// forces and rejected by jsonb with 22P02 (#133).
+	meta, err := dbjson.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("mining: marshal metadata: %w", err)
-	}
-	if string(metaBuf) == "null" {
-		metaBuf = []byte("{}")
 	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO lens_token_ledger
 			(workspace_id, amount, balance_after, type, description, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6)
-	`, workspaceID, delta, newBal, txType, description, metaBuf); err != nil {
+	`, workspaceID, delta, newBal, txType, description, meta); err != nil {
 		return fmt.Errorf("mining: insert ledger row: %w", err)
 	}
 
@@ -595,18 +596,15 @@ func writeBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, earne
 
 func insertLedgerRow(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter float64,
 	txType, description string, metadata map[string]interface{}) error {
-	metaBuf, err := json.Marshal(metadata)
+	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
 	if err != nil {
 		return fmt.Errorf("mining: marshal metadata: %w", err)
-	}
-	if string(metaBuf) == "null" {
-		metaBuf = []byte("{}")
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO lens_token_ledger
 			(workspace_id, amount, balance_after, type, description, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6)
-	`, workspaceID, delta, balanceAfter, txType, description, metaBuf); err != nil {
+	`, workspaceID, delta, balanceAfter, txType, description, meta); err != nil {
 		return fmt.Errorf("mining: insert ledger row: %w", err)
 	}
 	return nil

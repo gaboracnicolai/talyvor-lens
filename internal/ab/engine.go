@@ -15,7 +15,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,6 +25,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/dbjson"
 )
 
 // ─── types ────────────────────────────────────────
@@ -316,7 +317,7 @@ const insertExperimentSQL = `
 INSERT INTO experiments (
     id, workspace_id, name, description, status, metric,
     traffic_split, variants, started_at, ended_at, created_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11)
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 ON CONFLICT (id) DO UPDATE SET
     name=EXCLUDED.name,
     description=EXCLUDED.description,
@@ -358,8 +359,8 @@ func (e *Engine) CreateExperiment(ctx context.Context, exp *Experiment) error {
 	e.mu.Unlock()
 
 	if e.pool != nil {
-		variantsJSON, _ := json.Marshal(exp.Variants)
-		splitJSON, _ := json.Marshal(exp.TrafficSplit)
+		variantsJSON, _ := dbjson.Marshal(exp.Variants)
+		splitJSON, _ := dbjson.Marshal(exp.TrafficSplit)
 		if _, err := e.pool.Exec(ctx, insertExperimentSQL,
 			exp.ID, exp.WorkspaceID, exp.Name, exp.Description,
 			string(exp.Status), string(exp.Metric),
@@ -425,8 +426,8 @@ func (e *Engine) StartExperiment(ctx context.Context, id string) error {
 	}
 	exp.Status = StatusRunning
 	if e.pool != nil {
-		variantsJSON, _ := json.Marshal(exp.Variants)
-		splitJSON, _ := json.Marshal(exp.TrafficSplit)
+		variantsJSON, _ := dbjson.Marshal(exp.Variants)
+		splitJSON, _ := dbjson.Marshal(exp.TrafficSplit)
 		_, _ = e.pool.Exec(ctx, insertExperimentSQL,
 			exp.ID, exp.WorkspaceID, exp.Name, exp.Description,
 			string(exp.Status), string(exp.Metric),
@@ -462,8 +463,8 @@ func (e *Engine) transitionStatus(ctx context.Context, id string, to ExperimentS
 		exp.EndedAt = &now
 	}
 	if e.pool != nil {
-		variantsJSON, _ := json.Marshal(exp.Variants)
-		splitJSON, _ := json.Marshal(exp.TrafficSplit)
+		variantsJSON, _ := dbjson.Marshal(exp.Variants)
+		splitJSON, _ := dbjson.Marshal(exp.TrafficSplit)
 		_, _ = e.pool.Exec(ctx, insertExperimentSQL,
 			exp.ID, exp.WorkspaceID, exp.Name, exp.Description,
 			string(exp.Status), string(exp.Metric),

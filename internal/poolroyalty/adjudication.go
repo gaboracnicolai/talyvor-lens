@@ -31,12 +31,13 @@ package poolroyalty
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/talyvor/lens/internal/dbjson"
 )
 
 // AdjudicationDecision is the operator's reviewed decision — the required input
@@ -112,7 +113,9 @@ func (w *AdjudicationWriter) Adjudicate(ctx context.Context, d AdjudicationDecis
 	// with outcome NULL — the decision and the claim rows remain authoritative;
 	// we surface the error but the burn already (durably) happened and is
 	// recorded on the claim rows.
-	outcomeJSON, merr := json.Marshal(report)
+	// dbjson.JSONB so the outcome encodes as JSON text on both pgx protocols
+	// (a raw []byte is bytea under SimpleProtocol → 22P02, #133).
+	outcomeJSON, merr := dbjson.Marshal(report)
 	if merr != nil {
 		return id, report, fmt.Errorf("poolroyalty: marshal outcome: %w", merr)
 	}
