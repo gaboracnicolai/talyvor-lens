@@ -19,6 +19,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/attribution"
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/catalog"
@@ -732,6 +733,14 @@ WHERE workspace_id = $1
   AND created_at > NOW() - INTERVAL '30 days'`
 
 func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
+	// Authz (#146): the tenant roster (every workspace + per-workspace cost) is
+	// an all-tenant view with no single-tenant shape, so it is ADMIN-ONLY. A
+	// non-admin reads its own data via the path-scoped /v1/workspaces/{wsID}
+	// routes; here it gets 403 rather than the full roster.
+	if actx := auth.GetAuthContext(r.Context()); actx == nil || !actx.IsAdmin {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin credentials required"})
+		return
+	}
 	if s.wsManager == nil {
 		writeJSON(w, http.StatusOK, []any{})
 		return

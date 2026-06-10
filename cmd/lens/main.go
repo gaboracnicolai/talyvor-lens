@@ -1048,37 +1048,7 @@ func run() error {
 		authed.Post("/oai/*", p.HandleOpenAI)
 		authed.Post("/anthropic/*", p.HandleAnthropic)
 
-		authed.Post("/v1/api/keys", func(w http.ResponseWriter, req *http.Request) {
-			var in struct {
-				WorkspaceID string     `json:"workspace_id"`
-				Team        string     `json:"team"`
-				Name        string     `json:"name"`
-				ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
-				return
-			}
-			if in.WorkspaceID == "" {
-				in.WorkspaceID = "default"
-			}
-			raw, apiKey, err := keyStore.GenerateKey(req.Context(), in.WorkspaceID, in.Team, in.Name, in.ExpiresAt)
-			if err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"key":     raw,
-				"id":      apiKey.ID,
-				"warning": "Store this key securely. It will not be shown again.",
-			})
-		})
+		authed.Post("/v1/api/keys", newCreateAPIKeyHandler(keyStore))
 
 		authed.Post("/v1/api/injection/patterns", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
@@ -2249,6 +2219,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): a non-admin lists only as ITSELF (the seller is the
+			// caller); admin may list on behalf of any seller via the body.
+			eff, _, ok := effectiveWorkspaceID(req, in.SellerID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.SellerID = eff
 			if in.SellerID == "" {
 				writeJSONErr(w, http.StatusBadRequest, "seller_id required")
 				return
@@ -2275,6 +2253,13 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): the buyer is the CALLER for non-admins; admin honors the body.
+			eff, _, ok := effectiveWorkspaceID(req, in.BuyerWorkspace)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.BuyerWorkspace = eff
 			trade, err := marketplace.ExecuteTrade(req.Context(), id, in.BuyerWorkspace, in.AmountUSD)
 			if err != nil {
 				status := http.StatusBadRequest
@@ -2293,7 +2278,13 @@ func run() error {
 
 		authed.Delete("/v1/marketplace/listings/{id}", func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
-			wsID := req.URL.Query().Get("workspace_id")
+			// Authz (#146): a non-admin may cancel only its OWN listing; admin
+			// may act on any seller via the param.
+			wsID, _, ok := effectiveWorkspaceID(req, req.URL.Query().Get("workspace_id"))
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
 			if wsID == "" {
 				writeJSONErr(w, http.StatusBadRequest, "workspace_id query param required")
 				return
@@ -2311,20 +2302,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
-		authed.Get("/v1/marketplace/trades", func(w http.ResponseWriter, req *http.Request) {
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				writeJSONErr(w, http.StatusBadRequest, "workspace_id query param required")
-				return
-			}
-			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
-			trades, err := marketplace.GetTrades(req.Context(), wsID, limit)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, trades)
-		})
+		authed.Get("/v1/marketplace/trades", newMarketplaceTradesHandler(marketplace))
 
 		authed.Post("/v1/workspaces/{wsID}/tokens/stake", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
@@ -3200,18 +3178,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, guardrailsEngine.GetPolicy(wsID))
 		})
 
-		authed.Put("/v1/guardrails/policy", func(w http.ResponseWriter, req *http.Request) {
-			var in guardrails.GuardrailPolicy
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			if in.WorkspaceID == "" {
-				in.WorkspaceID = "default"
-			}
-			guardrailsEngine.SetPolicy(req.Context(), in.WorkspaceID, in)
-			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
-		})
+		authed.Put("/v1/guardrails/policy", newGuardrailsPolicyPutHandler(guardrailsEngine))
 
 		authed.Post("/v1/guardrails/check", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
@@ -3270,52 +3237,7 @@ func run() error {
 		// straight to the http.ResponseWriter so a 100k-record CSV never
 		// materialises in memory. Format defaults to JSON; query params
 		// drive the WHERE filters and the LIMIT cap.
-		authed.Get("/v1/audit/export", func(w http.ResponseWriter, req *http.Request) {
-			q := req.URL.Query()
-			format := audit.ExportFormat(q.Get("format"))
-			if format == "" {
-				format = audit.FormatJSON
-			}
-			filter := audit.ExportFilter{
-				WorkspaceID: q.Get("workspace_id"),
-				Team:        q.Get("team"),
-				Provider:    q.Get("provider"),
-			}
-			if v := q.Get("start"); v != "" {
-				if t, err := time.Parse(time.RFC3339, v); err == nil {
-					filter.StartTime = t
-				}
-			}
-			if v := q.Get("end"); v != "" {
-				if t, err := time.Parse(time.RFC3339, v); err == nil {
-					filter.EndTime = t
-				}
-			}
-			if v := q.Get("limit"); v != "" {
-				if n, err := strconv.Atoi(v); err == nil {
-					filter.MaxRecords = n
-				}
-			}
-			// Pick MIME + filename extension up front so we can emit
-			// Content-Disposition before any body bytes are written.
-			var ct, ext string
-			switch format {
-			case audit.FormatCSV:
-				ct, ext = "text/csv", "csv"
-			case audit.FormatNDJSON:
-				ct, ext = "application/x-ndjson", "ndjson"
-			default:
-				ct, ext = "application/json", "json"
-			}
-			w.Header().Set("Content-Type", ct)
-			w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="audit-%s.%s"`, time.Now().UTC().Format("2006-01-02"), ext))
-			w.WriteHeader(http.StatusOK)
-			if _, err := auditExporter.Export(req.Context(), filter, format, w); err != nil {
-				// Headers are already committed; surface the failure in the
-				// structured log so compliance ops can correlate later.
-				logger.Warn("audit: export failed mid-stream", slog.String("err", err.Error()))
-			}
-		})
+		authed.Get("/v1/audit/export", newAuditExportHandler(auditExporter))
 
 		authed.Post("/v1/audit/webhook", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
@@ -3330,6 +3252,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "webhook_url required")
 				return
 			}
+			// Authz (#146): non-admin scoped to own workspace; admin honors the
+			// filter (empty workspace = all tenants, admin-only).
+			effWS, _, ok := effectiveWorkspaceID(req, in.Filter.WorkspaceID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.Filter.WorkspaceID = effWS
 			// Fire-and-forget so the caller doesn't block on a slow SIEM.
 			// Use a fresh context detached from the request so cancellation
 			// of the HTTP connection doesn't kill the export mid-flight.
@@ -3456,6 +3386,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): a non-admin may mutate only its OWN prompt; admin
+			// honors the body (empty → "default").
+			eff, _, ok := effectiveWorkspaceID(req, in.WorkspaceID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.WorkspaceID = eff
 			if in.WorkspaceID == "" {
 				in.WorkspaceID = "default"
 			}
@@ -3491,6 +3429,14 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
+			// Authz (#146): a non-admin may roll back only its OWN prompt; admin
+			// honors the body (empty → "default").
+			eff, _, ok := effectiveWorkspaceID(req, in.WorkspaceID)
+			if !ok {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			in.WorkspaceID = eff
 			if in.WorkspaceID == "" {
 				in.WorkspaceID = "default"
 			}
@@ -3673,6 +3619,31 @@ func callerWorkspaceID(ctx context.Context) (workspaceID string, isAdmin bool) {
 		return k.WorkspaceID, false
 	}
 	return "", false
+}
+
+// effectiveWorkspaceID resolves which workspace a NON-{wsID}-path route may act
+// on, deriving identity from the authenticated credential rather than caller
+// input. It closes the cross-tenant authorization cluster (#146): routes that
+// took workspace_id from a query/body param trusted attacker-chosen input,
+// because workspaceIsolationMiddleware only guards the {wsID} PATH segment.
+//
+//   - A NON-ADMIN caller is ALWAYS forced to its own workspace; `requested`
+//     (whatever the query/body said) is ignored — it can never name another
+//     tenant. An honest caller naming its own workspace is unaffected.
+//   - The global ADMIN honors `requested`; an empty value preserves each
+//     handler's admin-wide semantics (e.g. audit export's all-tenant dump).
+//
+// ok is false ONLY when a non-admin has no resolvable workspace — the caller
+// must 403 rather than fall through to a shared/"default"/all-tenant path.
+func effectiveWorkspaceID(r *http.Request, requested string) (wsID string, isAdmin bool, ok bool) {
+	caller, admin := callerWorkspaceID(r.Context())
+	if admin {
+		return requested, true, true
+	}
+	if caller == "" {
+		return "", false, false
+	}
+	return caller, false, true
 }
 
 // workspaceIsolationMiddleware enforces tenant isolation on every routed

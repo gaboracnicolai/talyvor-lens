@@ -358,6 +358,15 @@ func (m *Manager) Middleware(
 	}
 }
 
+// WithAuthContext attaches a resolved AuthContext to ctx — the same slot
+// GetAuthContext reads and AuthMiddleware populates internally. Exported so
+// handlers and tests can inject identity symmetrically with WithAPIKey (the
+// context key type is unexported, so this is the only entry point from outside
+// the package).
+func WithAuthContext(ctx context.Context, actx *AuthContext) context.Context {
+	return context.WithValue(ctx, authContextCtxKey{}, actx)
+}
+
 // GetAuthContext returns the resolved AuthContext, or nil when
 // the middleware didn't run (or the request was unauthenticated
 // public).
