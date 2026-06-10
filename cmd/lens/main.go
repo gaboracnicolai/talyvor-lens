@@ -2582,47 +2582,8 @@ func run() error {
 			})
 		})
 
-		authed.Get("/v1/attribution/branch", func(w http.ResponseWriter, req *http.Request) {
-			branch := req.URL.Query().Get("branch")
-			repository := req.URL.Query().Get("repository")
-			if branch == "" || repository == "" {
-				writeJSONErr(w, http.StatusBadRequest, "branch and repository query params required")
-				return
-			}
-			got, err := branchTracker.GetBranchSpend(req.Context(), branch, repository)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if got == nil {
-				writeJSONErr(w, http.StatusNotFound, "branch not found")
-				return
-			}
-			writeJSONOK(w, http.StatusOK, got)
-		})
-
-		authed.Get("/v1/attribution/top", func(w http.ResponseWriter, req *http.Request) {
-			repository := req.URL.Query().Get("repository")
-			if repository == "" {
-				writeJSONErr(w, http.StatusBadRequest, "repository query param required")
-				return
-			}
-			limit := 10
-			if l := req.URL.Query().Get("limit"); l != "" {
-				if n, err := strconv.Atoi(l); err == nil && n > 0 {
-					limit = n
-				}
-			}
-			if limit > 50 {
-				limit = 50
-			}
-			top, err := branchTracker.GetTopBranches(req.Context(), repository, limit)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, top)
-		})
+		authed.Get("/v1/attribution/branch", newAttributionBranchHandler(attrStore))
+		authed.Get("/v1/attribution/top", newAttributionTopHandler(attrStore))
 
 		authed.Get("/v1/sessions/{sessionID}", newSessionGetHandler(sessionTracker))
 

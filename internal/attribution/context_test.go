@@ -282,3 +282,57 @@ func TestExtractFromRequest_StripsLowercaseFeaturePrefix(t *testing.T) {
 		t.Fatalf("feature = %q", got.Feature)
 	}
 }
+
+// #151: the scoped repo/branch reads must filter request_attribution by
+// workspace_id ($1) — the regex pins the WHERE clause, WithArgs pins wsA as the
+// bound value. Without the workspace filter a tenant would read every tenant's
+// spend for a shared repo name.
+func TestGetBranchSpendForWorkspace_ScopesByWorkspace(t *testing.T) {
+	pool, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pgxmock.NewPool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	s := newStore(pool)
+	now := time.Now()
+	cols := []string{"branch", "pr_number", "repo_name", "cost", "in", "out", "count", "first", "last"}
+	pool.ExpectQuery(`FROM request_attribution[\s\S]*workspace_id = \$1`).
+		WithArgs("wsA", "feature/x", "acme/lens").
+		WillReturnRows(pool.NewRows(cols).AddRow("feature/x", "42", "acme/lens", 10.0, 100, 50, 5, now, now))
+
+	got, err := s.GetBranchSpendForWorkspace(context.Background(), "wsA", "feature/x", "acme/lens")
+	if err != nil {
+		t.Fatalf("GetBranchSpendForWorkspace: %v", err)
+	}
+	if got == nil || got.Repository != "acme/lens" || got.TotalCostUSD != 10.0 {
+		t.Fatalf("got %+v, want repo acme/lens / cost 10.0", got)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("query must filter request_attribution by workspace_id (wsA as $1): %v", err)
+	}
+}
+
+func TestGetTopBranchesForWorkspace_ScopesByWorkspace(t *testing.T) {
+	pool, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pgxmock.NewPool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	s := newStore(pool)
+	now := time.Now()
+	cols := []string{"branch", "pr_number", "repo_name", "cost", "in", "out", "count", "first", "last"}
+	pool.ExpectQuery(`FROM request_attribution[\s\S]*workspace_id = \$1`).
+		WithArgs("wsA", "acme/lens", 10).
+		WillReturnRows(pool.NewRows(cols).AddRow("b1", "1", "acme/lens", 9.0, 90, 45, 3, now, now))
+
+	out, err := s.GetTopBranchesForWorkspace(context.Background(), "wsA", "acme/lens", 10)
+	if err != nil {
+		t.Fatalf("GetTopBranchesForWorkspace: %v", err)
+	}
+	if len(out) != 1 || out[0].Repository != "acme/lens" {
+		t.Fatalf("got %+v, want 1 row for acme/lens", out)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("query must filter request_attribution by workspace_id (wsA as $1): %v", err)
+	}
+}
