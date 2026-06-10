@@ -240,10 +240,10 @@ func extractCredential(r *http.Request) (raw, location string) {
 
 // Authenticate is the single entry point. Tries each credential
 // shape in priority order:
-//  1. JWT bearer (looks like a JWT — 3 segments separated by ".")
-//  2. Workspace key (starts with tenant.KeyPrefix)
-//  3. Global admin key (exact match with LENS_API_KEY)
-//  4. Legacy X-API-Key header → treated as global key fallback
+//   1. JWT bearer (looks like a JWT — 3 segments separated by ".")
+//   2. Workspace key (starts with tenant.KeyPrefix)
+//   3. Global admin key (exact match with LENS_API_KEY)
+//   4. Legacy X-API-Key header → treated as global key fallback
 //
 // Returns ErrMissingCredentials when no credential is present at
 // all, and ErrInvalidAuth (deliberately opaque) for every "we
