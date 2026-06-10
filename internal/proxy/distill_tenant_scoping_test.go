@@ -66,13 +66,13 @@ func TestDistill_PrivateByDefault_NoCrossTenantServe(t *testing.T) {
 	ctx := context.Background()
 	doc := docBlockBytes("the-same-document-bytes")
 
-	mdA, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsA")
+	mdA, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsA")
 	if !ok || mdA != "converted-1" {
 		t.Fatalf("wsA produce: ok=%v md=%q", ok, mdA)
 	}
 
 	// wsB sends the SAME bytes — must NOT receive wsA's artifact; it converts fresh.
-	mdB, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
+	mdB, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
 	if !ok {
 		t.Fatal("wsB: not ok")
 	}
@@ -88,7 +88,7 @@ func TestDistill_PrivateByDefault_NoCrossTenantServe(t *testing.T) {
 
 	// Serve-neutrality: wsA re-serving the same bytes hits its OWN private cache
 	// (within-workspace reuse, unchanged from pre-S0) — no new conversion.
-	mdA2, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsA")
+	mdA2, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsA")
 	if !ok || mdA2 != "converted-1" {
 		t.Fatalf("wsA re-serve (private hit): ok=%v md=%q", ok, mdA2)
 	}
@@ -106,11 +106,11 @@ func TestDistill_PooledServe_AllSwitchesOn(t *testing.T) {
 	ctx := context.Background()
 	doc := docBlockBytes("shared-doc")
 
-	mdA, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsA") // produce + publish pooled (owner=wsA)
+	mdA, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsA") // produce + publish pooled (owner=wsA)
 	if !ok || mdA != "converted-1" {
 		t.Fatalf("wsA produce: ok=%v md=%q", ok, mdA)
 	}
-	mdB, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB") // served wsA's pooled artifact
+	mdB, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB") // served wsA's pooled artifact
 	if !ok || mdB != "converted-1" {
 		t.Fatalf("wsB should be served wsA's pooled artifact, got ok=%v md=%q", ok, mdB)
 	}
@@ -126,8 +126,8 @@ func TestDistill_PooledDenied_RequesterNotOptedIn(t *testing.T) {
 	d := newScopedDistiller(t, conv, true, map[string]bool{"wsA": true}) // wsB absent
 	ctx := context.Background()
 	doc := docBlockBytes("doc")
-	_, _, _ = d.tryConvertBlock(ctx, doc, nil, "wsA")
-	mdB, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
+	_, _, _, _ = d.tryConvertBlock(ctx, doc, nil, "wsA")
+	mdB, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
 	if !ok || mdB != "converted-2" {
 		t.Fatalf("a non-opted-in requester must not be served pooled; ok=%v md=%q", ok, mdB)
 	}
@@ -142,9 +142,9 @@ func TestDistill_PooledDenied_OwnerOptOut(t *testing.T) {
 	d := newScopedDistiller(t, conv, true, poolable)
 	ctx := context.Background()
 	doc := docBlockBytes("doc")
-	_, _, _ = d.tryConvertBlock(ctx, doc, nil, "wsA") // wsA publishes pooled
+	_, _, _, _ = d.tryConvertBlock(ctx, doc, nil, "wsA") // wsA publishes pooled
 	poolable["wsA"] = false                           // wsA revokes its consent
-	mdB, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
+	mdB, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
 	if !ok || mdB != "converted-2" {
 		t.Fatalf("owner opt-out must deny the pooled serve; ok=%v md=%q", ok, mdB)
 	}
@@ -157,8 +157,8 @@ func TestDistill_PooledDenied_GlobalFlagOff(t *testing.T) {
 	d := newScopedDistiller(t, conv, false, map[string]bool{"wsA": true, "wsB": true})
 	ctx := context.Background()
 	doc := docBlockBytes("doc")
-	_, _, _ = d.tryConvertBlock(ctx, doc, nil, "wsA")
-	mdB, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
+	_, _, _, _ = d.tryConvertBlock(ctx, doc, nil, "wsA")
+	mdB, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
 	if !ok || mdB == "converted-1" {
 		t.Fatalf("global flag off must keep serving private; md=%q", mdB)
 	}

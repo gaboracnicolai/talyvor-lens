@@ -51,6 +51,7 @@ import (
 	"github.com/talyvor/lens/internal/dashboard"
 	"github.com/talyvor/lens/internal/dbmigrate"
 	"github.com/talyvor/lens/internal/distill"
+	"github.com/talyvor/lens/internal/distillattrib"
 	"github.com/talyvor/lens/internal/distillpreview"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/embedder"
@@ -378,6 +379,11 @@ func run() error {
 			func() bool { return cfg.DistillPoolableEnabled },
 			wsManager.GetDistillPoolable,
 		),
+		// S1 distill attribution sink (MINT-FREE): records consented cross-tenant
+		// pooled-distill serves into distill_serve_attribution (migration 0052).
+		// No ledger, no read endpoint yet — write-only. Inert unless a serve is
+		// actually consented cross-tenant (requires the distill_poolable flags on).
+		distillattrib.NewStore(pool),
 	)
 	// Phase-2 Stage 2.0 shared-cache governance gate (exact cache). Read-only:
 	// reads the global switch + each workspace's cache_poolable opt-in, mutates
