@@ -791,7 +791,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			span.AddEvent("cache.hit.exact")
 		} else {
 			span.AddEvent("cache.check.semantic")
-			if c := p.trySemantic(ctx, cfg.name, model, cachePrompt); c != nil {
+			if c := p.trySemantic(ctx, cfg.name, model, cachePrompt, wsID); c != nil {
 				cached, layer = c, "cache_hit_semantic"
 				span.AddEvent("cache.hit.semantic")
 			} else if p.poolGate.Participant(wsID) {
@@ -1525,11 +1525,11 @@ func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []
 	return cached
 }
 
-func (p *Proxy) trySemantic(ctx context.Context, provider, model, prompt string) []byte {
+func (p *Proxy) trySemantic(ctx context.Context, provider, model, prompt, workspaceID string) []byte {
 	if p.semantic == nil {
 		return nil
 	}
-	cached, err := p.semantic.Get(ctx, provider, model, prompt)
+	cached, err := p.semantic.Get(ctx, provider, model, prompt, workspaceID)
 	if err != nil || cached == nil {
 		return nil
 	}
@@ -1688,7 +1688,7 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 		// Private (workspace-scoped) semantic entry — embeds the wsID-prefixed
 		// prompt and stores is_poolable=false (default), exactly as before.
 		if vec, err := p.embedder.Embed(ctx, cachePrompt); err == nil {
-			_ = p.semantic.Set(ctx, provider, model, cachePrompt, response, vec)
+			_ = p.semantic.Set(ctx, provider, model, cachePrompt, response, vec, wsID)
 		}
 		// Pooled (cross-tenant) semantic copy — opt-in, inert by default. Keyed on
 		// the NUL-sentinel pooled prompt (disjoint hash) but embedding the RAW

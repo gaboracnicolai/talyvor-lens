@@ -90,7 +90,7 @@ func dispatchSem(t *testing.T, p *Proxy, wsID, content string) {
 // ── expectation builders mirroring serve()'s semantic-query order ──
 
 func expPrivateMiss(m pgxmock.PgxPoolIface) {
-	m.ExpectQuery(`is_poolable = false`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg()).
+	m.ExpectQuery(`is_poolable = false`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 }
 func expPooledMiss(m pgxmock.PgxPoolIface) {
@@ -105,7 +105,7 @@ func expPooledHit(m pgxmock.PgxPoolIface, contributor string) {
 }
 func expPrivateStore(m pgxmock.PgxPoolIface) {
 	m.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 func expPooledStore(m pgxmock.PgxPoolIface, contributor string) {
