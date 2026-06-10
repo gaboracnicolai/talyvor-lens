@@ -2704,13 +2704,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, summary)
 		})
 
-		authed.Get("/v1/sessions", func(w http.ResponseWriter, req *http.Request) {
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				wsID = "default"
-			}
-			writeJSONOK(w, http.StatusOK, sessionTracker.ListActiveByWorkspace(wsID))
-		})
+		authed.Get("/v1/sessions", newSessionsListHandler(sessionTracker))
 
 		authed.Post("/v1/batch/submit", func(w http.ResponseWriter, req *http.Request) {
 			body, err := io.ReadAll(req.Body)
@@ -2792,9 +2786,10 @@ func run() error {
 		})
 
 		authed.Get("/v1/eval/cases", func(w http.ResponseWriter, req *http.Request) {
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				wsID = "default"
+			wsID, ok := applyPhase2WSID(req, req.URL.Query().Get("workspace_id"))
+			if !ok {
+				phase2Forbidden(w)
+				return
 			}
 			var tags []string
 			if t := req.URL.Query().Get("tags"); t != "" {
@@ -2817,9 +2812,12 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
-			if in.WorkspaceID == "" {
-				in.WorkspaceID = "default"
+			eff, ok := applyPhase2WSID(req, in.WorkspaceID)
+			if !ok {
+				phase2Forbidden(w)
+				return
 			}
+			in.WorkspaceID = eff
 			summary, err := evalPipeline.RunSuite(req.Context(), in.WorkspaceID, in.Tags)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -2848,18 +2846,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, results)
 		})
 
-		authed.Get("/v1/eval/runs", func(w http.ResponseWriter, req *http.Request) {
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				wsID = "default"
-			}
-			runs, err := evalPipeline.ListRuns(req.Context(), wsID, 10)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, runs)
-		})
+		authed.Get("/v1/eval/runs", newEvalRunsListHandler(evalPipeline))
 
 		// ── Evaluation pipeline: golden datasets, regression runs, A/B
 		// significance verdicts, scheduling (Upgrade 17). Workspace-scoped;
@@ -3009,18 +2996,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, res)
 		})
 
-		authed.Get("/v1/povi/receipts", func(w http.ResponseWriter, req *http.Request) {
-			ws := req.URL.Query().Get("workspace")
-			if ws == "" {
-				ws = "default"
-			}
-			list, err := poviStore.ListReceipts(req.Context(), ws, 50)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, list)
-		})
+		authed.Get("/v1/povi/receipts", newPoviReceiptsHandler(poviStore))
 
 		authed.Get("/v1/povi/status", func(w http.ResponseWriter, req *http.Request) {
 			total, verified, _ := poviStore.Stats(req.Context())
@@ -3176,13 +3152,7 @@ func run() error {
 		// Guardrails: per-workspace safety policy + pre-flight check.
 		// Policy changes apply immediately; the engine reads on every
 		// proxy request and there is no per-request policy cache.
-		authed.Get("/v1/guardrails/policy", func(w http.ResponseWriter, req *http.Request) {
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				wsID = "default"
-			}
-			writeJSONOK(w, http.StatusOK, guardrailsEngine.GetPolicy(wsID))
-		})
+		authed.Get("/v1/guardrails/policy", newGuardrailsPolicyGetHandler(guardrailsEngine))
 
 		authed.Put("/v1/guardrails/policy", newGuardrailsPolicyPutHandler(guardrailsEngine))
 
@@ -3195,9 +3165,12 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
-			if in.WorkspaceID == "" {
-				in.WorkspaceID = "default"
+			eff, ok := applyPhase2WSID(req, in.WorkspaceID)
+			if !ok {
+				phase2Forbidden(w)
+				return
 			}
+			in.WorkspaceID = eff
 			result := guardrailsEngine.Check(req.Context(), in.WorkspaceID, in.Prompt, nil)
 			writeJSONOK(w, http.StatusOK, result)
 		})
@@ -3355,9 +3328,10 @@ func run() error {
 		})
 
 		authed.Get("/v1/prompts", func(w http.ResponseWriter, req *http.Request) {
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				wsID = "default"
+			wsID, ok := applyPhase2WSID(req, req.URL.Query().Get("workspace_id"))
+			if !ok {
+				phase2Forbidden(w)
+				return
 			}
 			list, err := promptManager.List(req.Context(), wsID)
 			if err != nil {
@@ -3367,19 +3341,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, list)
 		})
 
-		authed.Get("/v1/prompts/{name}", func(w http.ResponseWriter, req *http.Request) {
-			name := chi.URLParam(req, "name")
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				wsID = "default"
-			}
-			pr, err := promptManager.Get(req.Context(), name, wsID)
-			if err != nil {
-				writeJSONErr(w, http.StatusNotFound, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, pr)
-		})
+		authed.Get("/v1/prompts/{name}", newPromptGetHandler(promptManager))
 
 		authed.Put("/v1/prompts/{name}", func(w http.ResponseWriter, req *http.Request) {
 			name := chi.URLParam(req, "name")
@@ -3413,9 +3375,10 @@ func run() error {
 
 		authed.Get("/v1/prompts/{name}/history", func(w http.ResponseWriter, req *http.Request) {
 			name := chi.URLParam(req, "name")
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				wsID = "default"
+			wsID, ok := applyPhase2WSID(req, req.URL.Query().Get("workspace_id"))
+			if !ok {
+				phase2Forbidden(w)
+				return
 			}
 			hist, err := promptManager.History(req.Context(), name, wsID)
 			if err != nil {
@@ -3456,9 +3419,10 @@ func run() error {
 
 		authed.Get("/v1/prompts/{name}/diff", func(w http.ResponseWriter, req *http.Request) {
 			name := chi.URLParam(req, "name")
-			wsID := req.URL.Query().Get("workspace_id")
-			if wsID == "" {
-				wsID = "default"
+			wsID, ok := applyPhase2WSID(req, req.URL.Query().Get("workspace_id"))
+			if !ok {
+				phase2Forbidden(w)
+				return
 			}
 			fromV, _ := strconv.Atoi(req.URL.Query().Get("from"))
 			toV, _ := strconv.Atoi(req.URL.Query().Get("to"))

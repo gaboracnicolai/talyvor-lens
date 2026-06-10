@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/redis/go-redis/v9"
+	"github.com/talyvor/lens/internal/auth"
 
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/learner"
@@ -30,6 +31,9 @@ func newRouter(t *testing.T, s *Server) chi.Router {
 func doJSON(t *testing.T, r chi.Router, path string) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	// Dashboard reads are authenticated; inject an admin identity so the #146
+	// Phase-2 chokepoint honors the ?workspace_id= these tests pass.
+	req = req.WithContext(auth.WithAuthContext(req.Context(), &auth.AuthContext{IsAdmin: true}))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -45,6 +49,9 @@ func doJSON(t *testing.T, r chi.Router, path string) (*httptest.ResponseRecorder
 func doJSONArray(t *testing.T, r chi.Router, path string) (*httptest.ResponseRecorder, []any) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	// Dashboard reads are authenticated; inject an admin identity so the #146
+	// Phase-2 chokepoint honors the ?workspace_id= these tests pass.
+	req = req.WithContext(auth.WithAuthContext(req.Context(), &auth.AuthContext{IsAdmin: true}))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

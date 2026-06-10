@@ -224,9 +224,10 @@ func (s *Server) handleGuardrails(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
 		return
 	}
-	wsID := r.URL.Query().Get("workspace_id")
-	if wsID == "" {
-		wsID = "default"
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: no workspace identity"})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": s.guardrails.OutputEnabled(),
@@ -253,9 +254,10 @@ func (s *Server) handleBudgets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []budgets.Budget{})
 		return
 	}
-	wsID := r.URL.Query().Get("workspace_id")
-	if wsID == "" {
-		wsID = "default"
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: no workspace identity"})
+		return
 	}
 	list, err := s.budgetStore.List(r.Context(), wsID)
 	if err != nil {
@@ -281,9 +283,10 @@ func (s *Server) handleForecastSummary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []forecast.Forecast{})
 		return
 	}
-	wsID := r.URL.Query().Get("workspace_id")
-	if wsID == "" {
-		wsID = "default"
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: no workspace identity"})
+		return
 	}
 	list, err := s.forecaster.SummarizeWorkspace(r.Context(), wsID)
 	if err != nil {
@@ -309,9 +312,10 @@ func (s *Server) handleEvalRuns(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []eval.RunSummary{})
 		return
 	}
-	wsID := r.URL.Query().Get("workspace_id")
-	if wsID == "" {
-		wsID = "default"
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: no workspace identity"})
+		return
 	}
 	list, err := s.evalPipeline.ListRuns(r.Context(), wsID, 15)
 	if err != nil {
@@ -379,9 +383,10 @@ func (s *Server) SetCostAnomalyDetector(d *costanomaly.Detector) { s.costAnomaly
 // (the dashboard's default view). These are statistical flags, not
 // judgments. Read-only + cached in the detector.
 func (s *Server) handleCostAnomalies(w http.ResponseWriter, r *http.Request) {
-	wsID := r.URL.Query().Get("workspace_id")
-	if wsID == "" {
-		wsID = "default"
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: no workspace identity"})
+		return
 	}
 	scope := r.URL.Query().Get("scope")
 	if scope == "" {
@@ -407,9 +412,10 @@ func (s *Server) SetROIReporter(r *roi.Reporter) { s.roiReporter = r }
 // handleROISummary returns the compact executive ROI summary for the
 // dashboard. Read-only + cached in the reporter.
 func (s *Server) handleROISummary(w http.ResponseWriter, r *http.Request) {
-	wsID := r.URL.Query().Get("workspace_id")
-	if wsID == "" {
-		wsID = "default"
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: no workspace identity"})
+		return
 	}
 	if s.roiReporter == nil {
 		writeJSON(w, http.StatusOK, roi.ReportSummary{WorkspaceID: wsID, InsufficientData: true})
@@ -449,9 +455,10 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	wsID := q.Get("workspace_id")
-	if wsID == "" {
-		wsID = "default"
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: no workspace identity"})
+		return
 	}
 	anoms, err := s.anomalyDetector.Detect(r.Context(), wsID, q.Get("team"), q.Get("feature"), q.Get("provider"))
 	if err != nil {
@@ -500,7 +507,11 @@ func (s *Server) handleSpendSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database not configured")
 		return
 	}
-	wsID := queryDefault(r, "workspace_id", "default")
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "forbidden: no workspace identity")
+		return
+	}
 	days := queryInt(r, "days", 30)
 
 	var (
@@ -552,7 +563,11 @@ ORDER BY cost_usd DESC`
 			writeError(w, http.StatusInternalServerError, "database not configured")
 			return
 		}
-		wsID := queryDefault(r, "workspace_id", "default")
+		wsID, ok := s.effectiveWorkspaceID(r)
+		if !ok {
+			writeError(w, http.StatusForbidden, "forbidden: no workspace identity")
+			return
+		}
 		days := queryInt(r, "days", 30)
 
 		rows, err := s.pool.Query(r.Context(), q, wsID, days)
@@ -606,7 +621,11 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database not configured")
 		return
 	}
-	wsID := queryDefault(r, "workspace_id", "default")
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "forbidden: no workspace identity")
+		return
+	}
 
 	var total, cached int64
 	var uncachedCost float64
@@ -883,6 +902,25 @@ func queryDefault(r *http.Request, key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// effectiveWorkspaceID is the /v1/api/* dashboard chokepoint for the #146 Phase-2
+// cross-tenant read fix: it resolves which workspace a read may scope to from the
+// AUTHENTICATED credential, never the caller-supplied ?workspace_id=. A NON-ADMIN
+// is forced to its OWN workspace — the query param is ignored AND the legacy
+// "default" fallback never applies, so a tenant can read neither another tenant's
+// data nor the shared "default" tenant's. The global ADMIN honors ?workspace_id=
+// (empty → the historical "default", preserving the ops dashboard). ok is false
+// only when a non-admin has no resolvable workspace; the handler 403s.
+func (s *Server) effectiveWorkspaceID(r *http.Request) (string, bool) {
+	ws, isAdmin := auth.WorkspaceIdentity(r.Context())
+	if isAdmin {
+		return queryDefault(r, "workspace_id", "default"), true
+	}
+	if ws == "" {
+		return "", false
+	}
+	return ws, true
 }
 
 func queryInt(r *http.Request, key string, fallback int) int {
