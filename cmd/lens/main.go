@@ -1130,6 +1130,14 @@ func run() error {
 		}
 		authed.Post("/v1/admin/distill/preview", distillPreview.ServeHTTP)
 
+		// ADMIN-ONLY distill attribution read (S1 read-surface commitment).
+		// requireAdmin-gated: content_hash + counterparty workspace ids are
+		// exposed here and must never be tenant-reachable. Default returns raw
+		// rows; ?view=pairs returns the condition-(b) materiality aggregate. The
+		// Reader is Query-only (no write capability — see distillattrib.Reader).
+		authed.Get("/v1/admin/distill/attribution",
+			requireAdmin(authManager, http.HandlerFunc(newDistillAttributionAdminHandler(distillattrib.NewReader(pool)))))
+
 		// Stage-3 pool-mint adjudication gate — the Revoker's FIRST and ONLY
 		// production caller. Admin-gated (mirrors ApproveRate); the operator
 		// passes an explicitly-chosen subset of held request_ids to revoke. The
