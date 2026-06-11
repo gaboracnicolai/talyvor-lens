@@ -30,13 +30,17 @@ optin() { # <workspace_id>  (admin-driven)
   echo "  opted-in: $1"
 }
 
-register() { # <workspace_id>  (needed before SetLoggingPolicy)
+register() { # <workspace_id>  (needed before SetLoggingPolicy / SetCachePoolable)
   # A minimal {id,name} body is sufficient since #128/#138 — the server defaults
   # allowed_models/allowed_providers to empty (allow-all) and active to true.
-  curl -fsS -X POST "$BASE/v1/workspaces" \
+  # Tolerant of re-runs (an already-registered workspace is fine).
+  if curl -fsS -X POST "$BASE/v1/workspaces" \
     -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
-    -d "{\"id\":\"$1\",\"name\":\"$1\"}" >/dev/null
-  echo "  registered: $1"
+    -d "{\"id\":\"$1\",\"name\":\"$1\"}" >/dev/null 2>&1; then
+    echo "  registered: $1"
+  else
+    echo "  registered: $1 (already existed / ok)"
+  fi
 }
 
 setlogging() { # <workspace_id> <policy>
@@ -44,6 +48,32 @@ setlogging() { # <workspace_id> <policy>
     -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
     -d "{\"logging_policy\":\"$2\"}" >/dev/null
   echo "  logging=$2: $1"
+}
+
+# --- PR 2a helpers (semantic-isolation + JWT scenarios) ---
+
+cachepoolable() { # <workspace_id>  (admin-driven; opt into the pooled cache, scenario m)
+  curl -fsS -X PUT "$BASE/v1/workspaces/$1/cache-poolable" \
+    -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+    -d '{"cache_poolable":true}' >/dev/null
+  echo "  cache_poolable=true: $1"
+}
+
+jwtmint() { # <workspace_id> -> mints a workspace JWT via the admin /v1/auth/token
+  # route; appends "<ws>-jwt\t<jwt>" to keys.tsv for `traffic.sh send-jwt`.
+  # Needs LENS_JWT_PRIVATE_KEY in the lens env; if unset the route 503s and we
+  # SKIP (scenario r is then untested, exactly like the legacy (h) gap).
+  local ws="$1" tok
+  tok=$(curl -fsS -X POST "$BASE/v1/auth/token" \
+    -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+    -d "{\"workspace_id\":\"$ws\",\"scopes\":[\"proxy\"]}" 2>/dev/null \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' 2>/dev/null) || true
+  if [ -n "${tok:-}" ]; then
+    printf '%s\t%s\n' "${ws}-jwt" "$tok" >> "$OUT"
+    echo "  jwt minted: $ws (-> ${ws}-jwt in keys.tsv)"
+  else
+    echo "  jwt SKIPPED for $ws (LENS_JWT_PRIVATE_KEY unset?) — scenario r untested"
+  fi
 }
 
 echo "== scenario (a) base =="
@@ -66,6 +96,26 @@ mintkey ws-none       >/dev/null
 register ws-none
 setlogging ws-none none
 optin ws-none
+
+# --- PR 2a: semantic-isolation + authz + JWT workspaces ---
+# These need NO pattern opt-in (they exercise the cache/authz/jwt paths, not earn).
+
+echo "== scenarios (k)(l) private semantic isolation — NO cache_poolable (private rows only) =="
+mintkey ws-sem-a      >/dev/null   # owner: caches a private TLVCOLLIDE row
+mintkey ws-sem-b      >/dev/null   # requester: must MISS ws-sem-a's row (#142 filter)
+
+echo "== scenario (m) pooled control — BOTH opt into cache_poolable =="
+# cache-poolable consent lives in the workspace manager, so register first
+# (same prerequisite as setlogging).
+mintkey ws-pool-a     >/dev/null; register ws-pool-a; cachepoolable ws-pool-a  # contributes a poolable row
+mintkey ws-pool-b     >/dev/null; register ws-pool-b; cachepoolable ws-pool-b  # may receive it cross-tenant
+
+echo "== scenario (q) authz smoke — two unrelated tenants =="
+mintkey ws-authz-a    >/dev/null   # will try to read ws-authz-b's object (-> 404)
+mintkey ws-authz-b    >/dev/null   # owns the object
+
+echo "== scenario (r) JWT fallback (h-closure) — mint a workspace JWT =="
+jwtmint ws-jwt                     # writes ws-jwt-jwt -> keys.tsv (skips if no signing key)
 
 echo
 echo "keys -> $OUT"

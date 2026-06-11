@@ -36,6 +36,28 @@ services:
       # config.Load() presence-checks these; the trial routes only to vLLM/mock.
       - LENS_OPENAI_API_KEY=dummy-openai-unused
       - LENS_ANTHROPIC_API_KEY=dummy-anthropic-unused
+      # PR 2a — semantic-isolation scenarios (k/l/m). Points the embedder at the
+      # mock's /v1/embeddings (PR 1 #164 made this configurable). NOTE: this
+      # ACTIVATES the semantic cache (with the dummy OpenAI key it was inert —
+      # every embed 401'd). Pattern scenarios a/b/d/e/f/g use distinct prompts
+      # -> non-marker vectors -> semantic MISS -> unaffected; ONLY scenario (c)
+      # (a byte-identical replay) now also semantic-caches the first send, so
+      # (c) must clear prompt_embeddings alongside FLUSHALL — see README (c).
+      # FULL endpoint path (the embedder uses this verbatim, like the OpenAI
+      # const https://api.openai.com/v1/embeddings — it does NOT append a path).
+      - LENS_EMBEDDING_BASE_URL=http://mockvllm:8000/v1/embeddings
+      # Pooled-cache SERVE gate for scenario (m) (the pooled control). The pooled
+      # path requires this global switch AND both workspaces' cache_poolable
+      # consent (MaybeAllowPooledHit). Neutral to pattern scenarios: none of the
+      # pattern workspaces opt into cache_poolable, so DecidePoolableOnWrite stays
+      # false for them (no pooled rows, no pooled serves).
+      - LENS_CACHE_POOLABLE_ENABLED=true
+      # JWT fallback scenario (r) — closes the long-standing (h) gap. TRIAL-ONLY
+      # EC P-256 key, supplied from the shell env (NOT committed; see README
+      # setup: `export LENS_JWT_PRIVATE_KEY="$(openssl ecparam -genkey -name
+      # prime256v1 -noout)"`). Empty -> JWT minting 503s and (r) is skipped,
+      # exactly as (h) behaved before.
+      - LENS_JWT_PRIVATE_KEY=${LENS_JWT_PRIVATE_KEY:-}
       - LENS_LOG_LEVEL=debug
     depends_on:
       mockvllm:

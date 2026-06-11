@@ -38,9 +38,29 @@ admin_send() { # <model> <prompt> — global admin key, WorkspaceID "" (must NOT
     -d "$(body_for "$model" "$prompt")"
 }
 
+send_jwt() { # <jwt-label> <model> <prompt> — auth via a minted JWT (scenario r)
+  local label="$1" model="$2" prompt="$3" tok
+  tok=$(key_for "$label")
+  [ -n "$tok" ] || { echo "no jwt for $label (seed.sh needs LENS_JWT_PRIVATE_KEY)" >&2; return 2; }
+  curl -sS -o /tmp/lens_resp.json -w '%{http_code} %{time_total}s\n' \
+    -X POST "$BASE/v1/proxy/vllm/v1/chat/completions" \
+    -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+    -d "$(body_for "$model" "$prompt")"
+}
+
+get() { # <ws> <path> — GET <path> as <ws>'s key; prints just the status (authz scenario q)
+  local ws="$1" path="$2" k
+  k=$(key_for "$ws")
+  [ -n "$k" ] || { echo "no key for $ws" >&2; return 2; }
+  curl -sS -o /tmp/lens_resp.json -w '%{http_code}\n' \
+    "$BASE$path" -H "Authorization: Bearer $k"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   send)       send "$@" ;;
   admin-send) admin_send "$@" ;;
-  *) echo "usage: traffic.sh {send <ws> <model> <prompt> | admin-send <model> <prompt>}" >&2; exit 1 ;;
+  send-jwt)   send_jwt "$@" ;;
+  get)        get "$@" ;;
+  *) echo "usage: traffic.sh {send <ws> <model> <prompt> | admin-send <model> <prompt> | send-jwt <jwt-label> <model> <prompt> | get <ws> <path>}" >&2; exit 1 ;;
 esac
