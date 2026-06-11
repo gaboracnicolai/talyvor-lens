@@ -2,8 +2,12 @@ package dashboard
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
 )
+
+// econBlockRE matches an <!--{{ECON}}-->…<!--{{/ECON}}--> economy-only fragment.
+var econBlockRE = regexp.MustCompile(`(?s)<!--\{\{ECON\}\}-->.*?<!--\{\{/ECON\}\}-->`)
 
 // Handler serves the single-page Talyvor Lens dashboard. The HTML is
 // rendered once at construction time with the version baked in so each
@@ -14,8 +18,18 @@ type Handler struct {
 	tokenPages *tokenPages
 }
 
-func New(version string) *Handler {
+// New renders the dashboard. When economyEnabled is false (U3 master switch off),
+// economy-only fragments wrapped in <!--{{ECON}}-->…<!--{{/ECON}}--> are stripped
+// (the economy nav links); the data-driven economy panels self-hide anyway, since
+// their /v1/api/* and /v1/economy/* fetches are unregistered → 404. When on, only
+// the marker comments are removed and the content stays.
+func New(version string, economyEnabled bool) *Handler {
 	rendered := strings.ReplaceAll(dashboardHTML, "{{VERSION}}", version)
+	if economyEnabled {
+		rendered = strings.NewReplacer("<!--{{ECON}}-->", "", "<!--{{/ECON}}-->", "").Replace(rendered)
+	} else {
+		rendered = econBlockRE.ReplaceAllString(rendered, "")
+	}
 	return &Handler{
 		version: version,
 		html:    []byte(rendered),

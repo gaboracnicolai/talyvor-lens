@@ -313,6 +313,14 @@ type Config struct {
 	// LENS_ROUTING_INTELLIGENCE_ENABLED=true.
 	RoutingIntelligenceEnabled bool
 
+	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
+	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
+	// force-OFFs every economy state-creation gate below (regardless of its own
+	// env value), and main.go does not register the economy route surface — the
+	// deployment runs as pure fiat SaaS. NOT economy (untouched by this switch):
+	// LENS_HA_ENABLED, LENS_GUARDRAILS_ENABLED.
+	EconomyEnabled bool
+
 	// ROIIncludeEngineerBreakdown gates the per-engineer (author) cost
 	// section of the executive ROI report (Upgrade 24). OFF by default:
 	// attributing cost to named people is SENSITIVE and easily misread as a
@@ -884,6 +892,31 @@ func Load() (*Config, error) {
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("%w: %v", ErrMissingEnv, missing)
+	}
+
+	// U3 master economy kill-switch. Default TRUE (explicit opt-out, mirroring the
+	// TrustfulCompute default-true-then-override pattern above). When false, force
+	// OFF every economy state-creation gate — regardless of its individual env —
+	// so no mint/earn/pool/LXC path can fire. The route SURFACE is unregistered
+	// separately in main.go (registerEconomyRoutes). Adding a NEW economy gate?
+	// add it to this block AND to the manifest in cmd/lens/economy_killswitch_test.go.
+	c.EconomyEnabled = true
+	if os.Getenv("LENS_ECONOMY_ENABLED") != "" {
+		c.EconomyEnabled = parseBoolEnv("LENS_ECONOMY_ENABLED")
+	}
+	if !c.EconomyEnabled {
+		c.PatternMiningEnabled = false
+		c.PatternCaptureEnabled = false
+		c.PatternEarningEnabled = false
+		c.PoolRoyaltyMintingEnabled = false
+		c.POVIMintingEnabled = false
+		c.TrustfulComputeMintEnabled = false // NB: this one defaults TRUE — must be forced off
+		c.CacheSharingEnabled = false
+		c.CachePoolableEnabled = false
+		c.DistillPoolableEnabled = false
+		c.LXCGatingEnabled = false
+		c.LXCShadowSpendEnabled = false
+		c.RoutingIntelligenceEnabled = false
 	}
 
 	return c, nil

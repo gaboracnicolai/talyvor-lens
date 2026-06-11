@@ -12,7 +12,7 @@ import (
 // response recorder.
 func dispatchTokenPage(t *testing.T, path string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := New("99.0.0")
+	h := New("99.0.0", true)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	switch path {
@@ -151,7 +151,7 @@ func TestServeEconomy_ContainsConversionSection(t *testing.T) {
 }
 
 func TestMainDashboard_ContainsEconomyWidget(t *testing.T) {
-	h := New("99.0.0")
+	h := New("99.0.0", true)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
 	if rec.Code != http.StatusOK {
@@ -173,7 +173,7 @@ func TestMainDashboard_ContainsEconomyWidget(t *testing.T) {
 }
 
 func TestTokenPages_ShareVersion(t *testing.T) {
-	h := New("0.42.0")
+	h := New("0.42.0", true)
 	rec := httptest.NewRecorder()
 	h.ServeTokens(rec, httptest.NewRequest(http.MethodGet, "/dashboard/tokens", nil))
 	if !strings.Contains(rec.Body.String(), "0.42.0") {
