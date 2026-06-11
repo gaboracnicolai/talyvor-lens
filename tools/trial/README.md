@@ -65,9 +65,11 @@ rarity tuple `(model, provider, input_bucket, latency_bucket)` doesn't bleed acr
 - **(c) claim idempotency** — replay byte-identical work → `ON CONFLICT (request_id, workspace_id) DO
   NOTHING` → exactly one credit ever. (Redis exact-cache short-circuits before the seam; `FLUSHALL` between
   sends to exercise the DB-level claim. **NOTE since PR 2a:** the overlay sets `LENS_EMBEDDING_BASE_URL`,
-  which makes the *semantic* cache live too — so the replay now also semantic-hits unless you ALSO clear it:
-  `… psql -c 'TRUNCATE prompt_embeddings;'` alongside `FLUSHALL`. Only this scenario is affected; a/b/d–j use
-  distinct prompts → semantic miss.)
+  which makes the *semantic* cache (Postgres `prompt_embeddings`) live too — so the replay now ALSO
+  semantic-hits. Clear BOTH stores between sends — they are SEPARATE: `redis-cli FLUSHALL` clears the Redis
+  exact cache, and `psql -c 'TRUNCATE prompt_embeddings;'` clears the Postgres semantic cache (`FLUSHALL`
+  does NOT touch `prompt_embeddings`). Only this scenario is affected; a/b/d–j use distinct prompts →
+  semantic miss.)
 - **(d) cap** — cap=3/2m, burst 5 distinct-prompt requests → exactly **3** earn rows == 3 claims == 3 ledger
   rows (the no-orphan invariant), balance 0.003; wait out the window → a 6th re-earns (0.004).
 - **(e) exclusions** — non-opted-in → **zero** rows (capture is consent-gated); LoggingNone → nothing incl.
@@ -127,9 +129,15 @@ each from a clean cache: `docker compose exec -T redis redis-cli FLUSHALL && PSQ
   bash tools/trial/traffic.sh get ws-authz-a /v1/workspaces/ws-authz-a/tokens/history   # own
   bash tools/trial/traffic.sh get ws-authz-a /v1/admin/distill/attribution              # tenant on admin
   ```
-  ASSERT cross-tenant → **403** (the `{wsID}`-param routes are `effectiveWorkspaceID`-gated → Forbidden, the
-  #146 convention; object-id routes return 404), own → **200**, tenant-on-admin → **401**. The 401 covers
-  the (p) admin-route-gate half; the admin key returns 200 on that route.
+  ASSERT cross-tenant → **403**, own → **200**, tenant-on-admin → **401** (admin key → **200**).
+  `GET /v1/workspaces/{wsID}/tokens/history` carries a `{wsID}` path param, so it is gated by
+  `workspaceIsolationMiddleware`, which returns **403** "forbidden: credential not authorized for this
+  workspace" for any unauthorized workspace (pinned by `cmd/lens/workspace_authz_test.go`). This is the
+  workspace-isolation convention and is DELIBERATELY DISTINCT from the object-id IDOR convention: reads keyed
+  by an opaque object id (e.g. `GET /v1/sessions/{sessionID}`) return **404**, identical to a genuine
+  not-found, so they leak no existence oracle (#152, pinned by `cmd/lens/authz_routes_phase3_test.go`). A
+  workspace boundary is the tenant's own identity, not a hidden object — so 403 (not 404) is correct here.
+  The 401 covers (p)'s admin-route-gate half.
 
 - **(r) JWT fallback (closes the legacy (h) gap).** `seed.sh` mints `ws-jwt-jwt` via `/v1/auth/token` when
   `LENS_JWT_PRIVATE_KEY` is set.
