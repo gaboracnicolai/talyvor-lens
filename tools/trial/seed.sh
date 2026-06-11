@@ -76,6 +76,22 @@ jwtmint() { # <workspace_id> -> mints a workspace JWT via the admin /v1/auth/tok
   fi
 }
 
+# --- PR 2b helpers (DISTILL economy scenarios n/o/p) ---
+
+distillpolicy() { # <workspace_id> — DistillPolicy=always so any document distills (no header)
+  curl -fsS -X PUT "$BASE/v1/workspaces/$1/distill" \
+    -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+    -d '{"distill_policy":"always"}' >/dev/null
+  echo "  distill_policy=always: $1"
+}
+
+distillpoolable() { # <workspace_id> <true|false> — cross-tenant distill-share consent
+  curl -fsS -X PUT "$BASE/v1/workspaces/$1/distill-poolable" \
+    -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+    -d "{\"distill_poolable\":${2:-true}}" >/dev/null
+  echo "  distill_poolable=${2:-true}: $1"
+}
+
 echo "== scenario (a) base =="
 mintkey ws-base       >/dev/null; optin ws-base
 
@@ -116,6 +132,15 @@ mintkey ws-authz-b    >/dev/null   # owns the object
 
 echo "== scenario (r) JWT fallback (h-closure) — mint a workspace JWT =="
 jwtmint ws-jwt                     # writes ws-jwt-jwt -> keys.tsv (skips if no signing key)
+
+# --- PR 2b: DISTILL economy workspaces (n/o/p). Needs the trial-distill overlay
+# (LENS_DISTILL_POOLABLE_ENABLED). distill_policy=always so docs distill; the
+# (n) matrix toggles distill_poolable per leg. ws-distill-c is the owner-off leg.
+echo "== scenarios (n)(o)(p) distill economy — a=owner, b=requester (both consented) =="
+mintkey ws-distill-a  >/dev/null; register ws-distill-a; distillpolicy ws-distill-a; distillpoolable ws-distill-a true
+mintkey ws-distill-b  >/dev/null; register ws-distill-b; distillpolicy ws-distill-b; distillpoolable ws-distill-b true
+echo "== (n) owner-off leg — ws-distill-c distills but does NOT share (distill_poolable=false) =="
+mintkey ws-distill-c  >/dev/null; register ws-distill-c; distillpolicy ws-distill-c; distillpoolable ws-distill-c false
 
 echo
 echo "keys -> $OUT"

@@ -7,8 +7,16 @@ resulting DB state. Two scenario families:
   #125–#129 and #133.
 - **Semantic-isolation + authz + JWT (k–r, PR 2a)** — demonstrates the #142 private-cache `workspace_id`
   boundary end-to-end (the proof #159 could not run until #164 made the embedder endpoint configurable),
-  plus an authz smoke test and the JWT-fallback closure. DISTILL economy scenarios (n/o/p) are deferred —
-  see #166 (they need a distill-worker harness, not chat traffic).
+  plus an authz smoke test and the JWT-fallback closure.
+- **DISTILL economy (n–p, PR 2b)** — the cross-tenant pooled-distill serve through the distill-worker
+  subprocess: the three-switch consent matrix, the `distill_serve_attribution` counter, and the admin read
+  (#166). Needs the `docker-compose.trial-distill.yaml` overlay + a document fixture.
+
+**Neutrality of the shared scripts:** `seed.sh`/`traffic.sh` only gained ADDITIVE helpers + workspaces
+(`distillpolicy`/`distillpoolable`/`send-doc`/`clear-requester-caches`; `ws-distill-*`). The (a)–(m)
+provisioning, `send`/`send-jwt`/`get`, and the pattern/semantic workspaces are byte-unchanged, and the
+distill flag lives in a SEPARATE overlay (absent from the (a)–(m) runs) — so existing scenarios are
+unaffected. The distiller is inert for them regardless: a–m never set `distill_policy`/`distill_poolable`.
 
 > **Discipline (read first):** this is a SYNTHETIC trial with valueless tokens and throwaway workspaces. It
 > is evidence-gathering — it **satisfies NOTHING on the flip-on checklist**, which gates real-customer flips
@@ -148,9 +156,52 @@ each from a clean cache: `docker compose exec -T redis redis-cli FLUSHALL && PSQ
   ASSERT the send → **200** and a `token_events` row under `ws-jwt` — the JWT authenticated through the
   `AuthMiddleware` fallback and resolved to its workspace. (A garbage bearer → 401: auth is enforced.)
 
-- **(n)(o)(p-data) DEFERRED → #166.** The DISTILL economy scenarios (three-switch matrix, attribution
-  counter, admin-sees-pair) need a distill-worker harness (document-bearing requests through the worker
-  subprocess), not chat traffic. The attribution counter is already unit-pinned by #148; #166 closes the
-  end-to-end gap.
+## DISTILL economy scenarios (n)(o)(p) — needs the trial-distill overlay (#166)
+
+Bring the stack up with **both** the PR 2a overlay and the distill overlay:
+```
+docker compose -f docker-compose.yaml -f docker-compose.trial.yaml -f docker-compose.trial-distill.yaml up -d
+```
+`seed.sh` provisions `ws-distill-a` (owner) + `ws-distill-b` (requester) — both `distill_policy=always` and
+`distill_poolable=true` — plus `ws-distill-c` (`distill_poolable=false`). `FIX=tools/trial/fixtures/distill-fixture.pdf`
+is a fixed 612-byte text PDF; its sha256 **`ce2075ac…`** IS the `content_hash` the assertions key on (do not
+regenerate — see the builder's warning). `reset` = `PSQL -c 'TRUNCATE distill_serve_attribution; TRUNCATE
+prompt_embeddings;' && redis-cli FLUSHALL`. `PSQL` = `docker compose exec -T postgres psql -U lens -d talyvor_lens`.
+
+- **(n) three-switch matrix.** The cross-tenant pooled distill serve fires only when the global switch AND
+  the requester AND the owner are all opted in (`MaybeAllowPooledHit`). Four legs, `reset` before each:
+  - **both-on** → serve + attribution row:
+    ```
+    bash tools/trial/traffic.sh send-doc ws-distill-a $FIX   # owner writes the pooled artifact
+    bash tools/trial/traffic.sh send-doc ws-distill-b $FIX   # requester serves it cross-tenant
+    PSQL -c "SELECT owner_workspace_id, requester_workspace_id, left(content_hash,12), serve_count FROM distill_serve_attribution;"
+    #  ws-distill-a | ws-distill-b | ce2075ac9aba | 1
+    ```
+  - **requester-off** (`PUT …/distill-poolable {"distill_poolable":false}` on b) → **0 rows** (requester not opted in).
+  - **owner-off** (false on a, true on b) → **0 rows** (the owner wrote no pooled entry; the requester
+    re-converts and may write its OWN pooled `:owner` entry, but no *cross-tenant* serve fires).
+  - **global-off** (recreate lens with base + `trial.yaml` only, WITHOUT `trial-distill.yaml`) → **0 rows**,
+    and **no** `lens:distill:*:owner` key at all (`DecidePoolableOnWrite` is false when the global switch is off).
+
+- **(o) attribution counter + idempotent bump.** From the both-on state (`serve_count=1`):
+  ```
+  bash tools/trial/traffic.sh clear-requester-caches ws-distill-b   # exact + private-distill + semantic; KEEPS the pooled entry
+  bash tools/trial/traffic.sh send-doc ws-distill-b $FIX
+  PSQL -c "SELECT owner_workspace_id, requester_workspace_id, serve_count FROM distill_serve_attribution;"
+  #  ws-distill-a | ws-distill-b | 2      (SAME row, bumped)
+  ```
+  **PROMINENT:** without `clear-requester-caches`, a byte-identical re-serve short-circuits in THREE caches —
+  the Redis exact cache, the per-requester distill-conversion entry, and (because the PR 2a overlay sets
+  `LENS_EMBEDDING_BASE_URL`) the Postgres semantic cache — BEFORE the pooled distill read, so `serve_count`
+  does NOT move. That is **correct production behavior** (identical re-requests are cached), NOT a bug; the
+  triple clear is what makes the bump observable. The helper preserves the pooled entry and its `:owner` key.
+
+- **(p) admin-read data half.** With the admin key:
+  ```
+  curl -fsS "$BASE/v1/admin/distill/attribution?view=pairs" -H "Authorization: Bearer $LENS_API_KEY"
+  #  [{"owner_workspace_id":"ws-distill-a","requester_workspace_id":"ws-distill-b","serves":2,"last_served_at":…}]
+  ```
+  shows the (owner, requester) pair (and raw rows without `?view=pairs`). The tenant→**401** gate half is
+  scenario (q) (a tenant key on this same admin route) — together they are the full admin-read coverage.
 
 Do **not** track `keys.tsv`, `.env`, or any run state — see `.gitignore`.
