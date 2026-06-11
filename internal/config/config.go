@@ -435,6 +435,16 @@ type Config struct {
 	// on connection establishment. Env: LENS_DB_MIN_CONNS. Default 2.
 	DBMinConns int32
 
+	// ObsWriteMaxConcurrent caps how many post-serve observational writes
+	// (attribution records + routing-pattern capture) may run at once.
+	// Past the cap, writes are DROPPED (they are observational by contract)
+	// rather than queued — unbounded, they convert overload into
+	// pool-connection churn that can exhaust PgBouncer's max_client_conn
+	// (#122; observed empirically 2026-06-11). Env:
+	// LENS_OBS_WRITE_MAX_CONCURRENT. Default 32 (≈ a third of the
+	// PgBouncer-mode pool). 0 disables the bound entirely.
+	ObsWriteMaxConcurrent int
+
 	// High Availability (Upgrade 7). HA is strictly opt-in via
 	// LENS_HA_ENABLED; when false (the default) the process runs as a
 	// single instance exactly as it did before HA existed. Enabling HA
@@ -532,6 +542,8 @@ func Load() (*Config, error) {
 		DBPgBouncer: parseBoolEnv("LENS_DB_PGBOUNCER"),
 		DBMaxConns:  25,
 		DBMinConns:  2,
+
+		ObsWriteMaxConcurrent: 32,
 	}
 
 	// Pool size overrides.
@@ -548,6 +560,13 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_DB_MIN_CONNS (must be ≥ 0): %s", v)
 		}
 		c.DBMinConns = int32(n)
+	}
+	if v := os.Getenv("LENS_OBS_WRITE_MAX_CONCURRENT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_OBS_WRITE_MAX_CONCURRENT (must be ≥ 0; 0 disables the bound): %s", v)
+		}
+		c.ObsWriteMaxConcurrent = n
 	}
 
 	if err := ValidateDBSSLMode(c.DBSSLMode); err != nil {

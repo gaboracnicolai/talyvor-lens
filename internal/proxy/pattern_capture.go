@@ -3,7 +3,9 @@ package proxy
 import (
 	"context"
 	"log/slog"
+	"time"
 
+	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/mining"
 )
 
@@ -41,6 +43,21 @@ func (p *Proxy) SetPatternCapture(sink patternCaptureSink, enabled func() bool) 
 	p.patternCaptureEnabled = enabled
 }
 
+// SetObservationalLimiter installs the shared bound on post-serve
+// observational writes (a nil limiter admits everything). Capture runs
+// inline post-flush, so without a bound its concurrency equals total
+// in-flight requests — under overload that converts offered load directly
+// into pool-connection churn (#122; 2026-06-11 load trial).
+func (p *Proxy) SetObservationalLimiter(l *backpressure.Limiter) {
+	p.obsLimiter = l
+}
+
+// captureWriteTimeout bounds the detached observation write. Mirrors
+// attribution.RecordAsync's 5s budget. Without a deadline a pool-exhausted
+// Acquire blocks the (post-flush) serve goroutine indefinitely — the exact
+// #122 complaint.
+const captureWriteTimeout = 5 * time.Second
+
 // capturePattern records a routing observation for a just-served request. VOID
 // by design — it cannot affect the response. Called POST-SERVE on a detached
 // context (so client cancellation can't drop the write, and the write can't
@@ -60,10 +77,24 @@ func (p *Proxy) capturePattern(ctx context.Context, workspaceID, feature, model,
 	if !scored {
 		return // no real quality score ⇒ don't poison the Advisor with quality=0
 	}
+	// Shed under overload: capture is observational by contract, so when the
+	// writer bound is saturated the correct backpressure is to skip the row,
+	// not to queue another writer against an already-drowning pool.
+	if !p.obsLimiter.TryAcquire() {
+		if p.obsLimiter.LogDrop() {
+			slog.Warn("pattern capture: observation dropped (writer bound reached; observational, serve unaffected)",
+				slog.Int64("dropped_total", p.obsLimiter.Dropped()))
+		}
+		return
+	}
+	defer p.obsLimiter.Release()
 	pat := mining.ExtractPattern(feature, model, provider, inputTokens, outputTokens, quality, latencyMs, cacheHit)
 	// Detached: post-serve, must outlive client cancellation and cannot affect
 	// the served response. The opt-in WRITE gate lives in the sink's SQL.
-	if err := p.patternSink.RecordPatternObservation(context.WithoutCancel(ctx), workspaceID, pat); err != nil {
+	// Deadline-bounded (#122): detachment must not mean "can hang forever".
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), captureWriteTimeout)
+	defer cancel()
+	if err := p.patternSink.RecordPatternObservation(wctx, workspaceID, pat); err != nil {
 		slog.Warn("pattern capture: observation write failed (observational; serve unaffected)",
 			slog.String("workspace", workspaceID),
 			slog.String("err", err.Error()),

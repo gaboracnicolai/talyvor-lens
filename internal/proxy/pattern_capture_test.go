@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/mining"
 )
 
@@ -91,4 +92,67 @@ func TestCapturePattern_NilSafe(t *testing.T) {
 	if len(s.pats) != 0 {
 		t.Fatalf("nil enabled func must be inert; got %d", len(s.pats))
 	}
+}
+
+// ─── observational writer bound (#122) ───────────
+
+// A saturated limiter SHEDS the capture — no sink call — and the proxy
+// recovers admission once the slot frees.
+func TestCapturePattern_LimiterSaturated_Sheds(t *testing.T) {
+	s := &fakeCaptureSink{}
+	p := captureProxy(s, true)
+	l := backpressure.New(1)
+	p.SetObservationalLimiter(l)
+
+	if !l.TryAcquire() { // occupy the only slot, as an in-flight writer would
+		t.Fatal("setup: could not occupy the slot")
+	}
+	p.capturePattern(context.Background(), "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+	if len(s.pats) != 0 {
+		t.Fatalf("saturated limiter must shed the capture; sink calls=%d", len(s.pats))
+	}
+	if l.Dropped() != 1 {
+		t.Fatalf("dropped = %d, want 1", l.Dropped())
+	}
+
+	l.Release()
+	p.capturePattern(context.Background(), "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+	if len(s.pats) != 1 {
+		t.Fatalf("freed limiter must admit again; sink calls=%d", len(s.pats))
+	}
+}
+
+// A nil limiter (bound disabled / not wired) changes nothing: capture fires.
+func TestCapturePattern_NilLimiter_Unbounded(t *testing.T) {
+	s := &fakeCaptureSink{}
+	p := captureProxy(s, true) // SetObservationalLimiter never called
+	p.capturePattern(context.Background(), "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+	if len(s.pats) != 1 {
+		t.Fatalf("nil limiter must not gate capture; sink calls=%d", len(s.pats))
+	}
+}
+
+// The detached write context must carry a deadline (#122: detachment must not
+// mean "can hang forever" against an exhausted pool).
+func TestCapturePattern_WriteContextHasDeadline(t *testing.T) {
+	got := make(chan bool, 1)
+	s := &deadlineProbeSink{probe: got}
+	p := captureProxy(s, true)
+	p.capturePattern(context.Background(), "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+	select {
+	case has := <-got:
+		if !has {
+			t.Fatal("observation write context must have a deadline")
+		}
+	default:
+		t.Fatal("sink was not called")
+	}
+}
+
+type deadlineProbeSink struct{ probe chan bool }
+
+func (d *deadlineProbeSink) RecordPatternObservation(ctx context.Context, _ string, _ mining.RoutingPattern) error {
+	_, has := ctx.Deadline()
+	d.probe <- has
+	return nil
 }

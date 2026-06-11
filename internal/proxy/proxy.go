@@ -25,6 +25,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/audit"
+	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
@@ -126,6 +127,12 @@ type Proxy struct {
 	// producer for the routing Advisor. See pattern_capture.go.
 	patternSink           patternCaptureSink
 	patternCaptureEnabled func() bool
+
+	// obsLimiter bounds post-serve observational writes (pattern capture).
+	// nil = no bound. main wires the same limiter into attribution's
+	// RecordAsync so the total observational claim on the DB pool stays
+	// bounded (#122). See pattern_capture.go / internal/backpressure.
+	obsLimiter *backpressure.Limiter
 
 	// Distill attribution (S1) — optional, nil-safe post-serve, MINT-FREE
 	// record of a consented cross-tenant pooled-distill serve. See

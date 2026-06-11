@@ -31,6 +31,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/backpressure"
 )
 
 // GitContext is the on-the-wire git-context bundle. All fields
@@ -61,10 +63,10 @@ type AttributionContext struct {
 // table and to limit the blast radius of a client sending garbage headers.
 // Limits are generous enough that no legitimate tool-generated value is cut.
 const (
-	maxIDLen     = 128  // workspace IDs, issue IDs, user IDs, session IDs
-	maxNameLen   = 256  // branch names, repo names, author names, feature names
-	maxSHALen    = 64   // git commit SHA (40 hex for SHA-1, 64 for SHA-256)
-	maxPRNumLen  = 16   // PR number strings ("12345")
+	maxIDLen    = 128 // workspace IDs, issue IDs, user IDs, session IDs
+	maxNameLen  = 256 // branch names, repo names, author names, feature names
+	maxSHALen   = 64  // git commit SHA (40 hex for SHA-1, 64 for SHA-256)
+	maxPRNumLen = 16  // PR number strings ("12345")
 )
 
 // truncate returns s trimmed to at most maxLen runes. Operates on runes so
@@ -123,6 +125,13 @@ type pgxDB interface {
 // Store without standing up Postgres.
 type Store struct {
 	pool pgxDB
+
+	// writeLimiter bounds concurrent RecordAsync goroutines. nil = no bound
+	// (the zero value preserves pre-limiter behavior; main wires the shared
+	// observational limiter). Without it, every request spawns a writer; under
+	// overload those writers time out, poison their pool connections, and the
+	// resulting reconnect churn can exhaust PgBouncer's max_client_conn (#122).
+	writeLimiter *backpressure.Limiter
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
@@ -136,6 +145,14 @@ func NewStore(pool *pgxpool.Pool) *Store {
 
 func newStore(pool pgxDB) *Store {
 	return &Store{pool: pool}
+}
+
+// SetWriteLimiter installs the shared observational-write bound. Additive
+// and optional: an unset (nil) limiter admits everything.
+func (s *Store) SetWriteLimiter(l *backpressure.Limiter) {
+	if s != nil {
+		s.writeLimiter = l
+	}
 }
 
 // ─── Record ───────────────────────────────────────
@@ -193,9 +210,15 @@ func (s *Store) Record(
 // supplied attribution + token counts get copied by value so
 // the caller can't accidentally mutate them mid-flight. Errors
 // land in the structured logger; callers don't need to handle
-// them. Pass context.Background() — the goroutine creates its
-// own short-lived timeout context so a slow Postgres can't
-// pile up goroutines.
+// them.
+//
+// The 5s timeout alone cannot prevent goroutine pile-up: at 250 req/s a 5s
+// timeout window admits 1,250 concurrent writers against a 100-conn pool,
+// and every timeout destroys (and redials) a pool connection — the churn
+// that exhausted PgBouncer's max_client_conn in the 2026-06-11 load trial.
+// The writeLimiter is the actual bound: when no slot is free the record is
+// DROPPED (it is observational by contract), with sampled logging so the
+// overload doesn't also become a log storm.
 func (s *Store) RecordAsync(
 	attr AttributionContext,
 	inputTokens, outputTokens int,
@@ -206,7 +229,15 @@ func (s *Store) RecordAsync(
 	if s == nil || s.pool == nil {
 		return
 	}
+	if !s.writeLimiter.TryAcquire() {
+		if s.writeLimiter.LogDrop() {
+			slog.Warn("attribution: async record dropped (writer bound reached; observational, serve unaffected)",
+				slog.Int64("dropped_total", s.writeLimiter.Dropped()))
+		}
+		return
+	}
 	go func() {
+		defer s.writeLimiter.Release()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.Record(ctx, attr, inputTokens, outputTokens, costUSD, model, provider, latency); err != nil {
@@ -496,13 +527,13 @@ func (s *Store) GetTopBranchesForWorkspace(ctx context.Context, workspaceID, rep
 // Summary is the cross-dimension rollup returned by
 // GET /v1/workspaces/:wsID/attribution/summary?days=N.
 type Summary struct {
-	WorkspaceID  string        `json:"workspace_id"`
-	WindowDays   int           `json:"window_days"`
-	TotalCostUSD float64       `json:"total_cost"`
-	ByBranch     []BranchCost  `json:"by_branch"`
-	ByPR         []BranchCost  `json:"by_pr"`
-	ByAuthor     []AuthorCost  `json:"by_author"`
-	ByRepo       []BranchCost  `json:"by_repo"`
+	WorkspaceID  string       `json:"workspace_id"`
+	WindowDays   int          `json:"window_days"`
+	TotalCostUSD float64      `json:"total_cost"`
+	ByBranch     []BranchCost `json:"by_branch"`
+	ByPR         []BranchCost `json:"by_pr"`
+	ByAuthor     []AuthorCost `json:"by_author"`
+	ByRepo       []BranchCost `json:"by_repo"`
 }
 
 const summaryTotalSQL = `

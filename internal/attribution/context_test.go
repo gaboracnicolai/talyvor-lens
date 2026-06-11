@@ -7,7 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
+
+	"github.com/talyvor/lens/internal/backpressure"
 )
 
 // ─── ExtractFromRequest ───────────────────────────
@@ -365,5 +369,60 @@ func TestGetTopBranchesForWorkspace_ScopesByWorkspace(t *testing.T) {
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("query must filter request_attribution by workspace_id (wsA as $1): %v", err)
+	}
+}
+
+// ─── RecordAsync writer bound (#122) ──────────────
+
+// countingDB is a minimal pgxDB whose Exec signals execCh, letting the
+// async-path tests synchronize without sleeps-as-assertions.
+type countingDB struct{ execCh chan struct{} }
+
+func (c *countingDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	c.execCh <- struct{}{}
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+func (c *countingDB) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
+func (c *countingDB) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
+
+// A saturated limiter sheds RecordAsync — no goroutine, no insert — and
+// admits again once the slot frees.
+func TestRecordAsync_LimiterSaturated_Sheds(t *testing.T) {
+	db := &countingDB{execCh: make(chan struct{}, 4)}
+	s := newStore(db)
+	l := backpressure.New(1)
+	s.SetWriteLimiter(l)
+
+	if !l.TryAcquire() { // occupy the only slot, as an in-flight writer would
+		t.Fatal("setup: could not occupy the slot")
+	}
+	s.RecordAsync(AttributionContext{WorkspaceID: "ws-1"}, 1, 1, 0.01, "m", "p", time.Millisecond)
+	select {
+	case <-db.execCh:
+		t.Fatal("saturated limiter must shed the record — no insert may fire")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if l.Dropped() != 1 {
+		t.Fatalf("dropped = %d, want 1", l.Dropped())
+	}
+
+	l.Release()
+	s.RecordAsync(AttributionContext{WorkspaceID: "ws-1"}, 1, 1, 0.01, "m", "p", time.Millisecond)
+	select {
+	case <-db.execCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("freed limiter must admit the record")
+	}
+}
+
+// A nil limiter (not wired / bound disabled) preserves pre-limiter behavior.
+func TestRecordAsync_NilLimiter_Writes(t *testing.T) {
+	db := &countingDB{execCh: make(chan struct{}, 1)}
+	s := newStore(db)
+	s.RecordAsync(AttributionContext{WorkspaceID: "ws-1"}, 1, 1, 0.01, "m", "p", time.Millisecond)
+	select {
+	case <-db.execCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nil limiter must not gate RecordAsync")
 	}
 }
