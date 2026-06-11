@@ -1340,18 +1340,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		if p.budgetService != nil {
 			p.budgetService.RecordSpend(ctx, wsID, team, sprint, alerts.CostUSD(upstreamModel, inT, outT))
 		}
-		// Branch / PR attribution is also best-effort: DB errors here must
-		// not propagate to the caller. LoggingNone skips it entirely; the
-		// other policies record it. The cost is computed against the
-		// upstream model so the same number lands in alerts and attribution.
-		if willAttribute && loggingPolicy != workspace.LoggingNone {
-			cost := alerts.CostUSD(upstreamModel, inT, outT)
-			if err := p.tracker.Record(ctx, attr, upstreamModel, inT, outT, cost); err != nil {
-				slog.Warn("attribution: Record failed",
-					slog.String("err", err.Error()),
-				)
-			}
-		}
+		// (The legacy branch_spend double-write was retired in #157 — it had no
+		// reader since #158. request_attribution below is the sole attribution
+		// write now; attr/willAttribute still drive the X-Talyvor-Branch echo.)
 		// Upgraded per-request attribution. Always fired (the
 		// store handles the empty-workspace case by skipping the
 		// insert) and always async so a slow Postgres can't slow

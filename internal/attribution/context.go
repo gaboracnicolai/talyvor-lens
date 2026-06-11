@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -105,6 +107,16 @@ func ExtractFromRequest(r *http.Request) AttributionContext {
 }
 
 // ─── Store ────────────────────────────────────────
+
+// pgxDB is the subset of *pgxpool.Pool the Store needs. Tests use pgxmock; a
+// nil pool short-circuits to a no-op. (Relocated here from tracker.go in #157
+// when the Tracker's branch_spend DB methods were retired — the Store is now its
+// only user.)
+type pgxDB interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // Store reads and writes the request_attribution table.
 // nil-pool short-circuits to a no-op so unit tests can build a
