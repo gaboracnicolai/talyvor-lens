@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -612,6 +613,35 @@ func insertLedgerRow(ctx context.Context, tx pgx.Tx, workspaceID string, delta, 
 
 // GetHistory returns the ledger entries for a workspace, newest
 // first. Bounds: limit ≤ 200, offset ≥ 0.
+// requesterMetaKey is the counterparty workspace id some mint writers stamp into
+// a CONTRIBUTOR's ledger row (cache_mine; any pre-#155 pool-royalty held rows).
+// It is FUNCTIONALLY read by CountCacheHitsBenefited via SQL on the STORED row,
+// so it must stay stored — but it must never be echoed to the tenant in history.
+const requesterMetaKey = "request_workspace_id"
+
+// servedToPattern matches the trailing "served to <workspace>" leak shape — the
+// cache_mine "cache hit (X) served to <requester>" description. Targeted (not a
+// blind replace of the requester value, which could blunder on short/common
+// substrings and wrongly couple the two vectors).
+var servedToPattern = regexp.MustCompile(`served to \S+$`)
+
+// maskHistoryEntry scrubs counterparty identity from a ledger entry BEFORE it is
+// returned to a tenant (#145 family). Two INDEPENDENT vectors:
+//   - metadata: drop request_workspace_id — GENERIC, fires on the key's presence
+//     for any row type (defense in depth vs future leaky writers).
+//   - description: neutralize a trailing "served to <workspace>".
+//
+// It mutates only the in-memory entry (a per-row value with a freshly-unmarshaled
+// metadata map); the stored DB row and the SQL counter that reads
+// request_workspace_id are provably untouched. Retroactive: masks historic rows
+// on read, no backfill.
+func maskHistoryEntry(e *LedgerEntry) {
+	delete(e.Metadata, requesterMetaKey) // safe on nil / absent
+	if servedToPattern.MatchString(e.Description) {
+		e.Description = servedToPattern.ReplaceAllString(e.Description, "served to another workspace")
+	}
+}
+
 func (s *LedgerStore) GetHistory(ctx context.Context, workspaceID string, limit, offset int) ([]LedgerEntry, error) {
 	if s.pool == nil {
 		return nil, nil
@@ -647,6 +677,7 @@ func (s *LedgerStore) GetHistory(ctx context.Context, workspaceID string, limit,
 		if len(meta) > 0 {
 			_ = json.Unmarshal(meta, &e.Metadata)
 		}
+		maskHistoryEntry(&e) // #145: scrub counterparty identity from the tenant echo
 		out = append(out, e)
 	}
 	return out, rows.Err()
