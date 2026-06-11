@@ -2,7 +2,9 @@ package mining
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,6 +154,93 @@ func TestGetHistory_PaginatedResults(t *testing.T) {
 	}
 	if entries[0].Metadata["hit_type"] != "exact" {
 		t.Fatalf("metadata not unmarshalled, got %+v", entries[0].Metadata)
+	}
+}
+
+// #145 family: GetHistory must MASK the requester identity in the tenant echo. A
+// contributor's cache_mine row carried the requester in BOTH the description
+// ("served to <requester>") and metadata.request_workspace_id, and GetHistory
+// echoed both verbatim. Assert on the SERIALIZED JSON — the actual tenant
+// boundary.
+func TestGetHistory_MasksRequesterIdentity(t *testing.T) {
+	store, mock := newMockStore(t)
+	now := time.Now().UTC()
+	mock.ExpectQuery("SELECT id, workspace_id, amount, balance_after").
+		WithArgs("ws_owner", 20, 0).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "workspace_id", "amount", "balance_after",
+			"type", "description", "metadata", "created_at",
+		}).AddRow("e1", "ws_owner", 0.010, 0.010, TypeCacheMine,
+			"cache hit (exact) served to wsB",
+			[]byte(`{"hit_type":"exact","request_workspace_id":"wsB"}`), now))
+
+	entries, err := store.GetHistory(context.Background(), "ws_owner", 0, 0)
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	b, _ := json.Marshal(entries[0])
+	if s := string(b); strings.Contains(s, "request_workspace_id") || strings.Contains(s, "wsB") {
+		t.Errorf("LEAK: tenant history JSON still names the requester: %s", s)
+	}
+	// Passthrough: non-sensitive fields survive the mask.
+	if entries[0].Metadata["hit_type"] != "exact" {
+		t.Errorf("hit_type masked away (must survive): %+v", entries[0].Metadata)
+	}
+	if entries[0].Amount != 0.010 || entries[0].Type != TypeCacheMine || entries[0].BalanceAfter != 0.010 {
+		t.Errorf("non-sensitive fields altered: %+v", entries[0])
+	}
+	if !strings.Contains(entries[0].Description, "served to another workspace") {
+		t.Errorf("description not masked: %q", entries[0].Description)
+	}
+}
+
+// The mask is GENERIC (keyed on request_workspace_id, not type='cache_mine') — a
+// non-cache_mine row carrying the key is masked too (defense in depth), and
+// non-sensitive metadata keys are left intact.
+func TestGetHistory_MaskIsGeneric(t *testing.T) {
+	store, mock := newMockStore(t)
+	now := time.Now().UTC()
+	mock.ExpectQuery("SELECT id, workspace_id, amount, balance_after").
+		WithArgs("ws_owner", 20, 0).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "workspace_id", "amount", "balance_after",
+			"type", "description", "metadata", "created_at",
+		}).AddRow("e1", "ws_owner", 1.0, 1.0, "some_future_type",
+			"a future credit", []byte(`{"request_workspace_id":"wsB","other":"keep"}`), now))
+
+	entries, err := store.GetHistory(context.Background(), "ws_owner", 0, 0)
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if _, leaked := entries[0].Metadata["request_workspace_id"]; leaked {
+		t.Error("generic mask failed: request_workspace_id survived on a non-cache_mine row")
+	}
+	if entries[0].Metadata["other"] != "keep" {
+		t.Error("generic mask over-reached: stripped a non-sensitive key")
+	}
+}
+
+// NEUTRALITY: CountCacheHitsBenefited's query is UNCHANGED — it reads
+// request_workspace_id from the STORED row, so the functional earning counter is
+// intact (the mask is read-presentation only).
+func TestCountCacheHitsBenefited_QueryUnchanged(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectQuery(`type = 'cache_mine' AND metadata->>'request_workspace_id' = \$1`).
+		WithArgs("wsB").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+
+	n, err := store.CountCacheHitsBenefited(context.Background(), "wsB")
+	if err != nil {
+		t.Fatalf("CountCacheHitsBenefited: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("benefited count = %d, want 3 (stored field intact)", n)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("counter must still query metadata->>'request_workspace_id': %v", err)
 	}
 }
 
