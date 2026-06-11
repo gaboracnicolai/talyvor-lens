@@ -266,7 +266,7 @@ func run() error {
 	qualityScorer := quality.New(pool)
 	abEngine := ab.NewEngine(pool)
 	abEngine.RunAutoCompleteLoop(ctx, time.Hour)
-	branchTracker := attribution.New(pool)
+	branchTracker := attribution.New() // header attribution only; branch_spend writes retired (#157)
 	attrStore := attribution.NewStore(pool)
 	budgetStore := budgets.NewStore(pool)
 	budgetService := budgets.NewService(budgetStore)
@@ -2418,8 +2418,8 @@ func run() error {
 
 		// ─── Git attribution ────────────────────────────────
 		// Per-request rollups served from request_attribution
-		// (migration 0017). Complement the legacy /v1/branches
-		// endpoints which still serve branch_spend.
+		// (migration 0017) — now the SOLE attribution source (the
+		// branch_spend double-write was retired in #157).
 		authed.Get("/v1/workspaces/{wsID}/attribution/branches", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			since := parseSinceParam(req.URL.Query().Get("since"))

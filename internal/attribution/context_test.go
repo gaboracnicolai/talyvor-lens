@@ -120,6 +120,37 @@ func TestRecord_InsertsRequestAttribution(t *testing.T) {
 	}
 }
 
+// NEUTRALITY (#157): retiring the Tracker's branch_spend double-write must leave
+// the request_attribution write — the LIVE read source since #158 — untouched.
+// Pins that Store.Record still fires INSERT INTO request_attribution for the
+// workspace (the same proof shape as #161's counter-neutrality pin). If this
+// regresses, the retirement removed the wrong write.
+func TestRecord_RequestAttributionWriteIntact_Neutrality157(t *testing.T) {
+	pool, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	s := newStore(pool)
+
+	pool.ExpectExec(`INSERT INTO request_attribution`).
+		WithArgs(
+			"ws-1", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	if err := s.Record(context.Background(), AttributionContext{WorkspaceID: "ws-1"},
+		10, 5, 0.001, "claude-sonnet-4-6", "anthropic", 0); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("request_attribution write must still fire after the branch_spend retirement: %v", err)
+	}
+}
+
 func TestRecord_NilPoolIsNoop(t *testing.T) {
 	s := NewStore(nil)
 	err := s.Record(context.Background(), AttributionContext{WorkspaceID: "ws-1"}, 0, 0, 0, "", "", 0)
