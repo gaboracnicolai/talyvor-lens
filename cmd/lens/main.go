@@ -35,6 +35,7 @@ import (
 	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/attribution"
+	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/audit"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/batch"
@@ -267,7 +268,15 @@ func run() error {
 	abEngine := ab.NewEngine(pool)
 	abEngine.RunAutoCompleteLoop(ctx, time.Hour)
 	branchTracker := attribution.New() // header attribution only; branch_spend writes retired (#157)
+	// One shared bound across all post-serve observational writers
+	// (attribution + pattern capture), so their combined claim on the DB
+	// pool is capped. Drop-on-overflow by design: under overload these
+	// writers otherwise churn pool connections until PgBouncer's
+	// max_client_conn is exhausted (#122). nil when set to 0 (bound off).
+	obsLimiter := backpressure.New(cfg.ObsWriteMaxConcurrent)
+
 	attrStore := attribution.NewStore(pool)
+	attrStore.SetWriteLimiter(obsLimiter)
 	budgetStore := budgets.NewStore(pool)
 	budgetService := budgets.NewService(budgetStore)
 	// Predictive cost forecasting (Upgrade 20). Read-only analytics over
@@ -708,6 +717,7 @@ func run() error {
 	// workspaces only (SQL gate). NEVER reaches ledger.Credit (earning is a
 	// separate later stage).
 	p.SetPatternCapture(patternMiner, func() bool { return cfg.PatternCaptureEnabled })
+	p.SetObservationalLimiter(obsLimiter)
 	// S4 routing-pattern EARNING wire-up — the same miner, separate sink + flag.
 	// Default off; flag-off the serve path is byte-identical to capture-only.
 	p.SetPatternEarn(patternMiner, func() bool { return cfg.PatternEarningEnabled })
