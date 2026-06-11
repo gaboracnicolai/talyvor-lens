@@ -1,0 +1,20 @@
+# docker-compose.trial-distill.yaml — DISTILL economy overlay (scenarios n/o/p).
+#
+# Layered ON TOP of the base + the PR 2a trial overlay:
+#   docker compose -f docker-compose.yaml \
+#                  -f docker-compose.trial.yaml \
+#                  -f docker-compose.trial-distill.yaml up -d
+#
+# Kept SEPARATE on purpose: only this overlay flips the global distiller switch,
+# so the pattern/semantic runs (a)-(m) — base + trial.yaml, WITHOUT this file —
+# stay byte-identical. (Even with it present the distiller is inert for those
+# workspaces: scenarios a-m never set distill_policy or distill_poolable, both
+# of which the cross-tenant distill path still requires.)
+services:
+  lens:
+    environment:
+      # Global switch for cross-tenant distill pooling. Per-workspace consent
+      # (distill_poolable via PUT /v1/workspaces/{ws}/distill-poolable) AND an
+      # enabled DistillPolicy (PUT /v1/workspaces/{ws}/distill) are STILL
+      # required — MaybeAllowPooledHit needs global + requester + owner all on.
+      - LENS_DISTILL_POOLABLE_ENABLED=true
