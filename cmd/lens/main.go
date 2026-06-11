@@ -255,7 +255,7 @@ func run() error {
 	defer nc.Close()
 
 	exactCache := cache.NewExactCache(redisClient, cfg.MaxCacheTTL)
-	openAIEmbedder := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingModel)
+	openAIEmbedder := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingModel, cfg.EmbeddingBaseURL)
 	semanticCache := cache.NewSemanticCache(pool, openAIEmbedder, cfg.SemanticThreshold, cfg.SemanticCacheRetention)
 	promptCompressor := compressor.New()
 	modelRouter := router.New()

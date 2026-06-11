@@ -19,6 +19,7 @@ type Config struct {
 	AnthropicAPIKey   string
 	GoogleAPIKey      string
 	EmbeddingModel    string
+	EmbeddingBaseURL  string // LENS_EMBEDDING_BASE_URL override; empty = OpenAI default. Process-env only — no request input can set it (mirrors VLLMBaseURL; offline trial harness).
 	SemanticThreshold float64
 	MaxCacheTTL       time.Duration
 	LogLevel          string
@@ -469,6 +470,7 @@ func Load() (*Config, error) {
 		AnthropicAPIKey:   os.Getenv("LENS_ANTHROPIC_API_KEY"),
 		GoogleAPIKey:      os.Getenv("LENS_GOOGLE_API_KEY"),
 		EmbeddingModel:    getEnv("LENS_EMBEDDING_MODEL", "text-embedding-3-small"),
+		EmbeddingBaseURL:  os.Getenv("LENS_EMBEDDING_BASE_URL"),
 		SemanticThreshold: 0.92,
 		MaxCacheTTL:       24 * time.Hour,
 		LogLevel:          getEnv("LENS_LOG_LEVEL", "info"),

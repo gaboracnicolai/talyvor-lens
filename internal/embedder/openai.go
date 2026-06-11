@@ -20,12 +20,21 @@ type OpenAIEmbedder struct {
 	baseURL string
 }
 
-func NewOpenAIEmbedder(apiKey, model string) *OpenAIEmbedder {
+// NewOpenAIEmbedder builds an embedder for the OpenAI embeddings API. An empty
+// baseURL uses the production endpoint (openAIEmbeddingsURL) — byte-identical to
+// before; a non-empty value overrides it. The override is sourced ONLY from
+// operator process env (LENS_EMBEDDING_BASE_URL, mirroring LENS_VLLM_BASE_URL):
+// it lets the offline trial harness point embeddings at a deterministic mock. No
+// request input (header, workspace config, body) can influence it.
+func NewOpenAIEmbedder(apiKey, model, baseURL string) *OpenAIEmbedder {
+	if baseURL == "" {
+		baseURL = openAIEmbeddingsURL
+	}
 	return &OpenAIEmbedder{
 		apiKey:  apiKey,
 		model:   model,
 		client:  &http.Client{Timeout: 30 * time.Second},
-		baseURL: openAIEmbeddingsURL,
+		baseURL: baseURL,
 	}
 }
 
