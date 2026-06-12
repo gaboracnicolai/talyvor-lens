@@ -9,7 +9,7 @@ import (
 
 func renderDashboard(t *testing.T) string {
 	t.Helper()
-	h := New("test-version")
+	h := New("test-version", true)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
 	if w.Code != http.StatusOK {

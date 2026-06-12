@@ -578,9 +578,13 @@ func run() error {
 	// contributor LENS strands in held forever. With minting off and no held
 	// rows, each sweep is a single cheap indexed SELECT.
 	finalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger)
-	go haComps.leader.Run(ctx, "pool-royalty-finalize", 30*time.Second, func(lctx context.Context) {
-		finalizeSweeper.StartScheduler(lctx, time.Minute)
-	})
+	// U3: economy worker — gated on the master switch so no held→final settlement
+	// (an economy-state ledger write) runs when the economy is off.
+	if cfg.EconomyEnabled {
+		go haComps.leader.Run(ctx, "pool-royalty-finalize", 30*time.Second, func(lctx context.Context) {
+			finalizeSweeper.StartScheduler(lctx, time.Minute)
+		})
+	}
 	if cfg.PoolRoyaltyMintingEnabled {
 		logger.Warn("poolroyalty: Pool-B royalty minting is ENABLED — served cross-tenant pooled hits mint LENS to contributors",
 			slog.Float64("royalty_share", cfg.PoolRoyaltyShare))
@@ -653,9 +657,13 @@ func run() error {
 		computeMiner.NodeURL, challengeClient, poviStakeManager, challengeStore,
 		4, cfg.POVISlashFraction)
 	challengeScheduler := povi.NewChallengeScheduler(poviChallenger, poviStore, cfg.POVIChallengeRate)
-	go haComps.leader.Run(ctx, "povi-challenge", 30*time.Second, func(lctx context.Context) {
-		challengeScheduler.StartScheduler(lctx, time.Minute)
-	})
+	// U3: economy worker — gated on the master switch (PoVI challenge/slash is an
+	// economy-state mutation; no slashing when the economy is off).
+	if cfg.EconomyEnabled {
+		go haComps.leader.Run(ctx, "povi-challenge", 30*time.Second, func(lctx context.Context) {
+			challengeScheduler.StartScheduler(lctx, time.Minute)
+		})
+	}
 
 	// Embedding mining (Batch 2 Item 3). Shares the ledger;
 	// proxy wires RecordEmbeddingsServed in the semantic-cache
@@ -723,6 +731,11 @@ func run() error {
 	p.SetPatternEarn(patternMiner, func() bool { return cfg.PatternEarningEnabled })
 
 	r := chi.NewRouter()
+	// U3 master economy kill-switch: the single chokepoint for economy-route
+	// registration. econ.{get,post,del} register only when cfg.EconomyEnabled;
+	// when off the routes are never mounted → chi-native 404 (#152). See
+	// economy_routes.go.
+	econ := econReg{on: cfg.EconomyEnabled}
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
 	// into the request context before downstream middleware sees it.
@@ -819,7 +832,7 @@ func run() error {
 		pub.Use(ratelimit.RateLimitMiddleware(rateLimiter))
 
 		// Token earning rates — part of Lens's public economic surface.
-		pub.Get("/v1/tokens/rates", func(w http.ResponseWriter, _ *http.Request) {
+		econ.get(pub, "/v1/tokens/rates", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -838,7 +851,7 @@ func run() error {
 		})
 
 		// Economy stats (Batch 3 Phase 1).
-		pub.Get("/v1/economy/stats", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(pub, "/v1/economy/stats", func(w http.ResponseWriter, req *http.Request) {
 			stats, err := marketplace.GetEconomyStats(req.Context())
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -848,7 +861,7 @@ func run() error {
 		})
 
 		// Marketplace listings (read-only — browsing is public; buying requires auth).
-		pub.Get("/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(pub, "/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
 			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
 			listings, err := marketplace.GetListings(req.Context(), limit)
 			if err != nil {
@@ -859,7 +872,7 @@ func run() error {
 		})
 
 		// Aggregated routing patterns across opted-in workspaces.
-		pub.Get("/v1/insights/routing", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(pub, "/v1/insights/routing", func(w http.ResponseWriter, req *http.Request) {
 			q := req.URL.Query()
 			insights, err := patternMiner.GetInsights(req.Context(),
 				q.Get("model"), q.Get("provider"), q.Get("feature"))
@@ -945,6 +958,7 @@ func run() error {
 	apiServer.SetEvalPipeline(evalPipeline)
 	apiServer.SetPOVIStakeManager(poviStakeManager)
 	apiServer.SetPOVIChallengeStore(challengeStore)
+	apiServer.SetEconomyEnabled(cfg.EconomyEnabled) // U3: gate the economy dashboard-API routes
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
@@ -957,12 +971,12 @@ func run() error {
 	// Dashboard is public — same trust model as /healthz. The dashboard
 	// page itself is static; the live numbers come from /v1/api/* XHRs
 	// that the browser sends with the user's own API key.
-	dashHandler := dashboard.New("0.1.0")
+	dashHandler := dashboard.New("0.1.0", cfg.EconomyEnabled)
 	r.Get("/dashboard", dashHandler.ServeHTTP)
-	r.Get("/dashboard/tokens", dashHandler.ServeTokens)
+	econ.get(r, "/dashboard/tokens", dashHandler.ServeTokens)
 	r.Get("/dashboard/nodes", dashHandler.ServeNodes)
-	r.Get("/dashboard/oracle", dashHandler.ServeOracle)
-	r.Get("/dashboard/economy", dashHandler.ServeEconomy)
+	econ.get(r, "/dashboard/oracle", dashHandler.ServeOracle)
+	econ.get(r, "/dashboard/economy", dashHandler.ServeEconomy)
 	r.Get("/", dashHandler.RedirectRoot)
 
 	// Public oracle + economy endpoints — no auth, no PII, but rate-limited
@@ -970,7 +984,7 @@ func run() error {
 	r.Group(func(pub chi.Router) {
 		pub.Use(ratelimit.RateLimitMiddleware(rateLimiter))
 
-		pub.Get("/v1/oracle/stats", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(pub, "/v1/oracle/stats", func(w http.ResponseWriter, req *http.Request) {
 			stats, err := oracleEngine.GetOracleStats(req.Context())
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -981,7 +995,7 @@ func run() error {
 
 		// Public conversion-rate surface (two-token split). The rate +
 		// its full derivation are public economic signal; no auth.
-		pub.Get("/v1/economy/conversion-rate", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(pub, "/v1/economy/conversion-rate", func(w http.ResponseWriter, req *http.Request) {
 			rate, err := rateEngine.CurrentRate(req.Context())
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -994,7 +1008,7 @@ func run() error {
 			})
 		})
 
-		pub.Get("/v1/economy/conversion-rate/history", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(pub, "/v1/economy/conversion-rate/history", func(w http.ResponseWriter, req *http.Request) {
 			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
 			hist, err := rateEngine.RateHistory(req.Context(), limit)
 			if err != nil {
@@ -1103,7 +1117,7 @@ func run() error {
 		// admin can ONLY approve the algorithm's output (within
 		// band + floor) — there is no way to set an arbitrary rate.
 		// The full computation (all inputs) is returned + persisted.
-		authed.Post("/v1/admin/conversion-rate/approve", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/admin/conversion-rate/approve", func(w http.ResponseWriter, req *http.Request) {
 			actx, err := authManager.Authenticate(req)
 			if err != nil || !actx.IsAdmin {
 				writeJSONErr(w, http.StatusForbidden, "admin credentials required")
@@ -1145,7 +1159,7 @@ func run() error {
 		// exposed here and must never be tenant-reachable. Default returns raw
 		// rows; ?view=pairs returns the condition-(b) materiality aggregate. The
 		// Reader is Query-only (no write capability — see distillattrib.Reader).
-		authed.Get("/v1/admin/distill/attribution",
+		econ.get(authed, "/v1/admin/distill/attribution",
 			requireAdmin(authManager, http.HandlerFunc(newDistillAttributionAdminHandler(distillattrib.NewReader(pool)))))
 
 		// Stage-3 pool-mint adjudication gate — the Revoker's FIRST and ONLY
@@ -1158,7 +1172,7 @@ func run() error {
 		// a loop — operator-initiated only.
 		royaltyRevoker := poolroyalty.NewRevoker(pool, tokenLedger)
 		royaltyAdjudicator := poolroyalty.NewAdjudicationWriter(pool, royaltyRevoker)
-		authed.Post("/v1/admin/pool-royalty/adjudicate", newAdjudicateHandler(authManager, royaltyAdjudicator))
+		econ.post(authed, "/v1/admin/pool-royalty/adjudicate", newAdjudicateHandler(authManager, royaltyAdjudicator))
 
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
 			if authManager.PrivateKey() == nil {
@@ -1654,7 +1668,7 @@ func run() error {
 		})))
 
 		// ─── LENS token endpoints (Batch 2 Item 1) ─────
-		authed.Get("/v1/workspaces/{wsID}/tokens/balance", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/tokens/balance", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			snap, err := tokenLedger.GetSnapshot(req.Context(), wsID)
 			if err != nil {
@@ -1664,7 +1678,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, snap)
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/tokens/history", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/tokens/history", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
 			offset, _ := strconv.Atoi(req.URL.Query().Get("offset"))
@@ -1677,7 +1691,7 @@ func run() error {
 		})
 
 		// ─── LXC compute credit (two-token split) ──────
-		authed.Get("/v1/workspaces/{wsID}/lxc/balance", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/lxc/balance", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			snap, err := dualToken.GetLXCSnapshot(req.Context(), wsID)
 			if err != nil {
@@ -1687,7 +1701,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, snap)
 		})
 
-		authed.Post("/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
 				LXCAmount float64 `json:"lxc_amount"`
@@ -1708,7 +1722,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, res)
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/tokens/mining/cache", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/tokens/mining/cache", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			stats, err := cacheMiner.GetMiningStats(req.Context(), wsID)
 			if err != nil {
@@ -1718,7 +1732,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, stats)
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/tokens/mining/compute", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/tokens/mining/compute", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			stats, err := computeMiner.GetWorkspaceStats(req.Context(), wsID)
 			if err != nil {
@@ -2037,7 +2051,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/tokens/mining/embeddings", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/tokens/mining/embeddings", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			stats, err := embeddingMiner.GetStats(req.Context(), wsID)
 			if err != nil {
@@ -2048,7 +2062,7 @@ func run() error {
 		})
 
 		// ─── Annotation mining (Batch 2 Item 4) ─────────
-		authed.Post("/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
 				Amount float64 `json:"amount"`
@@ -2069,7 +2083,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]float64{"staked": staked})
 		})
 
-		authed.Delete("/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
+		econ.del(authed, "/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			if err := annotationMiner.Unstake(req.Context(), wsID); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
@@ -2123,7 +2137,7 @@ func run() error {
 			writeJSONOK(w, http.StatusCreated, map[string]bool{"ok": true})
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/tokens/mining/annotations", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/tokens/mining/annotations", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			stats, err := annotationMiner.GetAnnotatorStats(req.Context(), wsID)
 			if err != nil {
@@ -2144,7 +2158,7 @@ func run() error {
 		})
 
 		// ─── Pattern mining (Batch 2 Item 5) ────────────
-		authed.Post("/v1/workspaces/{wsID}/pattern-mining/opt-in", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/workspaces/{wsID}/pattern-mining/opt-in", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			if !cfg.PatternMiningEnabled {
 				writeJSONErr(w, http.StatusServiceUnavailable,
@@ -2158,7 +2172,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"opted_in": true})
 		})
 
-		authed.Delete("/v1/workspaces/{wsID}/pattern-mining/opt-in", func(w http.ResponseWriter, req *http.Request) {
+		econ.del(authed, "/v1/workspaces/{wsID}/pattern-mining/opt-in", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			if err := patternMiner.OptOut(req.Context(), wsID); err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -2167,7 +2181,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"opted_in": false})
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/tokens/mining/patterns", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/tokens/mining/patterns", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			c, err := patternMiner.GetContribution(req.Context(), wsID)
 			if err != nil {
@@ -2178,7 +2192,7 @@ func run() error {
 		})
 
 		// ─── Token transfers + marketplace + staking ────
-		authed.Post("/v1/workspaces/{wsID}/tokens/transfer", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/workspaces/{wsID}/tokens/transfer", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
 				ToWorkspace string  `json:"to_workspace"`
@@ -2200,7 +2214,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
-		authed.Post("/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
 			var in economy.MarketplaceListing
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -2230,7 +2244,7 @@ func run() error {
 			writeJSONOK(w, http.StatusCreated, out)
 		})
 
-		authed.Post("/v1/marketplace/listings/{id}/buy", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/marketplace/listings/{id}/buy", func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
 			var in struct {
 				BuyerWorkspace string  `json:"buyer_workspace"`
@@ -2263,7 +2277,7 @@ func run() error {
 			writeJSONOK(w, http.StatusCreated, trade)
 		})
 
-		authed.Delete("/v1/marketplace/listings/{id}", func(w http.ResponseWriter, req *http.Request) {
+		econ.del(authed, "/v1/marketplace/listings/{id}", func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
 			// Authz (#146): a non-admin may cancel only its OWN listing; admin
 			// may act on any seller via the param.
@@ -2289,9 +2303,9 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
-		authed.Get("/v1/marketplace/trades", newMarketplaceTradesHandler(marketplace))
+		econ.get(authed, "/v1/marketplace/trades", newMarketplaceTradesHandler(marketplace))
 
-		authed.Post("/v1/workspaces/{wsID}/tokens/stake", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/workspaces/{wsID}/tokens/stake", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
 				Amount   float64 `json:"amount"`
@@ -2313,7 +2327,7 @@ func run() error {
 			writeJSONOK(w, http.StatusCreated, pos)
 		})
 
-		authed.Post("/v1/workspaces/{wsID}/tokens/stake/{positionID}/unstake", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/workspaces/{wsID}/tokens/stake/{positionID}/unstake", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			positionID := chi.URLParam(req, "positionID")
 			if err := marketplace.Unstake(req.Context(), positionID, wsID); err != nil {
@@ -2329,7 +2343,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/tokens/stakes", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/tokens/stakes", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			positions, err := marketplace.GetStakePositions(req.Context(), wsID)
 			if err != nil {
@@ -2887,7 +2901,7 @@ func run() error {
 		// enabled) provisionally mints. GET endpoints are audit + status. A
 		// receipt is ATTESTATION + TAMPER-EVIDENCE, never proof of honest
 		// computation.
-		authed.Post("/v1/workspaces/{wsID}/povi/receipts", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/workspaces/{wsID}/povi/receipts", func(w http.ResponseWriter, req *http.Request) {
 			var rec povi.Receipt
 			if err := json.NewDecoder(req.Body).Decode(&rec); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -2901,9 +2915,9 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, res)
 		})
 
-		authed.Get("/v1/povi/receipts", newPoviReceiptsHandler(poviStore))
+		econ.get(authed, "/v1/povi/receipts", newPoviReceiptsHandler(poviStore))
 
-		authed.Get("/v1/povi/status", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/povi/status", func(w http.ResponseWriter, req *http.Request) {
 			total, verified, _ := poviStore.Stats(req.Context())
 			writeJSONOK(w, http.StatusOK, map[string]any{
 				"minting_enabled":   cfg.POVIMintingEnabled,
@@ -2921,7 +2935,7 @@ func run() error {
 		// ── PoVI staking (Part 2): node collateral that gates minting-
 		// eligibility and is slashable (Part 3). Staking does NOT gate serving —
 		// an unstaked node still serves, it's just not minting-eligible.
-		authed.Post("/v1/povi/nodes/{nodeID}/stake", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/povi/nodes/{nodeID}/stake", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
 			if !requireNodeOwnership(w, req, poviStakeManager, nodeID) {
 				return
@@ -2941,7 +2955,7 @@ func run() error {
 			writeJSONOK(w, http.StatusCreated, st)
 		})
 
-		authed.Post("/v1/povi/nodes/{nodeID}/unbond", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/povi/nodes/{nodeID}/unbond", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
 			if !requireNodeOwnership(w, req, poviStakeManager, nodeID) {
 				return
@@ -2954,7 +2968,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, st)
 		})
 
-		authed.Post("/v1/povi/nodes/{nodeID}/release", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/povi/nodes/{nodeID}/release", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
 			if !requireNodeOwnership(w, req, poviStakeManager, nodeID) {
 				return
@@ -2968,7 +2982,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, st)
 		})
 
-		authed.Get("/v1/povi/nodes/{nodeID}/stake", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/povi/nodes/{nodeID}/stake", func(w http.ResponseWriter, req *http.Request) {
 			nodeID := chi.URLParam(req, "nodeID")
 			if !requireNodeOwnership(w, req, poviStakeManager, nodeID) {
 				return
@@ -2989,7 +3003,7 @@ func run() error {
 			})
 		})
 
-		authed.Get("/v1/povi/staking/status", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/povi/staking/status", func(w http.ResponseWriter, req *http.Request) {
 			status, err := poviStakeManager.Status(req.Context())
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -3001,14 +3015,14 @@ func run() error {
 		// ── PoVI challenge-and-slash (Part 3). Lens publishes its challenge
 		// pubkey for nodes to pin; audits challenges; allows a manual challenge
 		// (admin/testing); and reports the honest economic-deterrent summary.
-		authed.Get("/v1/povi/pubkey", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/povi/pubkey", func(w http.ResponseWriter, req *http.Request) {
 			writeJSONOK(w, http.StatusOK, map[string]string{
 				"ed25519_pubkey": povi.EncodePublicKey(lensChallengePub),
 				"purpose":        "PoVI Part-3 challenge signing — pin this to verify challenges are from Lens",
 			})
 		})
 
-		authed.Get("/v1/povi/challenges", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/povi/challenges", func(w http.ResponseWriter, req *http.Request) {
 			// Authz (#146 P3): node-keyed read. A specific node must be owned by
 			// the caller; the unfiltered list (no node) is admin-only — a tenant
 			// can't enumerate every node's challenges.
@@ -3029,9 +3043,9 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, list)
 		})
 
-		authed.Get("/v1/povi/challenges/{id}", newChallengeGetHandler(challengeStore))
+		econ.get(authed, "/v1/povi/challenges/{id}", newChallengeGetHandler(challengeStore))
 
-		authed.Post("/v1/povi/challenges/issue", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/povi/challenges/issue", func(w http.ResponseWriter, req *http.Request) {
 			var in struct {
 				RequestID string `json:"request_id"`
 			}
@@ -3052,7 +3066,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, ch)
 		})
 
-		authed.Get("/v1/povi/security/status", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/povi/security/status", func(w http.ResponseWriter, req *http.Request) {
 			writeJSONOK(w, http.StatusOK, map[string]any{
 				"minting_enabled":         cfg.POVIMintingEnabled,
 				"trustful_compute_mint":   cfg.TrustfulComputeMintEnabled,

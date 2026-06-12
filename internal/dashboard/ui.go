@@ -208,9 +208,9 @@ const dashboardHTML = `<!DOCTYPE html>
     <span class="tagline">AI token intelligence</span>
     <nav style="display:flex;gap:14px;font-size:12px;margin-left:24px">
       <a href="/dashboard" style="color:var(--accent);text-decoration:none">Overview</a>
-      <a href="/dashboard/tokens" style="color:var(--secondary);text-decoration:none">Tokens &amp; Mining</a>
+      <!--{{ECON}}--><a href="/dashboard/tokens" style="color:var(--secondary);text-decoration:none">Tokens &amp; Mining</a><!--{{/ECON}}-->
       <a href="/dashboard/nodes" style="color:var(--secondary);text-decoration:none">Nodes</a>
-      <a href="/dashboard/economy" style="color:var(--secondary);text-decoration:none">Economy</a>
+      <!--{{ECON}}--><a href="/dashboard/economy" style="color:var(--secondary);text-decoration:none">Economy</a><!--{{/ECON}}-->
     </nav>
     <span class="updated mono" id="updated" style="margin-left:auto">—</span>
   </header>

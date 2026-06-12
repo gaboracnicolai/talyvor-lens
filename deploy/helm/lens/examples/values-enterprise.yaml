@@ -1,0 +1,16 @@
+# Example "enterprise / fiat-SaaS" override for the Lens chart (U3).
+#   helm template lens deploy/helm/lens -f deploy/helm/lens/examples/values-enterprise.yaml
+#
+# Sets the master economy kill-switch LENS_ECONOMY_ENABLED=false. The gateway
+# then runs as pure fiat SaaS: every token-economy state-creation gate is forced
+# OFF regardless of its own value, the entire economy route surface is
+# unregistered (chi-native 404 — no existence oracle), the economy background
+# workers (pool-royalty finalize, PoVI challenge) never start, and the dashboard
+# hides its economy sections. Existing balances/ledgers are left untouched on
+# disk and become reachable again if the switch is flipped back on.
+#
+# Cost/spend/quality/ROI analytics, budgets, forecasting, guardrails, and HA are
+# UNAFFECTED — they are not part of the token economy.
+config:
+  extraEnv:
+    LENS_ECONOMY_ENABLED: "false"

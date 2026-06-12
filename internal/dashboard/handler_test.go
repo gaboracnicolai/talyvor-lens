@@ -8,7 +8,7 @@ import (
 )
 
 func TestDashboard_Returns200(t *testing.T) {
-	h := New("1.2.3")
+	h := New("1.2.3", true)
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -19,7 +19,7 @@ func TestDashboard_Returns200(t *testing.T) {
 }
 
 func TestDashboard_ContentTypeHTML(t *testing.T) {
-	h := New("1.2.3")
+	h := New("1.2.3", true)
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -31,7 +31,7 @@ func TestDashboard_ContentTypeHTML(t *testing.T) {
 }
 
 func TestDashboard_BodyContainsBrand(t *testing.T) {
-	h := New("1.2.3")
+	h := New("1.2.3", true)
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -42,7 +42,7 @@ func TestDashboard_BodyContainsBrand(t *testing.T) {
 }
 
 func TestDashboard_RootRedirectsToDashboard(t *testing.T) {
-	h := New("1.2.3")
+	h := New("1.2.3", true)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	h.RedirectRoot(w, req)
@@ -57,7 +57,7 @@ func TestDashboard_RootRedirectsToDashboard(t *testing.T) {
 
 func TestDashboard_BodyContainsVersion(t *testing.T) {
 	const version = "7.8.9"
-	h := New(version)
+	h := New(version, true)
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

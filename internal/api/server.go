@@ -53,6 +53,11 @@ type Analyser interface {
 }
 
 type Server struct {
+	// economyEnabled (U3) gates the economy dashboard-API routes (povi
+	// stakes/challenges, routing intelligence). When false they are not mounted
+	// → chi-native 404, consistent with the main.go economy chokepoint.
+	economyEnabled bool
+
 	pool             pgxDB
 	redisClient      *redis.Client
 	natsConn         *nats.Conn
@@ -182,8 +187,10 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/models/usage", s.handleSpendBy("model"))
 	r.Get("/v1/api/models/recommendations", s.handleModelsRecommendations)
 	r.Get("/v1/api/eval/runs", s.handleEvalRuns)
-	r.Get("/v1/api/povi/stakes", s.handlePOVIStakes)
-	r.Get("/v1/api/povi/challenges", s.handlePOVIChallenges)
+	if s.economyEnabled { // U3: economy dashboard-API surface
+		r.Get("/v1/api/povi/stakes", s.handlePOVIStakes)
+		r.Get("/v1/api/povi/challenges", s.handlePOVIChallenges)
+	}
 	r.Get("/v1/api/workspaces", s.handleWorkspaces)
 	r.Get("/v1/api/alerts/circuits", s.handleAlertsCircuits)
 	r.Get("/v1/api/alerts/rules", s.handleAlertsRules)
@@ -195,7 +202,9 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/costanomalies", s.handleCostAnomalies)
 	r.Get("/v1/api/roi/summary", s.handleROISummary)
 	r.Get("/v1/api/distill/summary", s.handleDistillSummary)
-	r.Get("/v1/api/routing/intelligence", s.handleRoutingIntelligence)
+	if s.economyEnabled { // U3: routing intelligence is economy-derived (mined corpus)
+		r.Get("/v1/api/routing/intelligence", s.handleRoutingIntelligence)
+	}
 	r.Get("/v1/api/modality/capabilities", s.handleModalityCapabilities)
 	r.Get("/v1/api/guardrails", s.handleGuardrails)
 	r.Get("/v1/api/catalog", s.handleCatalog)
@@ -239,6 +248,10 @@ func (s *Server) handleModalityCapabilities(w http.ResponseWriter, _ *http.Reque
 // panel. A setter so NewServer's signature stays put; a nil store makes
 // handleBudgets return an empty list (panel stays hidden).
 func (s *Server) SetBudgetStore(st *budgets.Store) { s.budgetStore = st }
+
+// SetEconomyEnabled (U3) wires the master switch so the economy dashboard-API
+// routes are mounted only when the token economy is on.
+func (s *Server) SetEconomyEnabled(on bool) { s.economyEnabled = on }
 
 // handleBudgets lists a workspace's budgets (defaulting to "default") for
 // the ops dashboard. Always returns an array — never null — so the panel
