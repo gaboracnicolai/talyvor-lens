@@ -1751,14 +1751,8 @@ func run() error {
 		// Admin refund-visibility list (read-only; requireAdmin). An 'anomalous' row
 		// means the customer was CHARGED and NOT credited — v1 resolution is a manual
 		// refund in the Stripe dashboard.
-		bill.get(authed, "/v1/admin/billing/purchases", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			rows, err := billingSvc.ListPurchases(req.Context(), 200)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, rows)
-		})))
+		bill.get(authed, "/v1/admin/billing/purchases",
+			requireAdmin(authManager, newBillingPurchasesHandler(billingSvc)))
 
 		econ.post(authed, "/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")

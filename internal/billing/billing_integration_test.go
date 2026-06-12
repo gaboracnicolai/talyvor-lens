@@ -491,6 +491,49 @@ func TestCheckout_Allowed_CreatesSession_ReusesCustomer(t *testing.T) {
 	}
 }
 
+// TestListPurchases_IncludesAnomalousNewestFirst — the admin list surfaces BOTH a
+// credited and an anomalous row (charged-not-credited), newest first, so refunds
+// are visible. The real SQL behind the admin route (route gate proven separately
+// in cmd/lens).
+func TestListPurchases_IncludesAnomalousNewestFirst(t *testing.T) {
+	svc, pool, _ := newBillingService(t)
+	const ws = "ws_list"
+	seedWS(t, pool, ws)
+
+	cb, cs := signed(testWebhookSecret, "evt_list_ok", "checkout.session.completed",
+		sessionObj("cs_list_ok", ws, 1000, "usd", "paid", "pi_ok", 100))
+	if post(svc, cb, cs) != http.StatusOK {
+		t.Fatal("seed credited row")
+	}
+	ab, as := signed(testWebhookSecret, "evt_list_anom", "checkout.session.completed",
+		sessionObj("cs_list_anom", ws, 1000, "usd", "paid", "pi_anom", 9999)) // mismatch ⇒ anomalous
+	if post(svc, ab, as) != http.StatusOK {
+		t.Fatal("seed anomalous row")
+	}
+
+	rows, err := svc.ListPurchases(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("ListPurchases: %v", err)
+	}
+	var sawCompleted, sawAnomalous bool
+	for _, r := range rows {
+		switch r.Status {
+		case "completed":
+			sawCompleted = true
+		case "anomalous":
+			sawAnomalous = true
+		}
+	}
+	if !sawCompleted || !sawAnomalous {
+		t.Errorf("admin list must show both rows: completed=%v anomalous=%v", sawCompleted, sawAnomalous)
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].CreatedAt.Before(rows[i].CreatedAt) {
+			t.Errorf("rows must be newest-first; row %d older than row %d", i-1, i)
+		}
+	}
+}
+
 func assertStatus(t *testing.T, pool *pgxpool.Pool, sessID, want string) {
 	t.Helper()
 	var status string
