@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/workspace"
 )
 
@@ -148,5 +149,76 @@ func TestLXCGateBlocks_NilSafe(t *testing.T) {
 	p.SetLXCGate(nil, func() bool { return true }) // nil reader, gating on, shadow unset
 	if p.lxcGateBlocks(context.Background(), "wsA", "gpt-4o", "p", lp) {
 		t.Fatal("nil reader must not block")
+	}
+}
+
+// TestEconomyKillSwitch_LXCGateWorksFiatMode — the U18 fiat reclassification,
+// pinned end to end at the gate's decision seam. With the MASTER economy switch
+// OFF (LENS_ECONOMY_ENABLED=false) the LXC gate STILL fires, because LXC is fiat:
+// its flags survive the kill (config.Load), and those surviving flags — fed
+// through the SAME closures main.go installs (SetLXCGate / SetLXCSpendSink) —
+// drive a real block/serve decision. Reverting U18's force-off shrink in
+// config.Load (re-adding LXC to the kill list) reds this immediately.
+//
+// Why here, not cmd/lens: lxcGateBlocks (the block/serve seam) is unexported, and
+// the established pattern in this file tests the gate at that seam without the
+// full serve harness. This IS "the narrowest honest harness over lxcGateBlocks +
+// its installation". The PRODUCTION install being present AND unconditional
+// (outside any econ guard, like the fiat routes) is pinned separately and
+// structurally by TestEconomyKillSwitch_LXCWiringUnconditional in cmd/lens
+// (the inverse of WorkersGuarded).
+func TestEconomyKillSwitch_LXCGateWorksFiatMode(t *testing.T) {
+	// base env config.Load requires (mirrors cmd/lens setRequiredEnv).
+	t.Setenv("LENS_REDIS_URL", "redis://localhost:6379/0")
+	t.Setenv("LENS_DATABASE_URL", "postgres://localhost:5432/lens")
+	t.Setenv("LENS_NATS_URL", "nats://localhost:4222")
+	t.Setenv("LENS_OPENAI_API_KEY", "sk-test")
+	t.Setenv("LENS_ANTHROPIC_API_KEY", "sk-ant-test")
+	// The adversarial fiat setup: MASTER OFF, but LXC (fiat) gating + shadow ON.
+	t.Setenv("LENS_ECONOMY_ENABLED", "false")
+	t.Setenv("LENS_LXC_GATING_ENABLED", "true")
+	t.Setenv("LENS_LXC_SHADOW_SPEND_ENABLED", "true")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// Fiat-mode precondition: the master is dead, yet the LXC flags live on.
+	if cfg.EconomyEnabled {
+		t.Fatal("LENS_ECONOMY_ENABLED=false must kill the master switch")
+	}
+	if !cfg.LXCGatingEnabled || !cfg.LXCShadowSpendEnabled {
+		t.Fatalf("LXC is fiat — its gates must survive the master kill: gating=%v shadow=%v, want both true",
+			cfg.LXCGatingEnabled, cfg.LXCShadowSpendEnabled)
+	}
+
+	// Install the gate EXACTLY as main.go does: same closures, reading the
+	// SURVIVING cfg flags (not hand-set bools) — so a regression that re-kills
+	// LXC under the master switch flips these closures to false and reds the
+	// block/serve asserts below.
+	const costly = "the quick brown fox jumps over the lazy dog repeatedly to accrue tokens"
+	gate := func(reader lxcBalanceReader) *Proxy {
+		p := &Proxy{}
+		p.SetLXCGate(reader, func() bool { return cfg.LXCGatingEnabled })
+		p.SetLXCSpendSink(&fakeLXCSink{}, func() bool { return cfg.LXCShadowSpendEnabled })
+		return p
+	}
+
+	// Zero LXC balance ⇒ REFUSED (economy off, but the fiat gate still bites).
+	if !gate(&fakeLXCReader{balance: 0}).lxcGateBlocks(context.Background(), "wsA", "gpt-4o", costly, lp) {
+		t.Error("fiat mode (master off, LXC gating on) + zero balance: request must be REFUSED")
+	}
+	// Positive (ample) balance ⇒ SERVES.
+	if gate(&fakeLXCReader{balance: 1e9}).lxcGateBlocks(context.Background(), "wsA", "gpt-4o", costly, lp) {
+		t.Error("fiat mode + ample balance: request must SERVE")
+	}
+
+	// SENSITIVITY — proves the asserts above exercise the WIRING, not a constant:
+	// the SAME flags on a Proxy where SetLXCGate was NOT called never block. Drop
+	// the installation and the zero-balance REFUSED above flips → the test reds.
+	notInstalled := &Proxy{}
+	notInstalled.SetLXCSpendSink(&fakeLXCSink{}, func() bool { return cfg.LXCShadowSpendEnabled })
+	if notInstalled.lxcGateBlocks(context.Background(), "wsA", "gpt-4o", costly, lp) {
+		t.Error("gate not installed (no SetLXCGate) must never block — confirms the REFUSED above is the installed wiring")
 	}
 }

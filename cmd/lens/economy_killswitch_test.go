@@ -52,13 +52,22 @@ func TestEconomyKillSwitch_ForcesAllGatesOff(t *testing.T) {
 	if cfg.EconomyEnabled {
 		t.Fatal("EconomyEnabled should be false")
 	}
+	// The 10 ECONOMY gates force OFF (LXC is NOT here — it's fiat, U18).
 	checks := map[string]bool{
 		"PatternMining": cfg.PatternMiningEnabled, "PatternCapture": cfg.PatternCaptureEnabled,
 		"PatternEarning": cfg.PatternEarningEnabled, "PoolRoyaltyMinting": cfg.PoolRoyaltyMintingEnabled,
 		"POVIMinting": cfg.POVIMintingEnabled, "TrustfulComputeMint": cfg.TrustfulComputeMintEnabled,
 		"CacheSharing": cfg.CacheSharingEnabled, "CachePoolable": cfg.CachePoolableEnabled,
-		"DistillPoolable": cfg.DistillPoolableEnabled, "LXCGating": cfg.LXCGatingEnabled,
-		"LXCShadowSpend": cfg.LXCShadowSpendEnabled, "RoutingIntelligence": cfg.RoutingIntelligenceEnabled,
+		"DistillPoolable": cfg.DistillPoolableEnabled, "RoutingIntelligence": cfg.RoutingIntelligenceEnabled,
+	}
+	if len(checks) != 10 {
+		t.Fatalf("expected 10 economy gates, got %d", len(checks))
+	}
+	// U18 INVERSE: LXC is FIAT — its gates survive the master kill (env-true → on),
+	// so a fiat-SaaS deployment can still meter/gate paid LXC credit economy-off.
+	if !cfg.LXCGatingEnabled || !cfg.LXCShadowSpendEnabled {
+		t.Errorf("LXC gates must SURVIVE the master kill (fiat): gating=%v shadow=%v, want both true",
+			cfg.LXCGatingEnabled, cfg.LXCShadowSpendEnabled)
 	}
 	for name, on := range checks {
 		if on {
@@ -111,7 +120,8 @@ func TestEconomyKillSwitch_RouteGuard404(t *testing.T) {
 // economy route? Add it here AND register it through econ.{get,post,del}.
 var economyManifest = []string{
 	`/v1/tokens/rates`, `/v1/economy/`, `/v1/marketplace`, `/v1/insights/routing`, `/v1/oracle/stats`,
-	`/v1/workspaces/{wsID}/tokens`, `/v1/workspaces/{wsID}/lxc`, `/v1/workspaces/{wsID}/pattern-mining`,
+	// U18: only lxc/convert (burns LENS) is economy; lxc/balance is fiat (bare).
+	`/v1/workspaces/{wsID}/tokens`, `/v1/workspaces/{wsID}/lxc/convert`, `/v1/workspaces/{wsID}/pattern-mining`,
 	`/v1/workspaces/{wsID}/annotate/stake`, `/v1/workspaces/{wsID}/povi/receipts`,
 	`/v1/povi/`, `/v1/admin/conversion-rate/approve`, `/v1/admin/pool-royalty/adjudicate`,
 	`/v1/admin/distill/attribution`, `/dashboard/tokens`, `/dashboard/oracle`, `/dashboard/economy`,
@@ -136,10 +146,14 @@ func TestEconomyKillSwitch_ManifestCoverage(t *testing.T) {
 		}
 	}
 	// Negative controls: these economy-adjacent routes are deliberately NOT economy.
-	for _, keep := range []string{"/v1/admin/distill/preview", "/dashboard/nodes"} {
+	// /lxc/balance is FIAT (U18) — must NOT be classified economy; /lxc/convert IS.
+	for _, keep := range []string{"/v1/admin/distill/preview", "/dashboard/nodes", "/v1/workspaces/{wsID}/lxc/balance"} {
 		if isEconomyPath(keep) {
 			t.Errorf("%q wrongly classified as economy", keep)
 		}
+	}
+	if !isEconomyPath("/v1/workspaces/{wsID}/lxc/convert") {
+		t.Error("/lxc/convert must stay economy (it burns LENS)")
 	}
 }
 
@@ -189,6 +203,41 @@ func TestEconomyKillSwitch_WorkersGuarded(t *testing.T) {
 		}
 		if !guarded {
 			t.Errorf("worker %s is not gated on cfg.EconomyEnabled", worker)
+		}
+	}
+}
+
+// TestEconomyKillSwitch_LXCWiringUnconditional — the U18 fiat invariant at the
+// INSTALL site (the structural complement to the behavioral pin in internal/proxy:
+// TestEconomyKillSwitch_LXCGateWorksFiatMode). The LXC gate + shadow hooks must be
+// wired UNCONDITIONALLY — like the fiat routes — NOT inside an `if cfg.EconomyEnabled`
+// block; else the master kill would silently disable paid-credit gating, the exact
+// bug U18a exists to prevent. This is the precise INVERSE of WorkersGuarded: those
+// two workers MUST be econ-guarded; these two hooks must NOT be. "Unconditional" ⇒
+// a top-level run() statement ⇒ exactly one leading tab; nesting in any block
+// indents to >=2 tabs. Fails if a hook is deleted (never installed) OR moved under
+// a guard.
+func TestEconomyKillSwitch_LXCWiringUnconditional(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	lines := strings.Split(string(src), "\n")
+	for _, hook := range []string{"p.SetLXCGate(", "p.SetLXCSpendSink("} {
+		present, unconditional := false, false
+		for _, ln := range lines {
+			if strings.Contains(ln, hook) {
+				present = true
+				if strings.HasPrefix(ln, "\t"+hook) { // exactly one leading tab
+					unconditional = true
+				}
+			}
+		}
+		switch {
+		case !present:
+			t.Errorf("LXC hook %q not installed in main.go — fiat gating/shadow would never fire", hook)
+		case !unconditional:
+			t.Errorf("LXC hook %q is indented inside a block (>=2 tabs) — it must be an unconditional top-level run() wiring (fiat survives the master kill)", hook)
 		}
 	}
 }
