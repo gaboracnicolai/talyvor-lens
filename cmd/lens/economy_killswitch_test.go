@@ -1,15 +1,18 @@
 package main
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/talyvor/lens/internal/config"
+	"github.com/talyvor/lens/internal/dashboard"
 )
 
 // U3 master economy kill-switch tests. The adversarial setup throughout:
@@ -187,5 +190,81 @@ func TestEconomyKillSwitch_WorkersGuarded(t *testing.T) {
 		if !guarded {
 			t.Errorf("worker %s is not gated on cfg.EconomyEnabled", worker)
 		}
+	}
+}
+
+// TestEconomyKillSwitch_NoDirectEnvReads — a direct os.Getenv/os.LookupEnv of an
+// economy gate ANYWHERE outside internal/config bypasses the master switch (the
+// force-off only rewrites cfg fields). Walk the repo and assert none exist.
+func TestEconomyKillSwitch_NoDirectEnvReads(t *testing.T) {
+	var offenders []string
+	err := filepath.WalkDir("../..", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "vendor", "node_modules":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		if strings.Contains(filepath.ToSlash(p), "/internal/config/") {
+			return nil // config.Load is the ONE legitimate reader (it owns the force-off)
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		s := string(src)
+		for _, env := range economyGateEnv {
+			if strings.Contains(s, `os.Getenv("`+env+`")`) || strings.Contains(s, `os.LookupEnv("`+env+`")`) {
+				offenders = append(offenders, p+" reads "+env)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	for _, o := range offenders {
+		t.Errorf("MASTER-SWITCH BYPASS — direct economy-gate env read: %s", o)
+	}
+}
+
+// TestEconomyKillSwitch_DashboardHidesEconomy — master off ⇒ the rendered HTML
+// has no economy nav links and no ECON-marked content, but KEEPS the fiat ROI
+// panel; master on ⇒ economy nav present, markers removed.
+func TestEconomyKillSwitch_DashboardHidesEconomy(t *testing.T) {
+	render := func(on bool) string {
+		h := dashboard.New("t", on)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+		return rec.Body.String()
+	}
+
+	off := render(false)
+	if strings.Contains(off, "Tokens &amp; Mining") || strings.Contains(off, ">Economy</a>") {
+		t.Error("master off: economy nav links must be stripped")
+	}
+	if strings.Contains(off, "{{ECON}}") {
+		t.Error("master off: no ECON marker comments should remain")
+	}
+	if !strings.Contains(off, `id="roi-panel"`) {
+		t.Error("master off: the fiat ROI panel must still be present")
+	}
+
+	on := render(true)
+	if !strings.Contains(on, "Tokens &amp; Mining") || !strings.Contains(on, ">Economy</a>") {
+		t.Error("master on: economy nav links must be present")
+	}
+	if strings.Contains(on, "{{ECON}}") {
+		t.Error("master on: marker comments must be removed (content kept)")
+	}
+	if !strings.Contains(on, `id="roi-panel"`) {
+		t.Error("master on: the ROI panel must be present")
 	}
 }
