@@ -207,6 +207,41 @@ func TestEconomyKillSwitch_WorkersGuarded(t *testing.T) {
 	}
 }
 
+// TestEconomyKillSwitch_LXCWiringUnconditional — the U18 fiat invariant at the
+// INSTALL site (the structural complement to the behavioral pin in internal/proxy:
+// TestEconomyKillSwitch_LXCGateWorksFiatMode). The LXC gate + shadow hooks must be
+// wired UNCONDITIONALLY — like the fiat routes — NOT inside an `if cfg.EconomyEnabled`
+// block; else the master kill would silently disable paid-credit gating, the exact
+// bug U18a exists to prevent. This is the precise INVERSE of WorkersGuarded: those
+// two workers MUST be econ-guarded; these two hooks must NOT be. "Unconditional" ⇒
+// a top-level run() statement ⇒ exactly one leading tab; nesting in any block
+// indents to >=2 tabs. Fails if a hook is deleted (never installed) OR moved under
+// a guard.
+func TestEconomyKillSwitch_LXCWiringUnconditional(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	lines := strings.Split(string(src), "\n")
+	for _, hook := range []string{"p.SetLXCGate(", "p.SetLXCSpendSink("} {
+		present, unconditional := false, false
+		for _, ln := range lines {
+			if strings.Contains(ln, hook) {
+				present = true
+				if strings.HasPrefix(ln, "\t"+hook) { // exactly one leading tab
+					unconditional = true
+				}
+			}
+		}
+		switch {
+		case !present:
+			t.Errorf("LXC hook %q not installed in main.go — fiat gating/shadow would never fire", hook)
+		case !unconditional:
+			t.Errorf("LXC hook %q is indented inside a block (>=2 tabs) — it must be an unconditional top-level run() wiring (fiat survives the master kill)", hook)
+		}
+	}
+}
+
 // TestEconomyKillSwitch_NoDirectEnvReads — a direct os.Getenv/os.LookupEnv of an
 // economy gate ANYWHERE outside internal/config bypasses the master switch (the
 // force-off only rewrites cfg fields). Walk the repo and assert none exist.
