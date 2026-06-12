@@ -43,6 +43,13 @@ append-only tables:
 under the flag; the **ledgers are never deletable** (see §4). A stray `DELETE`
 without the flag (app bug / injection) is still rejected.
 
+**The append-only guarantee has exactly one scoped exception:** the retention
+sweeper may `DELETE` aged `token_events` rows under the flag; `UPDATE`/`TRUNCATE`
+and all ledger tables (`lens_token_ledger`, `lxc_ledger`) have **no exception**.
+This single-caller property is pinned by a static test
+(`TestAuditIntegrity_RetentionBypassFlagSingleCaller`): the flag is referenced in
+exactly one non-test file — the sweeper — and any second reference fails the build.
+
 ### ⚠ Repartitioning constraint
 The `BEFORE TRUNCATE` triggers were enumerated over the partitions that existed
 **at migration time**. If any future migration repartitions `token_events`,

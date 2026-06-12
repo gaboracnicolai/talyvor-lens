@@ -58,6 +58,54 @@ func TestAuditIntegrity_NoLedgerMutationInProductionCode(t *testing.T) {
 	}
 }
 
+// TestAuditIntegrity_RetentionBypassFlagSingleCaller — the append-only guarantee
+// has exactly ONE scoped exception: the retention sweeper sets
+// `SET LOCAL lens.audit_retention = 'on'` so the 0055 trigger permits its
+// token_events DELETE. NOTHING else may set that flag, or the immutability promise
+// is hollow. Asserts the flag is referenced in EXACTLY ONE non-test file — the
+// sweeper. A second file (a new caller) fails. File granularity: the sweeper file
+// legitimately names the flag in both a doc comment and the SET LOCAL statement.
+func TestAuditIntegrity_RetentionBypassFlagSingleCaller(t *testing.T) {
+	const flag = "lens.audit_retention"
+	var files []string
+	err := filepath.WalkDir("../..", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "vendor", "node_modules", "sdk":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		sp := filepath.ToSlash(p)
+		if !strings.Contains(sp, "/internal/") && !strings.Contains(sp, "/cmd/") {
+			return nil
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(src), flag) {
+			files = append(files, sp)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("the retention bypass flag %q must be referenced in EXACTLY ONE non-test file (the sweeper); found %d: %v", flag, len(files), files)
+	}
+	if !strings.HasSuffix(files[0], "internal/audit/retention.go") {
+		t.Errorf("the only flag reference must be the retention sweeper (internal/audit/retention.go); got %s", files[0])
+	}
+}
+
 // TestAuditIntegrity_MigrationGuardsExactlyTheFive — 0055 guards the five
 // append-only tables and NOT the two deliberately-mutable ones.
 func TestAuditIntegrity_MigrationGuardsExactlyTheFive(t *testing.T) {
