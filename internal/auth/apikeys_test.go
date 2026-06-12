@@ -8,7 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
+
+	"github.com/talyvor/lens/internal/backpressure"
 )
 
 // expectInsert wires a permissive INSERT expectation for GenerateKey.
@@ -250,5 +254,82 @@ func TestMiddleware_SetsWorkspaceHeaderFromAPIKey(t *testing.T) {
 	}
 	if sawTeam != "team-a" {
 		t.Errorf("X-Talyvor-Team = %q, want %q", sawTeam, "team-a")
+	}
+}
+
+// ─── last_used_at writer bound (#174) ─────────────
+
+// signalDB is a minimal pgxDB whose Exec signals execCh, letting the
+// async-updater tests synchronize without sleeps-as-assertions.
+type signalDB struct{ execCh chan struct{} }
+
+func (s *signalDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	s.execCh <- struct{}{}
+	return pgconn.NewCommandTag("UPDATE 1"), nil
+}
+func (s *signalDB) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
+func (s *signalDB) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
+
+// seedCachedKey plants an active key in the in-memory cache so Validate takes
+// the cache-hit path straight into finishValidate (no DB read involved).
+func seedCachedKey(ks *KeyStore, raw string) {
+	ks.mu.Lock()
+	ks.cache[hashKey(raw)] = &cacheEntry{
+		key:      &APIKey{ID: "k-test", WorkspaceID: "ws-test", Active: true, CreatedAt: time.Now()},
+		cachedAt: time.Now(),
+	}
+	ks.mu.Unlock()
+}
+
+// A saturated limiter sheds the last_used_at update — validation still
+// succeeds (the bound is bookkeeping-only) — and admits again once freed.
+func TestFinishValidate_LimiterSaturated_ShedsUpdate(t *testing.T) {
+	db := &signalDB{execCh: make(chan struct{}, 4)}
+	ks := newKeyStore(db)
+	seedCachedKey(ks, "tlv_rawkey")
+	l := backpressure.New(1)
+	ks.SetWriteLimiter(l)
+
+	if !l.TryAcquire() { // occupy the only slot, as an in-flight writer would
+		t.Fatal("setup: could not occupy the slot")
+	}
+	res := ks.Validate(context.Background(), "tlv_rawkey")
+	if !res.Valid {
+		t.Fatal("validation itself must SUCCEED when the bookkeeping update is shed")
+	}
+	select {
+	case <-db.execCh:
+		t.Fatal("saturated limiter must shed the last_used_at update")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if l.Dropped() != 1 {
+		t.Fatalf("dropped = %d, want 1", l.Dropped())
+	}
+
+	l.Release()
+	res = ks.Validate(context.Background(), "tlv_rawkey")
+	if !res.Valid {
+		t.Fatal("second validation must succeed")
+	}
+	select {
+	case <-db.execCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("freed limiter must admit the update")
+	}
+}
+
+// A nil limiter (not wired / bound disabled) preserves pre-limiter behavior.
+func TestFinishValidate_NilLimiter_Updates(t *testing.T) {
+	db := &signalDB{execCh: make(chan struct{}, 1)}
+	ks := newKeyStore(db)
+	seedCachedKey(ks, "tlv_rawkey2")
+	res := ks.Validate(context.Background(), "tlv_rawkey2")
+	if !res.Valid {
+		t.Fatal("validation must succeed")
+	}
+	select {
+	case <-db.execCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nil limiter must not gate the last_used_at update")
 	}
 }

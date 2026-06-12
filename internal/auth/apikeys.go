@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/backpressure"
 )
 
 const (
@@ -35,6 +37,23 @@ type KeyStore struct {
 	pool  pgxDB
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry // key: sha256 hex of raw key
+
+	// writeLimiter bounds the concurrent async last_used_at updaters that
+	// finishValidate spawns — one goroutine per successful validation, i.e.
+	// per authenticated request. nil = unbounded (pre-limiter behavior).
+	// Same exposure class #165 bounded for attribution/pattern-capture:
+	// under overload these writers pile up against the pool and convert
+	// load into connection churn. last_used_at is best-effort bookkeeping,
+	// so drop-on-overflow is the correct backpressure.
+	writeLimiter *backpressure.Limiter
+}
+
+// SetWriteLimiter installs the shared observational-write bound (see
+// internal/backpressure). Additive and optional: unset admits everything.
+func (k *KeyStore) SetWriteLimiter(l *backpressure.Limiter) {
+	if k != nil {
+		k.writeLimiter = l
+	}
 }
 
 // cacheEntry pairs an APIKey with the time it entered the cache so we can
@@ -192,13 +211,25 @@ func (k *KeyStore) finishValidate(ctx context.Context, apiKey *APIKey) Validatio
 		return ValidationResult{Reason: "API key has expired"}
 	}
 	// Async last_used_at: fire and forget, fresh context so a request
-	// cancel mid-handler doesn't abort the bookkeeping update.
+	// cancel mid-handler doesn't abort the bookkeeping update. The 5s
+	// timeout alone cannot prevent goroutine pile-up under overload (at
+	// 250 req/s it admits ~1,250 concurrent writers); the limiter is the
+	// actual bound — when saturated the update is dropped (best-effort
+	// bookkeeping; the row just keeps a slightly staler timestamp).
 	if k.pool != nil {
-		go func(id string) {
-			updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_, _ = k.pool.Exec(updateCtx, updateLastUsedSQL, id)
-		}(apiKey.ID)
+		if !k.writeLimiter.TryAcquire() {
+			if k.writeLimiter.LogDrop() {
+				slog.Warn("auth: last_used_at update dropped (writer bound reached; bookkeeping only)",
+					slog.Int64("dropped_total", k.writeLimiter.Dropped()))
+			}
+		} else {
+			go func(id string) {
+				defer k.writeLimiter.Release()
+				updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_, _ = k.pool.Exec(updateCtx, updateLastUsedSQL, id)
+			}(apiKey.ID)
+		}
 	}
 	_ = ctx
 	return ValidationResult{Valid: true, APIKey: apiKey}

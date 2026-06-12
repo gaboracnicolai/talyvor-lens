@@ -424,6 +424,10 @@ func run() error {
 	})
 
 	keyStore := auth.New(pool)
+	// Same shared observational-write bound as attribution/pattern-capture:
+	// the async last_used_at updater is goroutine-per-authenticated-request
+	// and must not be able to pile up against the pool under overload (#174).
+	keyStore.SetWriteLimiter(obsLimiter)
 	if err := keyStore.LoadAll(ctx); err != nil {
 		logger.Warn("auth: LoadAll failed", slog.String("err", err.Error()))
 	}
