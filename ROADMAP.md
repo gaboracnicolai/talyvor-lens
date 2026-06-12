@@ -23,6 +23,8 @@ Done & merged on main (all inert behind LENS_POOL_ROYALTY_MINTING_ENABLED=false)
 
 **PHASE-2 BUILD WORK IS COMPLETE.** The full loop — mint → finalize → detect → resolve → revoke → adjudicate → redeem → shadow-spend → gating — is on main, inert behind its flags (`LENS_POOL_ROYALTY_MINTING_ENABLED` / `LXCShadowSpendEnabled` / `LXCGatingEnabled`, all default-off) and real-Postgres -race CI-guarded end to end.
 
+**U3 master economy kill-switch — DONE on main (#172).** `LENS_ECONOMY_ENABLED` (default true) is the single opt-out that runs the deployment as pure fiat SaaS: force-OFFs all 12 economy gates, unregisters the whole economy route surface (chi-native 404), gates the economy background workers, and hides the dashboard economy sections (fiat ROI/cost analytics stay). Default-true preserves byte-identical behavior. Enterprise example in `deploy/helm/lens/examples/values-enterprise.yaml`. Open: #171 (public-endpoint auth + flip default to false at external release), #173 (consent-PUT/metrics residuals).
+
 What remains before any flip-on is NOT code:
 - External security/crypto audit (vendor + legal) of the minting/ledger path — a hard precondition on issuance; sits at the end of the Phase-2 audit, before Phase 3.
 - The logged pre-flip caveats: validate connection-pool headroom under high same-workspace concurrency before enabling the LXC shadow/gating flags (the `lxc_balances` FOR UPDATE serialization point); tighten adjudication operator identity beyond the global-key default (`decided_by` is TEXT — a value change, not a schema change).
