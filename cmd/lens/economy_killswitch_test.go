@@ -52,13 +52,22 @@ func TestEconomyKillSwitch_ForcesAllGatesOff(t *testing.T) {
 	if cfg.EconomyEnabled {
 		t.Fatal("EconomyEnabled should be false")
 	}
+	// The 10 ECONOMY gates force OFF (LXC is NOT here — it's fiat, U18).
 	checks := map[string]bool{
 		"PatternMining": cfg.PatternMiningEnabled, "PatternCapture": cfg.PatternCaptureEnabled,
 		"PatternEarning": cfg.PatternEarningEnabled, "PoolRoyaltyMinting": cfg.PoolRoyaltyMintingEnabled,
 		"POVIMinting": cfg.POVIMintingEnabled, "TrustfulComputeMint": cfg.TrustfulComputeMintEnabled,
 		"CacheSharing": cfg.CacheSharingEnabled, "CachePoolable": cfg.CachePoolableEnabled,
-		"DistillPoolable": cfg.DistillPoolableEnabled, "LXCGating": cfg.LXCGatingEnabled,
-		"LXCShadowSpend": cfg.LXCShadowSpendEnabled, "RoutingIntelligence": cfg.RoutingIntelligenceEnabled,
+		"DistillPoolable": cfg.DistillPoolableEnabled, "RoutingIntelligence": cfg.RoutingIntelligenceEnabled,
+	}
+	if len(checks) != 10 {
+		t.Fatalf("expected 10 economy gates, got %d", len(checks))
+	}
+	// U18 INVERSE: LXC is FIAT — its gates survive the master kill (env-true → on),
+	// so a fiat-SaaS deployment can still meter/gate paid LXC credit economy-off.
+	if !cfg.LXCGatingEnabled || !cfg.LXCShadowSpendEnabled {
+		t.Errorf("LXC gates must SURVIVE the master kill (fiat): gating=%v shadow=%v, want both true",
+			cfg.LXCGatingEnabled, cfg.LXCShadowSpendEnabled)
 	}
 	for name, on := range checks {
 		if on {
@@ -111,7 +120,8 @@ func TestEconomyKillSwitch_RouteGuard404(t *testing.T) {
 // economy route? Add it here AND register it through econ.{get,post,del}.
 var economyManifest = []string{
 	`/v1/tokens/rates`, `/v1/economy/`, `/v1/marketplace`, `/v1/insights/routing`, `/v1/oracle/stats`,
-	`/v1/workspaces/{wsID}/tokens`, `/v1/workspaces/{wsID}/lxc`, `/v1/workspaces/{wsID}/pattern-mining`,
+	// U18: only lxc/convert (burns LENS) is economy; lxc/balance is fiat (bare).
+	`/v1/workspaces/{wsID}/tokens`, `/v1/workspaces/{wsID}/lxc/convert`, `/v1/workspaces/{wsID}/pattern-mining`,
 	`/v1/workspaces/{wsID}/annotate/stake`, `/v1/workspaces/{wsID}/povi/receipts`,
 	`/v1/povi/`, `/v1/admin/conversion-rate/approve`, `/v1/admin/pool-royalty/adjudicate`,
 	`/v1/admin/distill/attribution`, `/dashboard/tokens`, `/dashboard/oracle`, `/dashboard/economy`,
@@ -136,10 +146,14 @@ func TestEconomyKillSwitch_ManifestCoverage(t *testing.T) {
 		}
 	}
 	// Negative controls: these economy-adjacent routes are deliberately NOT economy.
-	for _, keep := range []string{"/v1/admin/distill/preview", "/dashboard/nodes"} {
+	// /lxc/balance is FIAT (U18) — must NOT be classified economy; /lxc/convert IS.
+	for _, keep := range []string{"/v1/admin/distill/preview", "/dashboard/nodes", "/v1/workspaces/{wsID}/lxc/balance"} {
 		if isEconomyPath(keep) {
 			t.Errorf("%q wrongly classified as economy", keep)
 		}
+	}
+	if !isEconomyPath("/v1/workspaces/{wsID}/lxc/convert") {
+		t.Error("/lxc/convert must stay economy (it burns LENS)")
 	}
 }
 

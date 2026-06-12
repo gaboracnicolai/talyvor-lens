@@ -914,9 +914,13 @@ func Load() (*Config, error) {
 		c.CacheSharingEnabled = false
 		c.CachePoolableEnabled = false
 		c.DistillPoolableEnabled = false
-		c.LXCGatingEnabled = false
-		c.LXCShadowSpendEnabled = false
 		c.RoutingIntelligenceEnabled = false
+		// U18: LXCGatingEnabled / LXCShadowSpendEnabled are DELIBERATELY NOT
+		// forced off here — LXC is the fiat-pegged usage credit, not token
+		// economy. They keep their own env values so a fiat-SaaS deployment can
+		// still meter + gate paid LXC credit with the economy off. (Both still
+		// default false, so default enterprise-mode behavior is unchanged.) The
+		// LENS→LXC conversion route stays economy-gated in main.go.
 	}
 
 	return c, nil

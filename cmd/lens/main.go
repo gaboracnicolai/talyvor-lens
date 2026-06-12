@@ -1695,7 +1695,10 @@ func run() error {
 		})
 
 		// ─── LXC compute credit (two-token split) ──────
-		econ.get(authed, "/v1/workspaces/{wsID}/lxc/balance", func(w http.ResponseWriter, req *http.Request) {
+		// U18: LXC is the fiat usage credit — the balance READ is fiat (registers
+		// unconditionally; survives LENS_ECONOMY_ENABLED=false). The convert route
+		// below STAYS economy-gated (it burns LENS).
+		authed.Get("/v1/workspaces/{wsID}/lxc/balance", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			snap, err := dualToken.GetLXCSnapshot(req.Context(), wsID)
 			if err != nil {
