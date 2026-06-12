@@ -113,6 +113,16 @@ config:
     heartbeatSec: 5
     instanceTtlSec: 15
     drainTimeoutSec: 30
+  # Billing (U18b) — FIAT Stripe → LXC credit. DISABLED by default. When enabled,
+  # the Stripe keys (LENS_STRIPE_SECRET_KEY, LENS_STRIPE_WEBHOOK_SECRET) MUST be in
+  # the Secret below or the gateway refuses to start (fail-fast). The webhook path
+  # (/v1/billing/webhook) is PUBLIC and Stripe-signed: it REQUIRES HTTPS ingress —
+  # Stripe will not deliver to plain HTTP — so terminate TLS in front of it.
+  billing:
+    enabled: false
+    # Stripe Checkout redirect URLs (NOT secrets). Override per deployment.
+    successUrl: "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"
+    cancelUrl: "https://app.talyvor.com/billing/cancel"
   # -- Arbitrary extra NON-SECRET env (map of LENS_* name → value).
   extraEnv: {}
 
@@ -122,6 +132,8 @@ config:
 #   LENS_DATABASE_URL, LENS_REDIS_URL, LENS_NATS_URL,
 #   LENS_OPENAI_API_KEY, LENS_ANTHROPIC_API_KEY
 # and optionally: LENS_JWT_SECRET, LENS_GOOGLE_API_KEY, provider keys, etc.
+# When config.billing.enabled=true, ALSO required (SECRETS — keep here, not in
+# config): LENS_STRIPE_SECRET_KEY, LENS_STRIPE_WEBHOOK_SECRET.
 secret:
   # -- Name of a pre-existing Secret to read env from. RECOMMENDED.
   # When empty, the gateway reads from "<release>-lens-env" (which you must
@@ -137,6 +149,9 @@ secret:
     # LENS_NATS_URL: "nats://nats:4222"
     # LENS_OPENAI_API_KEY: "sk-..."
     # LENS_ANTHROPIC_API_KEY: "sk-ant-..."
+    # When config.billing.enabled=true:
+    # LENS_STRIPE_SECRET_KEY: "sk_live_..."
+    # LENS_STRIPE_WEBHOOK_SECRET: "whsec_..."
 
 # External datastore configuration. Lens does NOT bundle production databases.
 # These flags document the embedded (dev-only) option; see README for how to

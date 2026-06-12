@@ -321,6 +321,24 @@ type Config struct {
 	// LENS_HA_ENABLED, LENS_GUARDRAILS_ENABLED.
 	EconomyEnabled bool
 
+	// BillingEnabled (U18b) gates the FIAT Stripe billing surface (checkout +
+	// webhook + admin purchases). Env: LENS_BILLING_ENABLED, default FALSE. It is
+	// FIAT, NOT economy — independent of EconomyEnabled (a pure fiat-SaaS
+	// deployment runs EconomyEnabled=false + BillingEnabled=true). When false,
+	// main.go does not register the billing routes (unregistered ⇒ 404).
+	BillingEnabled bool
+
+	// StripeSecretKey / StripeWebhookSecret are read ONLY here (the
+	// NoDirectEnvReads invariant extends to them). SECRETS — never logged. If
+	// BillingEnabled is true and either is empty, Load() fails startup.
+	StripeSecretKey     string
+	StripeWebhookSecret string
+
+	// BillingSuccessURL / BillingCancelURL are the Stripe Checkout redirect URLs
+	// (NOT secrets). Stripe requires both; defaulted, override per deployment.
+	BillingSuccessURL string
+	BillingCancelURL  string
+
 	// ROIIncludeEngineerBreakdown gates the per-engineer (author) cost
 	// section of the executive ROI report (Upgrade 24). OFF by default:
 	// attributing cost to named people is SENSITIVE and easily misread as a
@@ -524,6 +542,12 @@ func Load() (*Config, error) {
 
 		RoutingIntelligenceEnabled: parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 
+		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
+		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
+		StripeWebhookSecret: os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
+		BillingSuccessURL:   getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
+		BillingCancelURL:    getEnv("LENS_BILLING_CANCEL_URL", "https://app.talyvor.com/billing/cancel"),
+
 		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
 
 		TLSDomain:   os.Getenv("LENS_TLS_DOMAIN"),
@@ -579,6 +603,14 @@ func Load() (*Config, error) {
 
 	if err := ValidateDBSSLMode(c.DBSSLMode); err != nil {
 		return nil, err
+	}
+
+	// U18b: billing moves fiat money — refuse to start half-configured. The error
+	// names the env vars but NEVER echoes a key value.
+	if c.BillingEnabled && (c.StripeSecretKey == "" || c.StripeWebhookSecret == "") {
+		return nil, errors.New(
+			"LENS_BILLING_ENABLED=true requires both LENS_STRIPE_SECRET_KEY and " +
+				"LENS_STRIPE_WEBHOOK_SECRET (one or both are unset)")
 	}
 
 	// HA timers, expressed in whole seconds. Defaults match the

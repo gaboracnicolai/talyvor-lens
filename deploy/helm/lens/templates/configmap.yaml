@@ -13,6 +13,14 @@ data:
   LENS_HA_HEARTBEAT_SEC: {{ .Values.config.ha.heartbeatSec | quote }}
   LENS_HA_INSTANCE_TTL_SEC: {{ .Values.config.ha.instanceTtlSec | quote }}
   LENS_HA_DRAIN_TIMEOUT_SEC: {{ .Values.config.ha.drainTimeoutSec | quote }}
+  # Billing (U18b) — FIAT. Stripe SECRETS live in the Secret, never in this ConfigMap.
+  LENS_BILLING_ENABLED: {{ .Values.config.billing.enabled | quote }}
+  {{- with .Values.config.billing.successUrl }}
+  LENS_BILLING_SUCCESS_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.billing.cancelUrl }}
+  LENS_BILLING_CANCEL_URL: {{ . | quote }}
+  {{- end }}
   {{- if .Values.pgbouncer.enabled }}
   # Injected automatically when pgbouncer.enabled=true: tells pgxpool to use
   # simple query protocol (no prepared statements) for PgBouncer compatibility.

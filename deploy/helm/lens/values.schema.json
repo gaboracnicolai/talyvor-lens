@@ -71,6 +71,15 @@
             "drainTimeoutSec": { "type": "integer", "minimum": 1 }
           }
         },
+        "billing": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "successUrl": { "type": "string" },
+            "cancelUrl": { "type": "string" }
+          }
+        },
         "extraEnv": { "type": "object", "additionalProperties": { "type": "string" } }
       }
     },
