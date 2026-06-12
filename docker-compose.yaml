@@ -124,6 +124,20 @@ services:
       - DEFAULT_POOL_SIZE=25
       - MIN_POOL_SIZE=2
       - SERVER_IDLE_TIMEOUT=600
+      # After a Postgres outage PgBouncer caches the failed server login and
+      # retries only every server_login_retry seconds (default 15) — measured
+      # as ~half of the 33s end-to-end recovery after a DB SIGKILL, and the
+      # cached error was twice observed wedging the pooler (issue #174,
+      # 2026-06-12 chaos session; second occurrence needed a manual restart).
+      # 3s keeps retries cheap while making recovery prompt.
+      - SERVER_LOGIN_RETRY=3
+    # autoheal opt-in (see the autoheal service): pgbouncer is the one service
+    # observed wedging running-but-unhealthy (#174), and a wedged pooler serves
+    # nothing — restart is always the right call. Deliberately NOT set on lens:
+    # lens reports unhealthy while correctly serving through a DB outage, and
+    # auto-restarting it would kill a working gateway.
+    labels:
+      - autoheal=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -189,6 +203,27 @@ services:
     restart: unless-stopped
     # Safe baseline only. JetStream (-js) needs a writable store dir, so keep
     # read_only off here; no-new-privileges is still a free hardening win.
+    security_opt:
+      - no-new-privileges:true
+
+  # Auto-heal: docker's restart policies fire only on PROCESS DEATH — a
+  # running-but-unhealthy container is never restarted by compose (observed
+  # live in the #174 chaos session: pgbouncer sat wedged-unhealthy after a DB
+  # outage until a human ran `restart pgbouncer`). This sidecar watches Docker
+  # health status and restarts containers labeled autoheal=true.
+  #
+  # Security tradeoff, stated honestly: it mounts the Docker socket, which is
+  # root-equivalent control of the host. Standard practice for this pattern,
+  # image is pinned, and it runs no exposed ports — but reviewers should be
+  # aware this is the one container with host-level power.
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=5
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     security_opt:
       - no-new-privileges:true
 
