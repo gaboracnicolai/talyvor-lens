@@ -124,6 +124,13 @@ services:
       - DEFAULT_POOL_SIZE=25
       - MIN_POOL_SIZE=2
       - SERVER_IDLE_TIMEOUT=600
+      # After a Postgres outage PgBouncer caches the failed server login and
+      # retries only every server_login_retry seconds (default 15) — measured
+      # as ~half of the 33s end-to-end recovery after a DB SIGKILL, and the
+      # cached error was twice observed wedging the pooler (issue #174,
+      # 2026-06-12 chaos session; second occurrence needed a manual restart).
+      # 3s keeps retries cheap while making recovery prompt.
+      - SERVER_LOGIN_RETRY=3
     depends_on:
       postgres:
         condition: service_healthy
