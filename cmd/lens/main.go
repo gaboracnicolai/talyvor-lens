@@ -522,6 +522,20 @@ func run() error {
 		anomalyDetector.StartMonitor(lctx, nc, 1*time.Hour)
 	})
 
+	// U14 audit-trail integrity — leader-only singleton jobs (exactly one instance).
+	// Both DEFAULT OFF: the token_events retention sweeper is inert unless
+	// LENS_AUDIT_RETENTION > 0, and the off-box export is inert unless
+	// LENS_AUDIT_EXPORT_URL is set — StartSweeper/StartLoop return immediately when
+	// their feature is disabled, so leader election spins on a no-op.
+	auditRetention := audit.NewRetention(pool, cfg.AuditRetention)
+	go haComps.leader.Run(ctx, "audit-retention", 30*time.Second, func(lctx context.Context) {
+		auditRetention.StartSweeper(lctx, time.Hour)
+	})
+	auditExport := audit.NewScheduledExport(pool, cfg.AuditExportURL)
+	go haComps.leader.Run(ctx, "audit-export", 30*time.Second, func(lctx context.Context) {
+		auditExport.StartLoop(lctx, cfg.AuditExportInterval)
+	})
+
 	// Control-plane — stateless reconciler (leader-only) + syncer (every instance).
 	//
 	// Reconciler: marks stale nodes inactive in Postgres, builds a NodeSnapshot,

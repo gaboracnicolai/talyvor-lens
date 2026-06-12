@@ -50,6 +50,19 @@ type Config struct {
 	// duration). Only consulted when SemanticCacheRetention > 0.
 	SemanticCacheSweepInterval time.Duration
 
+	// U14 audit-trail integrity. All DEFAULT OFF.
+	//
+	// AuditRetention is the sliding window for the token_events retention sweeper
+	// (token_events ONLY — there is no table knob; it can never touch a ledger).
+	// Env LENS_AUDIT_RETENTION (Go duration). <= 0 / unset DISABLES the sweeper.
+	AuditRetention time.Duration
+
+	// AuditExportURL / AuditExportInterval drive the leader-elected off-box export
+	// loop (reuses the audit webhook exporter). Empty URL = no loop (default off).
+	// Env: LENS_AUDIT_EXPORT_URL, LENS_AUDIT_EXPORT_INTERVAL (Go duration, default 1h).
+	AuditExportURL      string
+	AuditExportInterval time.Duration
+
 	// AWS Bedrock — all four fields are optional; an empty AccessKeyID
 	// keeps HandleBedrock in 503 graceful-degradation mode. SessionToken
 	// is only set when the deployment uses STS / assumed-role creds.
@@ -895,6 +908,28 @@ func Load() (*Config, error) {
 		c.SemanticCacheRetention = d
 	}
 	c.SemanticCacheSweepInterval = time.Hour
+
+	// U14 audit retention — token_events sweeper. <= 0 / unset disables (default).
+	if v := os.Getenv("LENS_AUDIT_RETENTION"); v != "" {
+		d, err := time.ParseDuration(v) // Go duration units (h/m/s); e.g. 8760h ≈ 1 year
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_AUDIT_RETENTION (Go duration, e.g. 8760h for ~1 year): %w", err)
+		}
+		c.AuditRetention = d
+	}
+	// U14 off-box export loop — empty URL disables (default). Interval default 1h.
+	c.AuditExportURL = os.Getenv("LENS_AUDIT_EXPORT_URL")
+	c.AuditExportInterval = time.Hour
+	if v := os.Getenv("LENS_AUDIT_EXPORT_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_AUDIT_EXPORT_INTERVAL (Go duration): %w", err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("LENS_AUDIT_EXPORT_INTERVAL must be > 0 (a time.Ticker panics on non-positive): %s", v)
+		}
+		c.AuditExportInterval = d
+	}
 	if v := os.Getenv("LENS_SEMANTIC_CACHE_SWEEP_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {

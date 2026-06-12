@@ -69,11 +69,12 @@ func newBillingService(t *testing.T) (*Service, *pgxpool.Pool, *economy.DualToke
 
 func reset(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	// DELETE rather than TRUNCATE: lxc_ledger is hash-partitioned, and TRUNCATE's
-	// ACCESS EXCLUSIVE lock across partitions can transiently surface as a
-	// "relation does not exist" under -race. DELETE is row-level and deterministic;
-	// the test data is tiny.
-	for _, tbl := range []string{"lxc_purchases", "billing_customers", "lxc_ledger", "lxc_balances"} {
+	// lxc_ledger is APPEND-ONLY since U14 (migration 0055) and is intentionally NOT
+	// reset here — these tests assert on lxc_balances + lxc_purchases and use unique
+	// workspace ids, so accumulated ledger rows are harmless. lxc_balances IS reset
+	// (it is not guarded) for balance isolation. DELETE (row-level) avoids the
+	// partitioned-TRUNCATE lock flake.
+	for _, tbl := range []string{"lxc_purchases", "billing_customers", "lxc_balances"} {
 		if _, err := pool.Exec(context.Background(), "DELETE FROM "+tbl); err != nil {
 			t.Fatalf("reset %s: %v", tbl, err)
 		}
