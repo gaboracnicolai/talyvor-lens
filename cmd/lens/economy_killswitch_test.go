@@ -309,6 +309,9 @@ func TestEconomyKillSwitch_DashboardHidesEconomy(t *testing.T) {
 	if !strings.Contains(off, `id="roi-panel"`) {
 		t.Error("master off: the fiat ROI panel must still be present")
 	}
+	if !strings.Contains(off, `id="lxc-balance-panel"`) {
+		t.Error("master off: the fiat LXC credit-balance panel must still be present (#182)")
+	}
 
 	on := render(true)
 	if !strings.Contains(on, "Tokens &amp; Mining") || !strings.Contains(on, ">Economy</a>") {
@@ -319,6 +322,9 @@ func TestEconomyKillSwitch_DashboardHidesEconomy(t *testing.T) {
 	}
 	if !strings.Contains(on, `id="roi-panel"`) {
 		t.Error("master on: the ROI panel must be present")
+	}
+	if !strings.Contains(on, `id="lxc-balance-panel"`) {
+		t.Error("master on: the fiat LXC credit-balance panel must be present (#182)")
 	}
 }
 

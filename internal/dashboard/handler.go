@@ -3,7 +3,10 @@ package dashboard
 import (
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+
+	"github.com/talyvor/lens/internal/economy"
 )
 
 // econBlockRE matches an <!--{{ECON}}-->…<!--{{/ECON}}--> economy-only fragment.
@@ -25,6 +28,9 @@ type Handler struct {
 // the marker comments are removed and the content stays.
 func New(version string, economyEnabled bool) *Handler {
 	rendered := strings.ReplaceAll(dashboardHTML, "{{VERSION}}", version)
+	// The fiat LXC peg (#182) — read from the const, never hardcoded in the UI.
+	rendered = strings.ReplaceAll(rendered, "{{LXC_USD_PEG}}",
+		strconv.FormatFloat(economy.LXCUSDValue, 'f', 2, 64))
 	if economyEnabled {
 		rendered = strings.NewReplacer("<!--{{ECON}}-->", "", "<!--{{/ECON}}-->", "").Replace(rendered)
 	} else {

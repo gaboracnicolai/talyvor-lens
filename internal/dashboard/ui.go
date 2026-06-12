@@ -512,6 +512,18 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="lxc-balance-panel" style="display:none">
+      <h2>LXC credit balance <span class="pill" style="background:#2e7d32;color:#e8f5e9">fiat</span></h2>
+      <p class="muted">
+        Prepaid usage credit (LXC) for this workspace, valued at the fixed peg of
+        ${{LXC_USD_PEG}} per LXC. Top up via Stripe billing; shown regardless of the
+        token-economy switch — LXC is the fiat usage credit.
+      </p>
+      <div id="lxc-balance-summary">
+        <span class="skeleton">Loading…</span>
+      </div>
+    </section>
+
     <section id="routing-panel" style="display:none">
       <h2>Routing intelligence <span class="pill" style="background:#3b3b52;color:#cfcfe6">data-driven</span></h2>
       <p class="muted">
@@ -1047,6 +1059,22 @@ const dashboardHTML = `<!DOCTYPE html>
         '<p class="muted" style="margin-top:8px">Top teams: ' + (teams || '—') + '</p>';
     }
 
+    function applyLXCBalance(s) {
+      const panel = document.getElementById('lxc-balance-panel');
+      if (!s) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      document.getElementById('lxc-balance-summary').innerHTML =
+        '<div class="grid">' +
+        '<div class="stat"><div class="label">Current balance</div><div class="value">' + (s.balance || 0).toFixed(2) + ' LXC</div></div>' +
+        '<div class="stat"><div class="label">USD value (at peg)</div><div class="value">' + fmtUSD(s.usd_value || 0) + '</div></div>' +
+        '<div class="stat"><div class="label">Lifetime purchased</div><div class="value">' + (s.lifetime_minted || 0).toFixed(2) + ' LXC</div></div>' +
+        '<div class="stat"><div class="label">Lifetime spent</div><div class="value">' + (s.lifetime_spent || 0).toFixed(2) + ' LXC</div></div>' +
+        '</div>';
+    }
+
     function applyRoutingIntel(d) {
       const panel = document.getElementById('routing-panel');
       const st = d && d.status;
@@ -1169,6 +1197,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ['/v1/api/forecast/summary?workspace_id=default',           applyForecast],
         ['/v1/api/costanomalies?workspace_id=default',              applyCostOutliers],
         ['/v1/api/roi/summary?workspace_id=default',                applyROISummary],
+        ['/v1/workspaces/default/lxc/balance',                      applyLXCBalance],
         ['/v1/api/distill/summary',                                 applyDistill],
         ['/v1/api/routing/intelligence',                            applyRoutingIntel],
         ['/v1/api/modality/capabilities',                           applyModalityCaps],

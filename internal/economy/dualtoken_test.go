@@ -469,8 +469,10 @@ func TestGetLXCSnapshot_ComputesUSDValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLXCSnapshot: %v", err)
 	}
-	// 50 LXC × $0.10 = $5.00.
-	if !approxEq(snap.USDValue, 5.0) {
-		t.Fatalf("expected USD value 5.0, got %f", snap.USDValue)
+	// USD value is the balance at the fixed peg — derived from the const, never
+	// hardcoded (50 × LXCUSDValue). This is the figure the #182 fiat panel shows.
+	want := roundTo(50.0*LXCUSDValue, 6)
+	if !approxEq(snap.USDValue, want) {
+		t.Fatalf("USD value = %f, want %f (50 × LXCUSDValue)", snap.USDValue, want)
 	}
 }
