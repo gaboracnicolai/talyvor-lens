@@ -17,6 +17,53 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("LENS_ANTHROPIC_API_KEY", "sk-ant-test")
 }
 
+// TestLoad_Audit — U14 audit knobs default OFF; parse when set; reject a
+// non-positive export interval (a time.Ticker panics on it).
+func TestLoad_Audit(t *testing.T) {
+	t.Run("defaults: all off", func(t *testing.T) {
+		setRequiredEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.AuditRetention != 0 {
+			t.Errorf("AuditRetention default must be 0 (disabled), got %v", c.AuditRetention)
+		}
+		if c.AuditExportURL != "" {
+			t.Errorf("AuditExportURL default must be empty (off), got %q", c.AuditExportURL)
+		}
+		if c.AuditExportInterval != time.Hour {
+			t.Errorf("AuditExportInterval default must be 1h, got %v", c.AuditExportInterval)
+		}
+	})
+	t.Run("parsed when set", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_AUDIT_RETENTION", "8760h")
+		t.Setenv("LENS_AUDIT_EXPORT_URL", "https://siem.example/ingest")
+		t.Setenv("LENS_AUDIT_EXPORT_INTERVAL", "15m")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.AuditRetention != 8760*time.Hour {
+			t.Errorf("AuditRetention = %v, want 8760h", c.AuditRetention)
+		}
+		if c.AuditExportURL != "https://siem.example/ingest" {
+			t.Errorf("AuditExportURL = %q", c.AuditExportURL)
+		}
+		if c.AuditExportInterval != 15*time.Minute {
+			t.Errorf("AuditExportInterval = %v, want 15m", c.AuditExportInterval)
+		}
+	})
+	t.Run("non-positive export interval rejected", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_AUDIT_EXPORT_INTERVAL", "0s")
+		if _, err := Load(); err == nil {
+			t.Error("a non-positive LENS_AUDIT_EXPORT_INTERVAL must fail Load (ticker panics)")
+		}
+	})
+}
+
 // TestLoad_Billing_FailsWhenEnabledWithoutKeys — billing moves fiat money, so an
 // enabled-but-half-configured deployment must refuse to start. Disabled (default)
 // ignores the keys; enabled requires BOTH; the error never echoes a secret value.
