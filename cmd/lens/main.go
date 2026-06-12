@@ -44,6 +44,7 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
+	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
@@ -717,6 +718,15 @@ func run() error {
 	// one-way LENS->LXC conversion + LXC spend path.
 	rateEngine := economy.NewRateEngine(tokenLedger, pool)
 	dualToken := economy.NewDualTokenStore(tokenLedger, pool, rateEngine)
+
+	// U18b billing (fiat Stripe → LXC credit). Constructed unconditionally so the
+	// route handler method values are valid; the routes themselves register only
+	// when cfg.BillingEnabled (billReg). Stripe keys are validated at config.Load
+	// (startup fails if billing is enabled without them) and never logged.
+	billingSvc := billing.New(pool, dualToken,
+		billing.NewLiveStripe(cfg.StripeSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL),
+		cfg.StripeWebhookSecret)
+	bill := billReg{on: cfg.BillingEnabled}
 	// Stage 2.4/2.5 shadow LXC spend — observational, post-serve, flag-gated
 	// (LENS_LXC_SHADOW_SPEND_ENABLED, default off). The proxy debits LXC
 	// alongside the cost_usd write; void/non-gating, cannot affect serving.
@@ -1032,6 +1042,12 @@ func run() error {
 	// Everything else sits behind the API-key middleware. chi.Group inherits
 	// middleware only for routes registered inside its closure.
 	heliconeCompat := compat.NewHeliconeCompat(keyStore)
+
+	// U18b billing webhook — PUBLIC (Stripe-signed, no auth), gated on
+	// BillingEnabled (unregistered ⇒ 404). Registered on the bare router with no
+	// auth/rate-limit middleware; the handler reads the RAW body itself (Stripe
+	// signs raw bytes) before any JSON.
+	bill.post(r, "/v1/billing/webhook", billingSvc.HandleWebhook)
 
 	r.Group(func(authed chi.Router) {
 		// Helicone-compat translates Helicone-* headers and rewrites
@@ -1707,6 +1723,42 @@ func run() error {
 			}
 			writeJSONOK(w, http.StatusOK, snap)
 		})
+
+		// U18b billing — FIAT, registered under BillingEnabled (independent of the
+		// economy master). Checkout is workspace-scoped: workspaceIsolationMiddleware
+		// binds {wsID} to the caller's credential (admin bypasses), like its siblings.
+		bill.post(authed, "/v1/workspaces/{wsID}/billing/checkout", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				USDCents int64 `json:"usd_cents"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			url, err := billingSvc.CreateCheckout(req.Context(), wsID, in.USDCents)
+			if err != nil {
+				status := http.StatusInternalServerError
+				if errors.Is(err, billing.ErrAmountNotAllowed) {
+					status = http.StatusBadRequest
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]string{"url": url})
+		})
+
+		// Admin refund-visibility list (read-only; requireAdmin). An 'anomalous' row
+		// means the customer was CHARGED and NOT credited — v1 resolution is a manual
+		// refund in the Stripe dashboard.
+		bill.get(authed, "/v1/admin/billing/purchases", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			rows, err := billingSvc.ListPurchases(req.Context(), 200)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, rows)
+		})))
 
 		econ.post(authed, "/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")

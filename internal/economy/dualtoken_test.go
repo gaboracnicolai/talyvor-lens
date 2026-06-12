@@ -290,6 +290,59 @@ func TestConvertLENStoLXC_AtomicDebitAndMint(t *testing.T) {
 	}
 }
 
+// TestCreditLXC_MintsWithoutBurningLENS — the U18b fiat-purchase credit: LXC is
+// minted directly (type=purchase, lifetime_minted += amount) with NO LENS debit.
+// The "no LENS burn" property is STRUCTURAL here: the mock declares ZERO
+// lens_token_* expectations, so any attempt to touch the LENS schema would fail
+// as an unexpected call.
+func TestCreditLXC_MintsWithoutBurningLENS(t *testing.T) {
+	store, _, mock := newDualTokenMock(t)
+	mock.ExpectBegin()
+	// ensure row + FOR UPDATE read at balance 20 (minted 20).
+	mock.ExpectExec(`INSERT INTO lxc_balances`).
+		WithArgs("ws_buy").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
+		WithArgs("ws_buy").
+		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
+			AddRow(20.0, 20.0, 0.0))
+	// credit 100: ledger row type=purchase + balance update to 120 (minted 120, spent 0).
+	mock.ExpectExec(`INSERT INTO lxc_ledger`).
+		WithArgs("ws_buy", 100.0, 120.0, LXCTypePurchase, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(`UPDATE lxc_balances`).
+		WithArgs("ws_buy", 120.0, 120.0, 0.0).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	newBal, err := store.CreditLXC(context.Background(), "ws_buy", 100.0, "stripe top-up",
+		map[string]interface{}{"usd_cents": 1000})
+	if err != nil {
+		t.Fatalf("CreditLXC: %v", err)
+	}
+	if !approxEq(newBal, 120.0) {
+		t.Fatalf("newBal=%v want 120", newBal)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// TestCreditLXC_RejectsNonPositive — a zero/negative credit is a programming or
+// money error; it must be refused before any DB work (no row touched).
+func TestCreditLXC_RejectsNonPositive(t *testing.T) {
+	store, _, mock := newDualTokenMock(t)
+	// No expectations registered → any DB call fails the test.
+	for _, amt := range []float64{0, -5} {
+		if _, err := store.CreditLXC(context.Background(), "ws_buy", amt, "bad", nil); err == nil {
+			t.Errorf("CreditLXC(%v) must error", amt)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 func TestConvertLENStoLXC_InsufficientLENS(t *testing.T) {
 	store, _, mock := newDualTokenMock(t)
 	expectCurrentRate(mock, 2.0, false)

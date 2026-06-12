@@ -147,7 +147,11 @@ func TestEconomyKillSwitch_ManifestCoverage(t *testing.T) {
 	}
 	// Negative controls: these economy-adjacent routes are deliberately NOT economy.
 	// /lxc/balance is FIAT (U18) — must NOT be classified economy; /lxc/convert IS.
-	for _, keep := range []string{"/v1/admin/distill/preview", "/dashboard/nodes", "/v1/workspaces/{wsID}/lxc/balance"} {
+	for _, keep := range []string{
+		"/v1/admin/distill/preview", "/dashboard/nodes", "/v1/workspaces/{wsID}/lxc/balance",
+		// U18b billing is FIAT — never economy (gated by billReg/BillingEnabled, not econ).
+		"/v1/billing/webhook", "/v1/workspaces/{wsID}/billing/checkout", "/v1/admin/billing/purchases",
+	} {
 		if isEconomyPath(keep) {
 			t.Errorf("%q wrongly classified as economy", keep)
 		}
@@ -315,5 +319,90 @@ func TestEconomyKillSwitch_DashboardHidesEconomy(t *testing.T) {
 	}
 	if !strings.Contains(on, `id="roi-panel"`) {
 		t.Error("master on: the ROI panel must be present")
+	}
+}
+
+// TestEconomyKillSwitch_BillingFiatIndependent — U18b/U3 interplay at the ROUTE
+// layer: billing is FIAT, gated by billReg (cfg.BillingEnabled), INDEPENDENT of
+// the economy master. With the economy OFF and billing ON (the fiat-SaaS shape),
+// an economy route 404s while the billing routes SERVE; with billing OFF the
+// billing routes 404. (The behavioral half — webhook credits, lxc/balance
+// reflects it with the economy off — is pinned against real PG in
+// internal/billing; billing never reads cfg.EconomyEnabled, so it is economy-
+// independent by construction.)
+func TestEconomyKillSwitch_BillingFiatIndependent(t *testing.T) {
+	ok := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+	hit := func(r chi.Router, method, path string) int {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+		return rec.Code
+	}
+
+	// economy master OFF, billing ON.
+	r := chi.NewRouter()
+	econReg{on: false}.get(r, "/v1/workspaces/{wsID}/lxc/convert", ok) // economy (burns LENS)
+	bill := billReg{on: true}
+	bill.post(r, "/v1/billing/webhook", ok)
+	bill.post(r, "/v1/workspaces/{wsID}/billing/checkout", ok)
+
+	if got := hit(r, http.MethodGet, "/v1/workspaces/ws/lxc/convert"); got != http.StatusNotFound {
+		t.Errorf("economy route must 404 with the master off; got %d", got)
+	}
+	if got := hit(r, http.MethodPost, "/v1/billing/webhook"); got != http.StatusOK {
+		t.Errorf("billing webhook must SERVE with billing on while economy off; got %d", got)
+	}
+	if got := hit(r, http.MethodPost, "/v1/workspaces/ws/billing/checkout"); got != http.StatusOK {
+		t.Errorf("billing checkout must SERVE with billing on while economy off; got %d", got)
+	}
+
+	// billing OFF ⇒ unregistered ⇒ 404.
+	rOff := chi.NewRouter()
+	billReg{on: false}.post(rOff, "/v1/billing/webhook", ok)
+	if got := hit(rOff, http.MethodPost, "/v1/billing/webhook"); got != http.StatusNotFound {
+		t.Errorf("billing OFF ⇒ webhook 404 (unregistered); got %d", got)
+	}
+}
+
+// TestBillingSecrets_ReadOnlyInConfig — the Stripe secrets (and the billing
+// switch) must be read ONLY in internal/config; a direct os.Getenv/os.LookupEnv
+// anywhere else risks logging a key or bypassing the enabled-without-keys startup
+// validation. Mirrors NoDirectEnvReads for the billing surface.
+func TestBillingSecrets_ReadOnlyInConfig(t *testing.T) {
+	billingEnv := []string{"LENS_STRIPE_SECRET_KEY", "LENS_STRIPE_WEBHOOK_SECRET", "LENS_BILLING_ENABLED"}
+	var offenders []string
+	err := filepath.WalkDir("../..", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "vendor", "node_modules":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		if strings.Contains(filepath.ToSlash(p), "/internal/config/") {
+			return nil // config.Load is the ONE legitimate reader
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		s := string(src)
+		for _, env := range billingEnv {
+			if strings.Contains(s, `os.Getenv("`+env+`")`) || strings.Contains(s, `os.LookupEnv("`+env+`")`) {
+				offenders = append(offenders, p+" reads "+env)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	for _, o := range offenders {
+		t.Errorf("billing secret/switch read outside internal/config: %s", o)
 	}
 }

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,6 +15,62 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("LENS_NATS_URL", "nats://localhost:4222")
 	t.Setenv("LENS_OPENAI_API_KEY", "sk-test")
 	t.Setenv("LENS_ANTHROPIC_API_KEY", "sk-ant-test")
+}
+
+// TestLoad_Billing_FailsWhenEnabledWithoutKeys — billing moves fiat money, so an
+// enabled-but-half-configured deployment must refuse to start. Disabled (default)
+// ignores the keys; enabled requires BOTH; the error never echoes a secret value.
+func TestLoad_Billing_FailsWhenEnabledWithoutKeys(t *testing.T) {
+	t.Run("disabled: keys optional, default off", func(t *testing.T) {
+		setRequiredEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load (billing default-off): %v", err)
+		}
+		if c.BillingEnabled {
+			t.Error("BillingEnabled must default false")
+		}
+	})
+	t.Run("enabled, no keys: startup fails", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_BILLING_ENABLED", "true")
+		if _, err := Load(); err == nil {
+			t.Fatal("billing enabled without Stripe keys must fail Load")
+		}
+	})
+	t.Run("enabled, only secret key: startup fails", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_BILLING_ENABLED", "true")
+		t.Setenv("LENS_STRIPE_SECRET_KEY", "sk_test_x")
+		if _, err := Load(); err == nil {
+			t.Fatal("billing enabled with the webhook secret missing must fail Load")
+		}
+	})
+	t.Run("enabled, both keys: ok", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_BILLING_ENABLED", "true")
+		t.Setenv("LENS_STRIPE_SECRET_KEY", "sk_test_x")
+		t.Setenv("LENS_STRIPE_WEBHOOK_SECRET", "whsec_x")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load (billing fully configured): %v", err)
+		}
+		if !c.BillingEnabled || c.StripeSecretKey == "" || c.StripeWebhookSecret == "" {
+			t.Error("fully-configured billing must load with fields set")
+		}
+	})
+	t.Run("startup error names env vars, not the secret value", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_BILLING_ENABLED", "true")
+		t.Setenv("LENS_STRIPE_SECRET_KEY", "sk_live_SUPERSECRET")
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected failure")
+		}
+		if strings.Contains(err.Error(), "SUPERSECRET") {
+			t.Errorf("startup error must not echo the secret value: %v", err)
+		}
+	})
 }
 
 func TestLoad_HADefaults(t *testing.T) {

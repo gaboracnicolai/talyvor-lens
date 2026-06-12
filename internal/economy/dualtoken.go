@@ -426,6 +426,56 @@ func (s *DualTokenStore) SpendLXC(ctx context.Context, workspaceID string, lxcAm
 	return tx.Commit(ctx)
 }
 
+// CreditLXCTx credits LXC WITHOUT spending LENS — the fiat-purchase path (U18b):
+// a PAID Stripe top-up mints LXC directly. It is the LXC-credit half of
+// ConvertLENStoLXC with NO LENS debit, recorded as LXCTypePurchase. It runs
+// inside the CALLER's transaction so a billing idempotency claim (the
+// lxc_purchases INSERT ... ON CONFLICT) and this credit commit ATOMICALLY — the
+// money guarantee. Returns the new LXC balance. The caller owns Begin/Commit/
+// Rollback (and must never let billing write lxc_ledger/lxc_balances directly).
+func (s *DualTokenStore) CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount float64, reason string, metadata map[string]interface{}) (float64, error) {
+	if lxcAmount <= 0 {
+		return 0, errors.New("economy: credit amount must be positive")
+	}
+	bal, minted, spent, err := readLXCBalance(ctx, tx, workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	newBal := roundTo(bal+lxcAmount, 6)
+	if err := insertLXCLedger(ctx, tx, workspaceID, lxcAmount, newBal,
+		LXCTypePurchase, reason, metadata); err != nil {
+		return 0, err
+	}
+	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted+lxcAmount, spent); err != nil {
+		return 0, err
+	}
+	return newBal, nil
+}
+
+// CreditLXC is the standalone (own-transaction) form of CreditLXCTx, for callers
+// that are not already inside a tx. Mirrors the convert path's tx envelope.
+func (s *DualTokenStore) CreditLXC(ctx context.Context, workspaceID string, lxcAmount float64, reason string, metadata map[string]interface{}) (float64, error) {
+	if lxcAmount <= 0 {
+		return 0, errors.New("economy: credit amount must be positive")
+	}
+	if s.pool == nil {
+		return 0, nil // no-DB path (pure-arithmetic unit tests)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("economy: begin credit: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	newBal, err := s.CreditLXCTx(ctx, tx, workspaceID, lxcAmount, reason, metadata)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("economy: commit credit: %w", err)
+	}
+	return newBal, nil
+}
+
 // GetLXCBalance returns the current LXC balance (0 for a fresh
 // workspace — not an error).
 func (s *DualTokenStore) GetLXCBalance(ctx context.Context, workspaceID string) (float64, error) {
