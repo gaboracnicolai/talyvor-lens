@@ -235,12 +235,10 @@ node-liveness channels are bus-backed). Current per-surface windows:
 | Token budget (`max_tokens`) | immediate — read from Postgres per request |
 | Spend-cap hard-block | ≈60 s (spend-cap refresh interval) |
 | API-key revocation | ≈5 min (key-cache TTL) — a key revoked on one replica may still be honored on another replica for up to ~5 minutes until that node's cache entry expires |
-| Workspace config (logging policy, cache-pooling flags) | **currently startup-only** across replicas — bounded reload tracked in U7b (#189) |
-| Guardrail policies | in-memory per node, reload cadence under review (U7b) |
+| Workspace config (logging policy, cache-pooling flags) | ≤ `LENS_WORKSPACE_RELOAD_INTERVAL` (default 30s) — each replica rebuilds its workspace cache from Postgres on this interval |
+| Guardrail policies | in-memory per node, reload cadence under review (#189) |
 
-These windows reflect current refresh/TTL constants; they are not yet enforced by tests —
-U7c adds the proofs. Plan multi-replica rollouts accordingly. Bounding the workspace-config
-window is tracked in U7b/U7c (#189).
+Workspace-config propagation is **test-proven** (U7c: a two-instance-over-one-pool test asserts a change on instance A is visible on instance B after a reload, and that a deactivation is dropped). The remaining windows (spend-cap ≈60 s, key-revocation ≈5 min) reflect current refresh/TTL constants and are **not yet enforced by tests**. Plan multi-replica rollouts accordingly. Guardrail-policy persistence/propagation is tracked in #189.
 
 ## In-cluster mining nodes (advanced, optional)
 

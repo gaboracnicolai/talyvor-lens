@@ -17,6 +17,41 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("LENS_ANTHROPIC_API_KEY", "sk-ant-test")
 }
 
+// TestLoad_WorkspaceReloadInterval — U7b: default 30s, parsed when set, and a
+// non-positive value is rejected at load (a time.Ticker panics on it).
+func TestLoad_WorkspaceReloadInterval(t *testing.T) {
+	t.Run("default 30s", func(t *testing.T) {
+		setRequiredEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.WorkspaceReloadInterval != 30*time.Second {
+			t.Errorf("default = %v, want 30s", c.WorkspaceReloadInterval)
+		}
+	})
+	t.Run("parsed when set", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_WORKSPACE_RELOAD_INTERVAL", "10s")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.WorkspaceReloadInterval != 10*time.Second {
+			t.Errorf("= %v, want 10s", c.WorkspaceReloadInterval)
+		}
+	})
+	for _, bad := range []string{"0s", "-5s", "nonsense"} {
+		t.Run("rejected: "+bad, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LENS_WORKSPACE_RELOAD_INTERVAL", bad)
+			if _, err := Load(); err == nil {
+				t.Errorf("LENS_WORKSPACE_RELOAD_INTERVAL=%q must be rejected at load", bad)
+			}
+		})
+	}
+}
+
 // TestLoad_Audit — U14 audit knobs default OFF; parse when set; reject a
 // non-positive export interval (a time.Ticker panics on it).
 func TestLoad_Audit(t *testing.T) {

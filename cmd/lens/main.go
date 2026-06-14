@@ -410,6 +410,12 @@ func run() error {
 		logger.Warn("budgets: initial load failed", slog.String("err", err.Error()))
 	}
 	budgetService.StartRefresh(ctx)
+	// U7b: bound cross-replica staleness of workspace config (logging policy +
+	// the cache-pooling privacy flag) — every replica rebuilds its in-memory
+	// workspace cache from Postgres on this interval (build-then-swap LoadAll).
+	// NOT leader-gated: each replica must refresh its OWN cache. ctx is the run
+	// lifecycle context (cancelled on shutdown → the ticker goroutine exits).
+	wsManager.StartRefresh(ctx, cfg.WorkspaceReloadInterval)
 	p.SetBudgetService(budgetService)
 	p.SetBedrockConfig(proxy.BedrockConfig{
 		Region:          cfg.AWSRegion,
