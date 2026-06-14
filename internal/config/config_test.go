@@ -52,6 +52,41 @@ func TestLoad_WorkspaceReloadInterval(t *testing.T) {
 	}
 }
 
+// TestLoad_GuardrailsReloadInterval — #189: default 30s, parsed when set, and a
+// non-positive / unparseable value is rejected at load (a time.Ticker panics on it).
+func TestLoad_GuardrailsReloadInterval(t *testing.T) {
+	t.Run("default 30s", func(t *testing.T) {
+		setRequiredEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.GuardrailsReloadInterval != 30*time.Second {
+			t.Errorf("default = %v, want 30s", c.GuardrailsReloadInterval)
+		}
+	})
+	t.Run("parsed when set", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_GUARDRAILS_RELOAD_INTERVAL", "15s")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.GuardrailsReloadInterval != 15*time.Second {
+			t.Errorf("= %v, want 15s", c.GuardrailsReloadInterval)
+		}
+	})
+	for _, bad := range []string{"0s", "-5s", "nonsense"} {
+		t.Run("rejected: "+bad, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LENS_GUARDRAILS_RELOAD_INTERVAL", bad)
+			if _, err := Load(); err == nil {
+				t.Errorf("LENS_GUARDRAILS_RELOAD_INTERVAL=%q must be rejected at load", bad)
+			}
+		})
+	}
+}
+
 // TestLoad_Audit — U14 audit knobs default OFF; parse when set; reject a
 // non-positive export interval (a time.Ticker panics on it).
 func TestLoad_Audit(t *testing.T) {

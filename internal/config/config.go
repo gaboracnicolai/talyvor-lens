@@ -71,6 +71,12 @@ type Config struct {
 	// SELECT). MUST be > 0 (a time.Ticker panics on a non-positive interval).
 	WorkspaceReloadInterval time.Duration
 
+	// GuardrailsReloadInterval (#189) is how often each replica rebuilds its
+	// in-memory custom guardrail-policy cache from Postgres (guardrail_policies),
+	// bounding cross-replica staleness of a SECURITY control. Env:
+	// LENS_GUARDRAILS_RELOAD_INTERVAL (Go duration). Default 30s. MUST be > 0.
+	GuardrailsReloadInterval time.Duration
+
 	// AWS Bedrock — all four fields are optional; an empty AccessKeyID
 	// keeps HandleBedrock in 503 graceful-degradation mode. SessionToken
 	// is only set when the deployment uses STS / assumed-role creds.
@@ -949,6 +955,18 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("LENS_WORKSPACE_RELOAD_INTERVAL must be > 0 (a time.Ticker panics on non-positive): %s", v)
 		}
 		c.WorkspaceReloadInterval = d
+	}
+	// #189 guardrails-policy reload interval — default 30s, MUST be > 0.
+	c.GuardrailsReloadInterval = 30 * time.Second
+	if v := os.Getenv("LENS_GUARDRAILS_RELOAD_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_GUARDRAILS_RELOAD_INTERVAL (Go duration, e.g. 30s): %w", err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("LENS_GUARDRAILS_RELOAD_INTERVAL must be > 0 (a time.Ticker panics on non-positive): %s", v)
+		}
+		c.GuardrailsReloadInterval = d
 	}
 	if v := os.Getenv("LENS_SEMANTIC_CACHE_SWEEP_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)

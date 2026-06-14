@@ -147,7 +147,10 @@ func newGuardrailsPolicyPutHandler(engine *guardrails.Engine) http.HandlerFunc {
 		if in.WorkspaceID == "" {
 			in.WorkspaceID = "default"
 		}
-		engine.SetPolicy(req.Context(), in.WorkspaceID, in)
+		if err := engine.SetPolicy(req.Context(), in.WorkspaceID, in); err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 	}
 }
