@@ -352,8 +352,18 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Build a FRESH map OUTSIDE the lock, then publish it with a single pointer
+	// swap under the write lock — making LoadAll safe to re-run on a reload ticker
+	// (U7b). Properties this guarantees:
+	//   - No torn read: readers hold RLock (GetLoggingPolicy/GetCachePoolable); the
+	//     swap holds Lock, so a reader sees either the whole old map or the whole
+	//     new one — never a half-built map (the cache-pooling privacy decision).
+	//   - A failed build never swaps: a query/scan/rows error returns with the OLD
+	//     map untouched (nothing half-built is ever published).
+	//   - Deletions propagate: a workspace that left the result set (deactivated —
+	//     loadAllSQL filters active=true — or deleted) is dropped by ABSENCE from
+	//     the new map instead of lingering with a stale policy.
+	next := make(map[string]*Workspace)
 	for rows.Next() {
 		var ws Workspace
 		var policy, dpolicy string
@@ -362,14 +372,52 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 			&ws.AllowedModels, &ws.AllowedProviders, &ws.MaxTokensPerRequest,
 			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &dpolicy, &ws.CachePoolable, &ws.DistillPoolable, &ws.CreatedAt,
 		); err != nil {
-			return fmt.Errorf("workspace: scan: %w", err)
+			return fmt.Errorf("workspace: scan: %w", err) // old map intact — no swap
 		}
 		ws.LoggingPolicy = normalizeLoggingPolicy(LoggingPolicy(policy))
 		ws.DistillPolicy = normalizeDistillPolicy(DistillPolicy(dpolicy))
 		stored := ws
-		m.workspaces[ws.ID] = &stored
+		next[ws.ID] = &stored
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("workspace: load all rows: %w", err) // old map intact — no swap
+	}
+
+	m.mu.Lock()
+	m.workspaces = next
+	m.mu.Unlock()
+	return nil
+}
+
+// Reload rebuilds the in-memory workspace cache from the DB via the build-then-swap
+// LoadAll. Public + directly callable so a CRUD path can refresh immediately on the
+// local node and tests can drive propagation deterministically (the U7c seam).
+func (m *Manager) Reload(ctx context.Context) error { return m.LoadAll(ctx) }
+
+// StartRefresh runs Reload on a fixed interval until ctx is cancelled, bounding
+// cross-replica staleness of workspace config (logging policy, cache-pooling flag)
+// to ≈interval. A transient DB error is logged, NOT fatal — build-then-swap keeps
+// the old cache live and the next tick retries. Mirrors budgets.Service.StartRefresh.
+// Intended to run once per process (a plain goroutine, not leader-gated: every
+// replica must reload its own cache).
+func (m *Manager) StartRefresh(ctx context.Context, interval time.Duration) {
+	if m == nil || m.pool == nil {
+		return
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := m.Reload(ctx); err != nil {
+					slog.Warn("workspace: reload failed (old cache kept)", slog.String("err", err.Error()))
+				}
+			}
+		}
+	}()
 }
 
 func containsString(haystack []string, needle string) bool {

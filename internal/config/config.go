@@ -63,6 +63,14 @@ type Config struct {
 	AuditExportURL      string
 	AuditExportInterval time.Duration
 
+	// WorkspaceReloadInterval (U7b) is how often each replica rebuilds its
+	// in-memory workspace-config cache from Postgres, bounding cross-replica
+	// staleness of logging policy + the cache-pooling privacy flag. Env:
+	// LENS_WORKSPACE_RELOAD_INTERVAL (Go duration). Default 30s (tighter than the
+	// budgets 60s — cache-pooling is a privacy decision; the reload is one cheap
+	// SELECT). MUST be > 0 (a time.Ticker panics on a non-positive interval).
+	WorkspaceReloadInterval time.Duration
+
 	// AWS Bedrock — all four fields are optional; an empty AccessKeyID
 	// keeps HandleBedrock in 503 graceful-degradation mode. SessionToken
 	// is only set when the deployment uses STS / assumed-role creds.
@@ -929,6 +937,18 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("LENS_AUDIT_EXPORT_INTERVAL must be > 0 (a time.Ticker panics on non-positive): %s", v)
 		}
 		c.AuditExportInterval = d
+	}
+	// U7b workspace-config reload interval — default 30s, MUST be > 0.
+	c.WorkspaceReloadInterval = 30 * time.Second
+	if v := os.Getenv("LENS_WORKSPACE_RELOAD_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_WORKSPACE_RELOAD_INTERVAL (Go duration, e.g. 30s): %w", err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("LENS_WORKSPACE_RELOAD_INTERVAL must be > 0 (a time.Ticker panics on non-positive): %s", v)
+		}
+		c.WorkspaceReloadInterval = d
 	}
 	if v := os.Getenv("LENS_SEMANTIC_CACHE_SWEEP_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
