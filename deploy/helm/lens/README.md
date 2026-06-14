@@ -224,6 +224,24 @@ Set `config.ha.enabled=true` (turns on `LENS_HA_ENABLED`, which the gateway
 needs before it's safe to run multiple replicas), then raise `replicaCount` or
 enable `autoscaling`/`podDisruptionBudget`. See `examples/values-ha.yaml`.
 
+### Cross-node policy consistency
+
+Policy changes propagate across replicas by **TTL / periodic refresh / restart — not a
+real-time bus.** There is no policy-invalidation pub/sub (only the circuit-breaker and
+node-liveness channels are bus-backed). Current per-surface windows:
+
+| Change | Cross-replica visibility |
+|---|---|
+| Token budget (`max_tokens`) | immediate — read from Postgres per request |
+| Spend-cap hard-block | ≈60 s (spend-cap refresh interval) |
+| API-key revocation | ≈5 min (key-cache TTL) — a key revoked on one replica may still be honored on another replica for up to ~5 minutes until that node's cache entry expires |
+| Workspace config (logging policy, cache-pooling flags) | **currently startup-only** across replicas — bounded reload tracked in U7b (#189) |
+| Guardrail policies | in-memory per node, reload cadence under review (U7b) |
+
+These windows reflect current refresh/TTL constants; they are not yet enforced by tests —
+U7c adds the proofs. Plan multi-replica rollouts accordingly. Bounding the workspace-config
+window is tracked in U7b/U7c (#189).
+
 ## In-cluster mining nodes (advanced, optional)
 
 `nodes.enabled=true` renders optional `Deployment`/`DaemonSet` workloads for the
