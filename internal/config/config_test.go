@@ -91,6 +91,50 @@ func TestLoad_GuardrailsReloadInterval(t *testing.T) {
 // Load does NOT validate the URL — a malformed value falls back to the primary
 // with a WARN at boot (dbrouting.OpenReplica), never a crash — so Load only
 // stores the raw string here.
+// TestLoad_MintRateCapLENS24h — U6 PR2: real default 1000 (default-ON ceiling),
+// parsed when set, 0 valid (disables), negative rejected.
+func TestLoad_MintRateCapLENS24h(t *testing.T) {
+	t.Run("default 1000", func(t *testing.T) {
+		setRequiredEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.MintRateCapLENS24h != 1000 {
+			t.Errorf("default = %v, want 1000 (default-ON ceiling)", c.MintRateCapLENS24h)
+		}
+	})
+	t.Run("parsed when set", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_MINT_RATE_CAP_LENS_24H", "250.5")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.MintRateCapLENS24h != 250.5 {
+			t.Errorf("= %v, want 250.5", c.MintRateCapLENS24h)
+		}
+	})
+	t.Run("zero disables (valid)", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_MINT_RATE_CAP_LENS_24H", "0")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("0 must be valid (explicit disable): %v", err)
+		}
+		if c.MintRateCapLENS24h != 0 {
+			t.Errorf("= %v, want 0 (off)", c.MintRateCapLENS24h)
+		}
+	})
+	t.Run("negative rejected", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_MINT_RATE_CAP_LENS_24H", "-5")
+		if _, err := Load(); err == nil {
+			t.Error("a negative cap must be rejected")
+		}
+	})
+}
+
 func TestLoad_DBReplicaURL(t *testing.T) {
 	t.Run("default empty (off)", func(t *testing.T) {
 		setRequiredEnv(t)

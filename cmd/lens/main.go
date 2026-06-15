@@ -603,6 +603,10 @@ func run() error {
 	// mint-type credit now requires a verified-to-earn workspace; conservation
 	// credits pass through. nil-safe for tests (they construct ledgers without it).
 	tokenLedger.SetMintVerifier(earnverify.New())
+	// U6 PR2: the per-identity mint rate cap — the universal steady-state bound on
+	// Sybil wash yield. Wired UNCONDITIONALLY (a safety restriction the economy
+	// kill must not lift, like the verifier). Default 1000 LENS/24h; 0 = off.
+	tokenLedger.SetMintRateCap(cfg.MintRateCapLENS24h, 24*time.Hour)
 	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
 	_ = cacheMiner // hooks into the cache-hit path in a follow-up wire-up
 
@@ -629,6 +633,10 @@ func run() error {
 	// this window. Trigger-agnostic — billing settlement can replace the
 	// timed sweeper later without touching the mint path.
 	royaltyMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
+	// U6 PR2: enable the owner-linkage wash guard in production — deny a pooled
+	// royalty mint between two workspaces sharing a captured card fingerprint.
+	// Default-allow-on-missing; the rate cap bounds yield regardless.
+	royaltyMinter.SetOwnerLinkageCheck(true)
 	p.SetRoyaltyMinter(royaltyMinter)
 
 	// Stage-2.3a finalize sweeper: settles due held mints (held → spendable;

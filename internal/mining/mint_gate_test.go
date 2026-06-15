@@ -51,6 +51,31 @@ func TestMintTypes_GateSet(t *testing.T) {
 	}
 }
 
+// TestMintTypeList_IsSingleSource pins that the floor's IsMintType set and the
+// PR2 rate-cap SUM read ONE source (mintTypeList) — and the mint-moment-vs-
+// settlement tripwires. A "consistency fix" that aligns the set with
+// GetTotalSupply (drop pool_royalty_held / add pool_royalty) breaks this AND
+// would simultaneously un-throttle the wash + un-gate/double-gate the floor.
+func TestMintTypeList_IsSingleSource(t *testing.T) {
+	// (i) every list entry is a mint type (the map is derived from the list).
+	for _, ty := range mintTypeList {
+		if !IsMintType(ty) {
+			t.Errorf("mintTypeList entry %q must satisfy IsMintType — the map must be DERIVED from the list, not a second copy", ty)
+		}
+	}
+	// (ii) the derived map has exactly the list's entries (no dupes, no extras).
+	if len(mintTypes) != len(mintTypeList) {
+		t.Fatalf("mintTypes map (%d) must equal len(mintTypeList)=%d — no second source", len(mintTypes), len(mintTypeList))
+	}
+	// (iii) the divergence tripwires: the held MINT is IN, the finalize is OUT.
+	if !IsMintType(TypePoolRoyaltyHeld) {
+		t.Error("pool_royalty_held (the mint moment) MUST be in the set — dropping it un-throttles the wash AND un-gates the floor")
+	}
+	if IsMintType(TypePoolRoyalty) {
+		t.Error("pool_royalty (the finalize settlement) MUST be excluded — including it DOUBLE-COUNTS the rate cap AND double-gates the floor")
+	}
+}
+
 // TestCreditOnce_EmptyRequestID_FailsClosed — no server-derived key ⇒ no mint
 // (returns before any DB work; the mock sees no SQL).
 func TestCreditOnce_EmptyRequestID_FailsClosed(t *testing.T) {

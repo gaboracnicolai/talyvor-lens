@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -67,15 +68,29 @@ func (s *LedgerStore) SetMintVerifier(v MintVerifier) { s.verifier = v }
 //     never settle value it legitimately earned). MUST stay excluded.
 //   - EXCLUDES conservation (marketplace_*, *unstake, transfer) and burns
 //     (pool_royalty_revoked) — they move or destroy existing value, never mint.
-var mintTypes = map[string]struct{}{
-	TypeCacheMine:              {},
-	TypeComputeMine:            {},
-	TypeEmbeddingMine:          {},
-	TypeAnnotationMine:         {},
-	TypePatternMine:            {},
-	"receipt_mine_provisional": {}, // == povi.TypeReceiptMineProvisional (cycle-free literal)
-	TypePoolRoyaltyHeld:        {},
+//
+// mintTypeList is the SINGLE SOURCE OF TRUTH for the mint-moment type set. BOTH
+// the verified-to-earn gate (IsMintType, via the derived map) AND the PR2 rate
+// cap (the SUM's `type = ANY($mintTypeList)`) read it — never a second copy, so
+// they cannot diverge (TestMintTypeList_IsSingleSource pins this).
+var mintTypeList = []string{
+	TypeCacheMine,
+	TypeComputeMine,
+	TypeEmbeddingMine,
+	TypeAnnotationMine,
+	TypePatternMine,
+	"receipt_mine_provisional", // == povi.TypeReceiptMineProvisional (cycle-free literal)
+	TypePoolRoyaltyHeld,
 }
+
+// mintTypes is DERIVED from mintTypeList (not a second literal) for O(1) lookup.
+var mintTypes = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(mintTypeList))
+	for _, t := range mintTypeList {
+		m[t] = struct{}{}
+	}
+	return m
+}()
 
 // IsMintType reports whether txType is a mint-moment type that the verified-to-
 // earn gate covers. Exported so a cross-package test (cmd/lens) can pin the set
@@ -98,6 +113,61 @@ func (s *LedgerStore) verifyEarn(ctx context.Context, tx pgx.Tx, workspaceID, tx
 	}
 	if !ok {
 		return ErrEarnNotVerified
+	}
+	return nil
+}
+
+// ─── U6 PR2: per-identity mint rate cap ───────────────────────────────────
+
+// ErrMintRateCapExceeded is returned by a mint when the workspace would exceed
+// its rolling-window minted-LENS ceiling. The mint tx rolls back (no ledger
+// row, no balance change, no metrics) — same shape as ErrEarnNotVerified.
+var ErrMintRateCapExceeded = errors.New("mining: workspace mint rate cap exceeded (U6 PR2)")
+
+// SetMintRateCap wires the per-workspace rolling-window mint ceiling (LENS
+// minted per window). capLENS <= 0 disables it (no cap). window <= 0 falls back
+// to 24h. Call once at startup, UNCONDITIONALLY — a safety restriction the
+// economy toggle must not lift (mirrors SetMintVerifier).
+func (s *LedgerStore) SetMintRateCap(capLENS float64, window time.Duration) {
+	s.mintRateCap = capLENS
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	s.mintRateWindow = window
+}
+
+// mintRateSumSQL sums the LENS a workspace has MINTED within the rolling window.
+// type = ANY($3) is fed mintTypeList VERBATIM (the floor's single source) — so
+// it includes pool_royalty_held (the mint moment) and excludes the pool_royalty
+// finalize-settlement, never double-counting a held mint that later finalizes.
+// `amount > 0` drops the revoke/burn rows. Index-only over idx_ledger_mint_rate
+// (workspace_id, created_at) INCLUDE (type, amount) — migration 0058.
+const mintRateSumSQL = `SELECT COALESCE(SUM(amount), 0)
+FROM lens_token_ledger
+WHERE workspace_id = $1
+  AND created_at  > now() - ($2::bigint * interval '1 microsecond')
+  AND amount      > 0
+  AND type        = ANY($3)`
+
+// checkMintRateCap enforces the rolling-window ceiling for a mint-type credit,
+// inside the caller's mint tx. It MUST be called AFTER the lens_token_balances
+// FOR UPDATE the credit takes, so concurrent same-workspace mints serialize and
+// the SUM sees prior committed mints (exact, no race). No-op when the cap is
+// disabled or txType is not a mint type (conservation / finalize / burn pass).
+func (s *LedgerStore) checkMintRateCap(ctx context.Context, tx pgx.Tx, workspaceID, txType string, amount float64) error {
+	if s.mintRateCap <= 0 || !IsMintType(txType) {
+		return nil
+	}
+	window := s.mintRateWindow
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	var minted float64
+	if err := tx.QueryRow(ctx, mintRateSumSQL, workspaceID, window.Microseconds(), mintTypeList).Scan(&minted); err != nil {
+		return fmt.Errorf("mining: mint rate-cap sum for %q: %w", workspaceID, err)
+	}
+	if minted+amount > s.mintRateCap {
+		return ErrMintRateCapExceeded
 	}
 	return nil
 }

@@ -5,12 +5,29 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/earnverify"
 )
+
+// heldMint runs one CreditHeldTx (pool_royalty_held) in its own tx — the helper
+// for the rate-cap held-path tests.
+func heldMint(t *testing.T, pool *pgxpool.Pool, store *LedgerStore, ws string, amount float64) error {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreditHeldTx(ctx, tx, ws, amount, TypePoolRoyaltyHeld, "royalty", nil); err != nil {
+		_ = tx.Rollback(ctx)
+		return err
+	}
+	return tx.Commit(ctx)
+}
 
 // u6TestPool builds a real-PG pool with the ledger + idempotency + verify-signal
 // tables the U6 chokepoint touches end-to-end. Skips without LENS_TEST_DATABASE_URL.
@@ -218,5 +235,133 @@ func TestU6Chokepoint_ConservationUngated(t *testing.T) {
 	}
 	if b := balanceOf(t, pool, "ws_u"); b != 3.0 {
 		t.Fatalf("conservation credit = %v, want 3.0 (ungated)", b)
+	}
+}
+
+// ─── U6 PR2: per-identity rate cap ─────────────────────────────────────────
+
+func ratecapStore(t *testing.T, pool *pgxpool.Pool, cap float64) *LedgerStore {
+	t.Helper()
+	s := NewLedgerStore(pool)
+	s.SetMintVerifier(earnverify.New())
+	s.SetMintRateCap(cap, 24*time.Hour)
+	return s
+}
+
+// TestU6RateCap_BlocksAcrossMintTypes — the cap SUMs ALL mint types together (so
+// an attacker can't evade by splitting across tracks); the over-cap mint is
+// blocked AND rolled back (balance reflects only what fit under the cap).
+func TestU6RateCap_BlocksAcrossMintTypes(t *testing.T) {
+	pool := u6TestPool(t)
+	ctx := context.Background()
+	store := ratecapStore(t, pool, 10.0) // 10 LENS / 24h
+	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_cap', true)`)
+
+	// 8 (compute) + 1.5 (cache) = 9.5 ≤ 10 → both mint.
+	if _, err := store.CreditOnce(ctx, "r1", "ws_cap", 8.0, TypeComputeMine, "c", nil); err != nil {
+		t.Fatalf("mint 1: %v", err)
+	}
+	if _, err := store.CreditOnce(ctx, "r2", "ws_cap", 1.5, TypeCacheMine, "c", nil); err != nil {
+		t.Fatalf("mint 2: %v", err)
+	}
+	// +1.0 (embedding) = 10.5 > 10 → BLOCKED (sums across the three different types).
+	if _, err := store.CreditOnce(ctx, "r3", "ws_cap", 1.0, TypeEmbeddingMine, "c", nil); !errors.Is(err, ErrMintRateCapExceeded) {
+		t.Fatalf("over-cap mint must be blocked across mint types, got %v", err)
+	}
+	if b := balanceOf(t, pool, "ws_cap"); b != 9.5 {
+		t.Fatalf("balance=%v, want 9.5 (the over-cap mint rolled back)", b)
+	}
+}
+
+// TestU6RateCap_HeldMintCapped — the held pool-royalty mint (heldInner path) is
+// capped too, and counts against the SAME per-workspace ceiling as spendable mints.
+func TestU6RateCap_HeldMintCapped(t *testing.T) {
+	pool := u6TestPool(t)
+	ctx := context.Background()
+	store := ratecapStore(t, pool, 5.0)
+	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_h', true)`)
+
+	// 2 (compute, spendable) + 2.5 (held) = 4.5 ≤ 5 → both.
+	if _, err := store.CreditOnce(ctx, "r1", "ws_h", 2.0, TypeComputeMine, "c", nil); err != nil {
+		t.Fatalf("spendable mint: %v", err)
+	}
+	if err := heldMint(t, pool, store, "ws_h", 2.5); err != nil {
+		t.Fatalf("held mint under cap: %v", err)
+	}
+	// +1 held = 5.5 > 5 → blocked (held counts against the same ceiling as spendable).
+	if err := heldMint(t, pool, store, "ws_h", 1.0); !errors.Is(err, ErrMintRateCapExceeded) {
+		t.Fatalf("over-cap held mint must be blocked, got %v", err)
+	}
+	if h := heldOf(t, pool, "ws_h"); h != 2.5 {
+		t.Fatalf("held=%v, want 2.5 (over-cap held mint rolled back)", h)
+	}
+}
+
+// TestU6RateCap_FinalizeNotDoubleCounted — the critical no-double-count: a held
+// mint counts (pool_royalty_held ∈ mintTypeList); FINALIZING it writes a
+// pool_royalty row that the SUM EXCLUDES. If finalize were counted, the second
+// mint below would be blocked; its success proves the settlement isn't double-counted.
+func TestU6RateCap_FinalizeNotDoubleCounted(t *testing.T) {
+	pool := u6TestPool(t)
+	ctx := context.Background()
+	store := ratecapStore(t, pool, 10.0)
+	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_f', true)`)
+
+	// held mint 8 (counts 8 toward the cap).
+	if err := heldMint(t, pool, store, "ws_f", 8.0); err != nil {
+		t.Fatalf("held mint: %v", err)
+	}
+	// finalize the 8 (writes a pool_royalty settlement row — NOT a mint type).
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeHeldTx(ctx, tx, "ws_f", 8.0, "settle", nil); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("finalize: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// a fresh 1.5 mint: counted = 8 (held) + 1.5 = 9.5 ≤ 10 → OK.
+	// (if finalize double-counted, counted would be 16 > 10 → blocked.)
+	if _, err := store.CreditOnce(ctx, "r1", "ws_f", 1.5, TypeCacheMine, "c", nil); err != nil {
+		t.Fatalf("finalize must NOT double-count toward the cap, got %v", err)
+	}
+}
+
+// TestU6RateCap_OldMintsOutsideWindow — mints older than the rolling window
+// don't count, so the cap is per-window not all-time.
+func TestU6RateCap_OldMintsOutsideWindow(t *testing.T) {
+	pool := u6TestPool(t)
+	ctx := context.Background()
+	store := ratecapStore(t, pool, 10.0)
+	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_w', true)`)
+	// a big mint 48h ago (outside the 24h window) — inserted directly.
+	mustExec(t, pool, `INSERT INTO lens_token_balances (workspace_id, balance) VALUES ('ws_w', 100)`)
+	mustExec(t, pool, `INSERT INTO lens_token_ledger (workspace_id, amount, balance_after, type, created_at)
+		VALUES ('ws_w', 100, 100, 'cache_mine', now() - interval '48 hours')`)
+	// a fresh 8-LENS mint succeeds — the old 100 is outside the window.
+	if _, err := store.CreditOnce(ctx, "r1", "ws_w", 8.0, TypeComputeMine, "c", nil); err != nil {
+		t.Fatalf("mints outside the window must not count, got %v", err)
+	}
+}
+
+// TestU6RateCap_ConservationUngatedAtCap — a workspace AT its mint cap can still
+// move existing value (unstake): the cap is mint-only, conservation isn't throttled.
+func TestU6RateCap_ConservationUngatedAtCap(t *testing.T) {
+	pool := u6TestPool(t)
+	ctx := context.Background()
+	store := ratecapStore(t, pool, 5.0)
+	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_c', true)`)
+	if _, err := store.CreditOnce(ctx, "r1", "ws_c", 5.0, TypeComputeMine, "c", nil); err != nil {
+		t.Fatalf("mint to cap: %v", err)
+	}
+	// at the cap, a mint would block — but a conservation credit must still work.
+	if err := store.Credit(ctx, "ws_c", 100.0, "unstake", "stake return", nil); err != nil {
+		t.Fatalf("conservation at the mint cap must NOT be throttled, got %v", err)
+	}
+	if b := balanceOf(t, pool, "ws_c"); b != 105.0 {
+		t.Fatalf("balance=%v, want 105.0 (5 mint + 100 unstake)", b)
 	}
 }

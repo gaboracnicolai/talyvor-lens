@@ -7,6 +7,7 @@ import (
 	stripe "github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/checkout/session"
 	"github.com/stripe/stripe-go/v81/customer"
+	"github.com/stripe/stripe-go/v81/paymentintent"
 )
 
 // LiveStripe is the production stripeAPI implementation. It is NOT exercised by
@@ -66,4 +67,22 @@ func (l *LiveStripe) CreateCheckoutSession(ctx context.Context, p CheckoutParams
 		return "", "", err
 	}
 	return sess.URL, sess.ID, nil
+}
+
+// CardFingerprint retrieves the payment intent with its payment method expanded
+// and returns the card's stable per-card fingerprint (Stripe's card.fingerprint).
+// Returns "" (not an error) when there is no expandable card — the caller treats
+// "" as capture-failed and swallows it. U6 PR2 owner-linkage.
+func (l *LiveStripe) CardFingerprint(ctx context.Context, paymentIntentID string) (string, error) {
+	params := &stripe.PaymentIntentParams{}
+	params.Context = ctx
+	params.AddExpand("payment_method")
+	pi, err := paymentintent.Get(paymentIntentID, params)
+	if err != nil {
+		return "", err
+	}
+	if pi.PaymentMethod == nil || pi.PaymentMethod.Card == nil {
+		return "", nil
+	}
+	return pi.PaymentMethod.Card.Fingerprint, nil
 }

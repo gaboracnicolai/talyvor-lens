@@ -11,6 +11,8 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +62,10 @@ type lxcCrediter interface {
 type stripeAPI interface {
 	CreateCustomer(ctx context.Context, workspaceID string) (customerID string, err error)
 	CreateCheckoutSession(ctx context.Context, p CheckoutParams) (url string, sessionID string, err error)
+	// CardFingerprint returns the stable per-card fingerprint for a payment
+	// intent (Stripe's card.fingerprint), "" when none is available. U6 PR2
+	// owner-linkage; called best-effort AFTER the credit commits.
+	CardFingerprint(ctx context.Context, paymentIntentID string) (fingerprint string, err error)
 }
 
 // CheckoutParams is the price-true input to a Checkout Session: cents is
@@ -316,7 +322,43 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 		s.fail(w, "commit credit", event.ID, err)
 		return
 	}
+	// U6 PR2: best-effort owner-linkage capture. Runs AFTER the credit committed
+	// above, has no error channel back here, and the 200 is acked regardless — a
+	// capture failure can NEVER drop or delay the payment credit. (Worst case, a
+	// slow Stripe call → Stripe re-delivers → the stripe_event_id claim above
+	// suppresses a second credit.)
+	s.captureCardFingerprint(ctx, wsID, pi)
 	w.WriteHeader(http.StatusOK)
+}
+
+// captureCardFingerprint stores a HASH of the payment's card fingerprint (never
+// the raw value) as a U6 PR2 owner-linkage signal. STRUCTURALLY best-effort:
+// called only after the LXC credit is durable, returns nothing, and swallows
+// every failure (no payment-intent, Stripe API error, no card on the PM, store
+// error) with a WARN — it cannot affect the payment.
+func (s *Service) captureCardFingerprint(ctx context.Context, wsID, paymentIntentID string) {
+	if wsID == "" || paymentIntentID == "" {
+		return
+	}
+	fp, err := s.stripe.CardFingerprint(ctx, paymentIntentID)
+	if err != nil || fp == "" {
+		s.log.Warn("billing: card-fingerprint capture skipped (best-effort; credit unaffected)",
+			"workspace", wsID, "err", errString(err))
+		return
+	}
+	sum := sha256.Sum256([]byte(fp))
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO workspace_card_fingerprints (workspace_id, fingerprint_hash)
+		 VALUES ($1, $2) ON CONFLICT DO NOTHING`, wsID, hex.EncodeToString(sum[:])); err != nil {
+		s.log.Warn("billing: card-fingerprint store failed (best-effort)", "workspace", wsID, "err", err.Error())
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (s *Service) handleRefund(w http.ResponseWriter, ctx context.Context, event *stripe.Event) {

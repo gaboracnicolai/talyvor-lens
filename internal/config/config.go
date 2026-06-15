@@ -255,6 +255,19 @@ type Config struct {
 	// LENS_PATTERN_EARN_CAP_WINDOW (Go duration).
 	PatternEarnCapWindow time.Duration
 
+	// MintRateCapLENS24h is the U6 PR2 per-identity earning-rate cap: the max
+	// LENS a single workspace may MINT (across ALL mint types: cache/compute/
+	// embedding/annotation/pattern/PoVI/pool-royalty-held) in a rolling 24h
+	// window, enforced at the ledger chokepoint. It is the universal steady-state
+	// bound on Sybil wash yield — verification (the floor) raised the entry bar
+	// but not the steady-state yield, so this caps it. DEFAULT 1000 (≈ $100/day
+	// realizable at the $0.10 peg) — generous for a legitimate contributor,
+	// bounding a washed identity; tighten at flip-on. 0 = explicit ops-disable
+	// (never the default; default-ON-with-a-ceiling keeps inaction safe). A
+	// safety restriction — NOT force-off'd by the economy kill. Env:
+	// LENS_MINT_RATE_CAP_LENS_24H.
+	MintRateCapLENS24h float64
+
 	// PoolHoldbackWindow is the Stage-2.3a holdback: a pool-royalty mint
 	// credits HELD balance, and only becomes spendable (and supply-counted)
 	// when the finalize sweeper settles it after this window. Default 72h —
@@ -785,6 +798,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_PATTERN_EARN_CAP_WINDOW (Go duration > 0, e.g. 48h): %s", v)
 		}
 		c.PatternEarnCapWindow = d
+	}
+	// U6 PR2 per-identity mint rate cap — REAL default (1000 LENS/24h), not 0
+	// (default-ON-with-a-ceiling; inaction stays safe). 0 = explicit ops-disable;
+	// negative is rejected. A safety restriction, NOT economy-killswitched.
+	c.MintRateCapLENS24h = 1000
+	if v := os.Getenv("LENS_MINT_RATE_CAP_LENS_24H"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_MINT_RATE_CAP_LENS_24H (must be ≥ 0; 0 disables): %s", v)
+		}
+		c.MintRateCapLENS24h = f
 	}
 	c.PoolHoldbackWindow = 72 * time.Hour
 	if v := os.Getenv("LENS_POOL_HOLDBACK_WINDOW"); v != "" {

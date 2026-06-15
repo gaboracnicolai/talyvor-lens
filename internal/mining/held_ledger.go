@@ -101,6 +101,14 @@ func (s *LedgerStore) heldInner(
 		return err
 	}
 
+	// U6 PR2: rate cap on the held MINT (pool_royalty_held). checkMintRateCap is
+	// a no-op for finalize (pool_royalty) and revoke (pool_royalty_revoked) — not
+	// mint types. AFTER the FOR UPDATE (heldLockSelectSQL) so same-workspace mints
+	// serialize. delta is the held credit amount (+) for the mint.
+	if err := s.checkMintRateCap(ctx, tx, workspaceID, txType, delta); err != nil {
+		return err
+	}
+
 	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
 	if err != nil {
 		return fmt.Errorf("mining: marshal metadata: %w", err)
