@@ -344,6 +344,16 @@ type Config struct {
 	// LENS_GUARDRAILS_ENABLED=true.
 	GuardrailsEnabled bool
 
+	// WorkTierEnabled gates the WorkTier descriptive work classifier — a
+	// post-serve, NON-CONTENT classification of each served request (size / cost
+	// / complexity / sensitivity), persisted for the future routing Advisor +
+	// analytics. CAPABILITY flag, default false: off = no classification, no
+	// rows, zero behavior change. DESCRIPTIVE and mint-free, so it is NOT a
+	// safety restriction and is deliberately NOT in the economy force-off block
+	// (the inverse of the economy gates: off = no feature = safe). Env:
+	// LENS_WORKTIER_ENABLED.
+	WorkTierEnabled bool
+
 	// RoutingIntelligenceEnabled gates Upgrade 22 — feeding aggregated
 	// pattern-mining intelligence back into model selection. OFF by default:
 	// when false, routing behaves byte-for-byte as before. Even when on, it
@@ -592,6 +602,7 @@ func Load() (*Config, error) {
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 
 		GuardrailsEnabled: parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
+		WorkTierEnabled:   parseBoolEnv("LENS_WORKTIER_ENABLED"),
 
 		RoutingIntelligenceEnabled: parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 

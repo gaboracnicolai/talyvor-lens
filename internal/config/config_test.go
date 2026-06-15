@@ -91,6 +91,44 @@ func TestLoad_GuardrailsReloadInterval(t *testing.T) {
 // Load does NOT validate the URL — a malformed value falls back to the primary
 // with a WARN at boot (dbrouting.OpenReplica), never a crash — so Load only
 // stores the raw string here.
+// TestLoad_WorkTierEnabled — capability flag, default false; survives the economy
+// kill (descriptive, NOT a safety restriction — must NOT be in the force-off block).
+func TestLoad_WorkTierEnabled(t *testing.T) {
+	t.Run("default false", func(t *testing.T) {
+		setRequiredEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.WorkTierEnabled {
+			t.Error("WorkTierEnabled must default false")
+		}
+	})
+	t.Run("parsed true", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_WORKTIER_ENABLED", "true")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !c.WorkTierEnabled {
+			t.Error("LENS_WORKTIER_ENABLED=true must enable it")
+		}
+	})
+	t.Run("survives the economy kill", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_WORKTIER_ENABLED", "true")
+		t.Setenv("LENS_ECONOMY_ENABLED", "false")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !c.WorkTierEnabled {
+			t.Error("WorkTier is a descriptive capability flag — it must NOT be force-off'd by the economy kill")
+		}
+	})
+}
+
 // TestLoad_MintRateCapLENS24h — U6 PR2: real default 1000 (default-ON ceiling),
 // parsed when set, 0 valid (disables), negative rejected.
 func TestLoad_MintRateCapLENS24h(t *testing.T) {

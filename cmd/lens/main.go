@@ -89,6 +89,7 @@ import (
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/warmer"
 	"github.com/talyvor/lens/internal/workspace"
+	"github.com/talyvor/lens/internal/worktier"
 	"github.com/talyvor/lens/migrations"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -806,6 +807,10 @@ func run() error {
 	// separate later stage).
 	p.SetPatternCapture(patternMiner, func() bool { return cfg.PatternCaptureEnabled })
 	p.SetObservationalLimiter(obsLimiter)
+	// WorkTier descriptive classifier (default-off capability flag). Post-serve,
+	// NON-CONTENT, mint-free; shares the obsLimiter budget. Nothing consumes the
+	// tier yet — the routing Advisor tier-conditioning is a future PR.
+	p.SetWorkTier(worktier.NewStore(pool), func() bool { return cfg.WorkTierEnabled })
 	// S4 routing-pattern EARNING wire-up — the same miner, separate sink + flag.
 	// Default off; flag-off the serve path is byte-identical to capture-only.
 	p.SetPatternEarn(patternMiner, func() bool { return cfg.PatternEarningEnabled })
