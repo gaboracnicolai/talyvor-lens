@@ -12,11 +12,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/dbjson"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/pii"
 )
@@ -91,6 +98,14 @@ type CustomGuardrail interface {
 	Name() string
 }
 
+// policyStore is the Postgres surface guardrail persistence needs (satisfied by
+// *pgxpool.Pool). nil → the engine is in-memory only (tests), behaving exactly as
+// before persistence was wired.
+type policyStore interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 type Engine struct {
 	pii       *pii.Detector
 	injection *injection.Detector
@@ -98,6 +113,15 @@ type Engine struct {
 	mu       sync.RWMutex
 	custom   []CustomGuardrail
 	policies map[string]*GuardrailPolicy
+
+	// store persists per-workspace policies to guardrail_policies (0014). nil →
+	// in-memory only. degraded is raised when custom policies could not be loaded
+	// (startup) so the engine is serving defaults; loaded records whether a load
+	// has EVER succeeded (so a later reload failure retains the last-good map
+	// rather than flipping to degraded). All atomic so Check reads them lock-free.
+	store    policyStore
+	degraded atomic.Bool
+	loaded   atomic.Bool
 
 	// outputEnabled gates the output stage (CheckOutput). Off by default →
 	// the input stage behaves exactly as today and no output guardrails run.
@@ -112,6 +136,22 @@ func New(piiDetector *pii.Detector, injectionDetector *injection.Detector) *Engi
 		policies:  make(map[string]*GuardrailPolicy),
 	}
 }
+
+// SetStore wires the Postgres persistence layer (guardrail_policies). A pool-less
+// engine (tests) skips all DB I/O and stays in-memory only. Call once at startup,
+// before Load — guarded against the typed-nil interface trap.
+func (e *Engine) SetStore(pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	e.store = pool
+}
+
+// Degraded reports whether the engine is serving defaultPolicy for every workspace
+// because custom policies could not be loaded at startup (DB down / a corrupt
+// row). It is FALSE once any load has succeeded — a later reload failure retains
+// the last-good policies (build-then-swap), which is not "degraded".
+func (e *Engine) Degraded() bool { return e != nil && e.degraded.Load() }
 
 // defaultPolicy is what every workspace gets until SetPolicy is called.
 // "PII redact, injection block, everything enabled" is the safest
@@ -128,9 +168,19 @@ func defaultPolicy() *GuardrailPolicy {
 	}
 }
 
-// SetPolicy stores a policy in the in-memory map. The change takes
-// effect on the very next Check call — no per-request caching.
-func (e *Engine) SetPolicy(_ context.Context, wsID string, policy GuardrailPolicy) {
+const upsertPolicySQL = `INSERT INTO guardrail_policies (workspace_id, policy)
+VALUES ($1, $2)
+ON CONFLICT (workspace_id) DO UPDATE SET policy = $2, updated_at = NOW()`
+
+// SetPolicy stores a policy in the in-memory map AND, when a store is wired,
+// persists it to guardrail_policies so it survives restart and propagates to other
+// replicas on their next reload. The change takes effect on the very next Check
+// call — no per-request caching. Map-first (the local node is immediately correct,
+// mirroring wsManager.SetLoggingPolicy); a returned error means the policy is live
+// locally but did NOT persist (the caller surfaces it so the admin knows it won't
+// survive a restart). The jsonb param goes through dbjson.Marshal — text-encoded,
+// pgbouncer-safe (#133), never a raw []byte.
+func (e *Engine) SetPolicy(ctx context.Context, wsID string, policy GuardrailPolicy) error {
 	if wsID == "" {
 		wsID = "default"
 	}
@@ -139,6 +189,18 @@ func (e *Engine) SetPolicy(_ context.Context, wsID string, policy GuardrailPolic
 	e.mu.Lock()
 	e.policies[wsID] = &stored
 	e.mu.Unlock()
+
+	if e.store == nil {
+		return nil // in-memory only
+	}
+	doc, err := dbjson.Marshal(policy)
+	if err != nil {
+		return fmt.Errorf("guardrails: marshal policy for %q: %w", wsID, err)
+	}
+	if _, err := e.store.Exec(ctx, upsertPolicySQL, wsID, doc); err != nil {
+		return fmt.Errorf("guardrails: persist policy for %q (live locally, NOT durable): %w", wsID, err)
+	}
+	return nil
 }
 
 // GetPolicy returns a copy of the workspace's policy or the safe
@@ -346,14 +408,134 @@ func (e *Engine) ShouldBufferStream(wsID string) bool {
 	return e.GetPolicy(wsID).BufferStreamForOutput
 }
 
-// DeletePolicy removes a workspace's policy so it reverts to the default.
-func (e *Engine) DeletePolicy(wsID string) {
+const deletePolicySQL = `DELETE FROM guardrail_policies WHERE workspace_id = $1`
+
+// DeletePolicy removes a workspace's policy so it reverts to the default — from the
+// in-memory map AND, when a store is wired, the DB row, so a reset-to-default is
+// durable and does not resurrect on the next reload.
+func (e *Engine) DeletePolicy(ctx context.Context, wsID string) error {
 	if wsID == "" {
 		wsID = "default"
 	}
 	e.mu.Lock()
 	delete(e.policies, wsID)
 	e.mu.Unlock()
+
+	if e.store == nil {
+		return nil
+	}
+	if _, err := e.store.Exec(ctx, deletePolicySQL, wsID); err != nil {
+		return fmt.Errorf("guardrails: delete persisted policy for %q: %w", wsID, err)
+	}
+	return nil
+}
+
+const loadPoliciesSQL = `SELECT workspace_id, policy FROM guardrail_policies`
+
+// Load rebuilds the in-memory policy map from guardrail_policies, build-then-swap
+// (the proven U7b shape): a fresh map is assembled OUTSIDE the lock, then published
+// with a single pointer swap under the write lock — readers never see a partial
+// map, and a failed build never swaps. ONLY e.policies is swapped; e.custom and
+// e.outputEnabled are untouched. No-op when no store is wired.
+//
+// FAIL DIRECTION (this is a SECURITY control):
+//   - (1) RELOAD failure (query/scan/rows error) once a load has succeeded → the
+//     last-good map is RETAINED (no swap), not flipped to default. Warn, not degraded.
+//   - (2) A single unparseable/corrupt policy row → the WHOLE build FAILS (the bad
+//     workspace_id is logged loudly). A bad row is NEVER skipped: skipping would
+//     silently downgrade that one tenant to defaultPolicy, which can be LOOSER than
+//     its intended tightening (default Redact vs a workspace's Block; no blocklist
+//     vs its blocklist). On reload the last-good map survives; on startup it stays
+//     empty → degraded (below).
+//   - (3) STARTUP load failure (no prior successful load) → the map stays empty so
+//     GetPolicy serves defaultPolicy for every workspace (PII redact + injection
+//     block stay ON), BUT the engine raises Degraded() + a loud ERROR so the
+//     downgrade is VISIBLE, not silent. NOT full fail-closed/block-all.
+func (e *Engine) Load(ctx context.Context) error {
+	if e.store == nil {
+		return nil
+	}
+	rows, err := e.store.Query(ctx, loadPoliciesSQL)
+	if err != nil {
+		return e.loadFailed(fmt.Errorf("guardrails: load policies: %w", err), "")
+	}
+	defer rows.Close()
+
+	next := make(map[string]*GuardrailPolicy)
+	for rows.Next() {
+		var wsID string
+		var doc []byte
+		if err := rows.Scan(&wsID, &doc); err != nil {
+			return e.loadFailed(fmt.Errorf("guardrails: scan policy row: %w", err), "")
+		}
+		var p GuardrailPolicy
+		if err := json.Unmarshal(doc, &p); err != nil {
+			// (2) FAIL THE WHOLE BUILD — never skip-the-row.
+			return e.loadFailed(fmt.Errorf("guardrails: unmarshal policy for %q: %w", wsID, err), wsID)
+		}
+		if p.WorkspaceID == "" {
+			p.WorkspaceID = wsID
+		}
+		stored := p
+		next[wsID] = &stored
+	}
+	if err := rows.Err(); err != nil {
+		return e.loadFailed(fmt.Errorf("guardrails: load policies rows: %w", err), "")
+	}
+
+	// Success — publish the fresh map, clear degraded, mark loaded.
+	e.mu.Lock()
+	e.policies = next
+	e.mu.Unlock()
+	e.degraded.Store(false)
+	e.loaded.Store(true)
+	return nil
+}
+
+// loadFailed centralizes the fail direction: build-then-swap means we never
+// published a partial map, so the existing map (last-good on reload, empty on a
+// cold start) is already what readers see. We only raise Degraded()+ERROR when we
+// have NEVER successfully loaded (startup → serving defaults); a reload failure
+// over a good map is a WARN and stays non-degraded.
+func (e *Engine) loadFailed(err error, badWorkspaceID string) error {
+	if e.loaded.Load() {
+		slog.Warn("guardrails: reload failed — retaining last-good policies",
+			slog.String("workspace_id", badWorkspaceID), slog.String("err", err.Error()))
+		return err
+	}
+	e.degraded.Store(true)
+	slog.Error("GUARDRAILS DEGRADED: custom policies not loaded, serving defaults (PII redact + injection block stay ON for all workspaces)",
+		slog.String("workspace_id", badWorkspaceID), slog.String("err", err.Error()))
+	return err
+}
+
+// Reload rebuilds the policy map from the store — public + directly callable (the
+// U7c test seam). Equivalent to Load.
+func (e *Engine) Reload(ctx context.Context) error { return e.Load(ctx) }
+
+// StartRefresh runs Reload on a fixed interval until ctx is cancelled, bounding
+// cross-replica staleness of custom guardrail policies. A transient error keeps the
+// last-good map (build-then-swap) and the next tick retries. No-op without a store.
+// NOT leader-gated — every replica refreshes its own cache. Mirrors
+// wsManager.StartRefresh.
+func (e *Engine) StartRefresh(ctx context.Context, interval time.Duration) {
+	if e == nil || e.store == nil {
+		return
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := e.Reload(ctx); err != nil {
+					slog.Warn("guardrails: scheduled reload failed (last-good kept)", slog.String("err", err.Error()))
+				}
+			}
+		}
+	}()
 }
 
 // CheckOutput runs the OUTPUT-stage guardrails over a response's content

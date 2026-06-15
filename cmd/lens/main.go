@@ -354,6 +354,17 @@ func run() error {
 	// Output-stage guardrails (Upgrade 13) are OFF by default; when off the
 	// input guardrails behave exactly as today and no output guardrails run.
 	guardrailsEngine.SetOutputEnabled(cfg.GuardrailsEnabled)
+	// #189: persist custom per-workspace guardrail policies (guardrail_policies,
+	// 0014) so they survive restart and propagate across replicas. SetStore wires
+	// the pool; Load seeds the cache at boot (on failure the engine serves
+	// defaultPolicy — PII redact + injection block stay ON — and flags Degraded());
+	// StartRefresh bounds cross-replica staleness, not leader-gated (each replica
+	// refreshes its own cache).
+	guardrailsEngine.SetStore(pool)
+	if err := guardrailsEngine.Load(ctx); err != nil {
+		logger.Warn("guardrails: initial policy load failed (serving defaults, Degraded)", slog.String("err", err.Error()))
+	}
+	guardrailsEngine.StartRefresh(ctx, cfg.GuardrailsReloadInterval)
 
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
@@ -3199,13 +3210,21 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 				return
 			}
-			guardrailsEngine.SetPolicy(req.Context(), wsID, in)
+			if err := guardrailsEngine.SetPolicy(req.Context(), wsID, in); err != nil {
+				// Policy is live on this node (map-first) but did not persist — tell
+				// the admin so they retry (it won't survive a restart otherwise).
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			writeJSONOK(w, http.StatusOK, guardrailsEngine.GetPolicy(wsID))
 		}
 		authed.Post("/v1/workspaces/{wsID}/guardrails", setGuardrails)
 		authed.Patch("/v1/workspaces/{wsID}/guardrails", setGuardrails)
 		authed.Delete("/v1/workspaces/{wsID}/guardrails", func(w http.ResponseWriter, req *http.Request) {
-			guardrailsEngine.DeletePolicy(chi.URLParam(req, "wsID"))
+			if err := guardrailsEngine.DeletePolicy(req.Context(), chi.URLParam(req, "wsID")); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 		authed.Get("/v1/workspaces/{wsID}/guardrails/test", func(w http.ResponseWriter, req *http.Request) {
