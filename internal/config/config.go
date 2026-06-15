@@ -488,6 +488,18 @@ type Config struct {
 	// on connection establishment. Env: LENS_DB_MIN_CONNS. Default 2.
 	DBMinConns int32
 
+	// DBReplicaURL is an OPTIONAL read-replica DSN (U8/U9). When set, the
+	// recon-confirmed analytics/display reads (forecast, ROI, dashboard
+	// stats, admin read-only lists, rate/history) are routed to it; ALL
+	// money/authz/transaction reads stay on the PRIMARY by construction —
+	// the money/authz structs are never handed this handle. Empty (default)
+	// → every read uses the primary pool, byte-identical to today. A
+	// malformed URL or an unreachable replica at boot falls back to the
+	// primary with a WARN: the replica is an optimization, never a boot
+	// dependency. When LENS_DB_PGBOUNCER is set, the replica pool also uses
+	// simple protocol. Env: LENS_DB_REPLICA_URL.
+	DBReplicaURL string
+
 	// ObsWriteMaxConcurrent caps how many post-serve observational writes
 	// (attribution records + routing-pattern capture) may run at once.
 	// Past the cap, writes are DROPPED (they are observational by contract)
@@ -528,6 +540,7 @@ func Load() (*Config, error) {
 		ListenAddr:        getEnv("LENS_LISTEN_ADDR", "0.0.0.0:8080"),
 		RedisURL:          os.Getenv("LENS_REDIS_URL"),
 		DatabaseURL:       os.Getenv("LENS_DATABASE_URL"),
+		DBReplicaURL:      os.Getenv("LENS_DB_REPLICA_URL"),
 		NatsURL:           os.Getenv("LENS_NATS_URL"),
 		OpenAIAPIKey:      os.Getenv("LENS_OPENAI_API_KEY"),
 		AnthropicAPIKey:   os.Getenv("LENS_ANTHROPIC_API_KEY"),
