@@ -254,10 +254,16 @@ func (m *EmbeddingMiner) verifyNodeAsync(nodeID, nodeURL, model string) {
 // RecordEmbeddingsServed credits the node owner when the request
 // came from a different workspace. No-ops on self-serving and on
 // zero/negative counts so callers can `defer` it safely.
+// RecordEmbeddingsServed mints embedding LENS to the node owner. requestID MUST
+// be a SERVER-DERIVED work-product key so the mint is idempotent on (requestID,
+// node-owner); an empty requestID mints nothing (fail-closed). Dormant today (no
+// production caller wires RecordEmbeddingsServed); the live wire-up supplies the
+// id. Gated on verified-to-earn via CreditOnce.
 func (m *EmbeddingMiner) RecordEmbeddingsServed(
 	ctx context.Context,
 	nodeID string,
 	requestingWorkspace string,
+	requestID string,
 	embeddingCount int,
 ) error {
 	if embeddingCount <= 0 || nodeID == "" {
@@ -281,7 +287,8 @@ func (m *EmbeddingMiner) RecordEmbeddingsServed(
 		"requesting_workspace": requestingWorkspace,
 	}
 	desc := fmt.Sprintf("embeddings served: %d on %s", embeddingCount, node.Model)
-	return m.ledger.Credit(ctx, node.WorkspaceID, earning, TypeEmbeddingMine, desc, meta)
+	_, err = m.ledger.CreditOnce(ctx, requestID, node.WorkspaceID, earning, TypeEmbeddingMine, desc, meta)
+	return err
 }
 
 // ─── lookups ─────────────────────────────────────

@@ -80,6 +80,14 @@ func (s *LedgerStore) heldInner(
 	metadata map[string]interface{},
 	transition func(bal, held, earned float64) (newBal, newHeld, newEarned, delta, balanceAfter float64, err error),
 ) error {
+	// U6 Sybil floor: gate the held MINT (pool_royalty_held) — the worst Sybil
+	// hole — on verified-to-earn. Finalize (pool_royalty) and revoke
+	// (pool_royalty_revoked) are NOT mint types, so verifyEarn is a no-op for
+	// them: finalize settles already-gated held value, revoke burns it. A block
+	// rolls the whole tx back.
+	if err := s.verifyEarn(ctx, tx, workspaceID, txType); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, heldEnsureBalanceSQL, workspaceID); err != nil {
 		return fmt.Errorf("mining: ensure balance row: %w", err)
 	}

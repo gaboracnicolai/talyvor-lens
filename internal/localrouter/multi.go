@@ -103,14 +103,16 @@ type Router struct {
 	// onRequestServed is the compute-mining hook the proxy
 	// invokes after a successful served request. Stays nil
 	// until SetOnRequestServed wires it (Batch 2 Item 2).
-	onRequestServed func(nodeID, requestingWorkspace string, tokens int, latencyMs int64)
+	// requestID (U6) is the SERVER-DERIVED work-product key the live
+	// wire-up must supply so the compute mint is idempotent.
+	onRequestServed func(nodeID, requestingWorkspace, requestID string, tokens int, latencyMs int64)
 }
 
 // SetOnRequestServed installs the mining hook. main.go wires it
 // to ComputeMiner.RecordServedRequest. The hook fires from
 // NotifyServed below — keeping the router free of a hard
 // dependency on the mining package.
-func (r *Router) SetOnRequestServed(fn func(nodeID, requestingWorkspace string, tokens int, latencyMs int64)) {
+func (r *Router) SetOnRequestServed(fn func(nodeID, requestingWorkspace, requestID string, tokens int, latencyMs int64)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onRequestServed = fn
@@ -131,12 +133,12 @@ func (r *Router) SetHTTPClient(client *http.Client) {
 // `latencyMs`". When a mining hook is wired it's invoked
 // synchronously so the proxy can `defer` it and not lose the
 // accounting on early returns.
-func (r *Router) NotifyServed(nodeID, requestingWorkspace string, tokens int, latencyMs int64) {
+func (r *Router) NotifyServed(nodeID, requestingWorkspace, requestID string, tokens int, latencyMs int64) {
 	r.mu.RLock()
 	fn := r.onRequestServed
 	r.mu.RUnlock()
 	if fn != nil {
-		fn(nodeID, requestingWorkspace, tokens, latencyMs)
+		fn(nodeID, requestingWorkspace, requestID, tokens, latencyMs)
 	}
 }
 

@@ -135,14 +135,14 @@ func TestRecordServedRequest_CreditsOwner(t *testing.T) {
 	}
 	expectGetNode(mock, node)
 	// 2000 tokens × rtx4090 (1.0×) → 0.10 LENS.
-	expectCreditOrDebit(mock, "ws_owner", 0, 0, 0, 0.10, 0.10, 0.10, 0)
+	expectCreditOnce(mock, "req-1", "ws_owner", TypeComputeMine, 0, 0, 0, 0.10, 0.10, 0.10, 0)
 	// metrics UPDATE
 	mock.ExpectExec("UPDATE node_metrics").
 		WithArgs("node1", 2000, int64(250)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	if err := miner.RecordServedRequest(context.Background(),
-		"node1", "ws_requester", 2000, 250); err != nil {
+		"node1", "ws_requester", "req-1", 2000, 250); err != nil {
 		t.Fatalf("RecordServedRequest: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -159,13 +159,13 @@ func TestRecordServedRequest_UsesGPUMultiplier(t *testing.T) {
 	}
 	expectGetNode(mock, node)
 	// 1000 tokens × h100 (3.0×) → 0.15 LENS.
-	expectCreditOrDebit(mock, "ws_h", 0, 0, 0, 0.15, 0.15, 0.15, 0)
+	expectCreditOnce(mock, "req-1", "ws_h", TypeComputeMine, 0, 0, 0, 0.15, 0.15, 0.15, 0)
 	mock.ExpectExec("UPDATE node_metrics").
 		WithArgs("h100node", 1000, int64(180)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	if err := miner.RecordServedRequest(context.Background(),
-		"h100node", "ws_requester", 1000, 180); err != nil {
+		"h100node", "ws_requester", "req-1", 1000, 180); err != nil {
 		t.Fatalf("RecordServedRequest: %v", err)
 	}
 }
@@ -184,7 +184,7 @@ func TestRecordServedRequest_NoSelfServing(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	if err := miner.RecordServedRequest(context.Background(),
-		"n2", "ws_self", 500, 120); err != nil {
+		"n2", "ws_self", "req-1", 500, 120); err != nil {
 		t.Fatalf("RecordServedRequest: %v", err)
 	}
 }
@@ -192,7 +192,7 @@ func TestRecordServedRequest_NoSelfServing(t *testing.T) {
 func TestRecordServedRequest_ZeroTokensSkip(t *testing.T) {
 	miner, _, _ := newMockMiner(t)
 	// No expectations: must short-circuit without touching DB.
-	if err := miner.RecordServedRequest(context.Background(), "node", "ws_x", 0, 100); err != nil {
+	if err := miner.RecordServedRequest(context.Background(), "node", "ws_x", "req-1", 0, 100); err != nil {
 		t.Fatalf("RecordServedRequest: %v", err)
 	}
 }

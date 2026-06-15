@@ -131,9 +131,9 @@ func TestRecordEmbeddingsServed_CreditsOwner(t *testing.T) {
 	}
 	expectGetEmbeddingNode(mock, node)
 	// 2000 embeddings × e5-large (medium=1.5) → 0.002 × 1.5 × 2 = 0.006.
-	expectCreditOrDebit(mock, "ws_owner", 0, 0, 0, 0.006, 0.006, 0.006, 0)
+	expectCreditOnce(mock, "req-1", "ws_owner", TypeEmbeddingMine, 0, 0, 0, 0.006, 0.006, 0.006, 0)
 	if err := miner.RecordEmbeddingsServed(context.Background(),
-		"e1", "ws_other", 2000); err != nil {
+		"e1", "ws_other", "req-1", 2000); err != nil {
 		t.Fatalf("RecordEmbeddingsServed: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -151,7 +151,7 @@ func TestRecordEmbeddingsServed_SkipsSelfServing(t *testing.T) {
 	expectGetEmbeddingNode(mock, node)
 	// No Credit expectation — owner == requester must not earn.
 	if err := miner.RecordEmbeddingsServed(context.Background(),
-		"e_self", "ws_self", 1000); err != nil {
+		"e_self", "ws_self", "req-1", 1000); err != nil {
 		t.Fatalf("RecordEmbeddingsServed: %v", err)
 	}
 }
@@ -159,7 +159,7 @@ func TestRecordEmbeddingsServed_SkipsSelfServing(t *testing.T) {
 func TestRecordEmbeddingsServed_ZeroCountSkip(t *testing.T) {
 	miner, _ := newMockEmbMiner(t)
 	// No expectations — must short-circuit without touching DB.
-	if err := miner.RecordEmbeddingsServed(context.Background(), "node", "ws", 0); err != nil {
+	if err := miner.RecordEmbeddingsServed(context.Background(), "node", "ws", "req-1", 0); err != nil {
 		t.Fatalf("RecordEmbeddingsServed: %v", err)
 	}
 }

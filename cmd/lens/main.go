@@ -56,6 +56,7 @@ import (
 	"github.com/talyvor/lens/internal/distill"
 	"github.com/talyvor/lens/internal/distillattrib"
 	"github.com/talyvor/lens/internal/distillpreview"
+	"github.com/talyvor/lens/internal/earnverify"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/eval"
@@ -596,6 +597,12 @@ func run() error {
 
 	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
 	tokenLedger := mining.NewLedgerStore(pool)
+	// U6 Sybil floor: wire the verified-to-earn gate UNCONDITIONALLY at the
+	// ledger chokepoint — a safety restriction must not be liftable by the
+	// economy toggle (mirrors the LXC-fiat unconditional wiring). Every
+	// mint-type credit now requires a verified-to-earn workspace; conservation
+	// credits pass through. nil-safe for tests (they construct ledgers without it).
+	tokenLedger.SetMintVerifier(earnverify.New())
 	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
 	_ = cacheMiner // hooks into the cache-hit path in a follow-up wire-up
 
@@ -649,16 +656,18 @@ func run() error {
 	// cross-workspace request gets credited automatically.
 	computeMiner := mining.NewComputeMiner(tokenLedger, pool)
 	computeMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
-	localRouterMulti.SetOnRequestServed(func(nodeID, requesterWS string, tokens int, latencyMs int64) {
-		// RETIREMENT SWITCH (PoVI Part 3): this is the LEGACY trust-based mint
-		// (mints LENS per served request, no receipt). With Parts 1+2+3 in
-		// place, receipt-minting is now economically safe; an operator can set
-		// LENS_TRUSTFUL_COMPUTE_MINT_ENABLED=false to retire this blind mint.
-		// Default TRUE preserves current behavior — do not flip by default.
+	localRouterMulti.SetOnRequestServed(func(nodeID, requesterWS, requestID string, tokens int, latencyMs int64) {
+		// RETIREMENT SWITCH (PoVI Part 3): the LEGACY trust-based mint (mints LENS
+		// per served request, no receipt). U6: now DEFAULT OFF — an unprotected
+		// mint path is opt-in. receipt-minting (LENS_POVI_MINTING_ENABLED) is the
+		// intended successor. NOTE: NotifyServed has no caller today, so this hook
+		// is dormant; when it is wired, requestID MUST be a server-derived
+		// work-product hash (RecordServedRequest mints idempotently on it, and an
+		// empty requestID mints nothing).
 		if !cfg.TrustfulComputeMintEnabled {
 			return
 		}
-		if err := computeMiner.RecordServedRequest(ctx, nodeID, requesterWS, tokens, latencyMs); err != nil {
+		if err := computeMiner.RecordServedRequest(ctx, nodeID, requesterWS, requestID, tokens, latencyMs); err != nil {
 			logger.Warn("compute mining: record served request failed",
 				slog.String("node_id", nodeID), slog.String("err", err.Error()))
 		}

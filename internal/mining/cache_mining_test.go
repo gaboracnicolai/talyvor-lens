@@ -37,6 +37,36 @@ func expectCreditOrDebit(
 	mock.ExpectCommit()
 }
 
+// expectCreditOnce programmes the mock for a CreditOnce (U6 idempotent mint):
+// Begin → claim INSERT (mint_idempotency, RowsAffected=1 = first claim) → the
+// same credit cycle as expectCreditOrDebit's body → Commit. The nil-verifier
+// path adds no SQL (verifyEarn is a no-op without a wired verifier).
+func expectCreditOnce(
+	mock pgxmock.PgxPoolIface,
+	requestID, workspaceID, mintType string,
+	startingBalance, startingEarned, startingSpent float64,
+	delta, expectedBalance, expectedEarned, expectedSpent float64,
+) {
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO mint_idempotency").
+		WithArgs(requestID, workspaceID, mintType, pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs(workspaceID).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
+		WithArgs(workspaceID).
+		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
+			AddRow(startingBalance, startingEarned, startingSpent))
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs(workspaceID, delta, expectedBalance, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs(workspaceID, expectedBalance, expectedEarned, expectedSpent).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+}
+
 func newMockStore(t *testing.T) (*LedgerStore, pgxmock.PgxPoolIface) {
 	t.Helper()
 	mock, err := pgxmock.NewPool()
@@ -250,8 +280,8 @@ func TestRecordCacheHit_SameWorkspaceTinyReward(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, true)
 	// Same workspace → CacheHitSameWorkspace = 0.001.
-	expectCreditOrDebit(mock, "ws_a", 0, 0, 0, 0.001, 0.001, 0.001, 0)
-	if err := miner.RecordCacheHit(context.Background(), "ws_a", "ws_a", "exact"); err != nil {
+	expectCreditOnce(mock, "req-1", "ws_a", TypeCacheMine, 0, 0, 0, 0.001, 0.001, 0.001, 0)
+	if err := miner.RecordCacheHit(context.Background(), "ws_a", "ws_a", "exact", "req-1"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
 }
@@ -259,8 +289,8 @@ func TestRecordCacheHit_SameWorkspaceTinyReward(t *testing.T) {
 func TestRecordCacheHit_CrossWorkspaceBigReward(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, true)
-	expectCreditOrDebit(mock, "ws_owner", 0, 0, 0, 0.010, 0.010, 0.010, 0)
-	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "exact"); err != nil {
+	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, 0.010, 0.010, 0.010, 0)
+	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "exact", "req-x"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
 }
@@ -268,8 +298,8 @@ func TestRecordCacheHit_CrossWorkspaceBigReward(t *testing.T) {
 func TestRecordCacheHit_SemanticHit(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, true)
-	expectCreditOrDebit(mock, "ws_owner", 0, 0, 0, 0.005, 0.005, 0.005, 0)
-	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "semantic"); err != nil {
+	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, 0.005, 0.005, 0.005, 0)
+	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "semantic", "req-x"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
 }
@@ -278,8 +308,8 @@ func TestRecordCacheHit_SharingDisabledFallsBackToSame(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, false) // sharing off
 	// Even though requester differs, sharing-off means tiny reward.
-	expectCreditOrDebit(mock, "ws_owner", 0, 0, 0, 0.001, 0.001, 0.001, 0)
-	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "exact"); err != nil {
+	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, 0.001, 0.001, 0.001, 0)
+	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "exact", "req-x"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
 }
@@ -287,8 +317,9 @@ func TestRecordCacheHit_SharingDisabledFallsBackToSame(t *testing.T) {
 func TestRecordCacheHit_EmptyOwnerNoOp(t *testing.T) {
 	store, _ := newMockStore(t)
 	miner := NewCacheMiner(store, true)
-	// No expectations: store must NOT be touched.
-	if err := miner.RecordCacheHit(context.Background(), "", "ws_req", "exact"); err != nil {
+	// No expectations: store must NOT be touched (empty owner short-circuits
+	// before CreditOnce).
+	if err := miner.RecordCacheHit(context.Background(), "", "ws_req", "exact", "req-x"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
 }

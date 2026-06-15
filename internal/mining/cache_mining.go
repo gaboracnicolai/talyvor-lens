@@ -103,6 +103,10 @@ type pgxDB interface {
 // insert and the balance update are atomically consistent.
 type LedgerStore struct {
 	pool pgxDB
+	// verifier is the U6 verified-to-earn gate. nil ⇒ no gate (tests + pre-flip
+	// behave exactly as before). Checked inside applyTx/heldInner for mint-type
+	// credits only — see mint_gate.go.
+	verifier MintVerifier
 }
 
 // NewLedgerStore wraps a real *pgxpool.Pool.
@@ -192,6 +196,17 @@ func (s *LedgerStore) applyTx(
 	// LensTokenLedgerSlow alert guards.
 	start := time.Now()
 	defer func() { metrics.ObserveLedgerWrite(time.Since(start)) }()
+
+	// U6 Sybil floor: a mint-type credit only proceeds for a verified-to-earn
+	// workspace. No-op for debits (add=false), conservation credits (non-mint
+	// txType), and when no verifier is wired. Runs on THIS tx so a block
+	// (ErrEarnNotVerified) rolls the whole mint back — no ledger row, no balance
+	// change, no metrics.
+	if add {
+		if err := s.verifyEarn(ctx, tx, workspaceID, txType); err != nil {
+			return err
+		}
+	}
 
 	// Two-step pessimistic lock: ensure the row exists without touching
 	// updated_at on every write, then acquire an explicit FOR UPDATE lock.
@@ -707,12 +722,19 @@ func NewCacheMiner(ledger *LedgerStore, crossWorkspaceEnabled bool) *CacheMiner 
 
 // RecordCacheHit credits the cache owner for serving a hit.
 // hitType ∈ {"exact", "semantic"}. The two workspace IDs may be
-// equal (workspace serving its own cache).
+// equal (workspace serving its own cache → the throttled tiny reward).
+//
+// requestID MUST be a SERVER-DERIVED work-product key (cache content hash) so
+// the mint is idempotent on (requestID, owner); an empty requestID mints
+// nothing (fail-closed). This track is dormant today (the proxy cache-hit path
+// only increments the Prometheus counter, not this); the live wire-up supplies
+// the id. The mint is gated on verified-to-earn via CreditOnce.
 func (m *CacheMiner) RecordCacheHit(
 	ctx context.Context,
 	cacheOwnerWorkspace string,
 	requestWorkspace string,
 	hitType string,
+	requestID string,
 ) error {
 	if cacheOwnerWorkspace == "" {
 		// No owner recorded — older cache entries from before
@@ -730,7 +752,8 @@ func (m *CacheMiner) RecordCacheHit(
 		"request_workspace_id": requestWorkspace,
 	}
 	desc := fmt.Sprintf("cache hit (%s) served to %s", hitType, requestWorkspace)
-	return m.ledger.Credit(ctx, cacheOwnerWorkspace, earning, TypeCacheMine, desc, meta)
+	_, err := m.ledger.CreditOnce(ctx, requestID, cacheOwnerWorkspace, earning, TypeCacheMine, desc, meta)
+	return err
 }
 
 // earnFor encapsulates the rate-selection rules — same workspace

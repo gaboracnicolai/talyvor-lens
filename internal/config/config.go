@@ -316,11 +316,11 @@ type Config struct {
 
 	// TrustfulComputeMintEnabled gates the LEGACY trust-based compute mint
 	// (ComputeMiner.RecordServedRequest mints LENS per served request with no
-	// receipt). Env: LENS_TRUSTFUL_COMPUTE_MINT_ENABLED. DEFAULT TRUE
-	// (preserves current behavior). This is the RETIREMENT SWITCH: once
-	// receipt-minting is enabled (LENS_POVI_MINTING_ENABLED=true, now safe with
-	// Parts 1+2+3), set this false to retire the blind trust-mint. Operator
-	// decision — do NOT flip the default here.
+	// receipt, on a caller-asserted token count, with no idempotency). Env:
+	// LENS_TRUSTFUL_COMPUTE_MINT_ENABLED. DEFAULT FALSE (U6 Sybil floor): an
+	// unprotected mint path must be opt-IN, not on-by-accident — receipt-minting
+	// (LENS_POVI_MINTING_ENABLED, now safe with PoVI Parts 1+2+3) is the intended
+	// successor. Set true only to deliberately re-enable the blind trust-mint.
 	TrustfulComputeMintEnabled bool
 
 	// GuardrailsEnabled gates the Upgrade 13 OUTPUT guardrails (CheckOutput:
@@ -865,8 +865,9 @@ func Load() (*Config, error) {
 		c.POVISlashFraction = f
 	}
 	c.POVIChallengeKey = os.Getenv("LENS_POVI_CHALLENGE_KEY")
-	// Retirement switch defaults TRUE (preserve current trust-mint behavior).
-	c.TrustfulComputeMintEnabled = true
+	// U6 Sybil floor: the legacy trust-mint defaults FALSE — an unprotected mint
+	// path (no receipt, caller-asserted tokens, no idempotency) must be opt-IN.
+	c.TrustfulComputeMintEnabled = false
 	if v := os.Getenv("LENS_TRUSTFUL_COMPUTE_MINT_ENABLED"); v != "" {
 		c.TrustfulComputeMintEnabled = parseBoolEnv("LENS_TRUSTFUL_COMPUTE_MINT_ENABLED")
 	}
@@ -1028,7 +1029,7 @@ func Load() (*Config, error) {
 		c.PatternEarningEnabled = false
 		c.PoolRoyaltyMintingEnabled = false
 		c.POVIMintingEnabled = false
-		c.TrustfulComputeMintEnabled = false // NB: this one defaults TRUE — must be forced off
+		c.TrustfulComputeMintEnabled = false // U6: now defaults false; still force-off'd if an operator opted in
 		c.CacheSharingEnabled = false
 		c.CachePoolableEnabled = false
 		c.DistillPoolableEnabled = false
