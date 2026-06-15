@@ -61,3 +61,31 @@ func TestU6_MintVerifierWiredUnconditional(t *testing.T) {
 		t.Fatal("SetMintVerifier must be an unconditional top-level run() wiring (one leading tab) — a safety restriction must survive the economy master kill")
 	}
 }
+
+// TestU6PR2_WashHardeningWiredUnconditional — the PR2 rate cap and owner-linkage
+// guard are SAFETY restrictions wired unconditionally (one leading tab, never
+// inside an `if cfg.EconomyEnabled` block) — the economy kill must not lift them,
+// mirroring the verifier + the LXC-fiat invariant.
+func TestU6PR2_WashHardeningWiredUnconditional(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	for _, hook := range []string{"tokenLedger.SetMintRateCap(", "royaltyMinter.SetOwnerLinkageCheck("} {
+		present, unconditional := false, false
+		for _, ln := range strings.Split(string(src), "\n") {
+			if strings.Contains(ln, hook) {
+				present = true
+				if strings.HasPrefix(ln, "\t"+hook) { // exactly one leading tab
+					unconditional = true
+				}
+			}
+		}
+		if !present {
+			t.Errorf("%s not wired in main.go — the wash-hardening would never enforce", hook)
+		}
+		if !unconditional {
+			t.Errorf("%s must be unconditional (one leading tab) — a safety restriction must survive the economy kill", hook)
+		}
+	}
+}

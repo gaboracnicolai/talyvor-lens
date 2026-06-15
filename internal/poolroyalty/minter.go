@@ -112,6 +112,16 @@ const insertClaimSQL = `INSERT INTO pool_royalty_mints
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'held', now() + ($13::bigint * interval '1 microsecond'))
 ON CONFLICT (request_id) DO NOTHING`
 
+// sharedFingerprintSQL is the U6 PR2 owner-linkage check: do the contributor and
+// requester workspaces share ANY captured card fingerprint (the lazy one-card
+// operator funding both)? EXISTS is false when EITHER side has no captured
+// fingerprint (default-ALLOW on missing — inconclusive never blocks honest
+// cross-actor reuse). A plain read; no row lock.
+const sharedFingerprintSQL = `SELECT EXISTS (
+    SELECT 1 FROM workspace_card_fingerprints a
+    JOIN workspace_card_fingerprints b ON a.fingerprint_hash = b.fingerprint_hash
+    WHERE a.workspace_id = $1 AND b.workspace_id = $2)`
+
 // capCountSQL is the 2.3b per-pair cap count, run INSIDE the mint tx AFTER
 // CreditTx. The ordering is the whole trick: every mint for a given
 // (requester, contributor) pair must take the SAME contributor-balance
@@ -158,7 +168,17 @@ type Minter struct {
 	// 2.3a holdback: new mints land status='held' with finalize_after =
 	// now() + holdWindow; the finalize sweeper settles them. Defaults 72h.
 	holdWindow time.Duration
+
+	// U6 PR2: when true, deny a mint between two workspaces sharing a captured
+	// card fingerprint (owner-linkage wash). false (default) skips the check —
+	// existing tests and pre-flip behave exactly as before; production wires it on.
+	linkageEnabled bool
 }
+
+// SetOwnerLinkageCheck enables/disables the U6 PR2 owner-linkage wash guard.
+// Off by default (the check is skipped — no workspace_card_fingerprints read);
+// production enables it. Default-allow-on-missing still applies when enabled.
+func (m *Minter) SetOwnerLinkageCheck(enabled bool) { m.linkageEnabled = enabled }
 
 // SetHoldbackWindow configures the held->finalizable delay (Stage 2.3a).
 // Non-positive values keep the 72h default. The TRIGGER that settles a held
@@ -261,6 +281,24 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 		return Result{}, fmt.Errorf("poolroyalty: begin mint tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// U6 PR2 owner-linkage: deny a pooled-royalty mint between two workspaces the
+	// SAME operator controls (a shared captured card fingerprint — the lazy
+	// one-card washer). Default-ALLOW on missing: the EXISTS is false when either
+	// side has no captured fingerprint, so an inconclusive check NEVER blocks
+	// honest cross-actor reuse (the rate cap bounds yield regardless). Read-only,
+	// no row lock — runs BEFORE the claim and the credit's balance FOR UPDATE, so
+	// there is no lock-ordering surface. A linked pair is a deflationary no-op,
+	// like the same-id self-serve guard above.
+	if m.linkageEnabled {
+		var linked bool
+		if err := tx.QueryRow(ctx, sharedFingerprintSQL, h.ContributorWorkspace, h.RequesterWorkspace).Scan(&linked); err != nil {
+			return Result{}, fmt.Errorf("poolroyalty: owner-linkage check: %w", err)
+		}
+		if linked {
+			return Result{}, nil
+		}
+	}
 
 	tag, err := tx.Exec(ctx, insertClaimSQL,
 		h.RequestID, h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,

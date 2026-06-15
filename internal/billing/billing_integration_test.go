@@ -3,6 +3,7 @@ package billing
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -93,8 +94,10 @@ func seedWS(t *testing.T, pool *pgxpool.Pool, wsID string) {
 // ─── Stripe test doubles ──────────────────────────────────────────────
 
 type fakeStripe struct {
-	customers int
-	sessions  int
+	customers      int
+	sessions       int
+	fingerprint    string // returned by CardFingerprint
+	fingerprintErr error  // when set, CardFingerprint errors (the capture must swallow it)
 }
 
 func (f *fakeStripe) CreateCustomer(_ context.Context, workspaceID string) (string, error) {
@@ -105,6 +108,10 @@ func (f *fakeStripe) CreateCustomer(_ context.Context, workspaceID string) (stri
 func (f *fakeStripe) CreateCheckoutSession(_ context.Context, p CheckoutParams) (string, string, error) {
 	f.sessions++
 	return "https://checkout.stripe.test/pay/" + p.WorkspaceID, "cs_test_" + p.WorkspaceID, nil
+}
+
+func (f *fakeStripe) CardFingerprint(_ context.Context, _ string) (string, error) {
+	return f.fingerprint, f.fingerprintErr
 }
 
 // flakyCrediter fails the FIRST CreditLXCTx (simulating a transient credit
@@ -545,5 +552,67 @@ func assertStatus(t *testing.T, pool *pgxpool.Pool, sessID, want string) {
 	}
 	if status != want {
 		t.Errorf("status=%q, want %q", status, want)
+	}
+}
+
+// ─── U6 PR2: card-fingerprint capture (best-effort, money-safe) ────────────
+
+// TestWebhook_FingerprintCaptureFailure_CreditStillLands — THE money-safety
+// proof: the fingerprint capture errors, yet the LXC credit STILL lands, the
+// webhook acks 200, and NO fingerprint row is written. The capture is
+// structurally post-commit, so it can never drop the payment.
+func TestWebhook_FingerprintCaptureFailure_CreditStillLands(t *testing.T) {
+	_, pool, dt := newBillingService(t)
+	fs := &fakeStripe{fingerprintErr: errors.New("stripe API down")}
+	svc := New(pool, dt, fs, testWebhookSecret)
+	ws := "ws_fp_fail"
+	seedWS(t, pool, ws)
+
+	body, sig := signed(testWebhookSecret, "evt_fp_fail", "checkout.session.completed",
+		sessionObj("cs_fp_fail", ws, 1000, "usd", "paid", "pi_fp_fail", lxcForCents(1000)))
+	if code := post(svc, body, sig); code != 200 {
+		t.Fatalf("webhook must ack 200 despite capture failure, got %d", code)
+	}
+	if b := balance(t, pool, ws); b <= 0 {
+		t.Fatalf("the LXC credit MUST land despite the fingerprint-capture failure, balance=%v", b)
+	}
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM workspace_card_fingerprints WHERE workspace_id=$1`, ws).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("a capture failure must write NO fingerprint row, got %d", n)
+	}
+}
+
+// TestWebhook_FingerprintCaptureSuccess_StoresHash — on success, a HASH (never
+// the raw fingerprint) is stored, and the credit lands.
+func TestWebhook_FingerprintCaptureSuccess_StoresHash(t *testing.T) {
+	_, pool, dt := newBillingService(t)
+	fs := &fakeStripe{fingerprint: "card_fp_ABC123"}
+	svc := New(pool, dt, fs, testWebhookSecret)
+	ws := "ws_fp_ok"
+	seedWS(t, pool, ws)
+
+	body, sig := signed(testWebhookSecret, "evt_fp_ok", "checkout.session.completed",
+		sessionObj("cs_fp_ok", ws, 1000, "usd", "paid", "pi_fp_ok", lxcForCents(1000)))
+	if code := post(svc, body, sig); code != 200 {
+		t.Fatalf("want 200, got %d", code)
+	}
+	if b := balance(t, pool, ws); b <= 0 {
+		t.Fatalf("credit must land, balance=%v", b)
+	}
+	var hash string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT fingerprint_hash FROM workspace_card_fingerprints WHERE workspace_id=$1`, ws).Scan(&hash); err != nil {
+		t.Fatalf("a fingerprint row must be stored on success: %v", err)
+	}
+	sum := sha256.Sum256([]byte("card_fp_ABC123"))
+	if want := hex.EncodeToString(sum[:]); hash != want {
+		t.Errorf("stored hash = %q, want sha256 hex %q", hash, want)
+	}
+	if hash == "card_fp_ABC123" {
+		t.Error("must store the HASH, never the raw fingerprint")
 	}
 }

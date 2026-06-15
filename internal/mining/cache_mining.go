@@ -107,6 +107,11 @@ type LedgerStore struct {
 	// behave exactly as before). Checked inside applyTx/heldInner for mint-type
 	// credits only — see mint_gate.go.
 	verifier MintVerifier
+	// mintRateCap is the U6 PR2 per-workspace rolling-window minted-LENS ceiling
+	// (<=0 ⇒ off); mintRateWindow is the window (default 24h). Enforced inside
+	// applyTx/heldInner AFTER the balance FOR UPDATE — see checkMintRateCap.
+	mintRateCap    float64
+	mintRateWindow time.Duration
 }
 
 // NewLedgerStore wraps a real *pgxpool.Pool.
@@ -235,6 +240,17 @@ func (s *LedgerStore) applyTx(
 		spent += amount
 	}
 	newBal := bal + delta
+
+	// U6 PR2: rolling-window mint rate cap. Only for mint-type credits, and
+	// placed AFTER the FOR UPDATE above so concurrent same-workspace mints
+	// serialize on the balance row and the SUM sees prior committed mints
+	// (exact, no race). A block (ErrMintRateCapExceeded) rolls the whole mint
+	// back — no ledger row, no balance change, no metrics.
+	if add {
+		if err := s.checkMintRateCap(ctx, tx, workspaceID, txType, amount); err != nil {
+			return err
+		}
+	}
 
 	// dbjson.JSONB encodes as JSON text on both pgx protocols — a raw []byte
 	// is inferred as bytea under the SimpleProtocol that LENS_DB_PGBOUNCER

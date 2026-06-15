@@ -173,7 +173,12 @@ The token economy ships **dark** (off by default). Before it can be flipped publ
 - **Idempotent mints.** The previously-unprotected compute / cache / embedding tracks now claim a `(request_id, workspace_id, mint_type)` row before crediting (the pattern track's proven shape). `request_id` must be **server-derived** work-product content; an empty id mints nothing.
 - **Legacy trust-mint off by default.** The receipt-less compute mint (`LENS_TRUSTFUL_COMPUTE_MINT_ENABLED`) now **defaults false** — an unprotected mint path is opt-in, not on-by-accident.
 
-**Residual (tracked for the fast-follow):** the floor raises the wash-trading bar from *two free workspaces* to *two verified identities*. Owner-linkage wash-hardening (so self-reuse between two identities the same operator controls doesn't pay) and a per-identity earning-rate cap are the next layer — they are **not** in this floor.
+The **PR2 wash-hardening** then bounds the steady-state yield (verification raised the *entry* bar but not the *steady-state* yield, which a determined operator amortizes):
+
+- **Per-identity rate cap (the universal bound).** A per-workspace rolling **24h** ceiling on **minted LENS across all mint types**, enforced at the same ledger chokepoint (`LENS_MINT_RATE_CAP_LENS_24H`, default **1000** LENS/24h, `0` = off). It sums every mint type together — an attacker can't evade by splitting across tracks — and is exact under concurrency (the SUM rides the balance `FOR UPDATE`). Held mints count at the mint moment; the finalize settlement is **not** double-counted. Conservation moves are never throttled.
+- **Card-fingerprint owner-linkage (the cheap bonus).** The Stripe webhook captures a **hash** of the card fingerprint (never the raw value) **best-effort, after the credit commits** — a capture failure can never drop the payment. A pool-royalty mint between two workspaces that share a fingerprint (one operator, one card) is denied; **default-allow on missing** (an absent fingerprint never blocks honest cross-actor reuse). Catches the lazy one-card washer.
+
+**Residual (honest):** a determined operator can still wash **under the rate cap** across **many cards** (rotating cards evades the fingerprint linkage). The rate cap bounds the per-identity yield; deeper owner-linkage (e.g. network/behavioral signals) carries a high privacy cost and is deferred. The verification cost + the rate cap + the cheap linkage together make casual washing unprofitable and bound the determined case.
 
 ### Quick start (GPU miner)
 
