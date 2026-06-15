@@ -128,6 +128,11 @@ type Proxy struct {
 	patternSink           patternCaptureSink
 	patternCaptureEnabled func() bool
 
+	// WorkTier descriptive classifier (optional, nil-safe post-serve). Shares the
+	// obsLimiter budget with pattern capture. See worktier_capture.go.
+	workTierSink    workTierSink
+	workTierEnabled func() bool
+
 	// obsLimiter bounds post-serve observational writes (pattern capture).
 	// nil = no bound. main wires the same limiter into attribution's
 	// RecordAsync so the total observational claim on the DB pool stays
@@ -717,6 +722,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// the prompt going forward. piiDetected is preserved as a downstream
 	// signal so the cache layer still refuses to persist PII responses.
 	piiDetected := false
+	guardrailFired := false // WorkTier sensitivity cause B (a non-blocking guardrail tripped)
 	var redactedPrompt string
 	if p.guardrails != nil {
 		gr := p.guardrails.Check(ctx, wsID, prompt, body)
@@ -763,6 +769,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			redactedPrompt = gr.RedactedPrompt
 			w.Header().Set("X-Talyvor-Guardrail-Redacted", "true")
 		}
+		// WorkTier sensitivity input: a guardrail FIRED (redact/warn) on a served
+		// request. A blocked request returned above, so this only marks non-block
+		// fires. Carried, NON-CONTENT (a bool, never the matched span).
+		guardrailFired = len(gr.Violations) > 0
 		if len(gr.Violations) > 0 && piiDetected {
 			metrics.RequestsTotal.WithLabelValues(cfg.name, "pii_skip_cache").Inc()
 		}
@@ -1309,6 +1319,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				p.capturePattern(ctx, wsID, feature, upstreamModel, cfg.name,
 					len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false)
 			}
+			// WorkTier descriptive classification — post-flush, off-hot-path, void,
+			// best-effort, shares the obsLimiter; default-off. DESCRIPTIVE + mint-free
+			// (the sink has no ledger handle). Complexity is derived on the SAME input
+			// the router analyzed (compressedPrompt) so it equals the routing decision's.
+			p.captureWorkTier(ctx, wsID, feature, upstreamModel, cfg.name, compressedPrompt,
+				len(compressedPrompt)/4, outT, piiDetected, guardrailFired, string(loggingPolicy))
 			// S1 distill attribution (MINT-FREE) — record any consented
 			// cross-tenant pooled-distill serves surfaced from MaybeDistill.
 			// Post-flush, void, detached, swallowed (mirrors capturePattern);
