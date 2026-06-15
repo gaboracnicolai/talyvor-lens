@@ -165,6 +165,16 @@ Build all four: `make binaries` (drops them into `./bin/`).
 - **Marketplace**: peer-to-peer LENS trading with a 5% platform fee
 - **Quality oracle stake**: 10 LENS minimum to annotate (Sybil-resistant)
 
+### Sybil resistance (verified-to-earn)
+
+The token economy ships **dark** (off by default). Before it can be flipped public, the **U6 Sybil floor** ensures value never mints to a free, duplicable identity:
+
+- **Verified-to-earn gate.** A workspace may mint / accrue royalty only when it is **verified-to-earn**: it has a **completed real-money LXC purchase** (derived at read time) OR an admin-set `earn_verified` flag (the enterprise / self-host vouch). Refunded / anomalous purchases do **not** count (closes the buy→refund→stay-verified loop). The gate is enforced at the **ledger chokepoint** (`applyTx` + `heldInner`): every mint-type credit — cache, compute, embedding, annotation, pattern, PoVI receipt, and the pool-royalty held mint — passes through it; conservation moves (marketplace, unstake, LENS→LXC convert) are never gated. The gate is wired **unconditionally** — a safety restriction the economy master-switch cannot lift.
+- **Idempotent mints.** The previously-unprotected compute / cache / embedding tracks now claim a `(request_id, workspace_id, mint_type)` row before crediting (the pattern track's proven shape). `request_id` must be **server-derived** work-product content; an empty id mints nothing.
+- **Legacy trust-mint off by default.** The receipt-less compute mint (`LENS_TRUSTFUL_COMPUTE_MINT_ENABLED`) now **defaults false** — an unprotected mint path is opt-in, not on-by-accident.
+
+**Residual (tracked for the fast-follow):** the floor raises the wash-trading bar from *two free workspaces* to *two verified identities*. Owner-linkage wash-hardening (so self-reuse between two identities the same operator controls doesn't pay) and a per-identity earning-rate cap are the next layer — they are **not** in this floor.
+
 ### Quick start (GPU miner)
 
 ```bash

@@ -92,8 +92,8 @@ func TestEconomyKillSwitch_DefaultPreservesGates(t *testing.T) {
 	if !cfg.PatternMiningEnabled {
 		t.Fatal("an explicitly-on gate must survive when the master defaults on (zero change)")
 	}
-	if !cfg.TrustfulComputeMintEnabled {
-		t.Fatal("TrustfulComputeMint (default-true) must survive when the master is on")
+	if cfg.TrustfulComputeMintEnabled {
+		t.Fatal("U6 Sybil floor: TrustfulComputeMint must now default FALSE (an unprotected mint path is opt-in, not on-by-accident)")
 	}
 }
 

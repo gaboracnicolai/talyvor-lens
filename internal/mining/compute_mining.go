@@ -349,10 +349,16 @@ func (m *ComputeMiner) verifyNodeAsync(nodeID, nodeURL, provider string) {
 //     accounting — rare race),
 //   - the requester IS the owner (no self-serving),
 //   - tokens is zero or negative.
+// RecordServedRequest mints compute LENS to the node owner for a served
+// cross-workspace request. requestID MUST be a SERVER-DERIVED work-product key
+// (the future live wire-up threads it through NotifyServed; a caller-supplied id
+// defeats idempotency). An empty requestID mints nothing (fail-closed). The mint
+// is idempotent on (requestID, node-owner workspace) and gated on verified-to-earn.
 func (m *ComputeMiner) RecordServedRequest(
 	ctx context.Context,
 	nodeID string,
 	requestingWorkspace string,
+	requestID string,
 	tokens int,
 	latencyMs int64,
 ) error {
@@ -383,7 +389,10 @@ func (m *ComputeMiner) RecordServedRequest(
 		"requesting_workspace": requestingWorkspace,
 	}
 	desc := fmt.Sprintf("compute serve: %d tokens on %s", tokens, node.GPUType)
-	if err := m.ledger.Credit(ctx, node.WorkspaceID, earning, TypeComputeMine, desc, meta); err != nil {
+	// U6: idempotent mint on (requestID, node-owner) + verified-to-earn gate.
+	// Empty requestID ⇒ ErrNoMintRequestID ⇒ no mint (the dormant hook passes ""
+	// until the live wire-up threads a server-derived id).
+	if _, err := m.ledger.CreditOnce(ctx, requestID, node.WorkspaceID, earning, TypeComputeMine, desc, meta); err != nil {
 		return err
 	}
 	return m.updateMetrics(ctx, nodeID, tokens, latencyMs)
