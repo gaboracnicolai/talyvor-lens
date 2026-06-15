@@ -100,6 +100,14 @@ var (
 		prometheus.GaugeOpts{Name: "lens_ha_instance_count", Help: "Active Lens instances seen in the HA registry (0 when HA disabled)."},
 	)
 
+	// ReplicaLagSeconds is the read-replica replay lag in seconds (U8/U9). It
+	// stays 0 when no replica is configured (LENS_DB_REPLICA_URL unset) or the
+	// queried node is not in recovery; only the lag monitor populates it, and
+	// only when a replica is wired.
+	ReplicaLagSeconds = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "lens_db_replica_lag_seconds", Help: "Read-replica replay lag in seconds (0 when no replica configured)."},
+	)
+
 	// ─── budget governance (Upgrade 19) ───
 	// scope is bounded (workspace/team/sprint). scope_id is potentially
 	// unbounded (team / sprint ids), so the budgets service gates these two
@@ -310,6 +318,7 @@ func init() {
 		TokenLedgerWriteDuration,
 		TokensMintedTotal, LXCConvertedTotal,
 		HAInstanceCount,
+		ReplicaLagSeconds,
 		BudgetSpentUSD, BudgetUtilizationRatio,
 		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
 		ForecastProjectedUSD, ForecastWillExceedTotal,
@@ -372,6 +381,9 @@ func ConvertedLXC(n float64) {
 
 // SetHAInstanceCount publishes the current active-instance count.
 func SetHAInstanceCount(n int) { HAInstanceCount.Set(float64(n)) }
+
+// SetReplicaLagSeconds publishes the current read-replica replay lag (U8/U9).
+func SetReplicaLagSeconds(v float64) { ReplicaLagSeconds.Set(v) }
 
 // ─── budget governance helpers ───
 // SetBudgetSpent / SetBudgetUtilization carry the unbounded scope_id label;

@@ -87,6 +87,34 @@ func TestLoad_GuardrailsReloadInterval(t *testing.T) {
 	}
 }
 
+// TestLoad_DBReplicaURL — U8/U9: optional read-replica DSN, default empty (off).
+// Load does NOT validate the URL — a malformed value falls back to the primary
+// with a WARN at boot (dbrouting.OpenReplica), never a crash — so Load only
+// stores the raw string here.
+func TestLoad_DBReplicaURL(t *testing.T) {
+	t.Run("default empty (off)", func(t *testing.T) {
+		setRequiredEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.DBReplicaURL != "" {
+			t.Errorf("DBReplicaURL default must be empty (off), got %q", c.DBReplicaURL)
+		}
+	})
+	t.Run("stored when set", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_DB_REPLICA_URL", "postgres://replica.internal:5432/lens?sslmode=disable")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.DBReplicaURL != "postgres://replica.internal:5432/lens?sslmode=disable" {
+			t.Errorf("DBReplicaURL = %q", c.DBReplicaURL)
+		}
+	})
+}
+
 // TestLoad_Audit — U14 audit knobs default OFF; parse when set; reject a
 // non-positive export interval (a time.Ticker panics on it).
 func TestLoad_Audit(t *testing.T) {

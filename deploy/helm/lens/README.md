@@ -242,6 +242,37 @@ Workspace-config and guardrail-policy propagation are both **test-proven** with 
 
 **Guardrail fail-safe (security control).** Guardrails are a security control, so the load path fails *safe*, never *open*. If custom policies cannot be loaded at **startup** (DB unreachable or a corrupt row), the engine serves the locked-down default — PII redact + injection block stay ON for every workspace — and raises a loud `Degraded()` + ERROR, so the downgrade is visible, never silent. A **reload** failure *after* a prior good load retains the last-good policies (build-then-swap never publishes a partial map) and stays non-degraded, so a transient DB blip can never loosen a stricter-than-default workspace. A single corrupt row fails the whole rebuild rather than skipping just that row — skipping would silently downgrade that one tenant to the (possibly looser) default.
 
+### Read scaling — optional read-replica (U8/U9)
+
+Set **`LENS_DB_REPLICA_URL`** to a read-replica DSN to offload a small, explicitly
+vetted set of **analytics/display reads** (spend forecasting, cost-anomaly
+detection, the admin distill-attribution view) to a replica. **Off by default** —
+unset, every read uses the primary, byte-identical to single-pool behaviour. A
+malformed DSN or an unreachable replica at boot **falls back to the primary with
+a WARN**, never a crash (the replica is an optimization, never a boot
+dependency). When `LENS_DB_PGBOUNCER` is set, the replica pool uses simple
+protocol too.
+
+**The invariant (enforced by wiring, not vigilance): no money/authz read that
+feeds a write decision is ever routed to a replica.** API-key validation,
+budget/spend enforcement, the LXC balance gate, Stripe credit, workspace config,
+and every read inside a write transaction stay on the **primary** by
+construction — those structs are never handed the replica pool. Only four
+read-only-by-construction structs receive it; a CI guard fails the build if a
+money/authz constructor is ever wired to the replica, or if one of the four
+gains a write method. A lagging replica therefore cannot cause a revoked key to
+be honoured or a payment to be mis-credited.
+
+Replica replay lag is exported as the Prometheus gauge
+**`lens_db_replica_lag_seconds`** (0 when no replica is configured) and surfaced
+on **`/healthz`** as the `read_replica` check (a healthy no-op when unconfigured).
+
+> **CI caveat (same honesty as the U7 staleness note):** the integration suite
+> runs a single Postgres, so it proves the **routing decision** (analytics→replica,
+> money/authz→primary) via two pools over one DB — it does **not** model real
+> replication lag. Lag-threshold/fallback behaviour against a genuine streaming
+> standby is not yet CI-covered (tracked as a follow-up).
+
 ## In-cluster mining nodes (advanced, optional)
 
 `nodes.enabled=true` renders optional `Deployment`/`DaemonSet` workloads for the

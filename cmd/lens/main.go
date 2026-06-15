@@ -52,6 +52,7 @@ import (
 	"github.com/talyvor/lens/internal/costanomaly"
 	"github.com/talyvor/lens/internal/dashboard"
 	"github.com/talyvor/lens/internal/dbmigrate"
+	"github.com/talyvor/lens/internal/dbrouting"
 	"github.com/talyvor/lens/internal/distill"
 	"github.com/talyvor/lens/internal/distillattrib"
 	"github.com/talyvor/lens/internal/distillpreview"
@@ -250,6 +251,23 @@ func run() error {
 		logger.Warn("postgres ping failed", slog.String("err", err.Error()))
 	}
 
+	// U8/U9 read-replica: an OPTIONAL second pool for analytics/display reads.
+	// It stays nil unless LENS_DB_REPLICA_URL is set AND the replica pings OK at
+	// boot (OpenReplica degrades every failure mode to nil + a WARN — never a
+	// crash). Money/authz/transaction reads NEVER receive this handle; only the
+	// recon-confirmed analytics readers are wired through dbrouting.ReadPool.
+	replicaPool := dbrouting.OpenReplica(ctx, cfg.DBReplicaURL, dbrouting.ReplicaOpts{
+		MaxConns: cfg.DBMaxConns, MinConns: cfg.DBMinConns, PgBouncer: cfg.DBPgBouncer, Log: logger,
+	})
+	if replicaPool != nil {
+		defer replicaPool.Close()
+	}
+	// U8/U9 lag observability: sample replica replay lag into the Prometheus
+	// gauge + surface it on /healthz. A no-op when replicaPool is nil (gauge
+	// stays 0, health entry reports a healthy "no replica configured").
+	replicaLagMonitor := dbrouting.NewLagMonitor(replicaPool, metrics.SetReplicaLagSeconds, 0, logger)
+	replicaLagMonitor.Start(ctx)
+
 	nc, err := connectNATS(cfg.NatsURL, cfg, logger)
 	if err != nil {
 		return err
@@ -282,10 +300,10 @@ func run() error {
 	budgetService := budgets.NewService(budgetStore)
 	// Predictive cost forecasting (Upgrade 20). Read-only analytics over
 	// token_events + budgets; cached, off the request hot path.
-	forecaster := forecast.New(forecast.NewStore(pool))
+	forecaster := forecast.New(forecast.NewStore(dbrouting.ReadPool(pool, replicaPool)))
 	// Cross-sectional cost anomaly detection (Upgrade 21). Read-only,
 	// cached, off the hot path. Distinct from the temporal anomaly.Detector.
-	costAnomalyStore := costanomaly.NewStore(pool)
+	costAnomalyStore := costanomaly.NewStore(dbrouting.ReadPool(pool, replicaPool))
 	costAnomalyDetector := costanomaly.New(costAnomalyStore)
 	// Executive ROI reporting (Upgrade 24). Read-only orchestration of
 	// budgets + forecast + costanomaly + attribution; cached, off the hot
@@ -334,7 +352,7 @@ func run() error {
 	evalPipeline.SetSpendRecorder(alertManager)
 	// eval scheduler and anomaly monitor goroutines are launched after setupHA
 	// below so they can be wrapped with leader election.
-	anomalyDetector := anomaly.New(pool)
+	anomalyDetector := anomaly.New(dbrouting.ReadPool(pool, replicaPool))
 	statusPage := status.New(pool, redisClient, nc, "0.1.0")
 	go statusPage.StartCacher(ctx, 60*time.Second)
 	// Model-catalog runtime overrides (Upgrade 16): an operator can add or
@@ -854,6 +872,9 @@ func run() error {
 			}
 			return true, 0, ""
 		}),
+		// U8/U9: replica reachability + replay lag. Healthy no-op when no
+		// replica is configured (the feature is off, not broken).
+		"read_replica": replicaLagMonitor,
 	})
 	r.Get("/healthz", healthHandler.ServeHTTP)
 
@@ -1211,7 +1232,7 @@ func run() error {
 		// rows; ?view=pairs returns the condition-(b) materiality aggregate. The
 		// Reader is Query-only (no write capability — see distillattrib.Reader).
 		econ.get(authed, "/v1/admin/distill/attribution",
-			requireAdmin(authManager, http.HandlerFunc(newDistillAttributionAdminHandler(distillattrib.NewReader(pool)))))
+			requireAdmin(authManager, http.HandlerFunc(newDistillAttributionAdminHandler(distillattrib.NewReader(dbrouting.ReadPool(pool, replicaPool))))))
 
 		// Stage-3 pool-mint adjudication gate — the Revoker's FIRST and ONLY
 		// production caller. Admin-gated (mirrors ApproveRate); the operator
