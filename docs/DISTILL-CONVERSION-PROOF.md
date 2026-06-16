@@ -94,4 +94,66 @@ hard-wired to 100% **fails** the `TestConversionProof_DetectsDegradation` spine.
 - **`outline` is a "what-is-this-about" summary, not an answer-preserving tier** —
   its large savings come at measured fact loss; do not route answer-bearing
   document work through it.
-- The vision-OCR path still needs its own model-based eval before any claim.
+- The vision-OCR path needs its own model-based eval before any claim — that is the **Vision-OCR fidelity benchmark** below.
+
+---
+
+# Vision-OCR fidelity benchmark — the higher-risk path
+
+The model-free proof above **excludes** vision-OCR (a model reads pixels of a
+scanned/text-less PDF) — the lossiest conversion and where savings-quality risk is
+highest. This benchmark is the on-demand instrument that measures it.
+
+**Framing: fidelity × cost, NOT savings × quality.** Vision-OCR **spends** tokens
+(`TokensSaved=0`, `VisionTokensCost>0`). The question is not "does it save?" but
+*"does the expensive Anthropic OCR recover answer-relevant facts well enough to
+justify its cost?"*
+
+Source: `internal/proxy/vision_benchmark_test.go` + fixtures under
+`internal/distill/testdata/vision/`.
+
+## Three execution modes (kept strictly separate)
+
+1. **Keyless CI guards** — always run, deterministic, free, no key:
+   - `TestVisionFixtures_AreTextLess` (`internal/distill/`) — pins that every
+     committed fixture is **text-less** (routes to `NeedsVision`), so the benchmark
+     measures real OCR, not text-layer reading. A fixture that grew a text layer
+     would silently fake high fidelity; this guard prevents that.
+   - `TestVisionGrader_OnRecordedTranscript` — validates the presence grader on a
+     fixed recorded transcript. **Validates the grader, NOT the model.**
+2. **Paid live benchmark** — `TestVisionFidelityBenchmark_Paid` — **skips cleanly**
+   unless **both** `ANTHROPIC_API_KEY` and `LENS_VISION_BENCH=1` are set. When run,
+   it OCRs each fixture **N times** (default 5, `LENS_VISION_BENCH_RUNS`) via real
+   Anthropic and reports **worst-of-N** fact recovery paired with the honest
+   `VisionTokensCost`. It spends tokens and is non-deterministic — **never a CI
+   gate**.
+3. **Throwaway generator** — `internal/distill/testdata/vision/gen_fixtures.go`
+   (`//go:build ignore`) — renders text → image (basicfont) → image-only PDF.
+   **Out of the module graph** (`x/image` never enters `go.mod`); committed for
+   provenance + regeneration.
+
+## How an operator runs it (the pre-enable gate)
+
+Before enabling document OCR (`DistillPolicy` routing scanned PDFs) for a
+customer, run the benchmark as the gate:
+
+```
+ANTHROPIC_API_KEY=sk-... LENS_VISION_BENCH=1 LENS_VISION_BENCH_RUNS=5 \
+  go test ./internal/proxy/ -run TestVisionFidelityBenchmark_Paid -v
+```
+
+It emits a per-fixture + aggregate table: **worst-of-N fact recovery × average
+`VisionTokensCost`**, headlined as *"recovers ≥X% of answer-relevant facts, worst
+of N runs."* **The artifact is unpopulated in-repo by design** — it materializes
+only when an operator runs the paid path (no tokens are spent speculatively).
+
+## Bounds on the claim (read before trusting a number)
+
+- **Clean synthetic renders are OPTIMISTIC.** The fixtures are crisp
+  machine-rendered text; real scans (noise, skew, low DPI, handwriting) are harder.
+  A good recovery rate here is a **ceiling**, not a field number — real-scan
+  fidelity needs real-scan fixtures.
+- **One-directional** (same as the model-free proof): it proves answer-relevant
+  facts were **recovered**, NOT that nothing spurious/hallucinated was added.
+- **Anthropic-only.** The live OCR path supports the Anthropic provider only
+  (`visionProviderSupported`); the benchmark measures that path.
