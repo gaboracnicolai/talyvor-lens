@@ -994,24 +994,38 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		if ws, ok := p.workspaceManager.GetWorkspace(wsID); ok {
 			allowedModels, allowedProviders = ws.AllowedModels, ws.AllowedProviders
 		}
-		// In-memory lookup only — never a DB query on the request path.
+		// In-memory lookup only — never a DB query on the request path. The
+		// Advisor is workspace-BLIND (it discards wsID); the Shape-1 gate below
+		// adds NO cross-tenant read — its decisionTier is computed from THIS
+		// request only (issue #198).
 		rec := p.routingAdvisor.Recommend(ctx, wsID, feature, len(compressedPrompt)/4, cfg.name, allowedModels, allowedProviders)
-		if rec.Basis != routing.BasisNone && rec.Model != "" {
-			upstreamModel = rec.Model
-			overrideModel = rec.Model
-			overrideReason = rec.Reason
+		// Base-path pick: the model an auto request gets if NO recommendation is
+		// applied (the complexity router). Pure/in-memory (no DB, no side
+		// effects), computed once — it is BOTH the downgrade baseline for the
+		// Shape-1 gate AND the model used when the gate suppresses the rec.
+		var base router.RoutingDecision
+		if p.router != nil {
+			base = p.router.Route(ctx, cfg.name, model, compressedPrompt)
+		}
+		// Shape-1 work-tier gate: a request-local, PRE-SERVE decisionTier can
+		// only SUPPRESS the recommendation (sensitivity opt-out or downgrade
+		// veto) — subtractive, never selecting a third model. decisionTier is
+		// deliberately DISTINCT from the persisted WorkTier (input-size not
+		// total, no cost, never stored; see routing_decision_tier.go).
+		dt := newDecisionTier(len(compressedPrompt)/4, compressedPrompt, piiDetected, guardrailFired, loggingPolicy)
+		res := resolveAutoRoute(p.router, rec, base, dt)
+		if res.model != "" {
+			upstreamModel = res.model
+			overrideModel = res.model
+			overrideReason = res.reason
+		}
+		if res.applied {
 			metrics.RoutingIntelligenceApplied()
-		} else if p.router != nil {
-			// No qualifying recommendation — fall back to the complexity
-			// router so an "auto" request still gets a concrete model.
-			decision := p.router.Route(ctx, cfg.name, model, compressedPrompt)
-			if decision.Model != "" {
-				upstreamModel = decision.Model
-				overrideModel = decision.Model
-				overrideReason = "routing default (no qualifying intelligence): " + decision.Reason
-			}
-			metrics.RoutingFallback()
-		} else {
+		}
+		if res.gated != "" {
+			metrics.RoutingTierGated(res.gated)
+		}
+		if res.fallback {
 			metrics.RoutingFallback()
 		}
 	} else if p.router != nil {
