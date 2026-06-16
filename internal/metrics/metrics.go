@@ -180,6 +180,13 @@ var (
 	RoutingFallbackTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_routing_fallback_total", Help: "Requests that fell back to the default route (no recommendation / below sample floor)."},
 	)
+	// RoutingTierGatedTotal counts auto-route recommendations SUPPRESSED by the
+	// Shape-1 work-tier gate (#198), by reason. Subtractive only — a gated
+	// request takes the base route, so it is also counted in RoutingFallbackTotal.
+	RoutingTierGatedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_routing_tier_gated_total", Help: "Auto-route recommendations suppressed by the work-tier gate, by reason (sensitivity_optout / downgrade_veto)."},
+		[]string{"reason"},
+	)
 
 	// ─── vision / multimodal routing (Upgrade 15) ───
 	// modality is a bounded, low-cardinality label (text / image / audio /
@@ -324,7 +331,7 @@ func init() {
 		ForecastProjectedUSD, ForecastWillExceedTotal,
 		AnomaliesDetectedTotal, AnomalyMaxFactor,
 		ROIReportsGeneratedTotal, ROIReportDuration,
-		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal,
+		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal, RoutingTierGatedTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 		SpendRecordsTotal,
 		DistillCacheTotal, DistillTokensSavedTotal,
@@ -433,6 +440,7 @@ func ObserveROIReportDuration(d time.Duration) {
 func RoutingRecommendation(basis string) { RoutingRecommendationsTotal.WithLabelValues(basis).Inc() }
 func RoutingIntelligenceApplied()        { RoutingIntelligenceAppliedTotal.Inc() }
 func RoutingFallback()                   { RoutingFallbackTotal.Inc() }
+func RoutingTierGated(reason string)     { RoutingTierGatedTotal.WithLabelValues(reason).Inc() }
 
 // ─── vision / multimodal helpers ───
 // Bounded {modality} label on the counter; redirects/unsupported unlabeled.
