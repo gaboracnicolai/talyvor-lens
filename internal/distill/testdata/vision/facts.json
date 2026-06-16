@@ -1,0 +1,54 @@
+[
+  {
+    "file": "invoice.pdf",
+    "facts": [
+      "INV-7781",
+      "Globex",
+      "4,200.00",
+      "350.00"
+    ]
+  },
+  {
+    "file": "report.pdf",
+    "facts": [
+      "Q3 FINANCIAL SUMMARY",
+      "4.2M",
+      "us-east-1",
+      "3.1%"
+    ]
+  },
+  {
+    "file": "memo.pdf",
+    "facts": [
+      "INCIDENT 4471",
+      "null deref",
+      "320 users",
+      "12 minutes"
+    ]
+  },
+  {
+    "file": "contract.pdf",
+    "facts": [
+      "50,000",
+      "Delaware",
+      "2026-09-30"
+    ]
+  },
+  {
+    "file": "inventory.pdf",
+    "facts": [
+      "STOCK REPORT",
+      "A100",
+      "4200",
+      "B200"
+    ]
+  },
+  {
+    "file": "roster.pdf",
+    "facts": [
+      "Dana Vex",
+      "Kira",
+      "Omar"
+    ]
+  }
+]
