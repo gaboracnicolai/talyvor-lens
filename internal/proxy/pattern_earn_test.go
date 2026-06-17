@@ -8,6 +8,7 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/poolroyalty"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // fakeEarnSink records IsOptedIn + RecordPattern calls so earnPattern can be
@@ -56,7 +57,7 @@ func workHash(model, prompt, response string) string {
 
 // earn(...) the standard call: scored, model "gpt-4o", prompt "p", response "r".
 func callEarn(p *Proxy, ctx context.Context) bool {
-	return p.earnPattern(ctx, "chat", "gpt-4o", "openai", "p", []byte("r"), 400, 100, 0.9, true, 50)
+	return p.earnPattern(ctx, false, false, workspace.LoggingMetadata, "chat", "gpt-4o", "openai", "p", []byte("r"), 400, 100, 0.9, true, 50)
 }
 
 // FLAG-OFF SERVE-NEUTRALITY (the make-or-break): earn flag off → earnPattern
@@ -65,7 +66,7 @@ func callEarn(p *Proxy, ctx context.Context) bool {
 func TestEarnPattern_FlagOff_NoCallReturnsFalse(t *testing.T) {
 	s := &fakeEarnSink{optedIn: true}
 	p := earnProxy(s, false)
-	if p.earnPattern(authCtx("wsA"), "chat", "gpt-4o", "openai", "p", []byte("r"), 400, 100, 0.9, true, 50) {
+	if p.earnPattern(authCtx("wsA"), false, false, workspace.LoggingMetadata, "chat", "gpt-4o", "openai", "p", []byte("r"), 400, 100, 0.9, true, 50) {
 		t.Fatal("flag OFF must return false (caller runs capture)")
 	}
 	if s.optInCalls != 0 || s.recCalls != 0 {
@@ -150,7 +151,7 @@ func TestEarnPattern_ContentHash_Deterministic(t *testing.T) {
 	}
 	// A different response (different work) → different hash.
 	s3 := &fakeEarnSink{optedIn: true}
-	earnProxy(s3, true).earnPattern(authCtx("wsA"), "chat", "gpt-4o", "openai", "p", []byte("DIFFERENT"), 400, 100, 0.9, true, 50)
+	earnProxy(s3, true).earnPattern(authCtx("wsA"), false, false, workspace.LoggingMetadata, "chat", "gpt-4o", "openai", "p", []byte("DIFFERENT"), 400, 100, 0.9, true, 50)
 	if s3.lastReqID == s1.lastReqID {
 		t.Error("different response must produce a different content hash")
 	}
@@ -158,7 +159,93 @@ func TestEarnPattern_ContentHash_Deterministic(t *testing.T) {
 
 // Nil-safe: zero-value proxy / nil sink → false, no panic.
 func TestEarnPattern_NilSafe(t *testing.T) {
-	if (&Proxy{}).earnPattern(authCtx("wsA"), "f", "m", "p", "pr", []byte("r"), 1, 1, 0.5, true, 1) {
+	if (&Proxy{}).earnPattern(authCtx("wsA"), false, false, workspace.LoggingMetadata, "f", "m", "p", "pr", []byte("r"), 1, 1, 0.5, true, 1) {
 		t.Fatal("zero-value proxy must return false")
+	}
+}
+
+// ── CORPUS SENSITIVITY EXCLUSION (money-path: a sensitive request never mints) ──
+
+// A sensitive request (PII, a fired guardrail, or logging==none) must DECLINE to
+// earn: earnPattern returns false and RecordPattern is NEVER called (no mint, no
+// CreditTx). The POSITIVE CONTROL in the same test proves the sink is wired — the
+// byte-identical NON-sensitive request DOES earn (without it the negative
+// assertions would be hollow). Each sensitive term is covered INDEPENDENTLY.
+// logging==none is exercised here at the function seam even though today's
+// proxy.go:1331 call site can't produce it (it sits inside the :1288
+// LoggingNone-excluding block) — reaching that term is the payoff of the
+// in-function guard.
+func TestEarnPattern_SensitiveExcluded(t *testing.T) {
+	t.Run("non-sensitive control EARNS (proves sink wired)", func(t *testing.T) {
+		s := &fakeEarnSink{optedIn: true}
+		p := earnProxy(s, true)
+		if !p.earnPattern(authCtx("wsA"), false, false, workspace.LoggingMetadata, "chat", "gpt-4o", "openai", "p", []byte("r"), 400, 100, 0.9, true, 50) {
+			t.Fatal("non-sensitive request must EARN (positive control)")
+		}
+		if s.recCalls != 1 {
+			t.Fatalf("non-sensitive control: RecordPattern must fire once; got %d", s.recCalls)
+		}
+	})
+
+	for _, c := range []struct {
+		name      string
+		pii       bool
+		guardrail bool
+		logging   workspace.LoggingPolicy
+	}{
+		{"pii-only (guardrail=false, logging!=none)", true, false, workspace.LoggingMetadata},
+		{"guardrail-only (pii=false, logging!=none)", false, true, workspace.LoggingFull},
+		{"logging==none-only (pii=false, guardrail=false)", false, false, workspace.LoggingNone},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := &fakeEarnSink{optedIn: true}
+			p := earnProxy(s, true)
+			if p.earnPattern(authCtx("wsA"), c.pii, c.guardrail, c.logging, "chat", "gpt-4o", "openai", "p", []byte("r"), 400, 100, 0.9, true, 50) {
+				t.Fatalf("%s: sensitive request must NOT earn (must return false)", c.name)
+			}
+			if s.recCalls != 0 {
+				t.Fatalf("%s: sensitive request must NOT mint; RecordPattern calls=%d, want 0", c.name, s.recCalls)
+			}
+			if s.optInCalls != 0 {
+				t.Fatalf("%s: must decline BEFORE the opt-in DB read; IsOptedIn calls=%d, want 0", c.name, s.optInCalls)
+			}
+		})
+	}
+}
+
+// CONTROL FLOW — the proxy.go:1331 branch `if !p.earnPattern(...) { p.capturePattern(...) }`.
+// A sensitive request must write ZERO routing_patterns rows: earnPattern declines
+// (returns false), and on the resulting fall-through capturePattern's OWN guard
+// also declines — so NEITHER sink fires. This proves earnPattern returning false
+// does not let a sensitive row leak through capture.
+func TestPatternCorpus_SensitiveWritesZeroRows(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		pii       bool
+		guardrail bool
+		logging   workspace.LoggingPolicy
+	}{
+		{"pii-only", true, false, workspace.LoggingMetadata},
+		{"guardrail-only", false, true, workspace.LoggingFull},
+		{"logging-none-only", false, false, workspace.LoggingNone},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			earnSink := &fakeEarnSink{optedIn: true}
+			capSink := &fakeCaptureSink{}
+			p := &Proxy{}
+			p.SetPatternEarn(earnSink, func() bool { return true })
+			p.SetPatternCapture(capSink, func() bool { return true })
+
+			// Exactly the proxy.go:1331 control flow.
+			if !p.earnPattern(authCtx("wsA"), c.pii, c.guardrail, c.logging, "chat", "gpt-4o", "openai", "p", []byte("r"), 400, 100, 0.9, true, 50) {
+				p.capturePattern(context.Background(), c.pii, c.guardrail, c.logging, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+			}
+			if earnSink.recCalls != 0 {
+				t.Fatalf("%s: earn must not mint a sensitive row; RecordPattern=%d", c.name, earnSink.recCalls)
+			}
+			if len(capSink.pats) != 0 {
+				t.Fatalf("%s: capture must not write a sensitive row on fall-through; RecordPatternObservation=%d", c.name, len(capSink.pats))
+			}
+		})
 	}
 }
