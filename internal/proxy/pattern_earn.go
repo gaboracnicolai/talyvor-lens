@@ -7,6 +7,7 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/poolroyalty"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // pattern_earn.go — the Phase-3 routing-pattern EARNING wire-up (S4): the FIRST
@@ -54,9 +55,18 @@ func (p *Proxy) SetPatternEarn(sink patternEarnSink, enabled func() bool) {
 // Gate: PatternEarningEnabled AND a real authenticated non-default workspace
 // AND opted-in. The economic unit is the WORK PRODUCT — requestID is a
 // content hash over (model, prompt, response), so identical work earns once.
-func (p *Proxy) earnPattern(ctx context.Context, feature, model, provider, prompt string, response []byte, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64) bool {
+func (p *Proxy) earnPattern(ctx context.Context, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy, feature, model, provider, prompt string, response []byte, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64) bool {
 	// FLAG-OFF: first, cheapest guard — no auth read, no DB read, no hash.
 	if p == nil || p.patternEarnSink == nil || p.patternEarnEnabled == nil || !p.patternEarnEnabled() {
+		return false
+	}
+	// CORPUS EXCLUSION (money-path self-protection, shared guard): a sensitive
+	// request never mints. Decline BEFORE the auth read / opt-in DB read /
+	// content hash / RecordPattern — sensitive ⇒ no earn, no credit, no mint.
+	// sensitiveForCorpus is the single shared predicate (also gates
+	// capturePattern); its loggingPolicy==none term is belt-and-suspenders (see
+	// pattern_corpus_sensitive.go).
+	if sensitiveForCorpus(piiDetected, guardrailFired, loggingPolicy) {
 		return false
 	}
 	if !scored {

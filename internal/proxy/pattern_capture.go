@@ -7,6 +7,7 @@ import (
 
 	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/mining"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // pattern_capture.go — the Phase-3 routing-pattern CAPTURE WRITE: the producer
@@ -70,8 +71,14 @@ const captureWriteTimeout = 5 * time.Second
 // deferral avoids. So unscored ⇒ no capture. This is the unifying invariant:
 // streaming (no scorer on that path) and non-200 (scorer skipped) are both
 // unscored, hence both uncaptured.
-func (p *Proxy) capturePattern(ctx context.Context, workspaceID, feature, model, provider string, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64, cacheHit bool) {
+func (p *Proxy) capturePattern(ctx context.Context, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy, workspaceID, feature, model, provider string, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64, cacheHit bool) {
 	if p == nil || p.patternSink == nil || p.patternCaptureEnabled == nil || !p.patternCaptureEnabled() {
+		return
+	}
+	// CORPUS EXCLUSION (shared guard): a sensitive request is never captured —
+	// the same predicate as the earn path (sensitiveForCorpus), so the two
+	// writers can never drift. See pattern_corpus_sensitive.go.
+	if sensitiveForCorpus(piiDetected, guardrailFired, loggingPolicy) {
 		return
 	}
 	if !scored {

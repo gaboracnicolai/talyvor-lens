@@ -1328,9 +1328,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// other state (incl. flag-OFF, the first guard) it returns false and
 			// capturePattern runs byte-identical to before. Both are post-flush,
 			// detached, void — neither can affect the served response.
-			if !p.earnPattern(ctx, feature, upstreamModel, cfg.name, prompt, upstreamBody,
+			if !p.earnPattern(ctx, piiDetected, guardrailFired, loggingPolicy, feature, upstreamModel, cfg.name, prompt, upstreamBody,
 				len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds()) {
-				p.capturePattern(ctx, wsID, feature, upstreamModel, cfg.name,
+				p.capturePattern(ctx, piiDetected, guardrailFired, loggingPolicy, wsID, feature, upstreamModel, cfg.name,
 					len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false)
 			}
 			// WorkTier descriptive classification — post-flush, off-hot-path, void,
