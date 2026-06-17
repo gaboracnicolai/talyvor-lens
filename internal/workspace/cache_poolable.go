@@ -22,6 +22,11 @@ WHERE id = $1`
 func (m *Manager) GetCachePoolable(wsID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// Fail closed on prolonged staleness: pause cross-tenant pooling when consent
+	// can't be confirmed (a revoke on another replica may be unpropagated).
+	if m.staleBeyondBoundLocked() {
+		return false
+	}
 	if ws, ok := m.workspaces[wsID]; ok {
 		return ws.CachePoolable
 	}

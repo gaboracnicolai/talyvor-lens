@@ -25,6 +25,11 @@ WHERE id = $1`
 func (m *Manager) GetDistillPoolable(wsID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// Fail closed on prolonged staleness: pause cross-tenant distill sharing when
+	// consent can't be confirmed.
+	if m.staleBeyondBoundLocked() {
+		return false
+	}
 	if ws, ok := m.workspaces[wsID]; ok {
 		return ws.DistillPoolable
 	}
