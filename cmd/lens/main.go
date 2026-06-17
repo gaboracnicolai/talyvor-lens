@@ -446,6 +446,9 @@ func run() error {
 	// workspace cache from Postgres on this interval (build-then-swap LoadAll).
 	// NOT leader-gated: each replica must refresh its OWN cache. ctx is the run
 	// lifecycle context (cancelled on shutdown → the ticker goroutine exits).
+	// Past WorkspaceMaxStaleness without a successful reload, the consent/privacy
+	// accessors fail closed (pause pooling / clamp logging) until the DB recovers.
+	wsManager.SetMaxStaleness(cfg.WorkspaceMaxStaleness)
 	wsManager.StartRefresh(ctx, cfg.WorkspaceReloadInterval)
 	p.SetBudgetService(budgetService)
 	p.SetBedrockConfig(proxy.BedrockConfig{

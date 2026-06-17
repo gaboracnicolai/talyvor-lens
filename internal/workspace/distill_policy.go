@@ -43,6 +43,11 @@ WHERE id = $1`
 func (m *Manager) GetDistillPolicy(wsID string) DistillPolicy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// Fail closed on prolonged staleness: stop distilling when the policy can't be
+	// confirmed (an unconfirmed opt-in could be stale-permissive).
+	if m.staleBeyondBoundLocked() {
+		return DistillDisabled
+	}
 	if ws, ok := m.workspaces[wsID]; ok {
 		return normalizeDistillPolicy(ws.DistillPolicy)
 	}

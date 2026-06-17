@@ -71,6 +71,15 @@ type Config struct {
 	// SELECT). MUST be > 0 (a time.Ticker panics on a non-positive interval).
 	WorkspaceReloadInterval time.Duration
 
+	// WorkspaceMaxStaleness is the fail-closed bound for the workspace cache: once a
+	// replica has gone this long without a SUCCESSFUL reload (a prolonged DB outage),
+	// the consent/privacy accessors (cache_poolable, distill_poolable, distill_policy,
+	// logging) return their conservative value instead of a possibly-revoked
+	// permissive one. Env: LENS_WORKSPACE_MAX_STALENESS (Go duration). Default 3× the
+	// reload interval (90s at the 30s default). MUST be > WorkspaceReloadInterval — a
+	// bound <= the interval would trip during normal operation.
+	WorkspaceMaxStaleness time.Duration
+
 	// GuardrailsReloadInterval (#189) is how often each replica rebuilds its
 	// in-memory custom guardrail-policy cache from Postgres (guardrail_policies),
 	// bounding cross-replica staleness of a SECURITY control. Env:
@@ -1004,6 +1013,19 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("LENS_WORKSPACE_RELOAD_INTERVAL must be > 0 (a time.Ticker panics on non-positive): %s", v)
 		}
 		c.WorkspaceReloadInterval = d
+	}
+	// Workspace fail-closed staleness bound — default 3× the reload interval, MUST
+	// exceed it (a bound <= the interval would fail closed during normal operation).
+	c.WorkspaceMaxStaleness = 3 * c.WorkspaceReloadInterval
+	if v := os.Getenv("LENS_WORKSPACE_MAX_STALENESS"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_WORKSPACE_MAX_STALENESS (Go duration, e.g. 90s): %w", err)
+		}
+		c.WorkspaceMaxStaleness = d
+	}
+	if c.WorkspaceMaxStaleness <= c.WorkspaceReloadInterval {
+		return nil, fmt.Errorf("LENS_WORKSPACE_MAX_STALENESS (%s) must be > LENS_WORKSPACE_RELOAD_INTERVAL (%s): a bound <= the reload interval trips during normal operation", c.WorkspaceMaxStaleness, c.WorkspaceReloadInterval)
 	}
 	// #189 guardrails-policy reload interval — default 30s, MUST be > 0.
 	c.GuardrailsReloadInterval = 30 * time.Second

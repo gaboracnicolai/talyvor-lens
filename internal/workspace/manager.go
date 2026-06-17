@@ -41,6 +41,20 @@ func normalizeLoggingPolicy(p LoggingPolicy) LoggingPolicy {
 	}
 }
 
+// loggingPermissiveness ranks how much a policy persists (higher = more data
+// retained = less private): none(0) < metadata(1) < full(2). The stale fail-closed
+// clamp uses it to lower an over-permissive value toward the default — never raise it.
+func loggingPermissiveness(p LoggingPolicy) int {
+	switch normalizeLoggingPolicy(p) {
+	case LoggingNone:
+		return 0
+	case LoggingFull:
+		return 2
+	default:
+		return 1 // metadata
+	}
+}
+
 // pgxDB is the subset of *pgxpool.Pool that Manager needs. Tests pass nil
 // pool — the in-memory map carries the entire policy decision for
 // model/provider/token checks.
@@ -54,6 +68,17 @@ type Manager struct {
 	pool       pgxDB
 	mu         sync.RWMutex
 	workspaces map[string]*Workspace
+
+	// Fail-closed-on-stale (consent/privacy): when the in-memory cache hasn't been
+	// successfully reloaded within maxStaleness (a prolonged DB outage at this
+	// replica), the consent/privacy accessors return their conservative floor
+	// instead of a possibly-revoked permissive value. lastReload is stamped under mu
+	// on every successful LoadAll swap. The override is DISABLED (fail-open) when
+	// maxStaleness==0, pool==nil, or lastReload is zero ("never loaded") — so a
+	// fresh/in-memory Manager never spuriously fails closed. now is injectable for tests.
+	now          func() time.Time
+	maxStaleness time.Duration // 0 = disabled; wired from LENS_WORKSPACE_MAX_STALENESS in main
+	lastReload   time.Time     // zero until the first successful LoadAll
 }
 
 type Workspace struct {
@@ -89,6 +114,7 @@ func New(pool *pgxpool.Pool) *Manager {
 	return &Manager{
 		pool:       db,
 		workspaces: make(map[string]*Workspace),
+		now:        time.Now,
 	}
 }
 
@@ -170,17 +196,54 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	return nil
 }
 
-// GetLoggingPolicy returns the workspace's logging policy or the safe
-// metadata default when the workspace isn't registered. Hot-path code
-// (proxy.serve) calls this on every request — it must be lock-light
-// and never reach the DB.
+// SetMaxStaleness configures the fail-closed bound: once the in-memory cache has
+// gone this long without a SUCCESSFUL reload, the consent/privacy accessors return
+// their conservative floor. 0 disables it (the default — a Manager fails closed on
+// stale only when main wires LENS_WORKSPACE_MAX_STALENESS). Set once at startup.
+func (m *Manager) SetMaxStaleness(d time.Duration) {
+	m.mu.Lock()
+	m.maxStaleness = d
+	m.mu.Unlock()
+}
+
+// staleBeyondBoundLocked is the SINGLE predicate every consent/privacy accessor
+// consults (never inlined — the one-definition discipline). Caller MUST hold at
+// least the read lock. Fail-OPEN by construction: returns false (no override) when
+// the override is disabled (maxStaleness<=0), when there is no DB to reload from
+// (pool==nil), or before the first successful reload (lastReload zero) — the
+// bootstrap guards, so a fresh or in-memory Manager never spuriously fails closed.
+func (m *Manager) staleBeyondBoundLocked() bool {
+	if m.pool == nil || m.maxStaleness <= 0 || m.lastReload.IsZero() {
+		return false
+	}
+	return m.now().Sub(m.lastReload) > m.maxStaleness
+}
+
+// GetLoggingPolicy returns the workspace's logging policy or the safe metadata
+// default when the workspace isn't registered. Hot-path code (proxy.serve) calls
+// this on every request — lock-light, never reaches the DB. Stale beyond the bound
+// it SURGICALLY clamps an over-permissive value (see below), never forcing none.
 func (m *Manager) GetLoggingPolicy(wsID string) LoggingPolicy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if ws, ok := m.workspaces[wsID]; ok {
-		return normalizeLoggingPolicy(ws.LoggingPolicy)
+	ws, ok := m.workspaces[wsID]
+	if !ok {
+		return LoggingMetadata
 	}
-	return LoggingMetadata
+	cached := normalizeLoggingPolicy(ws.LoggingPolicy)
+	// SURGICAL fail-closed (NOT a blunt floor): logging has no single conservative
+	// direction — `none` protects a privacy tenant, `full` a compliance tenant. So
+	// when the cache is stale past the bound, clamp ONLY a value MORE PERMISSIVE than
+	// the default (full → metadata): revert an UN-CONFIRMED relaxation — the worst
+	// case is a revoked `full` still capturing raw prompt_text — WITHOUT forcing
+	// `none` on a tenant whose confirmed setting is full. Accepted residual: a stale
+	// `metadata` secretly tightened to `none` is NOT forced to none (indistinguishable
+	// from a confirmed metadata; forcing none would under-serve every metadata/
+	// compliance tenant). effective ≤ cached always — never more permissive.
+	if m.staleBeyondBoundLocked() && loggingPermissiveness(cached) > loggingPermissiveness(LoggingMetadata) {
+		return LoggingMetadata
+	}
+	return cached
 }
 
 // SetLoggingPolicy updates the in-memory cache and the DB row. Policy
@@ -385,6 +448,7 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 
 	m.mu.Lock()
 	m.workspaces = next
+	m.lastReload = m.now() // a successful reload resets the staleness clock
 	m.mu.Unlock()
 	return nil
 }
