@@ -653,16 +653,20 @@ func Load() (*Config, error) {
 
 	// Pool size overrides.
 	if v := os.Getenv("LENS_DB_MAX_CONNS"); v != "" {
-		n, err := strconv.Atoi(v)
+		// ParseInt with bitSize 32 rejects values that don't fit int32, so the
+		// int32(n) cast below can't silently overflow (a huge value errors here
+		// instead of wrapping to a negative/garbage pool size).
+		n, err := strconv.ParseInt(v, 10, 32)
 		if err != nil || n < 1 {
-			return nil, fmt.Errorf("invalid LENS_DB_MAX_CONNS (must be ≥ 1): %s", v)
+			return nil, fmt.Errorf("invalid LENS_DB_MAX_CONNS (must be an integer in [1, %d]): %s", math.MaxInt32, v)
 		}
 		c.DBMaxConns = int32(n)
 	}
 	if v := os.Getenv("LENS_DB_MIN_CONNS"); v != "" {
-		n, err := strconv.Atoi(v)
+		// bitSize 32 → the int32(n) cast can't overflow (see LENS_DB_MAX_CONNS).
+		n, err := strconv.ParseInt(v, 10, 32)
 		if err != nil || n < 0 {
-			return nil, fmt.Errorf("invalid LENS_DB_MIN_CONNS (must be ≥ 0): %s", v)
+			return nil, fmt.Errorf("invalid LENS_DB_MIN_CONNS (must be an integer in [0, %d]): %s", math.MaxInt32, v)
 		}
 		c.DBMinConns = int32(n)
 	}

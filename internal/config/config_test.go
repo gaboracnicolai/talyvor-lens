@@ -52,6 +52,57 @@ func TestLoad_WorkspaceReloadInterval(t *testing.T) {
 	}
 }
 
+// TestLoad_DBConns_Int32Bounds — the int32 pool-size knobs reject an out-of-int32
+// value at load (no silent overflow on the int32 cast) and still parse a normal one.
+func TestLoad_DBConns_Int32Bounds(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		setRequiredEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.DBMaxConns != 25 || c.DBMinConns != 2 {
+			t.Errorf("defaults = max %d / min %d, want 25 / 2", c.DBMaxConns, c.DBMinConns)
+		}
+	})
+	t.Run("normal value parses", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_DB_MAX_CONNS", "100")
+		t.Setenv("LENS_DB_MIN_CONNS", "5")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.DBMaxConns != 100 || c.DBMinConns != 5 {
+			t.Errorf("= max %d / min %d, want 100 / 5", c.DBMaxConns, c.DBMinConns)
+		}
+	})
+	// Out-of-int32 must be rejected at load — NOT silently overflow the int32 cast.
+	t.Run("rejected: max over int32", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_DB_MAX_CONNS", "9999999999") // > math.MaxInt32
+		if _, err := Load(); err == nil {
+			t.Error("LENS_DB_MAX_CONNS over int32 must be rejected (no silent overflow)")
+		}
+	})
+	t.Run("rejected: min over int32", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("LENS_DB_MIN_CONNS", "2147483648") // math.MaxInt32 + 1
+		if _, err := Load(); err == nil {
+			t.Error("LENS_DB_MIN_CONNS over int32 must be rejected (no silent overflow)")
+		}
+	})
+	for _, bad := range []string{"0", "-1", "nonsense"} {
+		t.Run("rejected max: "+bad, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LENS_DB_MAX_CONNS", bad)
+			if _, err := Load(); err == nil {
+				t.Errorf("LENS_DB_MAX_CONNS=%q must be rejected", bad)
+			}
+		})
+	}
+}
+
 // TestLoad_GuardrailsReloadInterval — #189: default 30s, parsed when set, and a
 // non-positive / unparseable value is rejected at load (a time.Ticker panics on it).
 func TestLoad_GuardrailsReloadInterval(t *testing.T) {
@@ -635,15 +686,15 @@ func TestLoad_DetectorThresholdParsing(t *testing.T) {
 
 func TestLoad_DetectorThresholdInvalidRejected(t *testing.T) {
 	for name, env := range map[string][2]string{
-		"neg volume mints":      {"LENS_DETECT_VOLUME_MIN_MINTS", "-1"},
-		"bad volume mints":      {"LENS_DETECT_VOLUME_MIN_MINTS", "lots"},
-		"neg max requesters":    {"LENS_DETECT_VOLUME_MAX_REQUESTERS", "-1"},
-		"frac > 1":              {"LENS_DETECT_BILATERAL_MIN_FRAC", "1.5"},
-		"frac NaN":              {"LENS_DETECT_BILATERAL_MIN_FRAC", "NaN"},
-		"frac negative":         {"LENS_DETECT_BILATERAL_MIN_FRAC", "-0.1"},
-		"min sample < 1":        {"LENS_DETECT_SIMILARITY_MIN_SAMPLE", "0"},
-		"stddev negative":       {"LENS_DETECT_SIMILARITY_MAX_STDDEV", "-0.01"},
-		"stddev NaN":            {"LENS_DETECT_SIMILARITY_MAX_STDDEV", "NaN"},
+		"neg volume mints":   {"LENS_DETECT_VOLUME_MIN_MINTS", "-1"},
+		"bad volume mints":   {"LENS_DETECT_VOLUME_MIN_MINTS", "lots"},
+		"neg max requesters": {"LENS_DETECT_VOLUME_MAX_REQUESTERS", "-1"},
+		"frac > 1":           {"LENS_DETECT_BILATERAL_MIN_FRAC", "1.5"},
+		"frac NaN":           {"LENS_DETECT_BILATERAL_MIN_FRAC", "NaN"},
+		"frac negative":      {"LENS_DETECT_BILATERAL_MIN_FRAC", "-0.1"},
+		"min sample < 1":     {"LENS_DETECT_SIMILARITY_MIN_SAMPLE", "0"},
+		"stddev negative":    {"LENS_DETECT_SIMILARITY_MAX_STDDEV", "-0.01"},
+		"stddev NaN":         {"LENS_DETECT_SIMILARITY_MAX_STDDEV", "NaN"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			setRequiredEnv(t)
