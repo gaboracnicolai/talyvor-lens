@@ -26,7 +26,7 @@ func TestRecordReceipt_Inserts(t *testing.T) {
 
 	pool.ExpectExec(`INSERT INTO povi_receipts`).
 		WithArgs(r.RequestID, r.NodeID, r.WorkspaceID, r.Model,
-			r.InputTokens, r.OutputTokens, rootHex, true, r.Timestamp, 0).
+			r.InputTokens, r.OutputTokens, rootHex, true, r.Timestamp, 0, string(LeafKindRune)).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	s := newStore(pool)
@@ -52,7 +52,7 @@ func TestRecordReceipt_DuplicateReportsNotInserted(t *testing.T) {
 
 	pool.ExpectExec(`INSERT INTO povi_receipts`).
 		WithArgs(r.RequestID, r.NodeID, r.WorkspaceID, r.Model,
-			r.InputTokens, r.OutputTokens, rootHex, true, r.Timestamp, 0).
+			r.InputTokens, r.OutputTokens, rootHex, true, r.Timestamp, 0, string(LeafKindRune)).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 
 	s := newStore(pool)
@@ -72,8 +72,8 @@ func TestListReceipts_ParsesRows(t *testing.T) {
 	pool := newStorePool(t)
 	rows := pgxmock.NewRows([]string{
 		"request_id", "node_id", "workspace_id", "model",
-		"input_tokens", "output_tokens", "merkle_root", "verified", "timestamp", "leaf_count", "created_at",
-	}).AddRow("req-1", "node-1", "ws-1", "llama", 10, 20, "deadbeef", true, int64(1748600000), 5, time.Now())
+		"input_tokens", "output_tokens", "merkle_root", "verified", "timestamp", "leaf_count", "leaf_kind", "created_at",
+	}).AddRow("req-1", "node-1", "ws-1", "llama", 10, 20, "deadbeef", true, int64(1748600000), 5, "rune", time.Now())
 
 	pool.ExpectQuery(`FROM povi_receipts WHERE workspace_id`).WithArgs("ws-1", 50).WillReturnRows(rows)
 

@@ -142,11 +142,11 @@ func TestProcess_ReplayedReceipt_MintsExactlyOnce(t *testing.T) {
 	// First arrival claims the request_id; the replay conflicts.
 	pool.ExpectExec(`INSERT INTO povi_receipts`).
 		WithArgs(signed.RequestID, signed.NodeID, signed.WorkspaceID, signed.Model,
-			signed.InputTokens, signed.OutputTokens, rootHex, true, signed.Timestamp, signed.LeafCount).
+			signed.InputTokens, signed.OutputTokens, rootHex, true, signed.Timestamp, signed.LeafCount, string(LeafKindRune)).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectExec(`INSERT INTO povi_receipts`).
 		WithArgs(signed.RequestID, signed.NodeID, signed.WorkspaceID, signed.Model,
-			signed.InputTokens, signed.OutputTokens, rootHex, true, signed.Timestamp, signed.LeafCount).
+			signed.InputTokens, signed.OutputTokens, rootHex, true, signed.Timestamp, signed.LeafCount, string(LeafKindRune)).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 
 	p := NewProcessor(newStore(pool), m, staticLookup(pub), alwaysEligible, true)

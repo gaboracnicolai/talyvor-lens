@@ -1,0 +1,12 @@
+-- 0060_povi_leaf_kind.sql
+-- L1: record what a PoVI Merkle leaf REPRESENTS — output runes (the documented
+-- stand-in for backends with no token boundaries) vs true per-model tokens. The
+-- tree/proof machinery is leaf-agnostic; this only labels granularity so the Part-3
+-- challenge and the audit trail can tell a rune-rooted receipt from a token-rooted
+-- one.
+--
+-- Additive, default-safe: every pre-existing receipt was rune-rooted, so the column
+-- defaults to 'rune' and existing rows backfill to 'rune'. Their signed MerkleRoot
+-- is untouched and stays verifiable — the tag distinguishes, it does not invalidate.
+-- Pure column add — re-runnable.
+ALTER TABLE povi_receipts ADD COLUMN IF NOT EXISTS leaf_kind TEXT NOT NULL DEFAULT 'rune';
