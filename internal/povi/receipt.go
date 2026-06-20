@@ -58,6 +58,15 @@ type Receipt struct {
 	// just narrows the range checked; overstating gets it asked for positions
 	// it can't answer → the challenge fails).
 	LeafCount int `json:"leaf_count,omitempty"`
+	// LeafKind records what each committed leaf REPRESENTS — output runes (the
+	// stand-in for backends with no token boundaries) or true model tokens. Like
+	// LeafCount it is NOT part of the signed CanonicalPayload, so rune-rooted
+	// receipts signed before this field existed stay verifiable unchanged; it labels
+	// granularity for the Part-3 challenge + audit. A node can't benefit from
+	// mislabeling: sampled positions must still verify against the SIGNED MerkleRoot,
+	// and the leaves it returns to answer are self-evidently runes or tokens. Empty
+	// is treated as "rune" by the store (the historical default).
+	LeafKind LeafKind `json:"leaf_kind,omitempty"`
 }
 
 // GenerateNodeKey creates a fresh ed25519 keypair for a node. The node keeps

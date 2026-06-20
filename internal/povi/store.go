@@ -51,24 +51,25 @@ type StoredReceipt struct {
 	Verified      bool      `json:"verified"`
 	Timestamp     int64     `json:"timestamp"`
 	LeafCount     int       `json:"leaf_count"` // committed trace length, for Part-3 sampling
+	LeafKind      string    `json:"leaf_kind"`  // 'rune' (stand-in) or 'token' (true per-token)
 	CreatedAt     time.Time `json:"created_at"`
 }
 
 const insertReceiptSQL = `INSERT INTO povi_receipts
-    (request_id, node_id, workspace_id, model, input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    (request_id, node_id, workspace_id, model, input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, leaf_kind)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (request_id) DO NOTHING`
 
 const listReceiptsSQL = `SELECT request_id, node_id, workspace_id, model,
-    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, created_at
+    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, leaf_kind, created_at
 FROM povi_receipts WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2`
 
 const getReceiptSQL = `SELECT request_id, node_id, workspace_id, model,
-    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, created_at
+    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, leaf_kind, created_at
 FROM povi_receipts WHERE request_id = $1`
 
 const listVerifiedReceiptsSQL = `SELECT request_id, node_id, workspace_id, model,
-    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, created_at
+    input_tokens, output_tokens, merkle_root, verified, timestamp, leaf_count, leaf_kind, created_at
 FROM povi_receipts WHERE verified = true AND leaf_count > 0 ORDER BY created_at DESC LIMIT $1`
 
 const statsSQL = `SELECT COUNT(*), COUNT(*) FILTER (WHERE verified) FROM povi_receipts`
@@ -86,9 +87,13 @@ func (s *Store) RecordReceipt(ctx context.Context, r Receipt, verified bool) (in
 		return true, nil
 	}
 	rootHex := hex.EncodeToString(r.MerkleRoot[:])
+	kind := r.LeafKind
+	if kind == "" {
+		kind = LeafKindRune // historical default: pre-tag receipts were all rune-rooted
+	}
 	tag, err := s.pool.Exec(ctx, insertReceiptSQL,
 		r.RequestID, r.NodeID, r.WorkspaceID, r.Model,
-		r.InputTokens, r.OutputTokens, rootHex, verified, r.Timestamp, r.LeafCount,
+		r.InputTokens, r.OutputTokens, rootHex, verified, r.Timestamp, r.LeafCount, string(kind),
 	)
 	if err != nil {
 		return false, fmt.Errorf("povi: insert receipt: %w", err)
@@ -101,7 +106,7 @@ func scanReceipt(row interface{ Scan(...any) error }) (StoredReceipt, error) {
 	var sr StoredReceipt
 	err := row.Scan(&sr.RequestID, &sr.NodeID, &sr.WorkspaceID, &sr.Model,
 		&sr.InputTokens, &sr.OutputTokens, &sr.MerkleRootHex, &sr.Verified,
-		&sr.Timestamp, &sr.LeafCount, &sr.CreatedAt)
+		&sr.Timestamp, &sr.LeafCount, &sr.LeafKind, &sr.CreatedAt)
 	return sr, err
 }
 

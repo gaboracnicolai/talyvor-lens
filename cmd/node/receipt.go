@@ -69,11 +69,30 @@ func newReceiptSigner(state NodeState) (*receiptSigner, error) {
 	}, nil
 }
 
-// sign builds, retains, and signs a receipt for one served request.
+// sign builds, retains, and signs a receipt for one served request via the rune
+// path: one leaf per output rune, tagged LeafKindRune. This is the live production
+// path — local backends expose no token boundaries, so runes are the honest
+// ceiling, and every receipt it emits is tagged 'rune' from day one.
 func (rs *receiptSigner) sign(requestID, model string, inputTokens, outputTokens int, outputText string) povi.Receipt {
+	return rs.signSteps(requestID, model, inputTokens, outputTokens, povi.StepsFromRunes(outputText), povi.LeafKindRune)
+}
+
+// signTokens is the true per-token path: one leaf per model token, tagged
+// LeafKindToken. No provider emits token boundaries yet, so it is reached only by
+// synthetic callers/tests today; if the provider interface grows token streaming,
+// the server feeds the token sequence here with no change to the Merkle structure.
+func (rs *receiptSigner) signTokens(requestID, model string, inputTokens, outputTokens int, tokens []string) povi.Receipt {
+	return rs.signSteps(requestID, model, inputTokens, outputTokens, povi.StepsFromTokens(tokens), povi.LeafKindToken)
+}
+
+// signSteps is the shared core: it commits the (already-fed) leaf steps to a
+// Merkle root, retains the trace for Part-3 challenges, and signs the receipt
+// tagged with what its leaves represent. The tree machinery is leaf-agnostic — only
+// the caller's feeding (runes vs tokens) and the kind tag differ.
+func (rs *receiptSigner) signSteps(requestID, model string, inputTokens, outputTokens int, steps [][]byte, kind povi.LeafKind) povi.Receipt {
 	tb := povi.NewTraceBuilder()
-	for _, r := range outputText {
-		tb.AddStep([]byte(string(r))) // one leaf per output rune — deliberate; local backends expose no token boundaries (see type doc)
+	for _, st := range steps {
+		tb.AddStep(st)
 	}
 	// Retain the trace so Part 3 can produce sampled authentication paths.
 	rs.traces.Put(requestID, tb.Steps())
@@ -87,6 +106,8 @@ func (rs *receiptSigner) sign(requestID, model string, inputTokens, outputTokens
 		OutputTokens: outputTokens,
 		MerkleRoot:   tb.Root(),
 		Timestamp:    rs.now().Unix(),
+		LeafCount:    tb.Len(),
+		LeafKind:     kind,
 	}
 	return povi.SignReceipt(rs.priv, rec)
 }
