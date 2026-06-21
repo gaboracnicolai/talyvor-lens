@@ -39,10 +39,18 @@ type InferenceServer struct {
 	// The node verifies every /challenge is signed by Lens before answering, so
 	// arbitrary callers can't extract its served-response content.
 	challengePub ed25519.PublicKey
+	// challengeRefetch re-fetches Lens's current challenge pubkey on demand (wired from
+	// the LensClient in SetReceiptSigner). now is an injectable clock for tests. A nil
+	// challengeRefetch disables reactive re-fetch (the node still re-pins on the 30s
+	// heartbeat).
+	challengeRefetch func(context.Context) (ed25519.PublicKey, error)
+	now              func() time.Time
 
 	mu             sync.Mutex
 	activeRequests int64
-	startedAt      time.Time
+	// lastReactiveRefetch rate-limits the on-challenge key re-fetch (mu-guarded).
+	lastReactiveRefetch time.Time
+	startedAt           time.Time
 	// modelsCache is refreshed each /models call (kept simple —
 	// the heartbeat will re-fetch every 30s anyway).
 	modelsCache []string
@@ -54,6 +62,9 @@ type InferenceServer struct {
 func (s *InferenceServer) SetReceiptSigner(rs *receiptSigner, lens *LensClient) {
 	s.signer = rs
 	s.lens = lens
+	if lens != nil {
+		s.challengeRefetch = lens.FetchChallengePubKey
+	}
 }
 
 // SetChallengePubKey pins Lens's challenge-signing public key (PoVI Part 3).
@@ -72,12 +83,52 @@ func (s *InferenceServer) challengeKey() ed25519.PublicKey {
 	return s.challengePub
 }
 
+// reactiveRefetch{MinInterval,Timeout} bound the on-challenge key re-fetch.
+const (
+	reactiveRefetchMinInterval = 5 * time.Second
+	reactiveRefetchTimeout     = 5 * time.Second
+)
+
+func (s *InferenceServer) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// reactiveRefetchChallengeKey re-fetches Lens's current challenge pubkey and re-pins
+// it, returning the new key. RATE-LIMITED to at most one re-fetch per
+// reactiveRefetchMinInterval, so a flood of unverifiable (e.g. forged) challenges can't
+// make the node hammer Lens / DoS itself. Returns ok=false when rate-limited, no
+// refetcher is wired, or the fetch fails — the caller then 401s.
+func (s *InferenceServer) reactiveRefetchChallengeKey(ctx context.Context) (ed25519.PublicKey, bool) {
+	s.mu.Lock()
+	refetch := s.challengeRefetch
+	now := s.clock()
+	if refetch == nil || (!s.lastReactiveRefetch.IsZero() && now.Sub(s.lastReactiveRefetch) < reactiveRefetchMinInterval) {
+		s.mu.Unlock()
+		return nil, false
+	}
+	s.lastReactiveRefetch = now
+	s.mu.Unlock()
+
+	fctx, cancel := context.WithTimeout(ctx, reactiveRefetchTimeout)
+	defer cancel()
+	pub, err := refetch(fctx)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	s.SetChallengePubKey(pub)
+	return pub, true
+}
+
 func NewInferenceServer(provider Provider, secret string, cfg NodeConfig) *InferenceServer {
 	return &InferenceServer{
 		provider:  provider,
 		secret:    secret,
 		cfg:       cfg,
 		startedAt: time.Now(),
+		now:       time.Now,
 	}
 }
 
@@ -120,8 +171,18 @@ func (s *InferenceServer) handleChallenge(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := povi.VerifyChallenge(req, pub); err != nil {
-		http.Error(w, "unauthorized challenge", http.StatusUnauthorized)
-		return
+		// An unverifiable challenge may simply mean Lens rotated its challenge key and
+		// we still hold the old one — the propagation race that would otherwise get an
+		// HONEST node slashed (Lens reads our 401 as a failed challenge → timeout →
+		// slash). Reactively re-fetch Lens's CURRENT key once (rate-limited so a flood
+		// of forged challenges can't make us hammer Lens) and retry. A genuinely forged
+		// challenge (not signed by Lens) still fails after the re-fetch → 401, so the
+		// slash deterrent is unchanged.
+		refreshed, ok := s.reactiveRefetchChallengeKey(r.Context())
+		if !ok || povi.VerifyChallenge(req, refreshed) != nil {
+			http.Error(w, "unauthorized challenge", http.StatusUnauthorized)
+			return
+		}
 	}
 	answers, err := s.signer.traces.SampledLeafProofs(req.RequestID, req.Positions)
 	if err != nil {
