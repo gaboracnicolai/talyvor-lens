@@ -80,7 +80,7 @@ func streamReq(t *testing.T) *http.Request {
 func TestStreamGuardrails_BufferedOutputPIIBlocks(t *testing.T) {
 	eng := guardrails.New(pii.New(), injection.New(injection.DefaultPolicy()))
 	eng.SetOutputEnabled(true)
-	eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
+	_ = eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
 		BufferStreamForOutput: true,
 		OutputPIIAction:       guardrails.ActionBlock,
 	})
@@ -110,7 +110,7 @@ func TestStreamGuardrails_BufferedOutputPIIBlocks(t *testing.T) {
 func TestStreamGuardrails_BufferedOutputPIIRedacts(t *testing.T) {
 	eng := guardrails.New(pii.New(), injection.New(injection.DefaultPolicy()))
 	eng.SetOutputEnabled(true)
-	eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
+	_ = eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
 		BufferStreamForOutput: true,
 		OutputPIIAction:       guardrails.ActionRedact,
 	})
@@ -146,7 +146,7 @@ func TestStreamGuardrails_BufferedOutputPIIRedacts(t *testing.T) {
 func TestStreamGuardrails_BufferedCleanReachesClient(t *testing.T) {
 	eng := guardrails.New(pii.New(), injection.New(injection.DefaultPolicy()))
 	eng.SetOutputEnabled(true)
-	eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
+	_ = eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
 		BufferStreamForOutput: true,
 		OutputPIIAction:       guardrails.ActionBlock,
 	})
@@ -175,7 +175,7 @@ func TestStreamGuardrails_BufferedCleanReachesClient(t *testing.T) {
 func TestStreamGuardrails_NotBufferedSkipsOutputGuardrails(t *testing.T) {
 	eng := guardrails.New(pii.New(), injection.New(injection.DefaultPolicy()))
 	eng.SetOutputEnabled(true)
-	eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
+	_ = eng.SetPolicy(context.Background(), "default", guardrails.GuardrailPolicy{
 		BufferStreamForOutput: false, // NOT opted in
 		OutputPIIAction:       guardrails.ActionBlock,
 	})

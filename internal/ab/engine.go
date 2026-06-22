@@ -66,12 +66,12 @@ const (
 // optional — when set, the proxy substitutes it for the request's
 // system message; when nil, the variant uses the request's own.
 type Variant struct {
-	ID                   string   `json:"id"`
-	Name                 string   `json:"name"`
-	Model                string   `json:"model"`
-	Provider             string   `json:"provider"`
-	SystemPromptOverride *string  `json:"system_prompt_override,omitempty"`
-	Weight               float64  `json:"weight"`
+	ID                   string  `json:"id"`
+	Name                 string  `json:"name"`
+	Model                string  `json:"model"`
+	Provider             string  `json:"provider"`
+	SystemPromptOverride *string `json:"system_prompt_override,omitempty"`
+	Weight               float64 `json:"weight"`
 }
 
 // Experiment is the top-level config object. TrafficSplit must
@@ -517,18 +517,9 @@ func (e *Engine) RecordResult(ctx context.Context, r ExperimentResult) error {
 	if r.ExperimentID == "" || r.VariantID == "" {
 		return errors.New("ab: experiment_id and variant_id required")
 	}
-	// In-memory mirror so analysis stays fast without a DB hit.
-	e.mu.Lock()
-	exp := e.experiments[r.ExperimentID]
-	if exp != nil {
-		// We don't store per-result rows in memory at scale; the
-		// running averages would need pgxmock-style helpers. The
-		// in-memory copy is good enough for tests because we cap
-		// at hundreds of rows; the production analysis path reads
-		// from Postgres.
-	}
-	e.mu.Unlock()
-	_ = exp
+	// No in-memory per-result mirror: maintaining running averages there would need
+	// pgxmock-style helpers, and the production analysis path reads from Postgres. The
+	// resultsBuf below is the only memory-side store (used when there is no pool).
 
 	if e.pool == nil {
 		// In-memory only — stash the row.
@@ -700,10 +691,10 @@ func (e *Engine) collectStats(ctx context.Context, exp *Experiment) ([]VariantSt
 		defer rows.Close()
 		for rows.Next() {
 			var (
-				vid                       string
-				count                     int
+				vid                        string
+				count                      int
 				avgLatMs, avgQual, avgCost float64
-				p95LatMs                  float64
+				p95LatMs                   float64
 			)
 			if err := rows.Scan(&vid, &count, &avgLatMs, &avgQual, &avgCost, &p95LatMs); err != nil {
 				return nil, fmt.Errorf("ab: scan: %w", err)

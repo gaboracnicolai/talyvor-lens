@@ -110,7 +110,7 @@ func TestAuthzP2_PoviReceipts_Wiring(t *testing.T) {
 
 func TestAuthzP2_GuardrailsGet_Wiring(t *testing.T) {
 	eng := guardrails.New(pii.New(), injection.New(injection.DefaultPolicy()))
-	eng.SetPolicy(context.Background(), "ws-B", guardrails.GuardrailPolicy{WorkspaceID: "ws-B", BlockedWords: []string{"secret-B"}})
+	_ = eng.SetPolicy(context.Background(), "ws-B", guardrails.GuardrailPolicy{WorkspaceID: "ws-B", BlockedWords: []string{"secret-B"}})
 	h := newGuardrailsPolicyGetHandler(eng)
 
 	// ATTACK: ws-A reads ?workspace_id=ws-B → must NOT see ws-B's policy.

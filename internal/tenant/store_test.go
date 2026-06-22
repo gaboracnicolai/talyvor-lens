@@ -149,25 +149,14 @@ func TestValidateAPIKey_WrongKeyRejected(t *testing.T) {
 	// pretend the DB has a row whose hash was computed from a
 	// *different* raw key
 	other, _, _ := GenerateKey()
-	store2, _ := newMockStore(t)
-	_ = store2 // unused: we only need a hash, generate via Store
-	_, otherMeta, err := store.CreateAPIKey(ctx, "ws_x", "n", []string{"proxy"}, nil)
-	// We expect the CreateAPIKey call above to have used the mock —
-	// drain it. Re-init the mock to keep things tidy.
-	if err != nil {
-		// We swallow the error because pgxmock will report
-		// missing INSERT expectations; let's redo with proper exp.
-	}
-	// Re-init clean.
-	store, mock = newMockStore(t)
-	defer mock.Close()
 
+	// The mock expects the API-key INSERT the lookup below matches against.
 	mock.ExpectQuery("INSERT INTO workspace_api_keys").
 		WithArgs("ws_x", pgxmock.AnyArg(), pgxmock.AnyArg(),
 			"n", []string{"proxy"}, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("k1", time.Now()))
-	_, otherMeta, err = store.CreateAPIKey(ctx, "ws_x", "n", []string{"proxy"}, nil)
+	_, otherMeta, err := store.CreateAPIKey(ctx, "ws_x", "n", []string{"proxy"}, nil)
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}

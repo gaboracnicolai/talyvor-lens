@@ -84,7 +84,8 @@ func TestLimiter_NilAdmitsAll(t *testing.T) {
 func TestLimiter_UnmatchedReleaseHarmless(t *testing.T) {
 	l := New(2)
 	l.Release() // nothing held — must be a no-op
-	if !l.TryAcquire() || !l.TryAcquire() {
+	a1, a2 := l.TryAcquire(), l.TryAcquire()
+	if !a1 || !a2 {
 		t.Fatal("cap must be intact after an unmatched Release")
 	}
 	if l.TryAcquire() {

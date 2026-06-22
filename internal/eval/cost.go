@@ -34,13 +34,6 @@ func (t Target) modelFor(tc TestCase) string {
 	return tc.Model
 }
 
-func (t Target) providerFor(tc TestCase) string {
-	if t.Provider != "" {
-		return t.Provider
-	}
-	return tc.Provider
-}
-
 // CostEstimate is the projected spend for a dataset run, surfaced before
 // execution (and returned with the run) so eval cost is always visible.
 type CostEstimate struct {

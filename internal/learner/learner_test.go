@@ -141,7 +141,7 @@ func TestLearner_AnalyseReturnsInsightsSortedByHitCountDesc(t *testing.T) {
 	if len(insights) != 3 {
 		t.Fatalf("got %d insights, want 3", len(insights))
 	}
-	if !(insights[0].HitCount >= insights[1].HitCount && insights[1].HitCount >= insights[2].HitCount) {
+	if insights[0].HitCount < insights[1].HitCount || insights[1].HitCount < insights[2].HitCount {
 		t.Errorf("insights not sorted by HitCount desc: %+v", insights)
 	}
 	if insights[0].PromptPattern != "hash-high" {
