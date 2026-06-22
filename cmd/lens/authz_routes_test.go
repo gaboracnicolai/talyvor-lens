@@ -142,7 +142,7 @@ func TestAuthz_GuardrailsPolicy_Wiring(t *testing.T) {
 	h := newGuardrailsPolicyPutHandler(eng)
 
 	// Seed ws-B's policy with a marker.
-	eng.SetPolicy(context.Background(), "ws-B", guardrails.GuardrailPolicy{WorkspaceID: "ws-B", BlockedWords: []string{"secret-B"}})
+	_ = eng.SetPolicy(context.Background(), "ws-B", guardrails.GuardrailPolicy{WorkspaceID: "ws-B", BlockedWords: []string{"secret-B"}})
 
 	// ATTACK: ws-A PUTs a policy targeting ws-B.
 	rec := serveAuthed(t, http.MethodPut, "/v1/guardrails/policy", "/v1/guardrails/policy",

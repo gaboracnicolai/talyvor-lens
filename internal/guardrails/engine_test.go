@@ -65,7 +65,7 @@ func TestCheck_RedactsPIIAndContinues(t *testing.T) {
 
 func TestCheck_BlocksOnBlockedTopic(t *testing.T) {
 	e := newEngine()
-	e.SetPolicy(context.Background(), "ws", GuardrailPolicy{
+	_ = e.SetPolicy(context.Background(), "ws", GuardrailPolicy{
 		WorkspaceID:     "ws",
 		EnablePII:       true,
 		EnableInjection: true,
@@ -91,7 +91,7 @@ func TestCheck_BlocksOnBlockedTopic(t *testing.T) {
 
 func TestCheck_RedactsBlockedWords(t *testing.T) {
 	e := newEngine()
-	e.SetPolicy(context.Background(), "ws", GuardrailPolicy{
+	_ = e.SetPolicy(context.Background(), "ws", GuardrailPolicy{
 		WorkspaceID:      "ws",
 		EnableWordFilter: true,
 		BlockedWords:     []string{"secret"},
@@ -112,7 +112,7 @@ func TestCheck_RedactsBlockedWords(t *testing.T) {
 
 func TestCheck_AppliesCustomRulePattern(t *testing.T) {
 	e := newEngine()
-	e.SetPolicy(context.Background(), "ws", GuardrailPolicy{
+	_ = e.SetPolicy(context.Background(), "ws", GuardrailPolicy{
 		WorkspaceID:     "ws",
 		PIIAction:       ActionRedact,
 		InjectionAction: ActionBlock,
@@ -143,14 +143,14 @@ func TestCheck_AppliesCustomRulePattern(t *testing.T) {
 func TestSetPolicy_RoundTripsThroughGetPolicy(t *testing.T) {
 	e := newEngine()
 	stored := GuardrailPolicy{
-		WorkspaceID:      "ws-x",
-		EnablePII:        false,
-		EnableInjection:  true,
-		BlockedTopics:    []string{"finance"},
-		PIIAction:        ActionWarn,
-		InjectionAction:  ActionBlock,
+		WorkspaceID:     "ws-x",
+		EnablePII:       false,
+		EnableInjection: true,
+		BlockedTopics:   []string{"finance"},
+		PIIAction:       ActionWarn,
+		InjectionAction: ActionBlock,
 	}
-	e.SetPolicy(context.Background(), "ws-x", stored)
+	_ = e.SetPolicy(context.Background(), "ws-x", stored)
 	got := e.GetPolicy("ws-x")
 	if got == nil {
 		t.Fatal("GetPolicy returned nil after SetPolicy")
@@ -199,7 +199,7 @@ func TestCheck_ViolationListShape(t *testing.T) {
 
 func TestCheck_MultipleViolationsInOneRequest(t *testing.T) {
 	e := newEngine()
-	e.SetPolicy(context.Background(), "ws-multi", GuardrailPolicy{
+	_ = e.SetPolicy(context.Background(), "ws-multi", GuardrailPolicy{
 		WorkspaceID:      "ws-multi",
 		EnablePII:        true,
 		EnableInjection:  true,

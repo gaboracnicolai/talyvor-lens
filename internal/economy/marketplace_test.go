@@ -11,33 +11,6 @@ import (
 	"github.com/talyvor/lens/internal/mining"
 )
 
-// expectCreditTx programmes the mock for one full LedgerStore.Credit
-// transaction: Begin → INSERT DO NOTHING (ensure row) → SELECT FOR UPDATE →
-// INSERT ledger row → UPDATE balance → Commit.
-// Used by standalone Credit calls (e.g. Stake, CancelListing, Unstake).
-func expectCreditTx(
-	mock pgxmock.PgxPoolIface,
-	workspaceID string,
-	startingBal, startingEarned, startingSpent float64,
-	delta, expectedBal, expectedEarned, expectedSpent float64,
-) {
-	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO lens_token_balances").
-		WithArgs(workspaceID).
-		WillReturnResult(pgxmock.NewResult("INSERT", 0))
-	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
-		WithArgs(workspaceID).
-		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
-			AddRow(startingBal, startingEarned, startingSpent))
-	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs(workspaceID, delta, expectedBal, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs(workspaceID, expectedBal, expectedEarned, expectedSpent).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectCommit()
-}
-
 // expectCreditInTx programmes the mock for one CreditTx call inside a
 // caller-owned transaction — the 4 SQL operations without Begin/Commit.
 // Used when multiple credits share a single transaction (e.g. ExecuteTrade).

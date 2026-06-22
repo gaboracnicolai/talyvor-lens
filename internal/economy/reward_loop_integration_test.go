@@ -69,7 +69,7 @@ func TestRewardLoopSeam_MintFinalizeRedeem_Integration(t *testing.T) {
 	}
 	mintHeld(8.0)
 
-	bal, held, locked, earned := readBalances(t, pool, ctx, ws)
+	bal, held, _, earned := readBalances(t, pool, ctx, ws)
 	if bal != 0 || held != 8.0 || earned != 0 {
 		t.Fatalf("after mint: balance=%v held=%v earned=%v, want 0/8.0/0 (held, not spendable)", bal, held, earned)
 	}
@@ -97,7 +97,7 @@ func TestRewardLoopSeam_MintFinalizeRedeem_Integration(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	bal, held, locked, earned = readBalances(t, pool, ctx, ws)
+	bal, held, _, earned = readBalances(t, pool, ctx, ws)
 	if bal != 5.0 || held != 3.0 || earned != 5.0 {
 		t.Fatalf("after finalize(5): balance=%v held=%v earned=%v, want 5.0/3.0/5.0", bal, held, earned)
 	}
@@ -115,7 +115,7 @@ func TestRewardLoopSeam_MintFinalizeRedeem_Integration(t *testing.T) {
 	}
 
 	// ── STEP 5: full accounting in the DB ──
-	bal, held, locked, earned = readBalances(t, pool, ctx, ws)
+	bal, held, locked, _ := readBalances(t, pool, ctx, ws)
 	if bal != 2.0 {
 		t.Errorf("spendable balance after redeem = %v, want 2.0 (5 − 3)", bal)
 	}

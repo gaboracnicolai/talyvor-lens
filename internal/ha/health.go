@@ -52,11 +52,8 @@ func (h *Health) Ready(w http.ResponseWriter, r *http.Request) {
 
 	self := h.registry.Self()
 	checks := make(map[string]string, len(h.deps))
-	ready := true
+	ready := self.Status == StatusActive
 
-	if self.Status != StatusActive {
-		ready = false
-	}
 	for _, d := range h.deps {
 		if err := d.Check(ctx); err != nil {
 			ready = false

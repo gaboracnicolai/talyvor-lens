@@ -90,8 +90,8 @@ func TestOCRCache_DifferentBytesMiss(t *testing.T) {
 	c := &fakeCache{}
 	vis := &plannerMock{model: "m", planOK: true}
 
-	Orchestrate(ctx, scannedConv(), c, vis, []byte("doc-AAAA"), FormatPDF, TierFaithful)
-	Orchestrate(ctx, scannedConv(), c, vis, []byte("doc-BBBB different bytes"), FormatPDF, TierFaithful)
+	_, _, _ = Orchestrate(ctx, scannedConv(), c, vis, []byte("doc-AAAA"), FormatPDF, TierFaithful)
+	_, _, _ = Orchestrate(ctx, scannedConv(), c, vis, []byte("doc-BBBB different bytes"), FormatPDF, TierFaithful)
 	if vis.calls != 2 {
 		t.Fatalf("different bytes: dispatches = %d, want 2 (a different document must re-OCR)", vis.calls)
 	}
@@ -131,8 +131,8 @@ func TestOCRCache_NoPlannerNoCache(t *testing.T) {
 	c := &fakeCache{}
 	vis := &mockVisionDispatcher{res: VisionResult{Markdown: "# ocr", Model: "m", InputTokens: 10, OutputTokens: 5}}
 
-	Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
-	Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
+	_, _, _ = Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
+	_, _, _ = Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
 	if vis.calls != 2 {
 		t.Fatalf("no-planner: dispatches = %d, want 2 (no OCR caching)", vis.calls)
 	}
@@ -148,8 +148,8 @@ func TestOCRCache_PlanNotOKNoCache(t *testing.T) {
 	c := &fakeCache{}
 	vis := &plannerMock{model: "", planOK: false}
 
-	Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
-	Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
+	_, _, _ = Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
+	_, _, _ = Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
 	if vis.calls != 2 {
 		t.Fatalf("plan-not-ok: dispatches = %d, want 2", vis.calls)
 	}
@@ -169,7 +169,7 @@ func TestOCRCache_FailureNotCached(t *testing.T) {
 	if !r.NeedsVision {
 		t.Error("a failed OCR must stay NeedsVision")
 	}
-	Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
+	_, _, _ = Orchestrate(ctx, scannedConv(), c, vis, scannedDoc, FormatPDF, TierFaithful)
 	if vis.calls != 2 {
 		t.Fatalf("failed OCR must not be cached: dispatches = %d, want 2", vis.calls)
 	}

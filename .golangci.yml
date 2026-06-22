@@ -1,0 +1,16 @@
+version: "2"
+
+# Formal static-analysis gate. The standard high-signal linters; the codebase
+# passes them — real findings were fixed, not disabled.
+linters:
+  enable:
+    - errcheck # unchecked errors
+    - govet # suspicious constructs (already a CI step; pinned here too)
+    - ineffassign # ineffectual assignments
+    - staticcheck # the staticcheck suite (incl. gosimple, stylecheck)
+    - unused # unused code
+  exclusions:
+    # golangci-lint's curated exclusions: deferred Close()/Flush()/print() errors on
+    # cleanup are conventionally unactionable. errcheck still checks every other return.
+    presets:
+      - std-error-handling

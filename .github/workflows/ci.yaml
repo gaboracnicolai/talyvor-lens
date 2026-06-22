@@ -66,6 +66,22 @@ jobs:
           LENS_TEST_DATABASE_URL: postgres://postgres:lens_test@localhost:5432/lens_test?sslmode=disable
         run: go test -timeout 90s -race -count=1 ./...
 
+  # Formal static-analysis gate: golangci-lint (errcheck, govet, ineffassign,
+  # staticcheck, unused). Config in .golangci.yml. Blocking — a finding fails the
+  # build. (go vet also runs in the test job; pinned here under the lint suite too.)
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          "$(go env GOPATH)/bin/golangci-lint" run ./...
+
   build:
     runs-on: ubuntu-latest
     needs: test

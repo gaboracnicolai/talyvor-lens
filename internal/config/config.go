@@ -730,7 +730,7 @@ func Load() (*Config, error) {
 				"    openssl pkcs8 -topk8 -nocrypt -out ec-private.pem\n" +
 				"  export LENS_JWT_PRIVATE_KEY=$(cat ec-private.pem)\n" +
 				"Existing HS256 tokens will not be accepted after the upgrade. " +
-				"Rotate all tokens on the first deployment with the new key.",
+				"Rotate all tokens on the first deployment with the new key",
 		)
 	}
 

@@ -83,7 +83,7 @@ const textReq = `{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}
 func TestOutputGuardrail_BlockNonStreaming(t *testing.T) {
 	p, eng, sink := newGuardrailProxy(t, "the secret is hunter2")
 	eng.SetOutputEnabled(true)
-	eng.SetPolicy(context.Background(), "ws-g", guardrails.GuardrailPolicy{
+	_ = eng.SetPolicy(context.Background(), "ws-g", guardrails.GuardrailPolicy{
 		OutputMustNotMatch: "(?i)secret", OutputValidationBlock: true,
 	})
 
@@ -106,7 +106,7 @@ func TestOutputGuardrail_BlockNonStreaming(t *testing.T) {
 func TestOutputGuardrail_RedactNonStreaming(t *testing.T) {
 	p, eng, sink := newGuardrailProxy(t, "email me at jane.roe@example.com")
 	eng.SetOutputEnabled(true)
-	eng.SetPolicy(context.Background(), "ws-g", guardrails.GuardrailPolicy{OutputPIIAction: guardrails.ActionRedact})
+	_ = eng.SetPolicy(context.Background(), "ws-g", guardrails.GuardrailPolicy{OutputPIIAction: guardrails.ActionRedact})
 
 	w := dispatchG(t, p, textReq)
 	if w.Code != http.StatusOK {
@@ -128,7 +128,7 @@ func TestOutputGuardrail_RedactNonStreaming(t *testing.T) {
 func TestOutputGuardrail_DisabledBehavesAsToday(t *testing.T) {
 	p, eng, sink := newGuardrailProxy(t, "the secret is hunter2")
 	// Output stage left OFF; policy would block if it were on.
-	eng.SetPolicy(context.Background(), "ws-g", guardrails.GuardrailPolicy{
+	_ = eng.SetPolicy(context.Background(), "ws-g", guardrails.GuardrailPolicy{
 		OutputMustNotMatch: "(?i)secret", OutputValidationBlock: true,
 	})
 
