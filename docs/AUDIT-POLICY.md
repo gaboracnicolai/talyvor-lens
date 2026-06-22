@@ -100,16 +100,26 @@ role that owns the triggers; the app role with `UPDATE`/`DELETE`/`TRUNCATE` revo
   **at-least-once** delivery (no audit row is lost; a boundary row may rarely
   duplicate — dedup on `request_id`).
 
-### ⚠ Retention ↔ export ordering (a stated gap)
-Retention and export are **independent** loops. The retention sweeper deletes by
-age and does **not** consult the export watermark, so if `LENS_AUDIT_RETENTION` is
-shorter than the export lag, retention could delete `token_events` rows before they
-are exported. **Operational guidance:** set `LENS_AUDIT_RETENTION` far larger than
-the export interval (months/years vs. minutes/hours). The hard fix — gating
-retention behind the export watermark (delete only `created_at <= last_exported_at`)
-— is tracked in the U14 follow-up issue *"export-then-prune watermark"*.
+### Retention ↔ export ordering
+Retention and export are **independent** loops. By **default** the retention sweeper
+deletes by age and does **not** consult the export watermark (today's behaviour,
+unchanged), so if `LENS_AUDIT_RETENTION` is shorter than the export lag, retention
+could delete `token_events` rows before they are exported. **Operational guidance for
+the default:** set `LENS_AUDIT_RETENTION` far larger than the export interval
+(months/years vs. minutes/hours).
+
+**Proof-of-export-before-delete (U14 #187, opt-in).** Set
+`LENS_AUDIT_REQUIRE_EXPORT_BEFORE_PRUNE=true` to gate the sweeper behind the export
+watermark: a row is pruned only when `created_at <= audit_export_state.last_exported_at`
+**and** `< (now − retention)`, so an aged-but-un-exported row is **kept** until it has
+been exported off-box. The watermark is read once per sweep (it only advances, so a
+stale read prunes less, never more). If export is **disabled** while this is on, the
+sweep is **skipped with a warning** rather than pruning un-exportable rows. Default
+`false` preserves the age-only behaviour exactly — flipping it on is the
+customer-/compliance-driven decision, not a code default.
 
 ## Follow-ups
 - **DB role separation** (migration role vs app role) — for DB-enforced immutability
   against a compromised role. Tracked: #186.
-- **Export-then-prune watermark** — for proof-of-export-before-delete. Tracked: #187.
+- **Export-then-prune watermark** — proof-of-export-before-delete. BUILT (#187,
+  opt-in via `LENS_AUDIT_REQUIRE_EXPORT_BEFORE_PRUNE`, default off).
