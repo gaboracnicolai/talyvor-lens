@@ -5,12 +5,24 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
 	"github.com/talyvor/lens/internal/metrics"
 )
+
+// distillKind labels a cache lookup by its keyspace, read from the version
+// discriminator: the vision-OCR result cache versions with an "ocr:" prefix
+// (distill.ocrCacheVersion), the conversion cache with a leading digit. Lets the
+// one Get/Set surface serve both keyspaces while keeping the metric distinct.
+func distillKind(version string) string {
+	if strings.HasPrefix(version, "ocr:") {
+		return "ocr"
+	}
+	return "conversion"
+}
 
 const distillKeyPrefix = "lens:distill:"
 
@@ -54,13 +66,13 @@ func (c *DistillCache) Key(contentHash, version string) string {
 func (c *DistillCache) Get(ctx context.Context, contentHash, version string) ([]byte, error) {
 	b, err := c.client.Get(ctx, c.Key(contentHash, version)).Bytes()
 	if errors.Is(err, redis.Nil) {
-		metrics.DistillCache("miss")
+		metrics.DistillCache("miss", distillKind(version))
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	metrics.DistillCache("hit")
+	metrics.DistillCache("hit", distillKind(version))
 	return b, nil
 }
 

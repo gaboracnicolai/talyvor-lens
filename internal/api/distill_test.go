@@ -50,8 +50,8 @@ func TestDistillSummary_ZeroLookups(t *testing.T) {
 func TestAPI_DistillSummary_NetRelationship(t *testing.T) {
 	metrics.DistillTokensSaved(500)
 	metrics.DistillVisionTokensCost(120)
-	metrics.DistillCache("hit")
-	metrics.DistillCache("miss")
+	metrics.DistillCache("hit", "conversion")
+	metrics.DistillCache("miss", "conversion")
 
 	s := newServer(serverDeps{version: "test"})
 	r := newRouter(t, s)

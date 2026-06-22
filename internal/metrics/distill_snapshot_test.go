@@ -10,9 +10,12 @@ func TestDistillSnapshot_ReadsCounters(t *testing.T) {
 
 	DistillTokensSaved(100)
 	DistillVisionTokensCost(30)
-	DistillCache("hit")
-	DistillCache("hit")
-	DistillCache("miss")
+	DistillCache("hit", "conversion")
+	DistillCache("hit", "conversion")
+	DistillCache("miss", "conversion")
+	DistillCache("hit", "ocr")
+	DistillCache("miss", "ocr")
+	DistillCache("miss", "ocr")
 
 	got := DistillSnapshot()
 
@@ -23,9 +26,15 @@ func TestDistillSnapshot_ReadsCounters(t *testing.T) {
 		t.Errorf("VisionTokensCost delta = %v, want 30", d)
 	}
 	if d := got.CacheHits - base.CacheHits; d != 2 {
-		t.Errorf("CacheHits delta = %v, want 2", d)
+		t.Errorf("CacheHits (conversion) delta = %v, want 2", d)
 	}
 	if d := got.CacheMisses - base.CacheMisses; d != 1 {
-		t.Errorf("CacheMisses delta = %v, want 1", d)
+		t.Errorf("CacheMisses (conversion) delta = %v, want 1", d)
+	}
+	if d := got.OCRCacheHits - base.OCRCacheHits; d != 1 {
+		t.Errorf("OCRCacheHits delta = %v, want 1", d)
+	}
+	if d := got.OCRCacheMisses - base.OCRCacheMisses; d != 2 {
+		t.Errorf("OCRCacheMisses delta = %v, want 2", d)
 	}
 }

@@ -13,8 +13,10 @@ import (
 type DistillStats struct {
 	TokensSaved      float64 // lens_distill_tokens_saved_total (a real saving)
 	VisionTokensCost float64 // lens_distill_vision_tokens_cost_total (a real COST, never a saving)
-	CacheHits        float64 // lens_distill_cache_total{result="hit"}
-	CacheMisses      float64 // lens_distill_cache_total{result="miss"}
+	CacheHits        float64 // lens_distill_cache_total{result="hit",kind="conversion"}
+	CacheMisses      float64 // lens_distill_cache_total{result="miss",kind="conversion"}
+	OCRCacheHits     float64 // lens_distill_cache_total{result="hit",kind="ocr"}
+	OCRCacheMisses   float64 // lens_distill_cache_total{result="miss",kind="ocr"}
 }
 
 // DistillSnapshot reads the current DISTILL counter values. Reading the cache
@@ -25,8 +27,10 @@ func DistillSnapshot() DistillStats {
 	return DistillStats{
 		TokensSaved:      counterValue(DistillTokensSavedTotal),
 		VisionTokensCost: counterValue(DistillVisionTokensCostTotal),
-		CacheHits:        counterValue(DistillCacheTotal.WithLabelValues("hit")),
-		CacheMisses:      counterValue(DistillCacheTotal.WithLabelValues("miss")),
+		CacheHits:        counterValue(DistillCacheTotal.WithLabelValues("hit", "conversion")),
+		CacheMisses:      counterValue(DistillCacheTotal.WithLabelValues("miss", "conversion")),
+		OCRCacheHits:     counterValue(DistillCacheTotal.WithLabelValues("hit", "ocr")),
+		OCRCacheMisses:   counterValue(DistillCacheTotal.WithLabelValues("miss", "ocr")),
 	}
 }
 

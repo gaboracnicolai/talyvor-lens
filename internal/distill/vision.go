@@ -35,6 +35,19 @@ type VisionDispatcher interface {
 	DispatchVision(ctx context.Context, req VisionRequest) (VisionResult, error)
 }
 
+// ModelPlanner is an OPTIONAL capability a VisionDispatcher may implement: it
+// reports, WITHOUT dispatching, the vision model this request WOULD be OCR'd by
+// (the SAME selection DispatchVision uses). The orchestrator needs it to build
+// the OCR-cache key before dispatch — the model is a determining input (a
+// different model produces different text for the same bytes), and is otherwise
+// only known AFTER the call. A dispatcher that does not implement this, or returns
+// ok=false (unsupported provider / no capable model), makes the orchestrator SKIP
+// the OCR cache and dispatch as normal: fail-safe by construction — no planned
+// model ⇒ no cache ⇒ never a wrong-model serve.
+type ModelPlanner interface {
+	PlannedVisionModel(ctx context.Context) (model string, ok bool)
+}
+
 // VisionRequest is the provider-agnostic description of "OCR this document".
 // The dispatcher decides how to present Bytes to the model (render to images,
 // send as a document block, etc.) — that provider-specific shaping is its job.

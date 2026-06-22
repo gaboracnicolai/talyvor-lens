@@ -51,14 +51,11 @@ func Orchestrate(ctx context.Context, conv IsolatedConverter, cache Cache, visio
 	// Parent-side tier on the faithful subprocess output.
 	res = applyTier(res, tier)
 
-	// Vision-OCR fallback: a text-less document + a configured dispatcher → OCR
-	// it. visionFallback records the cost as a COST (Savings.VisionTokensCost,
-	// TokensSaved=0) and degrades gracefully (stays NeedsVision) on failure. The
-	// OCR result is NOT cached in this stage (OCR caching is deferred), so we
-	// return before the cache store.
+	// Vision-OCR fallback: a text-less document + a configured dispatcher → OCR it,
+	// with a result cache in front so a re-submitted scanned document reuses the
+	// prior OCR instead of re-dispatching the expensive vision model.
 	if vision != nil && res.NeedsVision {
-		vr, vsav := visionFallback(ctx, input, res, vision)
-		return vr, vsav, nil
+		return orchestrateVision(ctx, cache, vision, input, hash, res)
 	}
 
 	// Cache only a real, usable conversion — never a NeedsVision/empty result.
@@ -69,6 +66,70 @@ func Orchestrate(ctx context.Context, conv IsolatedConverter, cache Cache, visio
 	}
 
 	return res, computeSavings(input, res, false), nil
+}
+
+// orchestrateVision runs the OCR fallback with a RESULT CACHE in front of it,
+// keyed on (bytes, OCRVersion, vision model) in a keyspace DISTINCT from the
+// conversion cache (ocrCacheVersion's "ocr:" prefix). A re-submitted scanned
+// document reuses the prior OCR instead of re-dispatching the expensive vision
+// model. Correctness is the bar:
+//   - the MODEL is part of the key, so a workspace changing its model re-OCRs and
+//     never serves the old model's transcription;
+//   - a dispatcher that cannot report its planned model (not a ModelPlanner, or
+//     ok=false: unsupported provider / no capable model) SKIPS the cache and
+//     dispatches as before — fail-safe, never a wrong-model serve;
+//   - a successful OCR is stored under the ACTUAL model that served it, never a
+//     diverging planned model; a graceful FAILURE (stays NeedsVision) is never cached.
+func orchestrateVision(ctx context.Context, cache Cache, vision VisionDispatcher, input []byte, hash string, res Result) (Result, Savings, error) {
+	planModel, canCache := "", false
+	if mp, ok := vision.(ModelPlanner); ok {
+		planModel, canCache = mp.PlannedVisionModel(ctx)
+	}
+	canCache = canCache && cache != nil && planModel != ""
+
+	// LOOKUP (before dispatch): a hit serves the prior OCR — the dispatcher is NOT
+	// invoked, and no vision cost is booked (CacheHit=true, VisionTokensCost=0).
+	if canCache {
+		if b, err := cache.Get(ctx, hash, ocrCacheVersion(planModel)); err == nil && len(b) > 0 {
+			if co, ok := unmarshalCachedOCR(b); ok {
+				return co.Result, ocrHitSavings(input, co), nil
+			}
+			// Corrupt entry → fall through to a fresh OCR.
+		}
+	}
+
+	vr, vsav := visionFallback(ctx, input, res, vision)
+
+	// STORE only a SUCCESSFUL OCR, under the ACTUAL model that served it (never the
+	// planned model, so a plan/dispatch divergence can't file it under the wrong key).
+	if canCache && vr.Method == MethodVisionOCR && !vr.NeedsVision && vr.Markdown != "" {
+		storeModel := vsav.VisionModel
+		if storeModel == "" {
+			storeModel = planModel
+		}
+		if b, err := marshalCachedOCR(vr, vsav); err == nil {
+			_ = cache.Set(ctx, hash, ocrCacheVersion(storeModel), b) // best-effort; never fail the conversion
+		}
+	}
+	return vr, vsav, nil
+}
+
+// ocrHitSavings is the Savings for an OCR result served FROM the cache: the OCR'd
+// Markdown is delivered, but the vision model was NOT dispatched this time, so the
+// cost is ZERO (the value of the cache is exactly the avoided re-OCR). The original
+// cost the entry recorded is the AVOIDED cost — kept on the cached value for the S4
+// royalty basis, deliberately NOT re-booked as a spend here.
+func ocrHitSavings(input []byte, co cachedOCR) Savings {
+	return Savings{
+		InputTokensRaw:       len(input) / 4,
+		InputTokensDistilled: estTokens(co.Result.Markdown),
+		TokensSaved:          0, // OCR never "saves" tokens; a cache hit just avoids re-spending.
+		VisionTokensCost:     0, // NOT dispatched this time → no new spend booked.
+		VisionModel:          co.VisionModel,
+		InputBytes:           len(input),
+		OutputBytes:          len(co.Result.Markdown),
+		CacheHit:             true,
+	}
 }
 
 // FormatFromMediaType maps a declared chat content-block media type (e.g. an

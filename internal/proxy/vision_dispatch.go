@@ -74,6 +74,21 @@ func (p *Proxy) newVisionDispatcher(r *http.Request, cfg providerConfig, wsID st
 	}
 }
 
+// PlannedVisionModel reports the model DispatchVision WOULD OCR with — without
+// dispatching — by running the SAME two gates (provider preserves documents +
+// a document-capable model exists in the allow-list). It satisfies
+// distill.ModelPlanner so the orchestrator can key the OCR-result cache on the
+// model before the call. ok=false (unsupported provider / no capable model) → the
+// orchestrator skips the OCR cache, and the eventual dispatch fails gracefully the
+// same way. MUST stay in lockstep with DispatchVision's gates 1+2 — keying on a
+// model the dispatch then wouldn't use would file the entry under the wrong key.
+func (d *visionDispatcher) PlannedVisionModel(_ context.Context) (string, bool) {
+	if !visionProviderSupported(d.provider) {
+		return "", false
+	}
+	return modality.CapableModel(d.provider, modality.ModalitySet{HasDocument: true}, d.allowedModels)
+}
+
 // DispatchVision selects a document-capable model within the workspace allow-
 // list, OCRs the document, and reports the real token cost. Any failure returns
 // an error (→ graceful passthrough). It NEVER returns partial/empty text as a

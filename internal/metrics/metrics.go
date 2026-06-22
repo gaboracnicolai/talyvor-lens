@@ -213,8 +213,8 @@ var (
 	// result is a bounded set: hit | miss. Never document content/hash as a
 	// label.
 	DistillCacheTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{Name: "lens_distill_cache_total", Help: "DISTILL conversion-cache lookups, by result (hit|miss)."},
-		[]string{"result"},
+		prometheus.CounterOpts{Name: "lens_distill_cache_total", Help: "DISTILL cache lookups, by result (hit|miss) and kind (conversion|ocr)."},
+		[]string{"result", "kind"},
 	)
 	// Total input tokens saved by distillation (raw doc estimate minus the
 	// converted Markdown estimate, same len/4 basis the gateway bills on),
@@ -457,7 +457,10 @@ func SpendRecord(source string) { SpendRecordsTotal.WithLabelValues(source).Inc(
 // ─── DISTILL helpers ───
 
 // DistillCache counts a conversion-cache lookup by result ("hit"|"miss").
-func DistillCache(result string) { DistillCacheTotal.WithLabelValues(result).Inc() }
+// DistillCache records one distill cache lookup. kind is "conversion" (the
+// text-extraction cache) or "ocr" (the vision-OCR result cache) — distinct
+// keyspaces, distinctly observable.
+func DistillCache(result, kind string) { DistillCacheTotal.WithLabelValues(result, kind).Inc() }
 
 // DistillTokensSaved adds to the running total of input tokens saved by
 // distillation. Negative inputs (a conversion that grew the token count) are
