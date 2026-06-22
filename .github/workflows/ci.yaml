@@ -75,7 +75,11 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          # Must be >= go.mod's `toolchain` (go1.26.4): golangci-lint refuses to run if it
+          # was built with a Go older than the module's targeted version. (The test/build
+          # jobs can stay on 1.25 — `go test`/`go build` auto-fetch the toolchain; a
+          # `go install`-built golangci-lint does not, so it needs the newer Go here.)
+          go-version: "1.26.4"
           cache: false
       - name: golangci-lint
         run: |
