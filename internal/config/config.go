@@ -63,6 +63,14 @@ type Config struct {
 	AuditExportURL      string
 	AuditExportInterval time.Duration
 
+	// AuditRequireExportBeforePrune (U14 #187) gates the retention sweeper so it
+	// deletes a token_events row ONLY once it is at/below the off-box export
+	// watermark (audit_export_state.last_exported_at) — proof-of-export-before-
+	// delete. When export is disabled, the sweep is SKIPPED entirely (it never
+	// prunes un-exportable rows). Env LENS_AUDIT_REQUIRE_EXPORT_BEFORE_PRUNE;
+	// default false = today's age-only pruning (no behaviour change).
+	AuditRequireExportBeforePrune bool
+
 	// WorkspaceReloadInterval (U7b) is how often each replica rebuilds its
 	// in-memory workspace-config cache from Postgres, bounding cross-replica
 	// staleness of logging policy + the cache-pooling privacy flag. Env:
@@ -1006,6 +1014,9 @@ func Load() (*Config, error) {
 		}
 		c.AuditExportInterval = d
 	}
+	// U14 #187 export-before-prune gate. Default false = age-only (today's behaviour);
+	// on = prune only at/below the export watermark, skip the sweep if export is off.
+	c.AuditRequireExportBeforePrune = parseBoolEnv("LENS_AUDIT_REQUIRE_EXPORT_BEFORE_PRUNE")
 	// U7b workspace-config reload interval — default 30s, MUST be > 0.
 	c.WorkspaceReloadInterval = 30 * time.Second
 	if v := os.Getenv("LENS_WORKSPACE_RELOAD_INTERVAL"); v != "" {

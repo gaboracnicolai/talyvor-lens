@@ -35,16 +35,16 @@ import (
 	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/attribution"
-	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/audit"
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/batch"
+	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
-	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
@@ -567,7 +567,8 @@ func run() error {
 	// LENS_AUDIT_RETENTION > 0, and the off-box export is inert unless
 	// LENS_AUDIT_EXPORT_URL is set — StartSweeper/StartLoop return immediately when
 	// their feature is disabled, so leader election spins on a no-op.
-	auditRetention := audit.NewRetention(pool, cfg.AuditRetention)
+	auditRetention := audit.NewRetention(pool, cfg.AuditRetention,
+		cfg.AuditRequireExportBeforePrune, cfg.AuditExportURL != "")
 	go haComps.leader.Run(ctx, "audit-retention", 30*time.Second, func(lctx context.Context) {
 		auditRetention.StartSweeper(lctx, time.Hour)
 	})

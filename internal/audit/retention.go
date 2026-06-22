@@ -19,32 +19,89 @@ const retentionTable = "token_events"
 // highest-volume table can't take a long lock or bloat WAL/vacuum in one shot.
 const retentionBatch = 5000
 
+// Delete queries for the sweeper. The export-gated variant (U14 #187) additionally
+// bounds the delete by the off-box export watermark: a row is removed only once its
+// created_at is at/below last_exported_at — proof-of-export-before-delete.
+const (
+	deleteAgedSQL = `DELETE FROM ` + retentionTable +
+		` WHERE ctid IN (SELECT ctid FROM ` + retentionTable + ` WHERE created_at < $1 LIMIT $2)`
+	deleteAgedExportedSQL = `DELETE FROM ` + retentionTable +
+		` WHERE ctid IN (SELECT ctid FROM ` + retentionTable +
+		` WHERE created_at < $1 AND created_at <= $2 LIMIT $3)`
+)
+
 // Retention is the token_events-only retention sweeper. It is the ONLY sanctioned
 // deleter of audit rows: each batch runs `SET LOCAL lens.audit_retention = 'on'`
 // so the 0055 trigger permits the DELETE (a stray DELETE without the flag is still
 // blocked). UPDATE/TRUNCATE remain blocked even here.
+//
+// U14 #187: when requireExport is on, the delete is additionally bounded by the
+// off-box export watermark so retention can never prune a row that has not yet been
+// exported off-box.
 type Retention struct {
-	pool   *pgxpool.Pool
-	window time.Duration
-	batch  int
-	log    *slog.Logger
+	pool          *pgxpool.Pool
+	window        time.Duration
+	batch         int
+	requireExport bool // U14 #187: prune only at/below the export watermark
+	exportEnabled bool // whether off-box export is configured (LENS_AUDIT_EXPORT_URL set)
+	log           *slog.Logger
 }
 
 // NewRetention builds the sweeper. window <= 0 disables it.
-func NewRetention(pool *pgxpool.Pool, window time.Duration) *Retention {
-	return &Retention{pool: pool, window: window, batch: retentionBatch, log: slog.Default()}
+//
+// requireExport (U14 #187, default false) gates each delete behind the off-box
+// export watermark so no un-exported row is ever pruned. exportEnabled reports
+// whether the off-box export loop is configured: when requireExport is on and
+// export is OFF, the sweep is skipped entirely (rather than pruning rows that can
+// never be proven exported). With requireExport off, the sweeper behaves exactly
+// as before — age-only pruning, no watermark read.
+func NewRetention(pool *pgxpool.Pool, window time.Duration, requireExport, exportEnabled bool) *Retention {
+	return &Retention{
+		pool:          pool,
+		window:        window,
+		batch:         retentionBatch,
+		requireExport: requireExport,
+		exportEnabled: exportEnabled,
+		log:           slog.Default(),
+	}
 }
 
 // SweepOnce deletes token_events rows older than the window in batches, returning
 // the total deleted. window <= 0 is a no-op (disabled).
+//
+// When requireExport is on (U14 #187), the delete is additionally bounded by the
+// off-box export watermark, read ONCE here and applied to every batch: a row is
+// pruned only when created_at <= last_exported_at, so a row that has not yet been
+// exported is KEPT even if it is already past the retention window. Reading the
+// watermark once is safe by direction — it only advances, so a slightly-stale value
+// prunes LESS, never more. If export is disabled, the sweep is skipped entirely.
 func (r *Retention) SweepOnce(ctx context.Context) (int64, error) {
 	if r.window <= 0 {
 		return 0, nil
 	}
 	cutoff := time.Now().Add(-r.window)
+
+	// nil ⇒ age-only (default, unchanged behaviour); non-nil ⇒ also bound the delete
+	// by the export watermark (proof-of-export-before-delete).
+	var upper *time.Time
+	if r.requireExport {
+		if !r.exportEnabled {
+			// Proof-of-export is demanded but nothing exports off-box: pruning now could
+			// destroy un-exported audit history. Skip (and warn) rather than prune.
+			r.log.Warn("audit retention SKIPPED: require-export-before-prune is on but off-box export is disabled " +
+				"(set LENS_AUDIT_EXPORT_URL, or unset LENS_AUDIT_REQUIRE_EXPORT_BEFORE_PRUNE to allow age-only pruning)")
+			return 0, nil
+		}
+		wm, err := r.readWatermark(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("audit retention: read export watermark: %w", err)
+		}
+		upper = &wm
+	}
+
 	var total int64
 	for {
-		n, err := r.deleteBatch(ctx, cutoff)
+		n, err := r.deleteBatch(ctx, cutoff, upper)
 		total += n
 		if err != nil {
 			return total, err
@@ -58,7 +115,18 @@ func (r *Retention) SweepOnce(ctx context.Context) (int64, error) {
 	}
 }
 
-func (r *Retention) deleteBatch(ctx context.Context, cutoff time.Time) (int64, error) {
+// readWatermark returns the off-box export high-water mark — the created_at upper
+// bound of the last successfully-exported window (audit_export_state, migration
+// 0056). The singleton row is seeded at epoch, so before any successful export this
+// is 1970, which prunes nothing (the safe default for an enabled-but-not-yet-caught-
+// up export loop).
+func (r *Retention) readWatermark(ctx context.Context) (time.Time, error) {
+	var t time.Time
+	err := r.pool.QueryRow(ctx, `SELECT last_exported_at FROM audit_export_state WHERE id = true`).Scan(&t)
+	return t, err
+}
+
+func (r *Retention) deleteBatch(ctx context.Context, cutoff time.Time, upper *time.Time) (int64, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -69,10 +137,11 @@ func (r *Retention) deleteBatch(ctx context.Context, cutoff time.Time) (int64, e
 	if _, err := tx.Exec(ctx, `SET LOCAL lens.audit_retention = 'on'`); err != nil {
 		return 0, fmt.Errorf("audit retention: set flag: %w", err)
 	}
-	tag, err := tx.Exec(ctx,
-		`DELETE FROM `+retentionTable+
-			` WHERE ctid IN (SELECT ctid FROM `+retentionTable+` WHERE created_at < $1 LIMIT $2)`,
-		cutoff, r.batch)
+	query, args := deleteAgedSQL, []any{cutoff, r.batch}
+	if upper != nil {
+		query, args = deleteAgedExportedSQL, []any{cutoff, *upper, r.batch}
+	}
+	tag, err := tx.Exec(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("audit retention: delete batch: %w", err)
 	}
