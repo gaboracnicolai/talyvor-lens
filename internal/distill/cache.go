@@ -75,7 +75,7 @@ func CacheVersion(tier Tier) string {
 // served (the ConverterVersion discipline, for the vision path).
 const OCRVersion = "1"
 
-// ocrCacheVersion is the OCR-cache key discriminator: a DISTINCT keyspace from
+// OCRCacheVersion is the OCR-cache key discriminator: a DISTINCT keyspace from
 // the conversion cache (the "ocr:" prefix can never collide with a conversion
 // version, which is a leading digit) that binds an entry to BOTH the OCR pipeline
 // version AND the vision model that produced it. The model is in the key because
@@ -84,24 +84,24 @@ const OCRVersion = "1"
 // model's transcription. Tier is deliberately absent: OCR output is tier-invariant
 // today (visionFallback never re-tiers), and an OCRVersion bump covers it if that
 // ever changes.
-func ocrCacheVersion(model string) string {
+func OCRCacheVersion(model string) string {
 	return "ocr:" + OCRVersion + ":" + model
 }
 
-// cachedOCR is the OCR-cache value wire shape: the OCR Result to serve PLUS the
+// CachedOCR is the OCR-cache value wire shape: the OCR Result to serve PLUS the
 // original provider-REPORTED token cost (un-recomputable, unlike conversion
 // savings) and the model that produced it — so a cache hit can report the AVOIDED
 // cost without re-dispatching, and the S4 distill-reuse royalty has its
 // avoided-COGS basis pre-provisioned (recording a figure, not minting against it).
-type cachedOCR struct {
+type CachedOCR struct {
 	Result             Result `json:"result"`
 	VisionInputTokens  int    `json:"vision_input_tokens"`
 	VisionOutputTokens int    `json:"vision_output_tokens"`
 	VisionModel        string `json:"vision_model"`
 }
 
-func marshalCachedOCR(res Result, sav Savings) ([]byte, error) {
-	return json.Marshal(cachedOCR{
+func MarshalCachedOCR(res Result, sav Savings) ([]byte, error) {
+	return json.Marshal(CachedOCR{
 		Result:             res,
 		VisionInputTokens:  sav.VisionInputTokens,
 		VisionOutputTokens: sav.VisionOutputTokens,
@@ -109,13 +109,13 @@ func marshalCachedOCR(res Result, sav Savings) ([]byte, error) {
 	})
 }
 
-func unmarshalCachedOCR(b []byte) (cachedOCR, bool) {
+func UnmarshalCachedOCR(b []byte) (CachedOCR, bool) {
 	if len(b) == 0 {
-		return cachedOCR{}, false
+		return CachedOCR{}, false
 	}
-	var co cachedOCR
+	var co CachedOCR
 	if json.Unmarshal(b, &co) != nil {
-		return cachedOCR{}, false
+		return CachedOCR{}, false
 	}
 	return co, true
 }

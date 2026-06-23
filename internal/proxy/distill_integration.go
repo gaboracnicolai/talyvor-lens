@@ -266,6 +266,28 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 		}
 	}
 
+	// (1b) POOLED OCR READ — a cross-tenant OCR TRANSCRIPTION (the recovered text
+	//      of a scanned document — a MORE sensitive disclosure than a parsed
+	//      document) may be served ONLY under the SAME full dual-consent as (1),
+	//      over a DISJOINT keyspace (OCRCacheVersion's "ocr:" prefix). The PLANNED
+	//      vision model keys the entry, mirroring orchestrateVision; a dispatcher
+	//      that cannot plan a model (not a ModelPlanner, or ok=false) skips OCR
+	//      pooling entirely (fail-safe — never a wrong-model serve). A hit serves
+	//      the prior OCR WITHOUT dispatching vision (zero new spend). The S1
+	//      attribution + the S4 royalty basis are PR2; PR1 serves only.
+	if pooled != nil && vision != nil && d.poolGate.Participant(wsID) {
+		if mp, okMP := vision.(distill.ModelPlanner); okMP {
+			if planModel, okPlan := mp.PlannedVisionModel(ctx); okPlan && planModel != "" {
+				if b, owner, _ := pooled.GetWithOwner(ctx, distillPoolMarker+hash, distill.OCRCacheVersion(planModel)); len(b) > 0 &&
+					d.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+					if co, okC := distill.UnmarshalCachedOCR(b); okC && !co.Result.NeedsVision && strings.TrimSpace(co.Result.Markdown) != "" {
+						return co.Result.Markdown, visionSpend{}, nil, true // cross-tenant OCR serve (consented)
+					}
+				}
+			}
+		}
+	}
+
 	// (2) PRIVATE PATH (default) — a wsID-SCOPED cache, so an artifact is served
 	//     only within its producing workspace. This is the leak fix.
 	var privateCache distill.Cache
@@ -277,20 +299,37 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 		return "", visionSpend{}, nil, false
 	}
 
-	// (3) POOLED WRITE — if the PRODUCER opted in (+ global switch), publish the
-	//     artifact to the shared keyspace stamped with this workspace as owner,
-	//     so other opted-in tenants may be served it. Best-effort; never fails
-	//     the request. NeedsVision/empty already rejected above.
-	if pooled != nil && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+	// (3) POOLED WRITE — if the PRODUCER opted in (+ global switch), publish a
+	//     NATIVE conversion to the shared keyspace stamped with this workspace as
+	//     owner, so other opted-in tenants may be served it. Best-effort; never
+	//     fails the request. NeedsVision/empty already rejected above. OCR results
+	//     are EXCLUDED here — they are pooled by (3b) into the OCR keyspace WITH
+	//     their avoided-COGS basis, so a cost-basis-less copy can't shadow them in
+	//     the conversion keyspace (which (1) would otherwise serve first).
+	if pooled != nil && res.Method != distill.MethodVisionOCR && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
 		if b, mErr := distill.MarshalCached(res); mErr == nil {
 			_ = pooled.SetWithOwner(ctx, distillPoolMarker+hash, cacheVer, wsID, b)
 		}
 	}
+
 	// An OCR'd result carries the vision call's real token split + model so the
 	// request path can book it as a distinct, model-priced 'vision_ocr' row.
 	var vs visionSpend
 	if res.Method == distill.MethodVisionOCR {
 		vs = visionSpend{model: sav.VisionModel, inputTokens: sav.VisionInputTokens, outputTokens: sav.VisionOutputTokens}
+
+		// (3b) POOLED OCR WRITE — if THIS workspace OCR'd the document AND opted
+		//      in, publish the transcription to the shared OCR keyspace stamped as
+		//      owner, keyed on the ACTUAL serving model (sav.VisionModel), so other
+		//      opted-in tenants may be served it without re-dispatching vision.
+		//      MarshalCachedOCR preserves the avoided-COGS basis (token split +
+		//      model) the S4 royalty (PR2) needs. Same dual-consent gate as (3).
+		//      Best-effort; never fails the request.
+		if pooled != nil && strings.TrimSpace(sav.VisionModel) != "" && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+			if b, mErr := distill.MarshalCachedOCR(res, sav); mErr == nil {
+				_ = pooled.SetWithOwner(ctx, distillPoolMarker+hash, distill.OCRCacheVersion(sav.VisionModel), wsID, b)
+			}
+		}
 	}
 	return res.Markdown, vs, nil, true // private path → no cross-tenant attribution
 }

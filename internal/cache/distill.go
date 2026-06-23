@@ -15,7 +15,7 @@ import (
 
 // distillKind labels a cache lookup by its keyspace, read from the version
 // discriminator: the vision-OCR result cache versions with an "ocr:" prefix
-// (distill.ocrCacheVersion), the conversion cache with a leading digit. Lets the
+// (distill.OCRCacheVersion), the conversion cache with a leading digit. Lets the
 // one Get/Set surface serve both keyspaces while keeping the metric distinct.
 func distillKind(version string) string {
 	if strings.HasPrefix(version, "ocr:") {
