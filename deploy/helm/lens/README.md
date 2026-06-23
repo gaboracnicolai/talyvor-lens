@@ -269,9 +269,13 @@ on **`/healthz`** as the `read_replica` check (a healthy no-op when unconfigured
 
 > **CI caveat (same honesty as the U7 staleness note):** the integration suite
 > runs a single Postgres, so it proves the **routing decision** (analytics→replica,
-> money/authz→primary) via two pools over one DB — it does **not** model real
-> replication lag. Lag-threshold/fallback behaviour against a genuine streaming
-> standby is not yet CI-covered (tracked as a follow-up).
+> money/authz→primary) via two pools over one DB. Routing is a static config-time
+> choice and **lag gates nothing** — it is observability-only (the gauge + health
+> detail above), so there is no lag-threshold/fallback path to cover. The only thing
+> a single Postgres can't exercise is the **non-zero lag measurement** (the standby
+> `pg_is_in_recovery()` branch); that is a monitoring-fidelity limitation, **not** a
+> correctness gap — a wrong lag reading can only mislabel a metric, never cause a
+> misroute. A streaming-standby CI is not warranted.
 
 ## In-cluster mining nodes (advanced, optional)
 
