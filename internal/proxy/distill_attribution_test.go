@@ -8,14 +8,27 @@ import (
 	"github.com/talyvor/lens/internal/workspace"
 )
 
-// fakeAttribSink records RecordDistillServe calls (owner, requester, hash).
+// fakeAttribSink records RecordDistillServe + RecordRoyaltyBasis calls.
 type fakeAttribSink struct {
-	calls [][3]string
-	err   error
+	calls      [][3]string // RecordDistillServe (owner, requester, hash)
+	basisCalls []basisCall // RecordRoyaltyBasis (the avoided-COGS basis)
+	err        error
+}
+
+type basisCall struct {
+	owner, requester, hash string
+	cogs                   float64
+	model                  string
+	in, out                int
 }
 
 func (f *fakeAttribSink) RecordDistillServe(_ context.Context, owner, requester, hash string) error {
 	f.calls = append(f.calls, [3]string{owner, requester, hash})
+	return f.err
+}
+
+func (f *fakeAttribSink) RecordRoyaltyBasis(_ context.Context, owner, requester, hash string, cogs float64, model string, in, out int) error {
+	f.basisCalls = append(f.basisCalls, basisCall{owner, requester, hash, cogs, model, in, out})
 	return f.err
 }
 
@@ -130,5 +143,47 @@ func TestRecordDistillServes_Gating(t *testing.T) {
 		sink := &fakeAttribSink{err: errors.New("db down")}
 		p := &Proxy{distillAttribSink: sink}
 		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, facts) // must not panic/propagate
+	})
+}
+
+// TestRecordDistillServes_BasisRouting — PR2: an OCR fact (visionModel != "") records
+// BOTH the serve_count attribution AND the avoided-COGS basis with EXACT provenance; a
+// conversion fact (no basis) records ONLY the attribution; LoggingNone suppresses both.
+func TestRecordDistillServes_BasisRouting(t *testing.T) {
+	ocrFact := distillServeFact{owner: "wsA", hash: "h1", avoidedCOGSUSD: 0.0009, visionModel: "gpt-4o-mini", visionInputTokens: 500, visionOutputTokens: 20}
+	convFact := distillServeFact{owner: "wsX", hash: "h2"} // conversion → no basis
+
+	t.Run("OCR fact → attribution + basis (faithful args)", func(t *testing.T) {
+		sink := &fakeAttribSink{}
+		p := &Proxy{distillAttribSink: sink}
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, []distillServeFact{ocrFact})
+		if len(sink.calls) != 1 {
+			t.Fatalf("serve_count calls=%v, want 1", sink.calls)
+		}
+		if len(sink.basisCalls) != 1 {
+			t.Fatalf("basis calls=%v, want exactly 1", sink.basisCalls)
+		}
+		if got, want := sink.basisCalls[0], (basisCall{"wsA", "wsB", "h1", 0.0009, "gpt-4o-mini", 500, 20}); got != want {
+			t.Fatalf("basis args = %+v, want %+v", got, want)
+		}
+	})
+	t.Run("conversion fact → attribution only, NO basis", func(t *testing.T) {
+		sink := &fakeAttribSink{}
+		p := &Proxy{distillAttribSink: sink}
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, []distillServeFact{convFact})
+		if len(sink.calls) != 1 {
+			t.Fatalf("serve_count calls=%v, want 1", sink.calls)
+		}
+		if len(sink.basisCalls) != 0 {
+			t.Fatalf("a conversion serve must record NO basis, got %v", sink.basisCalls)
+		}
+	})
+	t.Run("LoggingNone → neither attribution nor basis", func(t *testing.T) {
+		sink := &fakeAttribSink{}
+		p := &Proxy{distillAttribSink: sink}
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingNone, []distillServeFact{ocrFact})
+		if len(sink.calls) != 0 || len(sink.basisCalls) != 0 {
+			t.Fatalf("LoggingNone wrote serve=%v basis=%v, want none", sink.calls, sink.basisCalls)
+		}
 	})
 }
