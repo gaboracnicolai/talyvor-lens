@@ -59,6 +59,17 @@ services:
       # exactly as (h) behaved before.
       - LENS_JWT_PRIVATE_KEY=${LENS_JWT_PRIVATE_KEY:-}
       - LENS_LOG_LEVEL=debug
+
+      # ── Operational (NON-economic) staging features — bucket (a) of the
+      #    operational-flag recon. All default-off; safe to enable here — NONE
+      #    touches the mint/ledger/economy path or the economy kill-switch block.
+      #    Deployment-dependent (HA/replica/TLS/CORS) + economic flags are NOT
+      #    here — see docs/recommended-production-config.md. Names verified
+      #    against internal/config/config.go (lines 605/619/621/622).
+      - LENS_WORKTIER_ENABLED=true               # descriptive work-tier classifier (size/complexity/cost); doctrine: never a reward multiplier — off-is-safe
+      - LENS_GUARDRAILS_ENABLED=true             # output PII+injection guardrails in OBSERVE/flag mode (blocks nothing without per-workspace opt-in)
+      - LENS_QUALITY_AUTO_RETRY=true             # one-shot re-call on a low-quality response — NOTE: up to ~2x upstream provider COGS on low-quality serves (real provider $, NOT LENS economy)
+      - LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN=true # per-engineer (named author) cost breakdown in ROI reports — fine on TEST data; a real named-employee deployment carries a UK data-protection consideration (see docs/recommended-production-config.md)
     depends_on:
       mockvllm:
         condition: service_started
