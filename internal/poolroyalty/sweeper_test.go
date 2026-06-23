@@ -37,7 +37,7 @@ func expectSweep(pool pgxmock.PgxPoolIface, rows *pgxmock.Rows) {
 func TestSweeperRunOnce_FinalizesDueRows(t *testing.T) {
 	pool := newMockPool(t)
 	fin := &fakeFinalizer{}
-	s := NewFinalizeSweeper(pool, fin)
+	s := NewFinalizeSweeper(pool, fin, "pool_royalty_mints")
 
 	expectSweep(pool, pgxmock.NewRows([]string{"request_id", "contributor_workspace_id", "minted_amount"}).
 		AddRow("req-a", "wsA", 1.0).
@@ -73,7 +73,7 @@ func TestSweeperRunOnce_FinalizesDueRows(t *testing.T) {
 func TestSweeperRunOnce_CASLost_SkipsWithoutBalanceTouch(t *testing.T) {
 	pool := newMockPool(t)
 	fin := &fakeFinalizer{}
-	s := NewFinalizeSweeper(pool, fin)
+	s := NewFinalizeSweeper(pool, fin, "pool_royalty_mints")
 
 	expectSweep(pool, pgxmock.NewRows([]string{"request_id", "contributor_workspace_id", "minted_amount"}).
 		AddRow("req-a", "wsA", 1.0))
@@ -101,7 +101,7 @@ func TestSweeperRunOnce_CASLost_SkipsWithoutBalanceTouch(t *testing.T) {
 func TestSweeperRunOnce_RowErrorIsolated(t *testing.T) {
 	pool := newMockPool(t)
 	fin := &fakeFinalizer{err: errors.New("ledger down")}
-	s := NewFinalizeSweeper(pool, fin)
+	s := NewFinalizeSweeper(pool, fin, "pool_royalty_mints")
 
 	expectSweep(pool, pgxmock.NewRows([]string{"request_id", "contributor_workspace_id", "minted_amount"}).
 		AddRow("req-a", "wsA", 1.0).
@@ -129,7 +129,7 @@ func TestSweeperRunOnce_RowErrorIsolated(t *testing.T) {
 // Empty sweep + nil-safety.
 func TestSweeperRunOnce_EmptyAndNilSafe(t *testing.T) {
 	pool := newMockPool(t)
-	s := NewFinalizeSweeper(pool, &fakeFinalizer{})
+	s := NewFinalizeSweeper(pool, &fakeFinalizer{}, "pool_royalty_mints")
 	expectSweep(pool, pgxmock.NewRows([]string{"request_id", "contributor_workspace_id", "minted_amount"}))
 	if n, err := s.RunOnce(context.Background()); err != nil || n != 0 {
 		t.Errorf("empty sweep: n=%d err=%v", n, err)

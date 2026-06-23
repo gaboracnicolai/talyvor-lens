@@ -47,17 +47,23 @@ import (
 // when a full batch suggests more are waiting.
 const sweepBatchLimit = 500
 
-// sweepSelectSQL finds due held mints. Uses the partial index
-// idx_pool_royalty_mints_finalize (finalize_after) WHERE status='held'.
-// LIMIT derived from sweepBatchLimit so the constant can't drift.
-var sweepSelectSQL = fmt.Sprintf(`SELECT request_id, contributor_workspace_id, minted_amount
-FROM pool_royalty_mints
+// sweepSelectSQLFor / finalizeCASSQLFor build the table-scoped settlement SQL.
+// The table is a TRUSTED internal constant (NewFinalizeSweeper's caller passes a
+// hardcoded name — "pool_royalty_mints" or "distill_royalty_mints" — never user
+// input), so the fmt.Sprintf interpolation is injection-safe. Both tables expose
+// the generic (request_id, contributor_workspace_id, minted_amount, status,
+// finalize_after) finalize columns the kernel reads; the partial index
+// idx_<table>_finalize (finalize_after) WHERE status='held' backs the SELECT.
+func sweepSelectSQLFor(table string) string {
+	return fmt.Sprintf(`SELECT request_id, contributor_workspace_id, minted_amount
+FROM %s
 WHERE status = 'held' AND finalize_after < now()
-LIMIT %d`, sweepBatchLimit)
+LIMIT %d`, table, sweepBatchLimit)
+}
 
-// finalizeCASSQL claims the row for settlement — the double-finalize guard.
-const finalizeCASSQL = `UPDATE pool_royalty_mints SET status = 'final'
-WHERE request_id = $1 AND status = 'held'`
+func finalizeCASSQLFor(table string) string {
+	return fmt.Sprintf(`UPDATE %s SET status = 'final' WHERE request_id = $1 AND status = 'held'`, table)
+}
 
 type sweeperDB interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
@@ -70,16 +76,32 @@ type heldFinalizer interface {
 	FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, description string, metadata map[string]interface{}) error
 }
 
-// FinalizeSweeper settles due held mints (Stage 2.3a). The zero/nil sweeper
-// is inert.
+// FinalizeSweeper settles due held mints (Stage 2.3a) for ONE claim table. The
+// zero/nil sweeper is inert. Parameterized by table so the SAME kernel finalizes
+// both pool_royalty_mints (cache royalty) and distill_royalty_mints (L2/S4) — the
+// finalize logic reads only generic columns, so one implementation serves both.
 type FinalizeSweeper struct {
-	db     sweeperDB
-	ledger heldFinalizer
+	db        sweeperDB
+	ledger    heldFinalizer
+	table     string
+	selectSQL string
+	casSQL    string
 }
 
-// NewFinalizeSweeper wires the pool and the held ledger.
-func NewFinalizeSweeper(db sweeperDB, ledger heldFinalizer) *FinalizeSweeper {
-	return &FinalizeSweeper{db: db, ledger: ledger}
+// NewFinalizeSweeper wires the pool, the held ledger, and the claim TABLE to
+// settle (a trusted internal constant — "pool_royalty_mints" or
+// "distill_royalty_mints"; empty defaults to pool_royalty_mints).
+func NewFinalizeSweeper(db sweeperDB, ledger heldFinalizer, table string) *FinalizeSweeper {
+	if table == "" {
+		table = "pool_royalty_mints"
+	}
+	return &FinalizeSweeper{
+		db:        db,
+		ledger:    ledger,
+		table:     table,
+		selectSQL: sweepSelectSQLFor(table),
+		casSQL:    finalizeCASSQLFor(table),
+	}
 }
 
 type dueMint struct {
@@ -96,7 +118,7 @@ func (s *FinalizeSweeper) RunOnce(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil || s.ledger == nil {
 		return 0, nil
 	}
-	rows, err := s.db.Query(ctx, sweepSelectSQL)
+	rows, err := s.db.Query(ctx, s.selectSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -151,7 +173,7 @@ func (s *FinalizeSweeper) settleOne(ctx context.Context, d dueMint) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx, finalizeCASSQL, d.requestID)
+	tag, err := tx.Exec(ctx, s.casSQL, d.requestID)
 	if err != nil {
 		return err
 	}
