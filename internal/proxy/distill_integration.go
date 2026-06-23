@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/distill"
 	"github.com/talyvor/lens/internal/modality"
@@ -281,7 +282,24 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 				if b, owner, _ := pooled.GetWithOwner(ctx, distillPoolMarker+hash, distill.OCRCacheVersion(planModel)); len(b) > 0 &&
 					d.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					if co, okC := distill.UnmarshalCachedOCR(b); okC && !co.Result.NeedsVision && strings.TrimSpace(co.Result.Markdown) != "" {
-						return co.Result.Markdown, visionSpend{}, nil, true // cross-tenant OCR serve (consented)
+						// PR2: emit the consented cross-tenant OCR serve for serve() to
+						// record post-flush, AND snapshot the avoided-COGS basis NOW — the
+						// cached entry (A's actual vision call) is in hand, and the OCR
+						// cache is TTL-ephemeral + model-keyed, so a later join can't
+						// recover it. SKIP self-serve (owner == wsID): re-hitting your OWN
+						// pooled OCR avoids nothing cross-tenant.
+						var attrib *distillServeFact
+						if owner != wsID {
+							attrib = &distillServeFact{
+								owner:              owner,
+								hash:               hash,
+								avoidedCOGSUSD:     alerts.CostUSD(co.VisionModel, co.VisionInputTokens, co.VisionOutputTokens),
+								visionModel:        co.VisionModel,
+								visionInputTokens:  co.VisionInputTokens,
+								visionOutputTokens: co.VisionOutputTokens,
+							}
+						}
+						return co.Result.Markdown, visionSpend{}, attrib, true // cross-tenant OCR serve (consented)
 					}
 				}
 			}

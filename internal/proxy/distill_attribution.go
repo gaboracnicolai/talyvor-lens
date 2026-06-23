@@ -29,6 +29,15 @@ import (
 type distillServeFact struct {
 	owner string
 	hash  string
+	// basis (L2/S4 PR2): present (visionModel != "") ONLY for a cross-tenant OCR
+	// serve — the avoided-COGS A's cached OCR transcription saved B, snapshotted at
+	// serve time, plus the provenance (model + token split) that makes the figure
+	// re-derivable. Conversion serves carry no basis (zero values). Recorded
+	// descriptively into distill_royalty_basis; the gated mint is PR3.
+	avoidedCOGSUSD     float64
+	visionModel        string
+	visionInputTokens  int
+	visionOutputTokens int
 }
 
 // distillAttributionSink is the minimal write surface the proxy depends on — one
@@ -36,6 +45,11 @@ type distillServeFact struct {
 // NO credit/earn method (cannot mint by construction).
 type distillAttributionSink interface {
 	RecordDistillServe(ctx context.Context, owner, requester, contentHash string) error
+	// RecordRoyaltyBasis records the avoided-COGS basis for ONE cross-tenant OCR
+	// reuse relationship, once (ON CONFLICT DO NOTHING). It is a descriptive money
+	// FIGURE, NOT a credit/earn method — *distillattrib.Store satisfies it with a
+	// ledger-free INSERT, so this sink still cannot mint by construction.
+	RecordRoyaltyBasis(ctx context.Context, owner, requester, contentHash string, avoidedCOGS float64, visionModel string, inTokens, outTokens int) error
 }
 
 // recordDistillServes writes S1 attribution rows for the consented cross-tenant
@@ -54,16 +68,31 @@ func (p *Proxy) recordDistillServes(ctx context.Context, requester string, loggi
 	if loggingPolicy == workspace.LoggingNone {
 		return // the row records a content hash; honor the no-logging posture
 	}
+	dctx := context.WithoutCancel(ctx)
 	for _, f := range facts {
 		if f.owner == "" {
 			continue // no owner stamp ⇒ nothing to attribute (defensive)
 		}
-		if err := p.distillAttribSink.RecordDistillServe(context.WithoutCancel(ctx), f.owner, requester, f.hash); err != nil {
+		if err := p.distillAttribSink.RecordDistillServe(dctx, f.owner, requester, f.hash); err != nil {
 			slog.Warn("distill attribution: write failed (observational; serve unaffected)",
 				slog.String("owner", f.owner),
 				slog.String("requester", requester),
 				slog.String("err", err.Error()),
 			)
+		}
+		// L2/S4 PR2: a cross-tenant OCR serve (visionModel != "") ALSO records its
+		// avoided-COGS basis, once per relationship (ON CONFLICT DO NOTHING).
+		// Conversion serves carry no basis. Still descriptive — the sink has no
+		// credit/earn method, so this records a figure, never a mint.
+		if f.visionModel != "" {
+			if err := p.distillAttribSink.RecordRoyaltyBasis(dctx, f.owner, requester, f.hash,
+				f.avoidedCOGSUSD, f.visionModel, f.visionInputTokens, f.visionOutputTokens); err != nil {
+				slog.Warn("distill royalty basis: write failed (observational; serve unaffected)",
+					slog.String("owner", f.owner),
+					slog.String("requester", requester),
+					slog.String("err", err.Error()),
+				)
+			}
 		}
 	}
 }

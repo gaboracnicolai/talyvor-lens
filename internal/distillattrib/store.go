@@ -3,10 +3,14 @@
 // pooled-distill serves.
 //
 // STRUCTURAL INERTNESS: this package imports NO ledger and exposes NO
-// credit/earn method. There is exactly one write — RecordDistillServe — and it
-// can only ever touch the distill_serve_attribution table (migration 0052).
-// Attribution is descriptive, never incentivized (WorkTier doctrine); a future
-// royalty is a separate, gated build that this package cannot reach.
+// credit/earn method. Its two writes — RecordDistillServe (the serve_count
+// counter, migration 0052) and RecordRoyaltyBasis (the avoided-COGS FIGURE,
+// migration 0061) — can only ever touch those two descriptive tables. Both are
+// Exec-only on the `execer` surface (no Query/Begin), so neither can read or open
+// a transaction, let alone touch a ledger. Recording a money FIGURE is not
+// minting; attribution/basis are descriptive, never incentivized (WorkTier
+// doctrine), and the gated royalty (L2/S4 PR3) is a separate build — keyed off
+// the deduplicated distill_royalty_basis table — that this package cannot reach.
 package distillattrib
 
 import (
@@ -58,5 +62,32 @@ func (s *Store) RecordDistillServe(ctx context.Context, owner, requester, conten
 		return nil
 	}
 	_, err := s.db.Exec(ctx, upsertSQL, owner, requester, contentHash)
+	return err
+}
+
+// basisInsertSQL records the avoided-COGS BASIS once per cross-tenant OCR reuse
+// relationship (owner, requester, content_hash). ON CONFLICT DO NOTHING PINS the
+// first-captured basis: a re-serve never overwrites it, so the figure PR3 mints
+// against is stable per relationship even if the cached model/cost later changes.
+// A descriptive money FIGURE — still NO ledger, NO mint (this package imports
+// neither; see the structural-inertness note above).
+const basisInsertSQL = `INSERT INTO distill_royalty_basis
+  (owner_workspace_id, requester_workspace_id, content_hash,
+   avoided_cogs_usd, vision_model, vision_input_tokens, vision_output_tokens)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (owner_workspace_id, requester_workspace_id, content_hash) DO NOTHING`
+
+// RecordRoyaltyBasis records the avoided-COGS basis for ONE consented cross-tenant
+// OCR reuse relationship — once (ON CONFLICT DO NOTHING; a re-serve never
+// overwrites the pinned figure). avoidedCOGS MUST be CostUSD(visionModel, inTokens,
+// outTokens), computed at serve time from the cached OCR entry; the model + token
+// split are stored as provenance so the figure is re-derivable. Returns only an
+// error for the caller to log-and-swallow — it NEVER mints or credits (this store
+// has no ledger surface). Nil-safe.
+func (s *Store) RecordRoyaltyBasis(ctx context.Context, owner, requester, contentHash string, avoidedCOGS float64, visionModel string, inTokens, outTokens int) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, basisInsertSQL, owner, requester, contentHash, avoidedCOGS, visionModel, inTokens, outTokens)
 	return err
 }
