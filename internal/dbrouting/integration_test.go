@@ -47,10 +47,19 @@ func appNameOf(t *testing.T, pool *pgxpool.Pool) string {
 // to the REPLICA connection when configured and the PRIMARY when not, observed
 // through a per-pool application_name sentinel on a real query.
 //
-// LIMITATION (same as U7): this proves the ROUTING DECISION, not real
-// replication lag — CI has a single Postgres, no streaming standby. Two pools
-// over one DB stand in for primary+replica. Real lag-threshold behavior is not
-// CI-covered (tracked as a follow-up: needs a streaming standby in CI).
+// SCOPE (not a correctness gap): this proves the ROUTING DECISION in full —
+// analytics→replica when configured, primary when not — via two pools over one
+// Postgres (CI has no streaming standby). Routing is a STATIC config-time choice
+// (ReadPool: replica if present, else primary); lag does NOT gate it. There is no
+// lag-threshold / fallback-to-primary path to test — replay lag is
+// OBSERVABILITY-ONLY (the lens_db_replica_lag_seconds gauge + the /healthz
+// read_replica detail). The one thing a single PG can't exercise is replicaLagSQL's
+// non-zero branch (pg_is_in_recovery()=false here → lag reads 0), i.e. the lag
+// MEASUREMENT under real lag. That is acceptable: a wrong/zero lag reading can only
+// mislabel a metric, never cause a misroute — the replica serves analytics reads
+// only, and money/authz/transaction reads are wired to the primary by construction.
+// So this is a monitoring-fidelity limitation, NOT a correctness gap; a
+// streaming-standby CI is not warranted.
 func TestReadPool_RoutesByConfig_RealPG(t *testing.T) {
 	primary := testPoolWithAppName(t, "u8-primary")
 	replica := testPoolWithAppName(t, "u8-replica")
