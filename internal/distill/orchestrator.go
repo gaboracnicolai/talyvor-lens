@@ -70,7 +70,7 @@ func Orchestrate(ctx context.Context, conv IsolatedConverter, cache Cache, visio
 
 // orchestrateVision runs the OCR fallback with a RESULT CACHE in front of it,
 // keyed on (bytes, OCRVersion, vision model) in a keyspace DISTINCT from the
-// conversion cache (ocrCacheVersion's "ocr:" prefix). A re-submitted scanned
+// conversion cache (OCRCacheVersion's "ocr:" prefix). A re-submitted scanned
 // document reuses the prior OCR instead of re-dispatching the expensive vision
 // model. Correctness is the bar:
 //   - the MODEL is part of the key, so a workspace changing its model re-OCRs and
@@ -90,8 +90,8 @@ func orchestrateVision(ctx context.Context, cache Cache, vision VisionDispatcher
 	// LOOKUP (before dispatch): a hit serves the prior OCR — the dispatcher is NOT
 	// invoked, and no vision cost is booked (CacheHit=true, VisionTokensCost=0).
 	if canCache {
-		if b, err := cache.Get(ctx, hash, ocrCacheVersion(planModel)); err == nil && len(b) > 0 {
-			if co, ok := unmarshalCachedOCR(b); ok {
+		if b, err := cache.Get(ctx, hash, OCRCacheVersion(planModel)); err == nil && len(b) > 0 {
+			if co, ok := UnmarshalCachedOCR(b); ok {
 				return co.Result, ocrHitSavings(input, co), nil
 			}
 			// Corrupt entry → fall through to a fresh OCR.
@@ -107,8 +107,8 @@ func orchestrateVision(ctx context.Context, cache Cache, vision VisionDispatcher
 		if storeModel == "" {
 			storeModel = planModel
 		}
-		if b, err := marshalCachedOCR(vr, vsav); err == nil {
-			_ = cache.Set(ctx, hash, ocrCacheVersion(storeModel), b) // best-effort; never fail the conversion
+		if b, err := MarshalCachedOCR(vr, vsav); err == nil {
+			_ = cache.Set(ctx, hash, OCRCacheVersion(storeModel), b) // best-effort; never fail the conversion
 		}
 	}
 	return vr, vsav, nil
@@ -119,7 +119,7 @@ func orchestrateVision(ctx context.Context, cache Cache, vision VisionDispatcher
 // cost is ZERO (the value of the cache is exactly the avoided re-OCR). The original
 // cost the entry recorded is the AVOIDED cost — kept on the cached value for the S4
 // royalty basis, deliberately NOT re-booked as a spend here.
-func ocrHitSavings(input []byte, co cachedOCR) Savings {
+func ocrHitSavings(input []byte, co CachedOCR) Savings {
 	return Savings{
 		InputTokensRaw:       len(input) / 4,
 		InputTokensDistilled: estTokens(co.Result.Markdown),
