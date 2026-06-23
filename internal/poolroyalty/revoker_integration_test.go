@@ -139,7 +139,7 @@ func TestRevoker_FinalizedNeverRevocable_Integration(t *testing.T) {
 	seedHeldMint(t, m, ctx, "rk-fin", "wsA", 2.0)
 	time.Sleep(5 * time.Millisecond)
 	// finalize it
-	sw := NewFinalizeSweeper(pool, ledger)
+	sw := NewFinalizeSweeper(pool, ledger, "pool_royalty_mints")
 	if n, err := sw.RunOnce(ctx); err != nil || n != 1 {
 		t.Fatalf("finalize: n=%d err=%v", n, err)
 	}
@@ -182,7 +182,7 @@ func TestRevoker_ConcurrentRevokeVsFinalize_Integration(t *testing.T) {
 		seedHeldMint(t, m, ctx, req, fmt.Sprintf("ws-%02d", i), 1.0)
 		time.Sleep(2 * time.Millisecond) // finalize_after passed → both ops are eligible
 
-		sw := NewFinalizeSweeper(pool, ledger)
+		sw := NewFinalizeSweeper(pool, ledger, "pool_royalty_mints")
 		var wg sync.WaitGroup
 		var finN int
 		var revOut RevokeOutcome

@@ -651,7 +651,7 @@ func run() error {
 	// held rows must finalize even if minting is later disabled, or
 	// contributor LENS strands in held forever. With minting off and no held
 	// rows, each sweep is a single cheap indexed SELECT.
-	finalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger)
+	finalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "pool_royalty_mints")
 	// U3: economy worker — gated on the master switch so no held→final settlement
 	// (an economy-state ledger write) runs when the economy is off.
 	if cfg.EconomyEnabled {
@@ -662,6 +662,32 @@ func run() error {
 	if cfg.PoolRoyaltyMintingEnabled {
 		logger.Warn("poolroyalty: Pool-B royalty minting is ENABLED — served cross-tenant pooled hits mint LENS to contributors",
 			slog.Float64("royalty_share", cfg.PoolRoyaltyShare))
+	}
+
+	// L2/S4 PR3: the distill reuse-royalty mint. A flag-gated, leader-elected
+	// sweeper mints s × avoided_cogs_usd to the OCR contributor (owner A), ONCE
+	// per cross-tenant reuse relationship, off the DEDUPLICATED distill_royalty_basis
+	// table (PR2) — claim-then-act exactly-once, reusing the Pool-B held-ledger
+	// kernel (CreditHeldTx → U6 floor on the contributor + per-identity rate cap +
+	// TypePoolRoyaltyHeld). Inert by default: with LENS_POOL_ROYALTY_MINTING_ENABLED
+	// =false the sweeper no-ops BEFORE any DB access, so basis rows accumulate but
+	// nothing mints. The distill finalize sweeper is the SAME kernel parameterized
+	// for the distill claim table; registered UNCONDITIONALLY (EconomyEnabled-gated
+	// start) so held rows settle even if minting is later disabled.
+	distillMinter := poolroyalty.NewDistillMinter(
+		pool, tokenLedger, cfg.PoolRoyaltyShare,
+		func() bool { return cfg.PoolRoyaltyMintingEnabled },
+	)
+	distillMinter.SetOwnerLinkageCheck(true) // U6 PR2 wash guard, like the cache minter
+	distillMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
+	distillFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "distill_royalty_mints")
+	if cfg.EconomyEnabled {
+		go haComps.leader.Run(ctx, "distill-royalty-mint", 30*time.Second, func(lctx context.Context) {
+			distillMinter.StartScheduler(lctx, time.Minute) // RunOnce no-ops while the mint flag is off
+		})
+		go haComps.leader.Run(ctx, "distill-royalty-finalize", 30*time.Second, func(lctx context.Context) {
+			distillFinalizeSweeper.StartScheduler(lctx, time.Minute)
+		})
 	}
 
 	// Compute mining (Batch 2 Item 2). Wires its hook into the

@@ -277,8 +277,8 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	// 2. CONCURRENT DOUBLE-FINALIZE IMPOSSIBLE: two sweepers race the same
 	//    due row; the CAS lets exactly one settle it.
 	time.Sleep(5 * time.Millisecond) // ensure finalize_after has passed
-	s1 := NewFinalizeSweeper(pool, ledger)
-	s2 := NewFinalizeSweeper(pool, ledger)
+	s1 := NewFinalizeSweeper(pool, ledger, "pool_royalty_mints")
+	s2 := NewFinalizeSweeper(pool, ledger, "pool_royalty_mints")
 	type out struct{ n int }
 	ch := make(chan out, 2)
 	for _, sw := range []*FinalizeSweeper{s1, s2} {
