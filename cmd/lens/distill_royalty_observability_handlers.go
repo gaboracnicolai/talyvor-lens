@@ -28,6 +28,12 @@ type distillDetectReader interface {
 	BilateralConcentration(context.Context, time.Duration) ([]poolroyalty.DistillSelfDealingFlag, error)
 }
 
+// distillResolveReader — DistillResolver satisfies it (volume + self_dealing; NO similarity).
+type distillResolveReader interface {
+	ResolveVolume(context.Context, poolroyalty.DistillVolumeFlag, time.Duration) (poolroyalty.ResolutionResult, error)
+	ResolveSelfDealing(context.Context, poolroyalty.DistillSelfDealingFlag, time.Duration) (poolroyalty.ResolutionResult, error)
+}
+
 type distillVolumeFlagDTO struct {
 	ContentHash                 string  `json:"content_hash"`
 	ContributorWorkspace        string  `json:"contributor_workspace"`
@@ -119,6 +125,57 @@ func newDistillRoyaltyMarginHandler(r poolMarginReader) http.HandlerFunc {
 			for _, row := range rows {
 				resp.Breakdown = append(resp.Breakdown, marginByDTO{Key: row.Key, marginSummaryDTO: marginSummaryDTO(row.MarginSummaryRow)})
 			}
+		}
+		writeJSONOK(w, http.StatusOK, resp)
+	}
+}
+
+// newDistillRoyaltyResolveHandler — GET /v1/admin/distill-royalty/resolve?type=…&window=…
+// Reconstructs the minimal distill flag from query params and returns the held
+// candidates. The returned candidates[].request_id ARE the distill adjudicate endpoint's
+// revoke_request_ids input (closing detect → resolve → adjudicate). Mirrors the cache
+// /resolve handler; distill has only two types (volume, self_dealing) — no similarity.
+func newDistillRoyaltyResolveHandler(r distillResolveReader) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		window, ok := parseWindowParam(req)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, "invalid window (Go duration > 0, e.g. 24h)")
+			return
+		}
+		q := req.URL.Query()
+		ctx := req.Context()
+		var res poolroyalty.ResolutionResult
+		var err error
+		switch q.Get("type") {
+		case "volume":
+			res, err = r.ResolveVolume(ctx, poolroyalty.DistillVolumeFlag{
+				ContentHash:          q.Get("content_hash"),
+				ContributorWorkspace: q.Get("contributor"),
+			}, window)
+		case "self_dealing":
+			res, err = r.ResolveSelfDealing(ctx, poolroyalty.DistillSelfDealingFlag{
+				ContributorWorkspace: q.Get("contributor"),
+				RequesterWorkspace:   q.Get("requester"),
+			}, window)
+		default:
+			writeJSONErr(w, http.StatusBadRequest, "type must be one of: volume, self_dealing")
+			return
+		}
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, "resolve failed")
+			return
+		}
+		resp := resolveResponse{Label: string(res.Label), Candidates: make([]candidateDTO, 0, len(res.Candidates))}
+		for _, c := range res.Candidates {
+			resp.Candidates = append(resp.Candidates, candidateDTO{
+				RequestID:            c.RequestID,
+				ContributorWorkspace: c.ContributorWorkspace,
+				MintedAmount:         c.MintedAmount,
+				Status:               c.Status,
+				Similarity:           c.Similarity,
+				TimeLeftSeconds:      c.TimeLeft.Seconds(),
+				PastWindow:           c.PastWindow,
+			})
 		}
 		writeJSONOK(w, http.StatusOK, resp)
 	}

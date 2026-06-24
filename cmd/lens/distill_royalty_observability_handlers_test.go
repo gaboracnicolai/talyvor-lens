@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -50,6 +51,7 @@ func distillObsHarness(t *testing.T) *pgxpool.Pool {
 type distillMintSeed struct {
 	req, contrib, requester, content, status string
 	avoided, minted                          float64
+	finalizeAfter                            *time.Time // resolver requires finalize_after IS NOT NULL on held rows
 }
 
 func (m distillMintSeed) insert(t *testing.T, pool *pgxpool.Pool) {
@@ -60,9 +62,9 @@ func (m distillMintSeed) insert(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO distill_royalty_mints
-		   (request_id, contributor_workspace_id, requester_workspace_id, content_hash, avoided_cogs_usd, minted_amount, status)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		m.req, m.contrib, m.requester, m.content, m.avoided, m.minted, status); err != nil {
+		   (request_id, contributor_workspace_id, requester_workspace_id, content_hash, avoided_cogs_usd, minted_amount, status, finalize_after)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		m.req, m.contrib, m.requester, m.content, m.avoided, m.minted, status, m.finalizeAfter); err != nil {
 		t.Fatalf("seed %s: %v", m.req, err)
 	}
 }
@@ -172,7 +174,55 @@ func TestDistillRoyaltyMargin_Integration(t *testing.T) {
 	}
 }
 
-// ADVERSARIAL ADMIN-GATE — both distill endpoints × {non-admin, unauthenticated} → 401
+// /resolve — held swarm/pair → candidates + the right label; the returned request_ids are
+// the distill adjudicate revoke_request_ids input; type=similarity AND bad type → 400.
+func TestDistillRoyaltyResolve_Integration(t *testing.T) {
+	pool := distillObsHarness(t)
+	h := newDistillRoyaltyResolveHandler(poolroyalty.NewDistillResolver(pool))
+	future := time.Now().Add(time.Hour)
+
+	distillMintSeed{req: "hs1", contrib: "wsA", requester: "r1", content: "hot", status: "held", finalizeAfter: &future}.insert(t, pool)
+	distillMintSeed{req: "hs2", contrib: "wsA", requester: "r2", content: "hot", status: "held", finalizeAfter: &future}.insert(t, pool)
+	distillMintSeed{req: "hp1", contrib: "wsC", requester: "wsD", content: "c1", status: "held", finalizeAfter: &future}.insert(t, pool)
+
+	var vr resolveResponse
+	if code := callJSON(t, h, "/v1/admin/distill-royalty/resolve?type=volume&content_hash=hot&contributor=wsA&window=24h", &vr); code != http.StatusOK {
+		t.Fatalf("volume resolve: code %d", code)
+	}
+	if vr.Label != "content_swarm" {
+		t.Errorf("volume label=%q want content_swarm", vr.Label)
+	}
+	if len(vr.Candidates) != 2 {
+		t.Errorf("volume: %d candidates want 2", len(vr.Candidates))
+	}
+	for _, c := range vr.Candidates {
+		if c.RequestID == "" {
+			t.Error("candidate request_id empty — would break the adjudicate revoke_request_ids input")
+		}
+		if c.Status != "held" {
+			t.Errorf("candidate status=%q want held (adjudicate-ready)", c.Status)
+		}
+	}
+
+	var sr resolveResponse
+	callJSON(t, h, "/v1/admin/distill-royalty/resolve?type=self_dealing&contributor=wsC&requester=wsD&window=24h", &sr)
+	if sr.Label != "pair_coarse" {
+		t.Errorf("self_dealing label=%q want pair_coarse", sr.Label)
+	}
+	if len(sr.Candidates) != 1 {
+		t.Errorf("self_dealing: %d candidates want 1", len(sr.Candidates))
+	}
+
+	// distill has NO similarity resolve type → 400; any other bad type → 400.
+	if code := callJSON(t, h, "/v1/admin/distill-royalty/resolve?type=similarity", nil); code != http.StatusBadRequest {
+		t.Errorf("type=similarity: code %d want 400 (distill has no similarity)", code)
+	}
+	if code := callJSON(t, h, "/v1/admin/distill-royalty/resolve?type=bogus", nil); code != http.StatusBadRequest {
+		t.Errorf("bad type: code %d want 400", code)
+	}
+}
+
+// ADVERSARIAL ADMIN-GATE — all distill endpoints × {non-admin, unauthenticated} → 401
 // with NO data leaked.
 func TestDistillRoyaltyObs_AdminGate(t *testing.T) {
 	pool := distillObsHarness(t)
@@ -183,9 +233,10 @@ func TestDistillRoyaltyObs_AdminGate(t *testing.T) {
 		h            http.HandlerFunc
 	}{
 		{"detect", "/v1/admin/distill-royalty/detect", newDistillRoyaltyDetectHandler(poolroyalty.NewDistillDetectorReader(pool, testDetectorThresholds()))},
+		{"resolve", "/v1/admin/distill-royalty/resolve?type=volume", newDistillRoyaltyResolveHandler(poolroyalty.NewDistillResolver(pool))},
 		{"margin", "/v1/admin/distill-royalty/margin", newDistillRoyaltyMarginHandler(poolroyalty.NewDistillMarginReader(pool))},
 	}
-	dataKeys := []string{"volume", "bilateral", "summary", "margin_usd", "avoided_cogs_usd", "minted_lens", "content_hash"}
+	dataKeys := []string{"volume", "bilateral", "summary", "margin_usd", "avoided_cogs_usd", "minted_lens", "content_hash", "candidates", "request_id", "minted_amount"}
 	rejecters := []struct {
 		name string
 		a    fakeAuthenticator
