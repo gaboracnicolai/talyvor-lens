@@ -1331,7 +1331,9 @@ func run() error {
 		// sweeper are untouched.
 		distillRoyaltyDetector := poolroyalty.NewDistillDetectorReader(pool, thresholdsFromConfig(cfg))
 		distillRoyaltyMargin := poolroyalty.NewDistillMarginReader(pool)
+		distillRoyaltyResolver := poolroyalty.NewDistillResolver(pool)
 		authed.Get("/v1/admin/distill-royalty/detect", requireAdmin(authManager, http.HandlerFunc(newDistillRoyaltyDetectHandler(distillRoyaltyDetector))))
+		authed.Get("/v1/admin/distill-royalty/resolve", requireAdmin(authManager, http.HandlerFunc(newDistillRoyaltyResolveHandler(distillRoyaltyResolver))))
 		authed.Get("/v1/admin/distill-royalty/margin", requireAdmin(authManager, http.HandlerFunc(newDistillRoyaltyMarginHandler(distillRoyaltyMargin))))
 
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
