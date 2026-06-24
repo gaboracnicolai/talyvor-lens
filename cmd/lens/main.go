@@ -1324,6 +1324,16 @@ func run() error {
 		authed.Get("/v1/admin/pool-royalty/resolve", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyResolveHandler(poolRoyaltyResolver))))
 		authed.Get("/v1/admin/pool-royalty/margin", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyMarginHandler(poolRoyaltyMargin))))
 
+		// Distill royalty OBSERVABILITY — the distill mirror of the Pool-B block above,
+		// over distill_royalty_mints / distill_royalty_margin. Same read-only admin-gated
+		// (NOT economy-gated) shape; NO similarity detector + NO resolver (distill has
+		// neither, by design). Read-only seams; the distill adjudicate/clawback path + any
+		// sweeper are untouched.
+		distillRoyaltyDetector := poolroyalty.NewDistillDetectorReader(pool, thresholdsFromConfig(cfg))
+		distillRoyaltyMargin := poolroyalty.NewDistillMarginReader(pool)
+		authed.Get("/v1/admin/distill-royalty/detect", requireAdmin(authManager, http.HandlerFunc(newDistillRoyaltyDetectHandler(distillRoyaltyDetector))))
+		authed.Get("/v1/admin/distill-royalty/margin", requireAdmin(authManager, http.HandlerFunc(newDistillRoyaltyMarginHandler(distillRoyaltyMargin))))
+
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
 			if authManager.PrivateKey() == nil {
 				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not available")
