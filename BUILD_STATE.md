@@ -2,7 +2,8 @@
 
 **Single source of truth for "what is built," derived from the actual code at the SHA below — never from the roadmap, notes, or assumptions.** Regenerated (never hand-edited) whenever it goes stale.
 
-- **Derived from main:** `2048919`
+- **Derived from main:** `11aabe8`
+- **Latest migration:** `0065_royalty_detector_findings.sql`
 - **Config:** all `config.go:LINE` citations are `internal/config/config.go`.
 - **Method:** every cell was grep'd / read from code. Where code and a note/roadmap disagree, **the code wins** — see [§C Discrepancies](#c-discrepancies-code-wins).
 
@@ -49,11 +50,13 @@ Mint components gate on `LENS_POOL_ROYALTY_MINTING_ENABLED` **false** (config.go
 | 4 | Volume detector | BUILT-&-ON (read-only) | `detector.go:163` | 0043 | yes (`detector_integration_test.go`) | — |
 | 5 | Bilateral detector | BUILT-&-ON (read-only) | `detector.go:206` | 0043 | yes | — |
 | 6 | Similarity detector | BUILT-&-ON (read-only) | `detector.go:245` | 0042 embeddings | yes | — |
-| 7 | Margin view | BUILT-&-ON (read-only) | `margin.go:75` → view `pool_royalty_margin` | 0044 (status appended 0046) | **no** (unit only) | — |
+| 7 | Margin view | BUILT-&-ON (read-only; **wired** §A11) | `margin.go:75` → view `pool_royalty_margin` | 0044 (status appended 0046) | yes (handler #227) | 1024f15 |
 | 8 | Adjudication | BUILT-INERT | `adjudication.go` `Adjudicate` | 0048 `pool_royalty_adjudications` | yes (`adjudication_integration_test.go`) | c859226 |
 | 9 | Revoker (CAS held→revoked) | BUILT-INERT | `revoker.go:121` | 0046 holdback/status | yes (`revoker_integration_test.go`) | c859226 |
 | 10 | Resolver (flag→candidates) | BUILT-&-ON (read-only) | `resolver.go:146/158/172` | 0043 | yes (`resolver_integration_test.go`) | — |
 | 11 | Finalize sweeper | **BUILT-&-ON (NOT gated)** | `sweeper.go:117` (`StartScheduler:206`) — ungated so held LENS can't strand | 0046 | yes (indirect) | 302dc48 |
+
+> The cache **detect / resolve / margin** readers (rows 4–7, 10) are now **wired** — on-demand admin endpoints (#227 `1024f15`) + the automatic leader-elected sweep (#230 `11aabe8`). See **§A11**.
 
 ### A3 · Distill reuse-royalty — `internal/poolroyalty/distill_*` + `internal/proxy/distill_integration.go`
 | Component | Status | Gating flag + default | file:line | Migration | real-PG | Last SHA |
@@ -62,11 +65,12 @@ Mint components gate on `LENS_POOL_ROYALTY_MINTING_ENABLED` **false** (config.go
 | PR2 avoided-COGS basis | BUILT-&-ON (descriptive, **no mint**) | none (writes once a consented serve occurs) | `internal/distillattrib/store.go:87` | 0061 `distill_royalty_basis` | yes (`basis_test.go`) | 025c3fc |
 | PR3 gated mint `DistillMinter` | BUILT-INERT | `LENS_POOL_ROYALTY_MINTING_ENABLED` **false** (config.go:624) | `distill_minter.go` (wired `main.go:677`) | 0062 `distill_royalty_mints` (request_id UNIQUE) | yes (`distill_minter_integration_test.go`) | 8b26091 |
 | **caps** (per-pair / per-content) | BUILT-&-ON (deflationary; **0/0 = off**) | `LENS_DISTILL_MINT_CAP_PER_PAIR`/`_PER_CONTENT` **0** (config.go:828), window **24h** (config.go:844) | `distill_minter.go` `SetCap`/`SetContentCap` (wired `main.go:684-685`) | (over 0062) | yes (`distill_caps_integration_test.go`) | 8b26091 |
-| **detector** (volume+bilateral, observe-only) | BUILT-INERT (read-only, **no production wiring**) | none (read-only; thresholds `Detect*`) | `distill_detector.go:83` — **NO similarity** (deliberate, header :24-29) | (reads 0062) | yes (`distill_detector_integration_test.go`) | b3e40e1 |
+| **detector** (volume+bilateral, observe-only) | BUILT-&-ON (read-only; **wired** §A11) | none (read-only; thresholds `Detect*`) | `distill_detector.go:83` — **NO similarity** (deliberate, header :24-29); `GET /v1/admin/distill-royalty/detect` (#228) + the sweep (#230) | (reads 0062) | yes (`distill_detector_integration_test.go`) | b3e40e1 |
+| **resolver** (volume→`content_swarm`, self_dealing→`pair_coarse`) | BUILT-&-ON (read-only; held-only) | none | `distill_resolver.go:68` `NewDistillResolver` (no similarity); `GET /v1/admin/distill-royalty/resolve` `main.go:1354` | (reads 0062) | yes (`distill_resolver_integration_test.go`) | 5bbc81d (#229) |
 | **revoke / adjudication** | BUILT-&-ON (endpoint live; doubly-inert) | admin auth + held rows (need the mint flag) | `revoker.go` `NewRevokerForTable`; `adjudication.go` `NewAdjudicationWriterForTable`; route `POST /v1/admin/distill-royalty/adjudicate` `main.go:1310` | 0063 `distill_royalty_adjudications` | yes (`distill_revoke_integration_test.go`) | c859226 |
-| **margin view** | BUILT-INERT (read-only, **no production wiring**) | none | `distill_margin.go:21` `DistillMarginReader` | 0064 `distill_royalty_margin` view | yes (`distill_margin_integration_test.go`) | 2048919 |
+| **margin view** | BUILT-&-ON (read-only; **wired** §A11) | none | `distill_margin.go:21` `DistillMarginReader`; `GET /v1/admin/distill-royalty/margin` `main.go:1355` | 0064 `distill_royalty_margin` view | yes (`distill_margin_integration_test.go`) | 2048919 |
 
-> Distill now has **parity** with the cache royalty's anti-gaming set, with two honest data-model deviations: **no similarity detector** (distill OCR is exact-`content_hash`; no similarity distribution to analyze) and the volume detector is reframed as a **sock-puppet-swarm** signal (once-per-relationship ⇒ `mints == distinct requesters`). Detector + margin readers are **built + tested but not yet constructed in `cmd/`** (read surfaces, like the cache detector).
+> Distill now has **full parity** with the cache royalty's anti-gaming + observability set — detector, **resolver**, margin, revoke/adjudication, all **wired** (admin endpoints #228/#229 + the automatic sweep #230; see §A11). Two honest data-model deviations remain: **no similarity detector/resolver** (distill OCR is exact-`content_hash`; no similarity distribution) and the volume detector/resolver are reframed as the **sock-puppet-swarm** signal (once-per-relationship ⇒ `mints == distinct requesters`).
 
 ### A4 · Pattern economy — `internal/mining/pattern_mining.go` + `internal/proxy/pattern_*`
 | Component | Status | Gating flag + default | file:line | Migration | real-PG | Last SHA |
@@ -109,6 +113,20 @@ Mint components gate on `LENS_POOL_ROYALTY_MINTING_ENABLED` **false** (config.go
 ### A10 · Closed-test trial config — **BUILT-&-ON** (committed)
 `docker-compose.trial.yaml` turns the economy on for a closed internal test (internal valueless ledger, Stripe **test mode**, reversible). Flags set `true`: `LENS_PATTERN_MINING/CAPTURE/EARNING_ENABLED`, `LENS_CACHE_POOLABLE_ENABLED`, `LENS_POOL_ROYALTY_MINTING_ENABLED`, `LENS_POVI_MINTING_ENABLED`, `LENS_WORKTIER_ENABLED`, `LENS_GUARDRAILS_ENABLED`, `LENS_QUALITY_AUTO_RETRY`, `LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN`; tunables `LENS_POOL_HOLDBACK_WINDOW=30s`, `LENS_PATTERN_EARN_CAP_PER_WORKSPACE=3`. Overlay `docker-compose.trial-distill.yaml` adds `LENS_DISTILL_POOLABLE_ENABLED=true`. `LENS_ECONOMY_ENABLED` left unset → default true; `LENS_BILLING_ENABLED` unset → test mode. Bring-up: `docs/closed-test-economy.md`.
 
+### A11 · Royalty observability — admin-gated read surfaces + the automatic sweep
+Read-only forensics over both economies. **Admin-gated (`requireAdmin` → 401) but NOT economy-gated** — registered on `authed.Get` (not `econ.get`), so they survive the `LENS_ECONOMY_ENABLED` kill-switch (forensics during an incident — the economy is likeliest off then). The **mutation** endpoints (adjudicate) stay economy-gated. All reader seams are Query/QueryRow-only (type-level no-write). The adversarial admin-gate (non-admin + unauthenticated → 401, no data leaked) is real-PG tested on every endpoint.
+
+| Surface | Status | Endpoint / wiring (file:line) | Reader | real-PG | Last SHA |
+|---|---|---|---|---|---|
+| Cache detect/resolve/margin | BUILT-&-ON | `GET /v1/admin/pool-royalty/{detect,resolve,margin}` (`main.go:1341-1343`) | `cmd/lens/pool_royalty_observability_handlers.go` over `detector.go`/`resolver.go`/`margin.go` | yes (`..._test.go` + admin-gate) | #227 `1024f15` |
+| Distill detect/margin | BUILT-&-ON | `GET /v1/admin/distill-royalty/{detect,margin}` (`main.go:1353,1355`) | `cmd/lens/distill_royalty_observability_handlers.go` | yes | #228 `fc2eca8` |
+| Distill resolve | BUILT-&-ON | `GET /v1/admin/distill-royalty/resolve` (`main.go:1354`) | `distill_resolver.go` `DistillResolver` (volume→`content_swarm`, self_dealing→`pair_coarse`; no similarity; held-only) | yes (`distill_resolver_integration_test.go`) | #229 `5bbc81d` |
+| **Detector SWEEP** (the smoke detector) | **BUILT-&-ON** (economy-gated) | leader-elected `"royalty-detector-sweep"` ttl 30s (`main.go:707`); runs iff `EconomyEnabled && DetectorSweepEnabled` (`main.go:708`) | `detector_sweep.go` `DetectorSweep` + `findings_writer.go` (append-only `INSERT … ON CONFLICT (identity_key) DO NOTHING`) | yes (`detector_sweep_integration_test.go`) | #230 `11aabe8` |
+
+- **Findings sink:** migration **0065** `royalty_detector_findings` (append-only; `UNIQUE(identity_key)` dedups across sweeps). Metrics gauge `RoyaltyDetectorFlagged{economy,detector}` (`metrics.go:163`, `SetRoyaltyDetectorFlagged:439`; alert on > 0).
+- **Never-auto-act (structural):** `DetectorSweep` holds only the read-only detectors + a `Record`-only sink; `detector_sweep.go` imports no ledger and references no mutation primitive in code — pinned by `TestDetectorSweep_NeverActs_ImportGuard` (AST identifiers, comments excluded) **and** a money-safety test (mint tables byte-identical after a sweep over gaming rows).
+- **Single-leader / no double-emit:** `haComps.leader.Run` (Redis lease when HA on; runs `fn` directly single-instance) — `internal/ha/leader_test.go` `TestLeader_FnRunsOnlyOnce`.
+
 ---
 
 ## §B — Every economy flag: default + what flipping it does
@@ -145,11 +163,18 @@ All booleans below are `parseBoolEnv` (**false** when unset) unless noted, and a
 | `LENS_DISTILL_MINT_CAP_WINDOW` | **24h** | :844 | Distill cap rolling window. |
 | `LENS_POVI_MIN_STAKE` | **100.0** | :779 | Min LENS a node stakes to be mint-eligible. |
 
+### Detector-sweep knobs (observability — gated by `EconomyEnabled` at the wiring, NOT in the force-off block)
+| Env | Default | config.go | Flipping / setting does… |
+|---|---|---|---|
+| `LENS_DETECTOR_SWEEP_ENABLED` | **TRUE** | :327 (set :951) | The scheduled cache+distill detector sweep. Net gate = `EconomyEnabled && DetectorSweepEnabled`. **Default-true** so the smoke detector accompanies minting automatically; setting it **false** is the manual off-switch. |
+| `LENS_DETECTOR_SWEEP_INTERVAL` | **1h** | :328 (set :955) | Sweep cadence (the inner `StartScheduler` tick; lease ttl stays 30s). |
+| `LENS_DETECTOR_SWEEP_WINDOW` | **24h** | :329 (set :963) | The rolling detection window the sweep passes to the detectors. |
+
 ---
 
 ## §C — Discrepancies (code wins)
 
 1. **Stale "no production caller until S4" comments.** `internal/mining/pattern_mining.go:211-212` and `cmd/lens/main.go:790-791` claim the pattern earn path has no production caller. **Code contradicts this:** `SetPatternEarn` is wired (`main.go:849`) and the serve path calls `earnPattern → RecordPattern` (`proxy.go:1331`). Accurate state: the earn path is **gated-inert** behind `LENS_PATTERN_EARNING_ENABLED` (default off), **not** caller-absent.
 2. **Stale config.go line citations in docs/compose.** `docs/closed-test-economy.md` and the trial-compose comments cite older line numbers (from SHA `ac6dc82`, e.g. 613/611/845/1094). The **current** lines are those in this manifest (e.g. mint flag :624, PoVI :622, holdback :881, economy :1130). The flag **names + defaults** are unchanged; only the line numbers drifted.
-3. **Distill detector + margin reader are not yet wired into `cmd/`.** Both are built + real-PG-tested but have no production constructor (read surfaces, mirroring the cache detector which is also test-only today). Not a defect — noted so "BUILT" is not read as "exposed via an endpoint."
+3. **RESOLVED (was: "the detectors are not wired into `cmd/`").** The cache + distill `detect`/`resolve`/`margin` readers are now wired BOTH as on-demand admin endpoints (#227 `1024f15` cache, #228 `fc2eca8` + #229 `5bbc81d` distill) AND an automatic leader-elected sweep that records flagged findings (#230 `11aabe8`) — see **§A11**. The prior "exists-but-not-wired" gap is closed; the distill resolver (the one missing parity piece) was built in #229.
 4. **node-earning is PARTIAL, not "no substrate."** The `cmd/node` daemon + PoVI receipt→mint path exist and are wired; what's missing is a **running node** for the verifier↔prover round-trip — runtime substrate, not code.
