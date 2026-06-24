@@ -157,6 +157,14 @@ var (
 		[]string{"scope"},
 	)
 
+	// RoyaltyDetectorFlagged is the count of flagged findings from the most recent
+	// detector sweep, by economy (cache|distill) and detector (volume|bilateral|similarity).
+	// Alert on > 0. Observe-only — the sweep never resolves/adjudicates.
+	RoyaltyDetectorFlagged = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "lens_royalty_detector_flagged", Help: "Flagged findings from the most recent royalty detector sweep, by economy and detector."},
+		[]string{"economy", "detector"},
+	)
+
 	// ─── executive ROI reporting (Upgrade 24) ───
 	// Bounded label: period (monthly/weekly/total). No workspace/unit labels.
 	ROIReportsGeneratedTotal = prometheus.NewCounterVec(
@@ -329,7 +337,7 @@ func init() {
 		BudgetSpentUSD, BudgetUtilizationRatio,
 		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
 		ForecastProjectedUSD, ForecastWillExceedTotal,
-		AnomaliesDetectedTotal, AnomalyMaxFactor,
+		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged,
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal, RoutingTierGatedTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
@@ -424,6 +432,12 @@ func AnomalyDetected(scope, severity string) {
 }
 func SetAnomalyMaxFactor(scope string, v float64) {
 	AnomalyMaxFactor.WithLabelValues(scope).Set(v)
+}
+
+// SetRoyaltyDetectorFlagged sets the flagged-finding count for one (economy, detector)
+// after a sweep — including 0, so the gauge reflects the current picture.
+func SetRoyaltyDetectorFlagged(economy, detector string, n float64) {
+	RoyaltyDetectorFlagged.WithLabelValues(economy, detector).Set(n)
 }
 
 // ─── ROI reporting helpers ───

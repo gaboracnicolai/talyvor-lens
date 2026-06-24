@@ -319,6 +319,15 @@ type Config struct {
 	DetectSimilarityMinSample int     // LENS_DETECT_SIMILARITY_MIN_SAMPLE (default 30, >=1)
 	DetectSimilarityMaxStddev float64 // LENS_DETECT_SIMILARITY_MAX_STDDEV (default 0.02, >=0)
 
+	// DetectorSweep* gate the scheduled "smoke detector" — the leader-elected sweep that
+	// runs the cache+distill detectors on a cadence and records flagged findings. It runs
+	// iff EconomyEnabled AND DetectorSweepEnabled. DetectorSweepEnabled defaults TRUE so
+	// detection accompanies minting automatically (the EconomyEnabled gate already makes
+	// it free when idle — no mints, nothing to scan); the flag is only a manual off-switch.
+	DetectorSweepEnabled  bool          // LENS_DETECTOR_SWEEP_ENABLED (default TRUE)
+	DetectorSweepInterval time.Duration // LENS_DETECTOR_SWEEP_INTERVAL (default 1h)
+	DetectorSweepWindow   time.Duration // LENS_DETECTOR_SWEEP_WINDOW (default 24h)
+
 	// PoolRoyaltyShare is s, the contributor's share of avoided_COGS
 	// (Stage 2.1). Env: LENS_POOL_ROYALTY_SHARE. Default 0.5. Must be in
 	// [0,1] so Talyvor's net (1−s) × avoided_COGS stays ≥ 0 (the
@@ -935,6 +944,29 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_DETECT_SIMILARITY_MAX_STDDEV (must be >= 0): %s", v)
 		}
 		c.DetectSimilarityMaxStddev = f
+	}
+
+	// Detector sweep — DEFAULT-TRUE (the smoke detector accompanies minting automatically);
+	// runs iff EconomyEnabled too (wired in main.go). The flag is a manual off-switch only.
+	c.DetectorSweepEnabled = true
+	if os.Getenv("LENS_DETECTOR_SWEEP_ENABLED") != "" {
+		c.DetectorSweepEnabled = parseBoolEnv("LENS_DETECTOR_SWEEP_ENABLED")
+	}
+	c.DetectorSweepInterval = time.Hour
+	if v := os.Getenv("LENS_DETECTOR_SWEEP_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_DETECTOR_SWEEP_INTERVAL (Go duration > 0, e.g. 1h): %s", v)
+		}
+		c.DetectorSweepInterval = d
+	}
+	c.DetectorSweepWindow = 24 * time.Hour
+	if v := os.Getenv("LENS_DETECTOR_SWEEP_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_DETECTOR_SWEEP_WINDOW (Go duration > 0, e.g. 24h): %s", v)
+		}
+		c.DetectorSweepWindow = d
 	}
 	c.PoolRoyaltyShare = 0.5
 	if v := os.Getenv("LENS_POOL_ROYALTY_SHARE"); v != "" {

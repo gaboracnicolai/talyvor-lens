@@ -665,6 +665,41 @@ func TestLoad_DetectorThresholdDefaults(t *testing.T) {
 	}
 }
 
+func TestLoad_DetectorSweepDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// The smoke detector defaults ON (accompanies minting automatically) with a 1h cadence
+	// over a 24h window. (It still only runs when EconomyEnabled — gated in main.go.)
+	if !c.DetectorSweepEnabled {
+		t.Error("DetectorSweepEnabled must default TRUE")
+	}
+	if c.DetectorSweepInterval != time.Hour {
+		t.Errorf("DetectorSweepInterval=%v, want 1h", c.DetectorSweepInterval)
+	}
+	if c.DetectorSweepWindow != 24*time.Hour {
+		t.Errorf("DetectorSweepWindow=%v, want 24h", c.DetectorSweepWindow)
+	}
+}
+
+func TestLoad_DetectorSweepDisableOverride(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_DETECTOR_SWEEP_ENABLED", "false")
+	t.Setenv("LENS_DETECTOR_SWEEP_INTERVAL", "30m")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DetectorSweepEnabled {
+		t.Error("LENS_DETECTOR_SWEEP_ENABLED=false must disable the sweep")
+	}
+	if c.DetectorSweepInterval != 30*time.Minute {
+		t.Errorf("DetectorSweepInterval=%v, want 30m", c.DetectorSweepInterval)
+	}
+}
+
 func TestLoad_DetectorThresholdParsing(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("LENS_DETECT_VOLUME_MIN_MINTS", "100")

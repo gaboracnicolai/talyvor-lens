@@ -691,6 +691,24 @@ func run() error {
 		go haComps.leader.Run(ctx, "distill-royalty-finalize", 30*time.Second, func(lctx context.Context) {
 			distillFinalizeSweeper.StartScheduler(lctx, time.Minute)
 		})
+
+		// The "smoke detector" — the scheduled cache+distill fraud-detector sweep. Mirrors
+		// the finalize sweeper's leader.Run start. Economy-gated by this enclosing block (no
+		// mints → nothing to scan); DetectorSweepEnabled defaults TRUE so detection accompanies
+		// minting automatically (a manual off-switch only). READ-ONLY: it reads the mint tables
+		// + records append-only findings + sets a gauge — it NEVER resolves/adjudicates or
+		// touches a mint/balance/held row (the never-auto-act invariant; see detector_sweep.go).
+		detectorSweep := poolroyalty.NewDetectorSweep(
+			poolroyalty.NewDetectorReader(pool, thresholdsFromConfig(cfg)),
+			poolroyalty.NewDistillDetectorReader(pool, thresholdsFromConfig(cfg)),
+			poolroyalty.NewFindingsWriter(pool),
+			cfg.DetectorSweepWindow,
+		)
+		go haComps.leader.Run(ctx, "royalty-detector-sweep", 30*time.Second, func(lctx context.Context) {
+			if cfg.DetectorSweepEnabled {
+				detectorSweep.StartScheduler(lctx, cfg.DetectorSweepInterval)
+			}
+		})
 	}
 
 	// Compute mining (Batch 2 Item 2). Wires its hook into the
