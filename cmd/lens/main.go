@@ -800,6 +800,18 @@ func run() error {
 	// earn per validated annotation.
 	annotationMiner := mining.NewAnnotationMiner(tokenLedger, pool)
 
+	// Annotation reputation RESOLUTION — the scheduled producer that scores resolved
+	// (TTL-expired) tasks into the append-only reputation_events log from the FINAL consensus.
+	// Economy-gated + leader-elected, mirroring the detector sweep. Reputation is
+	// MONEY-DECOUPLED: it is computed/gated/displayed but NEVER enters the earning path
+	// (annotation_mining.go SubmitAnnotation stays base + bonus) — pinned by an AST guard.
+	reputationStore := mining.NewReputationStore(pool)
+	if cfg.EconomyEnabled {
+		go haComps.leader.Run(ctx, "annotation-reputation-resolution", 30*time.Second, func(lctx context.Context) {
+			reputationStore.StartScheduler(lctx, time.Hour)
+		})
+	}
+
 	// Pattern mining (Batch 2 Item 5). The deployment-level
 	// PatternMiningEnabled flag ANDs with the per-workspace
 	// opt-in before earnings fire (RecordPattern's optedIn arg).

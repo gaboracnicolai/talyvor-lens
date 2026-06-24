@@ -165,6 +165,14 @@ var (
 		[]string{"economy", "detector"},
 	)
 
+	// AnnotationReputationEvents counts reputation_events appended, by kind
+	// (agreement_outcome|decay|admin_reset) — so reputation movement is observable
+	// (collusion-visibility). Reputation is money-decoupled; this is observe-only.
+	AnnotationReputationEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_annotation_reputation_events_total", Help: "Annotation reputation events appended, by kind."},
+		[]string{"kind"},
+	)
+
 	// ─── executive ROI reporting (Upgrade 24) ───
 	// Bounded label: period (monthly/weekly/total). No workspace/unit labels.
 	ROIReportsGeneratedTotal = prometheus.NewCounterVec(
@@ -337,7 +345,7 @@ func init() {
 		BudgetSpentUSD, BudgetUtilizationRatio,
 		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
 		ForecastProjectedUSD, ForecastWillExceedTotal,
-		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged,
+		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged, AnnotationReputationEvents,
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal, RoutingTierGatedTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
@@ -438,6 +446,11 @@ func SetAnomalyMaxFactor(scope string, v float64) {
 // after a sweep — including 0, so the gauge reflects the current picture.
 func SetRoyaltyDetectorFlagged(economy, detector string, n float64) {
 	RoyaltyDetectorFlagged.WithLabelValues(economy, detector).Set(n)
+}
+
+// IncAnnotationReputationEvent counts one appended reputation event of the given kind.
+func IncAnnotationReputationEvent(kind string) {
+	AnnotationReputationEvents.WithLabelValues(kind).Inc()
 }
 
 // ─── ROI reporting helpers ───

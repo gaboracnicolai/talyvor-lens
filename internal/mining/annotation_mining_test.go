@@ -356,6 +356,10 @@ func TestGetAnnotatorStats_ReturnsTotals(t *testing.T) {
 	mock.ExpectQuery("WITH mine AS").
 		WithArgs("ws_stats").
 		WillReturnRows(pgxmock.NewRows([]string{"avg"}).AddRow(0.82))
+	// Reputation — the real computed score (baseline 0.5 + SUM(delta)). 0.3 → 0.8.
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(delta\\), 0\\) FROM reputation_events").
+		WithArgs("ws_stats").
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(0.3))
 	stats, err := miner.GetAnnotatorStats(context.Background(), "ws_stats")
 	if err != nil {
 		t.Fatalf("GetAnnotatorStats: %v", err)
@@ -365,6 +369,9 @@ func TestGetAnnotatorStats_ReturnsTotals(t *testing.T) {
 	}
 	if stats.Agreement < 0.81 || stats.Agreement > 0.83 {
 		t.Fatalf("expected agreement ~0.82, got %f", stats.Agreement)
+	}
+	if stats.Reputation < 0.79 || stats.Reputation > 0.81 {
+		t.Fatalf("expected reputation ~0.8 (real computed, not hardcoded 1.0), got %f", stats.Reputation)
 	}
 }
 
