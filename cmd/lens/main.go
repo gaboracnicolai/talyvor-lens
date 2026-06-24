@@ -1354,6 +1354,13 @@ func run() error {
 		authed.Get("/v1/admin/pool-royalty/resolve", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyResolveHandler(poolRoyaltyResolver))))
 		authed.Get("/v1/admin/pool-royalty/margin", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyMarginHandler(poolRoyaltyMargin))))
 
+		// Annotation reputation ADMIN RE-ENTRY (PR2) — un-bench a sub-floor annotator by appending
+		// an admin_reset event (append-only; restores to baseline). Admin-gated (requireAdmin →
+		// 401), NOT economy-gated (an operator action, like the observability reads). MONEY-DECOUPLED:
+		// it moves a reputation score, never the ledger. reputationStore is the same one the
+		// resolution job uses.
+		authed.Post("/v1/admin/annotation-reputation/reset", requireAdmin(authManager, http.HandlerFunc(newReputationResetHandler(authManager, reputationStore))))
+
 		// Distill royalty OBSERVABILITY — the distill mirror of the Pool-B block above,
 		// over distill_royalty_mints / distill_royalty_margin. Same read-only admin-gated
 		// (NOT economy-gated) shape; NO similarity detector + NO resolver (distill has
