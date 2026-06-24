@@ -201,6 +201,7 @@ func (m *AnnotationMiner) CreateTask(
 // GetPendingTask returns the oldest un-expired task that:
 //   - was not created by `annotatorWorkspace`, and
 //   - hasn't been annotated by `annotatorWorkspace` yet.
+//
 // Returns (nil, nil) when there's nothing for them to do.
 func (m *AnnotationMiner) GetPendingTask(ctx context.Context, annotatorWorkspace string) (*AnnotationTask, error) {
 	if m.pool == nil {
@@ -586,7 +587,7 @@ func (m *AnnotationMiner) Unstake(ctx context.Context, workspaceID string) error
 
 // GetAnnotatorStats summarises the annotator's track record.
 func (m *AnnotationMiner) GetAnnotatorStats(ctx context.Context, workspaceID string) (*AnnotatorStats, error) {
-	stats := &AnnotatorStats{WorkspaceID: workspaceID, Reputation: 1.0}
+	stats := &AnnotatorStats{WorkspaceID: workspaceID, Reputation: ReputationBaseline}
 	if m.pool == nil {
 		return stats, nil
 	}
@@ -635,6 +636,14 @@ func (m *AnnotationMiner) GetAnnotatorStats(ctx context.Context, workspaceID str
 	if err := row.Scan(&stats.Agreement); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("annotation: agreement: %w", err)
 	}
+
+	// Reputation — the real, computed score (reputation.go). DISPLAY ONLY: this is the
+	// reputation read path; it never touches the earning/mint path (SubmitAnnotation).
+	rep, err := reputationScore(ctx, m.pool, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	stats.Reputation = rep
 
 	return stats, nil
 }
