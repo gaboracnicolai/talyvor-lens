@@ -33,6 +33,14 @@ const (
 	// claims a NEW task, never what a holding annotator earns (SubmitAnnotation is untouched).
 	AccessFloor = 0.35
 
+	// DormancyDays — an annotator with no annotation in this many days is "dormant"; their
+	// EARNED reputation (the part above baseline) then decays at ReputationDecayRate/day back
+	// toward baseline (PR3, DecayDormant). Decay FLOORS AT baseline and never below — below-
+	// baseline is reserved for active disagreement, so a dormant annotator is never benched
+	// (baseline 0.5 stays above AccessFloor 0.35). ReputationDecayRate (0.01) is reused from
+	// annotation_mining.go — not redefined.
+	DormancyDays = 7
+
 	// reputationK scales the per-task delta so a single MAXIMALLY-informative task moves the
 	// score by at most ~0.05: max|delta| = K·(agreement−0.5)max·difficultyMax·diversityMax
 	// = 0.25 · 0.5 · 0.4 · 1.0 = 0.05. (~3 maximally-bad tasks reach a 0.35 access floor;
@@ -250,7 +258,117 @@ func (r *ReputationStore) resolveTask(ctx context.Context, taskID string) error 
 	return nil
 }
 
-// StartScheduler ticks ResolveExpiredTasks until ctx ends — mirrors FinalizeSweeper.StartScheduler.
+// dormantDecayCandidatesSQL finds annotators ABOVE baseline (raw_sum > 0) whose last annotation
+// is older than DormancyDays — the decay candidates — with their summed score, last activity, and
+// most recent prior decay date (NULL if none). The CTEs keep raw_sum and last_activity separate so
+// the annotations join never fans out the event sum.
+const dormantDecayCandidatesSQL = `
+WITH scores AS (
+    SELECT annotator_id, SUM(delta) AS raw_sum
+    FROM reputation_events GROUP BY annotator_id
+),
+activity AS (
+    SELECT annotator_id, MAX(created_at) AS last_activity
+    FROM annotations GROUP BY annotator_id
+),
+last_decay AS (
+    SELECT annotator_id, MAX(idem_key) AS last_decay_key
+    FROM reputation_events WHERE kind = 'decay' GROUP BY annotator_id
+)
+SELECT s.annotator_id, s.raw_sum, a.last_activity, ld.last_decay_key
+FROM scores s
+JOIN activity a ON a.annotator_id = s.annotator_id
+LEFT JOIN last_decay ld ON ld.annotator_id = s.annotator_id
+WHERE s.raw_sum > 0
+  AND a.last_activity < now() - make_interval(days => $1)`
+
+// DecayDormant — the dormancy decay sweep (PR3). For each annotator ABOVE baseline with no
+// annotation in DormancyDays, append ONE 'decay' event keyed by the run date that erodes the
+// earned-above-baseline reputation toward baseline at ReputationDecayRate/day:
+//
+//	delta = −min(ReputationDecayRate · newDormantDays, currentScore − baseline)
+//
+// This single clamped catch-up event (NOT one event per missed day) is:
+//   - catch-up safe — newDormantDays counts every day since the last decay (or dormancy onset),
+//     so an outage is made whole in one event, each missed day applied exactly once;
+//   - idempotent per day — keyed by the run date via UNIQUE(annotator_id,'decay',decay_date),
+//     and newDormantDays<=0 once today is already decayed, so a re-run is a no-op;
+//   - floored AT baseline — the headroom clamp (currentScore − baseline) means decay can never
+//     cross baseline. An at/below-baseline annotator is excluded by raw_sum > 0 → no event.
+//
+// MONEY-DECOUPLED: it appends a reputation event; it never touches the ledger. Returns the count
+// of annotators decayed this sweep.
+func (r *ReputationStore) DecayDormant(ctx context.Context) (int, error) {
+	if r == nil || r.pool == nil {
+		return 0, nil
+	}
+	rows, err := r.pool.Query(ctx, dormantDecayCandidatesSQL, DormancyDays)
+	if err != nil {
+		return 0, fmt.Errorf("reputation: decay candidates: %w", err)
+	}
+	type cand struct {
+		id           string
+		rawSum       float64
+		lastActivity time.Time
+		lastDecayKey *string
+	}
+	var cands []cand
+	for rows.Next() {
+		var c cand
+		if err := rows.Scan(&c.id, &c.rawSum, &c.lastActivity, &c.lastDecayKey); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		cands = append(cands, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	const dateLayout = "2006-01-02"
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	decayed := 0
+	for _, c := range cands {
+		// Dormancy begins DormancyDays after the last activity; decay accrues per day from there
+		// (last-activity + 7d == 0 dormant days; each further day == one day of decay). A prior
+		// decay moves the accrual start forward so each missed day is counted exactly once.
+		la := c.lastActivity.UTC()
+		dormancyStart := time.Date(la.Year(), la.Month(), la.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, DormancyDays)
+		effectiveLast := dormancyStart
+		if c.lastDecayKey != nil {
+			if d, e := time.Parse(dateLayout, *c.lastDecayKey); e == nil && d.After(effectiveLast) {
+				effectiveLast = d
+			}
+		}
+		newDormantDays := int(today.Sub(effectiveLast).Hours() / 24)
+		if newDormantDays <= 0 {
+			continue // not yet dormant, or already decayed today (idempotent)
+		}
+		currentScore := clampReputation(ReputationBaseline + c.rawSum)
+		headroom := currentScore - ReputationBaseline
+		if headroom <= 1e-9 {
+			continue // at/below baseline — nothing earned to erode
+		}
+		decayMag := ReputationDecayRate * float64(newDormantDays)
+		if decayMag > headroom {
+			decayMag = headroom // FLOOR AT BASELINE: never erode past the earned-above-baseline amount
+		}
+		if decayMag <= 1e-9 {
+			continue
+		}
+		reason := map[string]any{"dormant_days": newDormantDays, "last_activity": la.Format(time.RFC3339)}
+		if err := r.recordEvent(ctx, c.id, "decay", today.Format(dateLayout), -decayMag, reason); err != nil {
+			return decayed, err
+		}
+		decayed++
+	}
+	return decayed, nil
+}
+
+// StartScheduler ticks the reputation sweep until ctx ends — ONE job doing resolution + dormancy
+// decay per tick (mirrors FinalizeSweeper.StartScheduler).
 func (r *ReputationStore) StartScheduler(ctx context.Context, tick time.Duration) {
 	if tick <= 0 {
 		tick = time.Hour
@@ -264,6 +382,9 @@ func (r *ReputationStore) StartScheduler(ctx context.Context, tick time.Duration
 		case <-ticker.C:
 			if _, err := r.ResolveExpiredTasks(ctx); err != nil {
 				slog.Warn("reputation: resolution sweep failed", slog.String("error", err.Error()))
+			}
+			if _, err := r.DecayDormant(ctx); err != nil {
+				slog.Warn("reputation: decay sweep failed", slog.String("error", err.Error()))
 			}
 		}
 	}

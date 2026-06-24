@@ -800,10 +800,11 @@ func run() error {
 	// earn per validated annotation.
 	annotationMiner := mining.NewAnnotationMiner(tokenLedger, pool)
 
-	// Annotation reputation RESOLUTION — the scheduled producer that scores resolved
-	// (TTL-expired) tasks into the append-only reputation_events log from the FINAL consensus.
-	// Economy-gated + leader-elected, mirroring the detector sweep. Reputation is
-	// MONEY-DECOUPLED: it is computed/gated/displayed but NEVER enters the earning path
+	// Annotation reputation SWEEP — ONE scheduled job that per tick (a) RESOLVES TTL-expired
+	// tasks into agreement_outcome events from the FINAL consensus, and (b) DECAYS dormant
+	// annotators' earned reputation toward baseline. Both are append-only writes to
+	// reputation_events. Economy-gated + leader-elected, mirroring the detector sweep. Reputation
+	// is MONEY-DECOUPLED: computed/gated/decayed/displayed but NEVER in the earning path
 	// (annotation_mining.go SubmitAnnotation stays base + bonus) — pinned by an AST guard.
 	reputationStore := mining.NewReputationStore(pool)
 	if cfg.EconomyEnabled {
