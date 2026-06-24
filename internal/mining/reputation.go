@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/talyvor/lens/internal/dbjson"
@@ -24,6 +25,13 @@ const (
 	ReputationBaseline = 0.5
 	reputationFloor    = 0.0
 	reputationCeil     = 1.0
+
+	// AccessFloor — the minimum reputation to CLAIM a new task (the PR2 gate, GetPendingTask).
+	// Set BELOW the baseline so a new annotator (baseline 0.5) and a dormant-decayed annotator
+	// (decay floors AT baseline, never below) are NEVER gated — only an annotator who has
+	// actively DISAGREED below the floor loses new-task access. MONEY-DECOUPLED: this gates who
+	// claims a NEW task, never what a holding annotator earns (SubmitAnnotation is untouched).
+	AccessFloor = 0.35
 
 	// reputationK scales the per-task delta so a single MAXIMALLY-informative task moves the
 	// score by at most ~0.05: max|delta| = K·(agreement−0.5)max·difficultyMax·diversityMax
@@ -81,6 +89,29 @@ func reputationScore(ctx context.Context, pool pgxDB, annotatorID string) (float
 
 // Score is the method form of reputationScore.
 func (r *ReputationStore) Score(ctx context.Context, annotatorID string) (float64, error) {
+	return reputationScore(ctx, r.pool, annotatorID)
+}
+
+// Reset is the admin re-entry path: it APPENDS an admin_reset event that lands the annotator
+// back at the baseline (it is NOT an UPDATE/DELETE of the log — the immutability trigger stays
+// intact and prior events remain for audit). delta = −rawSum (the negation of the current
+// summed deltas) so the new sum is 0 and the score is exactly the baseline regardless of any
+// clamping. by/note are recorded in the reason JSONB for audit. Returns the post-reset score.
+func (r *ReputationStore) Reset(ctx context.Context, annotatorID, by, note string) (float64, error) {
+	if r == nil || r.pool == nil {
+		return ReputationBaseline, nil
+	}
+	var rawSum float64
+	if err := r.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(delta), 0) FROM reputation_events WHERE annotator_id = $1`, annotatorID).Scan(&rawSum); err != nil {
+		return 0, fmt.Errorf("reputation: reset read sum: %w", err)
+	}
+	delta := -rawSum
+	idemKey := strconv.FormatInt(time.Now().UnixNano(), 10) // a distinct event per reset
+	reason := map[string]any{"by": by, "note": note}
+	if err := r.recordEvent(ctx, annotatorID, "admin_reset", idemKey, delta, reason); err != nil {
+		return 0, err
+	}
 	return reputationScore(ctx, r.pool, annotatorID)
 }
 

@@ -207,6 +207,18 @@ func (m *AnnotationMiner) GetPendingTask(ctx context.Context, annotatorWorkspace
 	if m.pool == nil {
 		return nil, nil
 	}
+	// Reputation gate (PR2): an annotator below the access floor cannot CLAIM a new task —
+	// returned as "no task available" (nil, nil). MONEY-DECOUPLED: this gates the claim path
+	// only; it never touches earning on tasks already held (SubmitAnnotation is unchanged). A
+	// new annotator (baseline) and a dormant-decayed one (decay floors AT baseline) are above
+	// the floor and never gated — only active disagreement below AccessFloor benches an annotator.
+	score, err := reputationScore(ctx, m.pool, annotatorWorkspace)
+	if err != nil {
+		return nil, fmt.Errorf("annotation: reputation gate: %w", err)
+	}
+	if score < AccessFloor {
+		return nil, nil
+	}
 	row := m.pool.QueryRow(ctx, `
 		SELECT t.id, t.source_workspace, t.prompt_hash, t.response_a, t.response_b,
 		       t.task_type, t.created_at, t.expires_at
@@ -220,7 +232,7 @@ func (m *AnnotationMiner) GetPendingTask(ctx context.Context, annotatorWorkspace
 		ORDER BY t.created_at ASC
 		LIMIT 1`, annotatorWorkspace)
 	var task AnnotationTask
-	err := row.Scan(&task.ID, &task.WorkspaceID, &task.PromptHash,
+	err = row.Scan(&task.ID, &task.WorkspaceID, &task.PromptHash,
 		&task.ResponseA, &task.ResponseB, &task.TaskType, &task.CreatedAt, &task.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
