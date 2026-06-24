@@ -65,6 +65,24 @@ const distillInsertClaimSQL = `INSERT INTO distill_royalty_mints
 VALUES ($1, $2, $3, $4, $5, $6, 'held', now() + ($7::bigint * interval '1 microsecond'))
 ON CONFLICT (request_id) DO NOTHING`
 
+// distillPairCapCountSQL / distillContentCapCountSQL are the PR1 per-pair and
+// per-content mint caps — mirroring the cache minter's capCountSQL/entryCountSQL
+// (minter.go:135/149) but over distill_royalty_mints (a SEPARATE budget; separate
+// table). Counted INSIDE the mint tx AFTER CreditHeldTx, so each count rides the
+// owner-balance FOR UPDATE the credit just took — concurrent mints for the same
+// owner serialize there, making the count exact (a content_hash maps to ONE owner,
+// so per-content is exact too). NO status filter — held+final+REVOKED all count, so
+// revoking a mint never REFUNDS cap budget (mirrors the cache cap; the opposite of
+// the detectors). The count includes the just-inserted claim row, so n > cap means
+// "this would be the (cap+1)th".
+const distillPairCapCountSQL = `SELECT COUNT(*) FROM distill_royalty_mints
+WHERE contributor_workspace_id = $1 AND requester_workspace_id = $2
+  AND created_at > now() - ($3::bigint * interval '1 microsecond')`
+
+const distillContentCapCountSQL = `SELECT COUNT(*) FROM distill_royalty_mints
+WHERE content_hash = $1
+  AND created_at > now() - ($2::bigint * interval '1 microsecond')`
+
 // distillMinterDB is the DB surface the sweeper needs: scan basis (Query) +
 // a per-relationship transaction (Begin). *pgxpool.Pool satisfies it.
 type distillMinterDB interface {
@@ -81,6 +99,9 @@ type DistillMinter struct {
 	enabled        func() bool
 	holdWindow     time.Duration
 	linkageEnabled bool
+	capPerPair     int           // PR1: max mints per (owner, requester) pair in capWindow; 0 = off
+	capPerContent  int           // PR1: max mints per content_hash in capWindow; 0 = off
+	capWindow      time.Duration // rolling window both caps count over (default 24h)
 }
 
 // NewDistillMinter wires the pool, the held ledger, the contributor share s (the
@@ -94,7 +115,7 @@ func NewDistillMinter(db distillMinterDB, ledger ledgerCreditTx, share float64, 
 	if share > 1 {
 		share = 1
 	}
-	return &DistillMinter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour}
+	return &DistillMinter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour, capWindow: 24 * time.Hour}
 }
 
 // SetOwnerLinkageCheck enables the U6 PR2 owner-linkage wash guard: deny a
@@ -110,6 +131,39 @@ func (m *DistillMinter) SetOwnerLinkageCheck(enabled bool) {
 func (m *DistillMinter) SetHoldbackWindow(d time.Duration) {
 	if m != nil && d > 0 {
 		m.holdWindow = d
+	}
+}
+
+// SetCap sets the per-(owner, requester) mint cap over the window: at most perPair
+// distill mints for one pair within the window. perPair <= 0 disables (the default).
+// window <= 0 keeps the current window. Mirrors the cache Minter.SetCap. Deflationary:
+// a cap can only DENY a mint, never create one.
+func (m *DistillMinter) SetCap(perPair int, window time.Duration) {
+	if m == nil {
+		return
+	}
+	if perPair < 0 {
+		perPair = 0
+	}
+	m.capPerPair = perPair
+	if window > 0 {
+		m.capWindow = window
+	}
+}
+
+// SetContentCap sets the per-content_hash mint cap over the window: at most
+// perContent distill mints for one document across ALL requesters. perContent <= 0
+// disables (the default). Shares the SetCap window. Mirrors Minter.SetEntryCap.
+func (m *DistillMinter) SetContentCap(perContent int, window time.Duration) {
+	if m == nil {
+		return
+	}
+	if perContent < 0 {
+		perContent = 0
+	}
+	m.capPerContent = perContent
+	if window > 0 {
+		m.capWindow = window
 	}
 }
 
@@ -235,6 +289,32 @@ func (m *DistillMinter) mintOne(ctx context.Context, r distillRelationship) (boo
 	if err := m.ledger.CreditHeldTx(ctx, tx, r.owner, amount, TypePoolRoyaltyHeld,
 		"distill reuse royalty: cross-tenant OCR transcription served", meta); err != nil {
 		return false, fmt.Errorf("poolroyalty: distill credit contributor (held): %w", err)
+	}
+
+	// (3) PR1 caps — counted AFTER the credit (rides the owner-balance FOR UPDATE the
+	//     credit just took, so the count is exact under concurrency, like the cache
+	//     minter). Over the cap → the deferred rollback discards the claim + credit: a
+	//     CAPPED mint is a deflationary no-op (return false, nil — NOT an error, so no
+	//     per-tick log spam), and the relationship re-eligibly mints once the window
+	//     frees budget. Both counts include the just-inserted held row and count
+	//     revoked (a revoke never refunds budget).
+	if m.capPerPair > 0 {
+		var n int64
+		if err := tx.QueryRow(ctx, distillPairCapCountSQL, r.owner, r.requester, m.capWindow.Microseconds()).Scan(&n); err != nil {
+			return false, fmt.Errorf("poolroyalty: distill pair cap count: %w", err)
+		}
+		if n > int64(m.capPerPair) {
+			return false, nil // per-pair cap reached — rollback, no mint
+		}
+	}
+	if m.capPerContent > 0 {
+		var n int64
+		if err := tx.QueryRow(ctx, distillContentCapCountSQL, r.contentHash, m.capWindow.Microseconds()).Scan(&n); err != nil {
+			return false, fmt.Errorf("poolroyalty: distill content cap count: %w", err)
+		}
+		if n > int64(m.capPerContent) {
+			return false, nil // per-content cap reached — rollback, no mint
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("poolroyalty: distill commit mint: %w", err)
