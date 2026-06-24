@@ -40,6 +40,11 @@ func swHarness(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	for _, ddl := range []string{
+		// Drop dependent VIEWS first: pool_royalty_margin / distill_royalty_margin (created
+		// by sibling margin tests, or left in a reused CI DB) depend on the mint tables, so
+		// DROP TABLE below errors (2BP01) if they pre-exist. Ordering-independent (PR4 lesson).
+		`DROP VIEW IF EXISTS pool_royalty_margin`,
+		`DROP VIEW IF EXISTS distill_royalty_margin`,
 		`DROP TABLE IF EXISTS royalty_detector_findings`,
 		`DROP TABLE IF EXISTS pool_royalty_mints`,
 		`DROP TABLE IF EXISTS distill_royalty_mints`,
