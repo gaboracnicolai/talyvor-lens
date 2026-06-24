@@ -40,6 +40,11 @@ func distillMintHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 	}
 	t.Cleanup(pool.Close)
 	for _, ddl := range []string{
+		// Drop dependents FIRST: distill_royalty_margin (PR4 view) depends on
+		// distill_royalty_mints, so the table drop below errors (2BP01) if it
+		// pre-exists — including a leftover in a reused CI database. Ordering-
+		// independent: every harness reset clears it before the table drop.
+		`DROP VIEW IF EXISTS distill_royalty_margin`,
 		`DROP TABLE IF EXISTS lens_token_ledger`,
 		`DROP TABLE IF EXISTS lens_token_balances`,
 		`DROP TABLE IF EXISTS distill_royalty_mints`,
