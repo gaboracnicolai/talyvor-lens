@@ -52,6 +52,14 @@ services:
       # pattern workspaces opt into cache_poolable, so DecidePoolableOnWrite stays
       # false for them (no pooled rows, no pooled serves).
       - LENS_CACHE_POOLABLE_ENABLED=true
+      # ── CLOSED-TEST ECONOMY: the mints, baked ON (internal ledger, valueless
+      #    test tokens; reversible). LENS_ECONOMY_ENABLED stays at its default
+      #    true (the master switch — setting it false would force ALL of these
+      #    off, config.go:1094/1098-1106). Billing stays TEST-mode: NO live Stripe
+      #    keys here (LENS_BILLING_ENABLED unset/false). See docs/closed-test-economy.md.
+      - LENS_POOL_ROYALTY_MINTING_ENABLED=true   # Pool-B + distill reuse-royalty mint (default false, config.go:613). Cache royalty mints on cache-poolable cross-tenant hits; distill royalty mints when the trial-distill overlay adds LENS_DISTILL_POOLABLE_ENABLED.
+      - LENS_POVI_MINTING_ENABLED=true            # PoVI receipt mint (default false, config.go:611), per Nicolai. NOTE: idle until a real cmd/node submits staked, challenge-answerable receipts — see docs/closed-test-economy.md "Part 2 (validator-earning): what's needed".
+      - LENS_POOL_HOLDBACK_WINDOW=30s             # held->final settlement delay (default 72h, config.go:845). STAGING ONLY — short so finalize is observable; production stays 72h.
       # JWT fallback scenario (r) — closes the long-standing (h) gap. TRIAL-ONLY
       # EC P-256 key, supplied from the shell env (NOT committed; see README
       # setup: `export LENS_JWT_PRIVATE_KEY="$(openssl ecparam -genkey -name
