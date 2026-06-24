@@ -65,25 +65,44 @@ type revokerSurface interface {
 	RevokeHeldMints(ctx context.Context, requestIDs []string) (RevokeReport, error)
 }
 
-// AdjudicationWriter binds record→revoke. The nil writer is inert.
+// AdjudicationWriter binds record→revoke. The nil writer is inert. `table` scopes
+// the audit record to one adjudications table (pool_royalty_adjudications or
+// distill_royalty_adjudications), matched to the Revoker's mint table.
 type AdjudicationWriter struct {
 	db     adjudicationDB
 	revoke revokerSurface
+	table  string
 }
 
-// NewAdjudicationWriter composes the record-write surface and the Revoker.
+// NewAdjudicationWriter composes the record-write surface and the cache Revoker
+// (writes pool_royalty_adjudications). For distill use NewAdjudicationWriterForTable.
 func NewAdjudicationWriter(db adjudicationDB, revoke revokerSurface) *AdjudicationWriter {
-	return &AdjudicationWriter{db: db, revoke: revoke}
+	return NewAdjudicationWriterForTable(db, revoke, "pool_royalty_adjudications")
 }
 
-const insertAdjudicationSQL = `INSERT INTO pool_royalty_adjudications
+// NewAdjudicationWriterForTable composes the writer over an EXPLICIT adjudications
+// table. table is a hardcoded literal (never user input). Pair it with a Revoker
+// over the matching mint table.
+func NewAdjudicationWriterForTable(db adjudicationDB, revoke revokerSurface, table string) *AdjudicationWriter {
+	return &AdjudicationWriter{db: db, revoke: revoke, table: table}
+}
+
+// insertAdjudicationSQLFor / completeAdjudicationSQLFor build the table-scoped audit
+// SQL. Both adjudications tables share the same columns (0048 / 0063). `table` is a
+// hardcoded literal, NEVER user input, so the fmt.Sprintf interpolation is
+// injection-safe (mirrors the Revoker's revokeCASSQLFor).
+func insertAdjudicationSQLFor(table string) string {
+	return fmt.Sprintf(`INSERT INTO %s
     (flag_type, resolution_label, candidate_request_ids, revoked_request_ids, decided_by)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id`
+RETURNING id`, table)
+}
 
-const completeAdjudicationSQL = `UPDATE pool_royalty_adjudications
+func completeAdjudicationSQLFor(table string) string {
+	return fmt.Sprintf(`UPDATE %s
 SET outcome = $2
-WHERE id = $1`
+WHERE id = $1`, table)
+}
 
 // Adjudicate writes the decision record FIRST, then revokes exactly the chosen
 // subset, then completes the record with the RevokeReport. Returns the
@@ -100,7 +119,7 @@ func (w *AdjudicationWriter) Adjudicate(ctx context.Context, d AdjudicationDecis
 
 	// 1. Record the decision BEFORE any burn.
 	var id string
-	if err := w.db.QueryRow(ctx, insertAdjudicationSQL,
+	if err := w.db.QueryRow(ctx, insertAdjudicationSQLFor(w.table),
 		d.FlagType, d.ResolutionLabel, d.CandidateRequestIDs, d.RevokeRequestIDs, d.DecidedBy,
 	).Scan(&id); err != nil {
 		return "", RevokeReport{}, fmt.Errorf("poolroyalty: write adjudication record: %w", err)
@@ -119,7 +138,7 @@ func (w *AdjudicationWriter) Adjudicate(ctx context.Context, d AdjudicationDecis
 	if merr != nil {
 		return id, report, fmt.Errorf("poolroyalty: marshal outcome: %w", merr)
 	}
-	if _, err := w.db.Exec(ctx, completeAdjudicationSQL, id, outcomeJSON); err != nil {
+	if _, err := w.db.Exec(ctx, completeAdjudicationSQLFor(w.table), id, outcomeJSON); err != nil {
 		return id, report, fmt.Errorf("poolroyalty: complete adjudication record: %w", err)
 	}
 	return id, report, nil

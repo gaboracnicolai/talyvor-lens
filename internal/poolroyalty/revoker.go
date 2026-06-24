@@ -39,6 +39,7 @@ package poolroyalty
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -73,26 +74,45 @@ type heldRevoker interface {
 }
 
 // Revoker turns the held-burn primitive into a production operation. The
-// zero/nil Revoker is inert.
+// zero/nil Revoker is inert. `table` scopes the CAS to one mint table
+// (pool_royalty_mints or distill_royalty_mints).
 type Revoker struct {
 	db     revokerDB
 	ledger heldRevoker
+	table  string
 }
 
-// NewRevoker builds a revoke orchestrator.
+// NewRevoker builds a revoke orchestrator over the cache royalty
+// (pool_royalty_mints). For the distill table use NewRevokerForTable.
 func NewRevoker(db revokerDB, ledger heldRevoker) *Revoker {
-	return &Revoker{db: db, ledger: ledger}
+	return NewRevokerForTable(db, ledger, "pool_royalty_mints")
 }
 
-// revokeCASSQL is CAS-first: flip held→revoked and RETURN the data the burn
-// needs, in one statement. A returned row proves the flip happened; 0 rows
-// means the row was not held (final/revoked/absent) — never burn.
-const revokeCASSQL = `UPDATE pool_royalty_mints SET status = 'revoked'
-WHERE request_id = $1 AND status = 'held'
-RETURNING contributor_workspace_id, minted_amount`
+// NewRevokerForTable builds a revoke orchestrator over an EXPLICIT mint table.
+// table is a hardcoded literal from the caller (never user input).
+func NewRevokerForTable(db revokerDB, ledger heldRevoker, table string) *Revoker {
+	return &Revoker{db: db, ledger: ledger, table: table}
+}
 
-// classifyStatusSQL is the ADVISORY skip-labeller (read-only; no money rides on it).
-const classifyStatusSQL = `SELECT status FROM pool_royalty_mints WHERE request_id = $1`
+// revokeCASSQLFor / classifyStatusSQLFor build the table-scoped revoke SQL. Both
+// mint tables expose the same columns (request_id, status, contributor_workspace_id,
+// minted_amount), so the identical CAS works for both. `table` is a hardcoded
+// literal (NewRevoker / NewRevokerForTable), NEVER user input, so the fmt.Sprintf
+// interpolation is injection-safe (mirrors sweeper.go's sweepSelectSQLFor).
+//
+// revokeCASSQLFor is CAS-first: flip held→revoked and RETURN the data the burn
+// needs, in one statement. A returned row proves the flip happened; 0 rows means
+// the row was not held (final/revoked/absent) — never burn.
+func revokeCASSQLFor(table string) string {
+	return fmt.Sprintf(`UPDATE %s SET status = 'revoked'
+WHERE request_id = $1 AND status = 'held'
+RETURNING contributor_workspace_id, minted_amount`, table)
+}
+
+// classifyStatusSQLFor is the ADVISORY skip-labeller (read-only; no money rides on it).
+func classifyStatusSQLFor(table string) string {
+	return fmt.Sprintf(`SELECT status FROM %s WHERE request_id = $1`, table)
+}
 
 // RevokeHeldMints revokes exactly the given held request_ids, each in its own
 // tx, and returns an auditable per-row report. Idempotent: a second call on the
@@ -128,7 +148,7 @@ func (r *Revoker) revokeOne(ctx context.Context, requestID string) RevokeOutcome
 
 	var contributor string
 	var amount float64
-	err = tx.QueryRow(ctx, revokeCASSQL, requestID).Scan(&contributor, &amount)
+	err = tx.QueryRow(ctx, revokeCASSQLFor(r.table), requestID).Scan(&contributor, &amount)
 	if err == nil {
 		// The CAS transitioned the row (held → revoked) and returned its
 		// contributor + amount. Burn from held in the SAME tx; commit only if
@@ -151,7 +171,7 @@ func (r *Revoker) revokeOne(ctx context.Context, requestID string) RevokeOutcome
 	// SELECT below is ADVISORY ONLY — it just labels the skip for the report and
 	// can never cause a write or a burn.
 	var status string
-	if serr := tx.QueryRow(ctx, classifyStatusSQL, requestID).Scan(&status); serr != nil {
+	if serr := tx.QueryRow(ctx, classifyStatusSQLFor(r.table), requestID).Scan(&status); serr != nil {
 		if errors.Is(serr, pgx.ErrNoRows) {
 			return OutcomeSkippedNotFound
 		}

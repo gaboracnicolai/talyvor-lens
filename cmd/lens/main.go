@@ -1301,6 +1301,14 @@ func run() error {
 		royaltyAdjudicator := poolroyalty.NewAdjudicationWriter(pool, royaltyRevoker)
 		econ.post(authed, "/v1/admin/pool-royalty/adjudicate", newAdjudicateHandler(authManager, royaltyAdjudicator))
 
+		// PR3 distill anti-gaming — the SAME record-before-revoke gate over the
+		// distill_royalty_mints / distill_royalty_adjudications tables (the Revoker +
+		// AdjudicationWriter parameterized by table; RevokeHeldTx is already generic).
+		// Same admin gate, same inertness (held distill rows exist only under the mint flag).
+		distillRoyaltyRevoker := poolroyalty.NewRevokerForTable(pool, tokenLedger, "distill_royalty_mints")
+		distillRoyaltyAdjudicator := poolroyalty.NewAdjudicationWriterForTable(pool, distillRoyaltyRevoker, "distill_royalty_adjudications")
+		econ.post(authed, "/v1/admin/distill-royalty/adjudicate", newAdjudicateHandler(authManager, distillRoyaltyAdjudicator))
+
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
 			if authManager.PrivateKey() == nil {
 				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not available")
