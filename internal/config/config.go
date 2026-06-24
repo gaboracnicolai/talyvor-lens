@@ -255,6 +255,17 @@ type Config struct {
 	// Env: LENS_POOL_MINT_CAP_WINDOW (Go duration, e.g. 48h).
 	PoolMintCapWindow time.Duration
 
+	// DistillMintCap* are the PR1 distill reuse-royalty mint caps — the same
+	// deflationary primitive as PoolMintCap* but over distill_royalty_mints (a
+	// SEPARATE budget; distill is its own table). PerPair caps mints per
+	// (owner, requester); PerContent caps mints per content_hash across requesters.
+	// Default 0/0 (off) + 24h. Env: LENS_DISTILL_MINT_CAP_PER_PAIR /
+	// LENS_DISTILL_MINT_CAP_PER_CONTENT / LENS_DISTILL_MINT_CAP_WINDOW. NOT in the
+	// economy force-off block — a cap only DENIES a mint, never enables one.
+	DistillMintCapPerPair    int
+	DistillMintCapPerContent int
+	DistillMintCapWindow     time.Duration
+
 	// PatternEarnCapPerWorkspace is the S2 routing-pattern EARN cap: max
 	// pattern-mine credits per workspace per rolling window. DELIBERATELY
 	// DEFAULTS to a REAL limit (50000), NOT 0 — pattern-earning is a
@@ -812,6 +823,31 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_POOL_MINT_CAP_WINDOW (Go duration > 0, e.g. 48h): %s", v)
 		}
 		c.PoolMintCapWindow = d
+	}
+	// PR1 distill mint caps (separate budget from the cache caps; default 0/0 off + 24h).
+	c.DistillMintCapPerPair = 0
+	if v := os.Getenv("LENS_DISTILL_MINT_CAP_PER_PAIR"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_DISTILL_MINT_CAP_PER_PAIR (must be >= 0; 0 disables): %s", v)
+		}
+		c.DistillMintCapPerPair = n
+	}
+	c.DistillMintCapPerContent = 0
+	if v := os.Getenv("LENS_DISTILL_MINT_CAP_PER_CONTENT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_DISTILL_MINT_CAP_PER_CONTENT (must be >= 0; 0 disables): %s", v)
+		}
+		c.DistillMintCapPerContent = n
+	}
+	c.DistillMintCapWindow = 24 * time.Hour
+	if v := os.Getenv("LENS_DISTILL_MINT_CAP_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_DISTILL_MINT_CAP_WINDOW (Go duration > 0, e.g. 48h): %s", v)
+		}
+		c.DistillMintCapWindow = d
 	}
 	// S2 routing-pattern earn cap — REAL default (50000), not 0 (see the field
 	// comment); 0 = explicit ops-disable.

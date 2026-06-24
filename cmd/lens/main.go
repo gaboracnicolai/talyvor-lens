@@ -680,6 +680,9 @@ func run() error {
 	)
 	distillMinter.SetOwnerLinkageCheck(true) // U6 PR2 wash guard, like the cache minter
 	distillMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
+	// PR1 distill mint caps (default 0/0 = off; deflationary — a cap only denies).
+	distillMinter.SetCap(cfg.DistillMintCapPerPair, cfg.DistillMintCapWindow)
+	distillMinter.SetContentCap(cfg.DistillMintCapPerContent, cfg.DistillMintCapWindow)
 	distillFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "distill_royalty_mints")
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "distill-royalty-mint", 30*time.Second, func(lctx context.Context) {
