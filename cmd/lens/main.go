@@ -872,9 +872,11 @@ func run() error {
 	p.SetPatternCapture(patternMiner, func() bool { return cfg.PatternCaptureEnabled })
 	p.SetObservationalLimiter(obsLimiter)
 	// WorkTier descriptive classifier (default-off capability flag). Post-serve,
-	// NON-CONTENT, mint-free; shares the obsLimiter budget. Nothing consumes the
-	// tier yet — the routing Advisor tier-conditioning is a future PR.
-	p.SetWorkTier(worktier.NewStore(pool), func() bool { return cfg.WorkTierEnabled })
+	// NON-CONTENT, mint-free; shares the obsLimiter budget. The ANALYTICS consumer
+	// (GET /v1/admin/worktier/distribution, registered below) reads this same store via
+	// Aggregate; the routing Advisor tier-conditioning is still a future PR.
+	worktierStore := worktier.NewStore(pool)
+	p.SetWorkTier(worktierStore, func() bool { return cfg.WorkTierEnabled })
 	// S4 routing-pattern EARNING wire-up — the same miner, separate sink + flag.
 	// Default off; flag-off the serve path is byte-identical to capture-only.
 	p.SetPatternEarn(patternMiner, func() bool { return cfg.PatternEarningEnabled })
@@ -1354,6 +1356,14 @@ func run() error {
 		authed.Get("/v1/admin/pool-royalty/detect", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyDetectHandler(poolRoyaltyDetector))))
 		authed.Get("/v1/admin/pool-royalty/resolve", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyResolveHandler(poolRoyaltyResolver))))
 		authed.Get("/v1/admin/pool-royalty/margin", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyMarginHandler(poolRoyaltyMargin))))
+
+		// WorkTier ANALYTICS (read-only, admin-gated, NOT economy-gated) — surfaces ONE
+		// workspace's descriptive tier distribution from worktier.Store.Aggregate (Query-only;
+		// no Exec/Begin reachable, no mint path). workspace_id is REQUIRED (no cross-tenant
+		// mode). Registered on `authed` (NOT econ.get) to match the WorkTier capture's
+		// kill-switch-EXEMPT posture — the read survives LENS_ECONOMY_ENABLED, like the capture
+		// it surfaces. MONEY-DECOUPLED: WorkTier never feeds mint/earn/billing.
+		authed.Get("/v1/admin/worktier/distribution", requireAdmin(authManager, http.HandlerFunc(newWorkTierDistributionHandler(worktierStore))))
 
 		// Annotation reputation ADMIN RE-ENTRY (PR2) — un-bench a sub-floor annotator by appending
 		// an admin_reset event (append-only; restores to baseline). Admin-gated (requireAdmin →
