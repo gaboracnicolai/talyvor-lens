@@ -1309,6 +1309,21 @@ func run() error {
 		distillRoyaltyAdjudicator := poolroyalty.NewAdjudicationWriterForTable(pool, distillRoyaltyRevoker, "distill_royalty_adjudications")
 		econ.post(authed, "/v1/admin/distill-royalty/adjudicate", newAdjudicateHandler(authManager, distillRoyaltyAdjudicator))
 
+		// Pool-B royalty OBSERVABILITY (read-only, admin-gated, NOT economy-gated).
+		// Forensic infra must survive the kill-switch — the economy is likeliest OFF
+		// during a security event, exactly when detection is needed. The readers use
+		// Query-only db seams (no Exec/Begin reachable): NO mint/burn/balance/held row
+		// is touched, and the adjudicate/clawback path above is untouched. requireAdmin
+		// → 401 (the existing admin-reader gate); registered on `authed` directly (NOT
+		// econ.get), so they resolve regardless of LENS_ECONOMY_ENABLED. Only the
+		// MUTATION endpoint (adjudicate, above) stays economy-gated.
+		poolRoyaltyDetector := poolroyalty.NewDetectorReader(pool, thresholdsFromConfig(cfg))
+		poolRoyaltyResolver := poolroyalty.NewResolver(pool)
+		poolRoyaltyMargin := poolroyalty.NewMarginReader(pool)
+		authed.Get("/v1/admin/pool-royalty/detect", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyDetectHandler(poolRoyaltyDetector))))
+		authed.Get("/v1/admin/pool-royalty/resolve", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyResolveHandler(poolRoyaltyResolver))))
+		authed.Get("/v1/admin/pool-royalty/margin", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyMarginHandler(poolRoyaltyMargin))))
+
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
 			if authManager.PrivateKey() == nil {
 				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not available")
