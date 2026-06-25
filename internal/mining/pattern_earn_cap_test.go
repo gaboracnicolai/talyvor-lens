@@ -45,7 +45,7 @@ func TestRecordPattern_OverCap_AtomicBlock(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1)) // claim taken (not a dup)
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_e", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, true, 0.001).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", true, 0.001).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow("p1", time.Now()))
 	expectApplyTx(mock, "ws_e", 0, 0, 0, 0.001, 0.001, 0.001, 0)
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM routing_patterns").
@@ -73,7 +73,7 @@ func TestRecordPattern_CapCountError_FailsClosed(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_e", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, true, 0.001).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", true, 0.001).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow("p1", time.Now()))
 	expectApplyTx(mock, "ws_e", 0, 0, 0, 0.001, 0.001, 0.001, 0)
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM routing_patterns").
@@ -118,7 +118,7 @@ func earnTestPool(t *testing.T) *pgxpool.Pool {
 			input_token_range TEXT NOT NULL, output_quality DOUBLE PRECISION NOT NULL DEFAULT 0,
 			latency_bucket TEXT NOT NULL, cache_hit_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
 			success_rate DOUBLE PRECISION NOT NULL DEFAULT 1, sample_count INT NOT NULL DEFAULT 1,
-			rarity DOUBLE PRECISION NOT NULL DEFAULT 0, opted_in BOOLEAN NOT NULL DEFAULT FALSE,
+			rarity DOUBLE PRECISION NOT NULL DEFAULT 0, complexity_bucket TEXT NOT NULL DEFAULT '', opted_in BOOLEAN NOT NULL DEFAULT FALSE,
 			earned DOUBLE PRECISION NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
 			lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0,

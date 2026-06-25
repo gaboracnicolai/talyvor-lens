@@ -15,7 +15,7 @@ import (
 // (claim-first: a replay writes nothing — not even the INSERT.)
 func TestRecordPattern_DuplicateRequest_Suppressed(t *testing.T) {
 	miner, mock := newMockPatternMiner(t)
-	miner.SetEarnCap(0, time.Hour) // isolate the claim (cap disabled)
+	miner.SetEarnCap(0, time.Hour)     // isolate the claim (cap disabled)
 	expectScoreRarity(mock, "ws_e", 0) // n=0 → earned base 0.001
 	mock.ExpectBegin()
 	// claim conflicts → 0 rows affected → suppressed before any INSERT.
@@ -42,7 +42,7 @@ func TestRecordPattern_EmptyRequestID_NoCreditPersistsObservation(t *testing.T) 
 	// NO claim ExpectExec. INSERT persists with earned=0, rarity=0, opted_in=true.
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_e", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 0.0 /*rarity*/, true /*opted_in*/, 0.0 /*earned*/).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0 /*rarity*/, "" /*complexity_bucket*/, true /*opted_in*/, 0.0 /*earned*/).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow("p1", time.Now()))
 	mock.ExpectCommit()
 

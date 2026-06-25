@@ -36,7 +36,7 @@ func captureProxy(sink patternCaptureSink, enabled bool) *Proxy {
 func TestCapturePattern_FlagOff_NoCall(t *testing.T) {
 	s := &fakeCaptureSink{}
 	p := captureProxy(s, false)
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true /*scored*/, 50, false)
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true /*scored*/, 50, false, "")
 	if len(s.pats) != 0 {
 		t.Fatalf("flag OFF must make ZERO capture calls; got %d", len(s.pats))
 	}
@@ -48,7 +48,7 @@ func TestCapturePattern_FlagOff_NoCall(t *testing.T) {
 func TestCapturePattern_FlagOn_Captures(t *testing.T) {
 	s := &fakeCaptureSink{}
 	p := captureProxy(s, true)
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true /*scored*/, 50, true)
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true /*scored*/, 50, true, "")
 	if len(s.pats) != 1 || s.wsIDs[0] != "wsA" {
 		t.Fatalf("flag ON must call the sink once for wsA; calls=%d", len(s.pats))
 	}
@@ -66,7 +66,7 @@ func TestCapturePattern_FlagOn_Captures(t *testing.T) {
 func TestCapturePattern_Unscored_NoCall(t *testing.T) {
 	s := &fakeCaptureSink{}
 	p := captureProxy(s, true)
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.0, false /*scored*/, 50, false)
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.0, false /*scored*/, 50, false, "")
 	if len(s.pats) != 0 {
 		t.Fatalf("an UNSCORED response must NOT be captured (no quality=0 poison); calls=%d", len(s.pats))
 	}
@@ -77,7 +77,7 @@ func TestCapturePattern_Unscored_NoCall(t *testing.T) {
 func TestCapturePattern_SinkError_Swallowed(t *testing.T) {
 	s := &fakeCaptureSink{err: errors.New("db down")}
 	p := captureProxy(s, true)
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true /*scored*/, 50, false) // must not panic / propagate
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true /*scored*/, 50, false, "") // must not panic / propagate
 	if len(s.pats) != 1 {
 		t.Errorf("the capture is attempted then swallowed; calls=%d", len(s.pats))
 	}
@@ -85,11 +85,11 @@ func TestCapturePattern_SinkError_Swallowed(t *testing.T) {
 
 // Nil-safe: nil sink / nil enabled / zero-value Proxy → no call, no panic.
 func TestCapturePattern_NilSafe(t *testing.T) {
-	(&Proxy{}).capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 1, 1, 0, true, 1, false)
+	(&Proxy{}).capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 1, 1, 0, true, 1, false, "")
 	s := &fakeCaptureSink{}
 	p := &Proxy{}
 	p.SetPatternCapture(s, nil) // nil enabled func
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 1, 1, 0, true, 1, false)
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 1, 1, 0, true, 1, false, "")
 	if len(s.pats) != 0 {
 		t.Fatalf("nil enabled func must be inert; got %d", len(s.pats))
 	}
@@ -108,7 +108,7 @@ func TestCapturePattern_LimiterSaturated_Sheds(t *testing.T) {
 	if !l.TryAcquire() { // occupy the only slot, as an in-flight writer would
 		t.Fatal("setup: could not occupy the slot")
 	}
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false, "")
 	if len(s.pats) != 0 {
 		t.Fatalf("saturated limiter must shed the capture; sink calls=%d", len(s.pats))
 	}
@@ -117,7 +117,7 @@ func TestCapturePattern_LimiterSaturated_Sheds(t *testing.T) {
 	}
 
 	l.Release()
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false, "")
 	if len(s.pats) != 1 {
 		t.Fatalf("freed limiter must admit again; sink calls=%d", len(s.pats))
 	}
@@ -127,7 +127,7 @@ func TestCapturePattern_LimiterSaturated_Sheds(t *testing.T) {
 func TestCapturePattern_NilLimiter_Unbounded(t *testing.T) {
 	s := &fakeCaptureSink{}
 	p := captureProxy(s, true) // SetObservationalLimiter never called
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false, "")
 	if len(s.pats) != 1 {
 		t.Fatalf("nil limiter must not gate capture; sink calls=%d", len(s.pats))
 	}
@@ -139,7 +139,7 @@ func TestCapturePattern_WriteContextHasDeadline(t *testing.T) {
 	got := make(chan bool, 1)
 	s := &deadlineProbeSink{probe: got}
 	p := captureProxy(s, true)
-	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+	p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false, "")
 	select {
 	case has := <-got:
 		if !has {
@@ -170,7 +170,7 @@ func TestCapturePattern_SensitiveExcluded(t *testing.T) {
 	t.Run("non-sensitive control CAPTURES (proves sink wired)", func(t *testing.T) {
 		s := &fakeCaptureSink{}
 		p := captureProxy(s, true)
-		p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+		p.capturePattern(context.Background(), false, false, workspace.LoggingMetadata, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false, "")
 		if len(s.pats) != 1 {
 			t.Fatalf("non-sensitive request must be captured (positive control); calls=%d", len(s.pats))
 		}
@@ -189,7 +189,7 @@ func TestCapturePattern_SensitiveExcluded(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			s := &fakeCaptureSink{}
 			p := captureProxy(s, true)
-			p.capturePattern(context.Background(), c.pii, c.guardrail, c.logging, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false)
+			p.capturePattern(context.Background(), c.pii, c.guardrail, c.logging, "wsA", "chat", "gpt-4o", "openai", 400, 100, 0.9, true, 50, false, "")
 			if len(s.pats) != 0 {
 				t.Fatalf("%s: sensitive request must NOT be captured; calls=%d, want 0", c.name, len(s.pats))
 			}

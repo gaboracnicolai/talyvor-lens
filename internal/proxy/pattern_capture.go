@@ -71,7 +71,7 @@ const captureWriteTimeout = 5 * time.Second
 // deferral avoids. So unscored ⇒ no capture. This is the unifying invariant:
 // streaming (no scorer on that path) and non-200 (scorer skipped) are both
 // unscored, hence both uncaptured.
-func (p *Proxy) capturePattern(ctx context.Context, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy, workspaceID, feature, model, provider string, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64, cacheHit bool) {
+func (p *Proxy) capturePattern(ctx context.Context, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy, workspaceID, feature, model, provider string, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64, cacheHit bool, complexityBucket string) {
 	if p == nil || p.patternSink == nil || p.patternCaptureEnabled == nil || !p.patternCaptureEnabled() {
 		return
 	}
@@ -96,6 +96,7 @@ func (p *Proxy) capturePattern(ctx context.Context, piiDetected, guardrailFired 
 	}
 	defer p.obsLimiter.Release()
 	pat := mining.ExtractPattern(feature, model, provider, inputTokens, outputTokens, quality, latencyMs, cacheHit)
+	pat.ComplexityBucket = complexityBucket // tier-cohort dimension (worktier.ComplexityBucketFor); '' when the projection is unavailable
 	// Detached: post-serve, must outlive client cancellation and cannot affect
 	// the served response. The opt-in WRITE gate lives in the sink's SQL.
 	// Deadline-bounded (#122): detachment must not mean "can hang forever".

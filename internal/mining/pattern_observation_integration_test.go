@@ -32,7 +32,7 @@ func TestRecordPatternObservation_OptInWriteGate_Integration(t *testing.T) {
 			provider_used TEXT NOT NULL, input_token_range TEXT NOT NULL, output_quality DOUBLE PRECISION NOT NULL DEFAULT 0,
 			latency_bucket TEXT NOT NULL, cache_hit_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
 			success_rate DOUBLE PRECISION NOT NULL DEFAULT 1, sample_count INT NOT NULL DEFAULT 1,
-			rarity DOUBLE PRECISION NOT NULL DEFAULT 0, opted_in BOOLEAN NOT NULL DEFAULT FALSE,
+			rarity DOUBLE PRECISION NOT NULL DEFAULT 0, complexity_bucket TEXT NOT NULL DEFAULT '', opted_in BOOLEAN NOT NULL DEFAULT FALSE,
 			earned DOUBLE PRECISION NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE workspace_pattern_optin (workspace_id TEXT PRIMARY KEY, opted_in_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`INSERT INTO workspace_pattern_optin (workspace_id) VALUES ('wsA')`, // wsA opted in; wsB not

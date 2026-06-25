@@ -73,7 +73,7 @@ func TestDecisionTier_SmallSimple(t *testing.T) {
 func TestNewDecisionTier_DerivesFromSignals(t *testing.T) {
 	// A code + multi-step prompt scores ≥ 2 on AnalyseComplexity.
 	prompt := "```go\nfunc x(){}\n``` do this step by step, first...then finally"
-	d := newDecisionTier(640, prompt, true, false, workspace.LoggingFull)
+	d := newDecisionTier(640, router.AnalyseComplexity(prompt).Score(), true, false, workspace.LoggingFull)
 	if d.inputTokens != 640 || !d.pii || d.guardrail {
 		t.Errorf("signals not passed through: %+v", d)
 	}
@@ -83,7 +83,7 @@ func TestNewDecisionTier_DerivesFromSignals(t *testing.T) {
 	if d.loggingNone {
 		t.Error("LoggingFull must not be loggingNone")
 	}
-	if r := newDecisionTier(10, "hi", false, false, workspace.LoggingNone); !r.loggingNone {
+	if r := newDecisionTier(10, router.AnalyseComplexity("hi").Score(), false, false, workspace.LoggingNone); !r.loggingNone {
 		t.Error("LoggingNone must set loggingNone")
 	}
 }
@@ -93,7 +93,7 @@ func TestNewDecisionTier_DerivesFromSignals(t *testing.T) {
 // the served request). Best-effort = totality, not error-swallowing.
 func TestNewDecisionTier_TotalNoPanic(t *testing.T) {
 	for _, p := range []string{"", "x", string(make([]byte, 1<<20)), "🚀∑∫ proof", "```"} {
-		_ = newDecisionTier(-5, p, false, false, workspace.LoggingMetadata) // negative tokens too
+		_ = newDecisionTier(-5, router.AnalyseComplexity(p).Score(), false, false, workspace.LoggingMetadata) // negative tokens too
 	}
 }
 

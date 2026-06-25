@@ -830,7 +830,7 @@ func run() error {
 	routingAdvisor := routing.New(
 		patternMiner,
 		func(m string) float64 { return alerts.CostUSD(m, 500, 500) },
-		routing.Config{Enabled: cfg.RoutingIntelligenceEnabled},
+		routing.Config{Enabled: cfg.RoutingIntelligenceEnabled, TierCohorts: cfg.RoutingTierCohortsEnabled},
 	)
 	routingAdvisor.StartRefresh(ctx)
 	p.SetRoutingAdvisor(routingAdvisor)
