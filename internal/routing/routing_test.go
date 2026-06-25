@@ -14,13 +14,19 @@ import (
 )
 
 type mockSource struct {
-	stats []mining.CohortStat
-	calls atomic.Int64 // atomic: the stress test refreshes concurrently
+	stats       []mining.CohortStat
+	tieredStats []mining.CohortStat
+	calls       atomic.Int64 // atomic: the stress test refreshes concurrently
 }
 
 func (m *mockSource) AggregateCohorts(_ context.Context) ([]mining.CohortStat, error) {
 	m.calls.Add(1)
 	return m.stats, nil
+}
+
+func (m *mockSource) AggregateCohortsTiered(_ context.Context) ([]mining.CohortStat, error) {
+	m.calls.Add(1)
+	return m.tieredStats, nil
 }
 
 // costStub prices three OpenAI models; unknown → 0 (unpriced).
@@ -64,7 +70,7 @@ func newAdvisor(t *testing.T, stats []mining.CohortStat, cfg Config) (*Advisor, 
 func TestRecommend_PicksBestQualityPerDollar(t *testing.T) {
 	a, _ := newAdvisor(t, chatCohort(), Config{Enabled: true})
 	// gpt-4o-mini: 0.85/0.02 = 42.5 (best); gpt-4.1: 15; gpt-4o: 9.5.
-	rec := a.Recommend(context.Background(), "ws1", "chat", 1000, "openai", nil, nil)
+	rec := a.Recommend(context.Background(), "ws1", "chat", 1000, "", "openai", nil, nil)
 	if rec.Basis != BasisQualityPerDollar {
 		t.Fatalf("basis: got %q want quality_per_dollar", rec.Basis)
 	}
@@ -79,22 +85,38 @@ func TestRecommend_BelowSampleFloorFallsBack(t *testing.T) {
 	// Too few patterns.
 	thin := []mining.CohortStat{{FeatureCategory: "chat", InputTokenRange: "medium", ModelUsed: "gpt-4o-mini", ProviderUsed: "openai", AvgQuality: 0.9, SampleCount: 5, DistinctWorkspaces: 6}}
 	a, _ := newAdvisor(t, thin, Config{Enabled: true})
-	if rec := a.Recommend(ctx, "ws1", "chat", 1000, "openai", nil, nil); rec.Basis != BasisNone {
+	if rec := a.Recommend(ctx, "ws1", "chat", 1000, "", "openai", nil, nil); rec.Basis != BasisNone {
 		t.Fatalf("below min samples must be basis=none, got %q (%s)", rec.Basis, rec.Model)
 	}
 
 	// Enough patterns but a single workspace — must NOT override.
 	single := []mining.CohortStat{{FeatureCategory: "chat", InputTokenRange: "medium", ModelUsed: "gpt-4o-mini", ProviderUsed: "openai", AvgQuality: 0.9, SampleCount: 500, DistinctWorkspaces: 1}}
 	a2, _ := newAdvisor(t, single, Config{Enabled: true})
-	if rec := a2.Recommend(ctx, "ws1", "chat", 1000, "openai", nil, nil); rec.Basis != BasisNone {
+	if rec := a2.Recommend(ctx, "ws1", "chat", 1000, "", "openai", nil, nil); rec.Basis != BasisNone {
 		t.Fatalf("single-workspace signal must be basis=none, got %q", rec.Basis)
 	}
 }
 
 func TestRecommend_DisabledReturnsNone(t *testing.T) {
 	a, _ := newAdvisor(t, chatCohort(), Config{Enabled: false})
-	if rec := a.Recommend(context.Background(), "ws1", "chat", 1000, "openai", nil, nil); rec.Basis != BasisNone {
+	if rec := a.Recommend(context.Background(), "ws1", "chat", 1000, "", "openai", nil, nil); rec.Basis != BasisNone {
 		t.Fatalf("disabled advisor must never recommend: got %q", rec.Basis)
+	}
+}
+
+// (b) Flag OFF (TierCohorts unset) must IGNORE the complexity arg — different complexities yield
+// the identical non-tiered recommendation (byte-for-byte the current behavior).
+func TestRecommend_FlagOff_IgnoresComplexity(t *testing.T) {
+	a, _ := newAdvisor(t, chatCohort(), Config{Enabled: true}) // TierCohorts: false
+	ctx := context.Background()
+	r1 := a.Recommend(ctx, "ws1", "chat", 1000, "simple", "openai", nil, nil)
+	r2 := a.Recommend(ctx, "ws1", "chat", 1000, "complex", "openai", nil, nil)
+	r3 := a.Recommend(ctx, "ws1", "chat", 1000, "", "openai", nil, nil)
+	if r1.Model != r2.Model || r1.Model != r3.Model || r1.Basis != r2.Basis {
+		t.Fatalf("flag OFF must ignore complexity: simple=%q complex=%q empty=%q", r1.Model, r2.Model, r3.Model)
+	}
+	if r1.Model != "gpt-4o-mini" { // the same best-qpd pick as the non-tiered tests
+		t.Fatalf("flag OFF must match the current non-tiered pick (gpt-4o-mini), got %q", r1.Model)
 	}
 }
 
@@ -103,13 +125,13 @@ func TestRecommend_NeverRecommendsDisallowedModelOrProvider(t *testing.T) {
 	a, _ := newAdvisor(t, chatCohort(), Config{Enabled: true})
 
 	// Allow only gpt-4o → the best-qpd gpt-4o-mini must NOT be recommended.
-	rec := a.Recommend(ctx, "ws1", "chat", 1000, "openai", []string{"gpt-4o"}, nil)
+	rec := a.Recommend(ctx, "ws1", "chat", 1000, "", "openai", []string{"gpt-4o"}, nil)
 	if rec.Model != "gpt-4o" {
 		t.Fatalf("must only recommend an allowed model: got %q want gpt-4o", rec.Model)
 	}
 
 	// Provider not in the workspace allow-list → none.
-	rec = a.Recommend(ctx, "ws1", "chat", 1000, "openai", nil, []string{"anthropic"})
+	rec = a.Recommend(ctx, "ws1", "chat", 1000, "", "openai", nil, []string{"anthropic"})
 	if rec.Basis != BasisNone {
 		t.Fatalf("must not recommend a disallowed provider: got %q (%s)", rec.Basis, rec.Model)
 	}
@@ -121,7 +143,7 @@ func TestRecommend_HotPathDoesNotQueryStore(t *testing.T) {
 		t.Fatalf("setup: expected 1 store call, got %d", m.calls.Load())
 	}
 	for i := 0; i < 500; i++ {
-		a.Recommend(context.Background(), "ws1", "chat", 1000, "openai", nil, nil)
+		a.Recommend(context.Background(), "ws1", "chat", 1000, "", "openai", nil, nil)
 	}
 	if m.calls.Load() != 1 {
 		t.Fatalf("the request path must NOT query the store: got %d calls (want 1)", m.calls.Load())
@@ -154,7 +176,7 @@ func TestConcurrentRecommendDuringRefresh(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 500; i++ {
-				a.Recommend(ctx, "ws1", "chat", 1000, "openai", nil, nil)
+				a.Recommend(ctx, "ws1", "chat", 1000, "", "openai", nil, nil)
 				_ = a.Status()
 				_ = a.Overview()
 			}
@@ -168,9 +190,9 @@ func TestMetrics_BoundedByBasis(t *testing.T) {
 	ctx := context.Background()
 	// Many distinct features → must NOT create a series per feature.
 	for i := 0; i < 50; i++ {
-		a.Recommend(ctx, "ws1", "feature"+string(rune('A'+i)), 1000, "openai", nil, nil)
+		a.Recommend(ctx, "ws1", "feature"+string(rune('A'+i)), 1000, "", "openai", nil, nil)
 	}
-	a.Recommend(ctx, "ws1", "chat", 1000, "openai", nil, nil) // a quality_per_dollar hit
+	a.Recommend(ctx, "ws1", "chat", 1000, "", "openai", nil, nil) // a quality_per_dollar hit
 	if n := testutil.CollectAndCount(metrics.RoutingRecommendationsTotal); n > 3 {
 		t.Fatalf("routing_recommendations_total has %d series — only {basis} (≤3) allowed", n)
 	}
@@ -180,7 +202,7 @@ func TestUnpricedModel_UsesQualityBasis(t *testing.T) {
 	// A cohort whose only model is unpriced (cost 0) → quality basis.
 	stats := []mining.CohortStat{{FeatureCategory: "vibe", InputTokenRange: "medium", ModelUsed: "mystery-model", ProviderUsed: "openai", AvgQuality: 0.9, SampleCount: 50, DistinctWorkspaces: 6}}
 	a, _ := newAdvisor(t, stats, Config{Enabled: true})
-	rec := a.Recommend(context.Background(), "ws1", "vibe", 1000, "openai", nil, nil)
+	rec := a.Recommend(context.Background(), "ws1", "vibe", 1000, "", "openai", nil, nil)
 	if rec.Basis != BasisQuality || rec.Model != "mystery-model" {
 		t.Fatalf("unpriced model should fall to quality basis: got basis=%q model=%q", rec.Basis, rec.Model)
 	}
@@ -192,13 +214,16 @@ func TestRoutingHasNoHotPathDependency(t *testing.T) {
 		t.Fatalf("ImportDir: %v", err)
 	}
 	forbidden := map[string]bool{
-		"github.com/talyvor/lens/internal/proxy": true,
-		"github.com/talyvor/lens/internal/api":   true,
-		"net/http":                               true,
+		"github.com/talyvor/lens/internal/proxy":       true,
+		"github.com/talyvor/lens/internal/api":         true,
+		"net/http":                                     true,
+		"github.com/talyvor/lens/internal/economy":     true,
+		"github.com/talyvor/lens/internal/poolroyalty": true,
+		"github.com/talyvor/lens/internal/povi":        true,
 	}
 	for _, imp := range pkg.Imports {
 		if forbidden[imp] {
-			t.Errorf("routing must not import %q — the advisor must not depend on the request/HTTP layer", imp)
+			t.Errorf("routing must not import %q — the advisor must not depend on the request/HTTP layer OR any ledger/economy/mint package (it only changes which model serves, never mints)", imp)
 		}
 	}
 }

@@ -25,7 +25,7 @@ func TestRecordPatternObservation_CannotMint_NilLedger(t *testing.T) {
 	// Capture issues the opt-in-gated conditional INSERT (no RETURNING, no
 	// Credit query). The WHERE EXISTS gates the write on consent in SQL.
 	mock.ExpectExec("INSERT INTO routing_patterns").
-		WithArgs("wsA", "chat", "gpt-4o", "openai", "0-1k", 0.9, "fast", 1.0, 1.0, 1).
+		WithArgs("wsA", "chat", "gpt-4o", "openai", "0-1k", 0.9, "fast", 1.0, 1.0, 1, "").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	p := RoutingPattern{

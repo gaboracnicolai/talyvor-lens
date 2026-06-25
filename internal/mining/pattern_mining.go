@@ -78,19 +78,20 @@ const (
 
 // RoutingPattern is the shape persisted to routing_patterns.
 type RoutingPattern struct {
-	ID              string    `json:"id"`
-	WorkspaceID     string    `json:"workspace_id"`
-	FeatureCategory string    `json:"feature_category"`
-	ModelUsed       string    `json:"model_used"`
-	ProviderUsed    string    `json:"provider_used"`
-	InputTokenRange string    `json:"input_token_range"`
-	OutputQuality   float64   `json:"output_quality"`
-	LatencyBucket   string    `json:"latency_bucket"`
-	CacheHitRate    float64   `json:"cache_hit_rate"`
-	SuccessRate     float64   `json:"success_rate"`
-	SampleCount     int       `json:"sample_count"`
-	Rarity          float64   `json:"rarity"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID               string    `json:"id"`
+	WorkspaceID      string    `json:"workspace_id"`
+	FeatureCategory  string    `json:"feature_category"`
+	ModelUsed        string    `json:"model_used"`
+	ProviderUsed     string    `json:"provider_used"`
+	InputTokenRange  string    `json:"input_token_range"`
+	OutputQuality    float64   `json:"output_quality"`
+	LatencyBucket    string    `json:"latency_bucket"`
+	CacheHitRate     float64   `json:"cache_hit_rate"`
+	SuccessRate      float64   `json:"success_rate"`
+	SampleCount      int       `json:"sample_count"`
+	Rarity           float64   `json:"rarity"`
+	ComplexityBucket string    `json:"complexity_bucket"` // worktier.ComplexityBucketFor(score); '' when uncaptured
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // PatternContribution is the per-workspace rollup the dashboard
@@ -447,13 +448,13 @@ func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p 
 			workspace_id, feature_category, model_used, provider_used,
 			input_token_range, output_quality, latency_bucket,
 			cache_hit_rate, success_rate, sample_count, rarity,
-			opted_in, earned
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			complexity_bucket, opted_in, earned
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id, created_at`,
 		workspaceID, p.FeatureCategory, p.ModelUsed, p.ProviderUsed,
 		p.InputTokenRange, p.OutputQuality, p.LatencyBucket,
 		p.CacheHitRate, p.SuccessRate, p.SampleCount, p.Rarity,
-		optedIn, earned,
+		p.ComplexityBucket, optedIn, earned,
 	)
 	if err := row.Scan(&p.ID, &p.CreatedAt); err != nil {
 		return fmt.Errorf("pattern mining: insert pattern: %w", err)
@@ -658,6 +659,7 @@ func (m *PatternMiner) GetTopInsight(ctx context.Context, feature, inputRange st
 type CohortStat struct {
 	FeatureCategory    string  `json:"feature_category"`
 	InputTokenRange    string  `json:"input_token_range"`
+	ComplexityBucket   string  `json:"complexity_bucket"` // empty for the non-tiered aggregate
 	ModelUsed          string  `json:"model_used"`
 	ProviderUsed       string  `json:"provider_used"`
 	AvgQuality         float64 `json:"avg_quality"`
@@ -671,6 +673,18 @@ SELECT feature_category, input_token_range, model_used, provider_used,
 FROM routing_patterns
 WHERE opted_in = TRUE
 GROUP BY feature_category, input_token_range, model_used, provider_used`
+
+// aggregateCohortsTieredSQL is the TIER-CONDITIONED parallel of aggregateCohortsSQL: it adds the
+// complexity_bucket grouping key. Legacy rows (complexity_bucket = ”) are EXCLUDED so they never
+// dilute a tier. The per-TIERED-cohort COUNT(DISTINCT workspace_id) is the privacy floor the
+// Advisor enforces (a finer slice with < MinWorkspaces distinct workspaces never surfaces). The
+// non-tiered query above is left byte-identical — it is the flag-OFF path.
+const aggregateCohortsTieredSQL = `
+SELECT feature_category, input_token_range, complexity_bucket, model_used, provider_used,
+       AVG(output_quality), COUNT(*), COUNT(DISTINCT workspace_id)
+FROM routing_patterns
+WHERE opted_in = TRUE AND complexity_bucket <> ''
+GROUP BY feature_category, input_token_range, complexity_bucket, model_used, provider_used`
 
 // AggregateCohorts returns every candidate (feature, input-range, model,
 // provider) over the opted-in corpus in ONE query — the routing advisor
@@ -691,6 +705,31 @@ func (m *PatternMiner) AggregateCohorts(ctx context.Context) ([]CohortStat, erro
 		if err := rows.Scan(&c.FeatureCategory, &c.InputTokenRange, &c.ModelUsed,
 			&c.ProviderUsed, &c.AvgQuality, &c.SampleCount, &c.DistinctWorkspaces); err != nil {
 			return nil, fmt.Errorf("pattern mining: scan cohort: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// AggregateCohortsTiered is the tier-conditioned parallel of AggregateCohorts — same shape, plus
+// the complexity_bucket dimension on each cohort. The advisor loads this (in addition to the
+// non-tiered cohorts) when LENS_ROUTING_TIER_COHORTS_ENABLED is on, so the per-request path stays
+// an in-memory map lookup. Reads only the privacy-bucketed aggregate, never raw content.
+func (m *PatternMiner) AggregateCohortsTiered(ctx context.Context) ([]CohortStat, error) {
+	if m.pool == nil {
+		return nil, nil
+	}
+	rows, err := m.pool.Query(ctx, aggregateCohortsTieredSQL)
+	if err != nil {
+		return nil, fmt.Errorf("pattern mining: aggregate tiered cohorts: %w", err)
+	}
+	defer rows.Close()
+	var out []CohortStat
+	for rows.Next() {
+		var c CohortStat
+		if err := rows.Scan(&c.FeatureCategory, &c.InputTokenRange, &c.ComplexityBucket, &c.ModelUsed,
+			&c.ProviderUsed, &c.AvgQuality, &c.SampleCount, &c.DistinctWorkspaces); err != nil {
+			return nil, fmt.Errorf("pattern mining: scan tiered cohort: %w", err)
 		}
 		out = append(out, c)
 	}
@@ -732,10 +771,10 @@ const insertPatternObservationSQL = `
 INSERT INTO routing_patterns (
 	workspace_id, feature_category, model_used, provider_used,
 	input_token_range, output_quality, latency_bucket,
-	cache_hit_rate, success_rate, sample_count, rarity,
+	cache_hit_rate, success_rate, sample_count, complexity_bucket, rarity,
 	opted_in, earned
 )
-SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, TRUE, 0
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, TRUE, 0
 WHERE EXISTS (SELECT 1 FROM workspace_pattern_optin WHERE workspace_id = $1)`
 
 // RecordPatternObservation persists a single anonymized routing observation for
@@ -750,7 +789,7 @@ func (m *PatternMiner) RecordPatternObservation(ctx context.Context, workspaceID
 	if _, err := m.pool.Exec(ctx, insertPatternObservationSQL,
 		workspaceID, p.FeatureCategory, p.ModelUsed, p.ProviderUsed,
 		p.InputTokenRange, p.OutputQuality, p.LatencyBucket,
-		p.CacheHitRate, p.SuccessRate, p.SampleCount,
+		p.CacheHitRate, p.SuccessRate, p.SampleCount, p.ComplexityBucket,
 	); err != nil {
 		return fmt.Errorf("pattern mining: insert observation: %w", err)
 	}

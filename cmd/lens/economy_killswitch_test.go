@@ -59,9 +59,10 @@ func TestEconomyKillSwitch_ForcesAllGatesOff(t *testing.T) {
 		"POVIMinting": cfg.POVIMintingEnabled, "TrustfulComputeMint": cfg.TrustfulComputeMintEnabled,
 		"CacheSharing": cfg.CacheSharingEnabled, "CachePoolable": cfg.CachePoolableEnabled,
 		"DistillPoolable": cfg.DistillPoolableEnabled, "RoutingIntelligence": cfg.RoutingIntelligenceEnabled,
+		"RoutingTierCohorts": cfg.RoutingTierCohortsEnabled,
 	}
-	if len(checks) != 10 {
-		t.Fatalf("expected 10 economy gates, got %d", len(checks))
+	if len(checks) != 11 {
+		t.Fatalf("expected 11 economy gates, got %d", len(checks))
 	}
 	// U18 INVERSE: LXC is FIAT — its gates survive the master kill (env-true → on),
 	// so a fiat-SaaS deployment can still meter/gate paid LXC credit economy-off.

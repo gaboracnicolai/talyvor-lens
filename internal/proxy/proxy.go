@@ -50,6 +50,7 @@ import (
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/workspace"
+	"github.com/talyvor/lens/internal/worktier"
 )
 
 const (
@@ -998,7 +999,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// Advisor is workspace-BLIND (it discards wsID); the Shape-1 gate below
 		// adds NO cross-tenant read — its decisionTier is computed from THIS
 		// request only (issue #198).
-		rec := p.routingAdvisor.Recommend(ctx, wsID, feature, len(compressedPrompt)/4, cfg.name, allowedModels, allowedProviders)
+		// Compute the request's complexity ONCE (pure substring scans) and reuse it for both the
+		// Advisor's pre-serve tier projection and the Shape-1 decisionTier below — never the
+		// persisted post-serve WorkTier (unknowable here). The tier conditions the pick only when
+		// LENS_ROUTING_TIER_COHORTS_ENABLED is on; otherwise Recommend ignores it.
+		complexityScore := router.AnalyseComplexity(compressedPrompt).Score()
+		rec := p.routingAdvisor.Recommend(ctx, wsID, feature, len(compressedPrompt)/4, string(worktier.ComplexityBucketFor(complexityScore)), cfg.name, allowedModels, allowedProviders)
 		// Base-path pick: the model an auto request gets if NO recommendation is
 		// applied (the complexity router). Pure/in-memory (no DB, no side
 		// effects), computed once — it is BOTH the downgrade baseline for the
@@ -1012,7 +1018,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// veto) — subtractive, never selecting a third model. decisionTier is
 		// deliberately DISTINCT from the persisted WorkTier (input-size not
 		// total, no cost, never stored; see routing_decision_tier.go).
-		dt := newDecisionTier(len(compressedPrompt)/4, compressedPrompt, piiDetected, guardrailFired, loggingPolicy)
+		dt := newDecisionTier(len(compressedPrompt)/4, complexityScore, piiDetected, guardrailFired, loggingPolicy)
 		res := resolveAutoRoute(p.router, rec, base, dt)
 		if res.model != "" {
 			upstreamModel = res.model
@@ -1328,10 +1334,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// other state (incl. flag-OFF, the first guard) it returns false and
 			// capturePattern runs byte-identical to before. Both are post-flush,
 			// detached, void — neither can affect the served response.
+			// Tier-cohort dimension for the routing corpus: the complexity bucket on the SAME
+			// compressedPrompt the router/decisionTier/WorkTier use, so the captured/earned row's
+			// bucket equals the live lookup bucket (write == lookup). Inert until
+			// LENS_ROUTING_TIER_COHORTS_ENABLED reads it; '' on legacy rows is excluded from the tiered aggregate.
+			routingComplexityBucket := string(worktier.ComplexityBucketFor(router.AnalyseComplexity(compressedPrompt).Score()))
 			if !p.earnPattern(ctx, piiDetected, guardrailFired, loggingPolicy, feature, upstreamModel, cfg.name, prompt, upstreamBody,
-				len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds()) {
+				len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), routingComplexityBucket) {
 				p.capturePattern(ctx, piiDetected, guardrailFired, loggingPolicy, wsID, feature, upstreamModel, cfg.name,
-					len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false)
+					len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false, routingComplexityBucket)
 			}
 			// WorkTier descriptive classification — post-flush, off-hot-path, void,
 			// best-effort, shares the obsLimiter; default-off. DESCRIPTIVE + mint-free

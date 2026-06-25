@@ -161,7 +161,7 @@ func TestRecordPattern_CreditsOptedInWorkspace(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_opt", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, true, 0.001).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", true, 0.001).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("p1", time.Now()))
 	expectApplyTx(mock, "ws_opt", 0, 0, 0, 0.001, 0.001, 0.001, 0) // credit 0.001 (unchanged effect)
@@ -191,7 +191,7 @@ func TestRecordPattern_SkipsCreditWhenNotOptedIn(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_off", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, false, 0.0).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", false, 0.0).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("p_off", time.Now()))
 	mock.ExpectCommit()

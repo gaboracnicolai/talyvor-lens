@@ -43,11 +43,12 @@ const (
 
 // newDecisionTier builds the pre-serve tier from request-local signals ONLY —
 // no DB read, no cross-tenant data. Total (no error, no panic) so it can never
-// break the served response.
-func newDecisionTier(inputTokens int, compressedPrompt string, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy) decisionTier {
+// break the served response. complexityScore is router.AnalyseComplexity(prompt).Score()
+// computed ONCE by the caller and shared with the Advisor's tier projection.
+func newDecisionTier(inputTokens, complexityScore int, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy) decisionTier {
 	return decisionTier{
 		inputTokens: inputTokens,
-		complexity:  router.AnalyseComplexity(compressedPrompt).Score(),
+		complexity:  complexityScore,
 		pii:         piiDetected,
 		guardrail:   guardrailFired,
 		loggingNone: loggingPolicy == workspace.LoggingNone,

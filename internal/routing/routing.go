@@ -50,6 +50,7 @@ const (
 // Config tunes the advisor. Zero fields fall back to defaults.
 type Config struct {
 	Enabled         bool
+	TierCohorts     bool          // condition cohorts on the complexity tier (LENS_ROUTING_TIER_COHORTS_ENABLED, default off)
 	MinSamples      int           // ≥N patterns in a cohort (default 20)
 	MinWorkspaces   int           // ≥M distinct contributing workspaces (default 3)
 	RefreshInterval time.Duration // cache refresh cadence (default 5m)
@@ -63,6 +64,7 @@ type CostFunc func(model string) float64
 // cohortSource is the read surface — *mining.PatternMiner in production.
 type cohortSource interface {
 	AggregateCohorts(ctx context.Context) ([]mining.CohortStat, error)
+	AggregateCohortsTiered(ctx context.Context) ([]mining.CohortStat, error)
 }
 
 // Candidate is one model option within a (feature, input-range) cohort,
@@ -107,9 +109,10 @@ type Advisor struct {
 	cfg  Config
 	now  func() time.Time
 
-	mu          sync.RWMutex
-	cohorts     map[string][]Candidate // feature|input_range → candidates (best first)
-	lastRefresh time.Time
+	mu            sync.RWMutex
+	cohorts       map[string][]Candidate // feature|input_range → candidates (best first)
+	tieredCohorts map[string][]Candidate // feature|input_range|complexity → candidates (only when TierCohorts on)
+	lastRefresh   time.Time
 }
 
 // New builds an Advisor. src is the pattern aggregation, cost the pricing
@@ -127,7 +130,7 @@ func New(src cohortSource, cost CostFunc, cfg Config) *Advisor {
 	if cost == nil {
 		cost = func(string) float64 { return 0 }
 	}
-	return &Advisor{src: src, cost: cost, cfg: cfg, now: time.Now, cohorts: map[string][]Candidate{}}
+	return &Advisor{src: src, cost: cost, cfg: cfg, now: time.Now, cohorts: map[string][]Candidate{}, tieredCohorts: map[string][]Candidate{}}
 }
 
 // Enabled reports whether intelligence is on. The proxy gates the whole
@@ -135,6 +138,11 @@ func New(src cohortSource, cost CostFunc, cfg Config) *Advisor {
 func (a *Advisor) Enabled() bool { return a != nil && a.cfg.Enabled }
 
 func cohortKey(feature, inputRange string) string { return feature + "|" + inputRange }
+
+// cohortKeyTiered adds the complexity dimension — the tier-conditioned key (TierCohorts on).
+func cohortKeyTiered(feature, inputRange, complexity string) string {
+	return feature + "|" + inputRange + "|" + complexity
+}
 
 // Refresh reloads the cohort cache from the aggregated corpus and ranks each
 // cohort's candidates (priced quality-per-dollar first, then quality). The
@@ -147,6 +155,28 @@ func (a *Advisor) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	next := a.rankCohorts(stats, false)
+	// When tier-conditioning is on, ALSO load the tiered overlay. The non-tiered map above is
+	// kept as the fallback (Condition 2) and remains the byte-identical flag-OFF path.
+	var nextTiered map[string][]Candidate
+	if a.cfg.TierCohorts {
+		tstats, terr := a.src.AggregateCohortsTiered(ctx)
+		if terr != nil {
+			return terr
+		}
+		nextTiered = a.rankCohorts(tstats, true)
+	}
+	a.mu.Lock()
+	a.cohorts = next
+	a.tieredCohorts = nextTiered
+	a.lastRefresh = a.now()
+	a.mu.Unlock()
+	return nil
+}
+
+// rankCohorts builds + ranks the in-memory cohort map from aggregated stats. When tiered, the key
+// carries the complexity dimension. Behavior-preserving extraction of the prior Refresh loop.
+func (a *Advisor) rankCohorts(stats []mining.CohortStat, tiered bool) map[string][]Candidate {
 	next := make(map[string][]Candidate)
 	for _, s := range stats {
 		cpk := a.cost(s.ModelUsed)
@@ -155,6 +185,9 @@ func (a *Advisor) Refresh(ctx context.Context) error {
 			qpd = s.AvgQuality / cpk
 		}
 		k := cohortKey(s.FeatureCategory, s.InputTokenRange)
+		if tiered {
+			k = cohortKeyTiered(s.FeatureCategory, s.InputTokenRange, s.ComplexityBucket)
+		}
 		next[k] = append(next[k], Candidate{
 			Model: s.ModelUsed, Provider: s.ProviderUsed, AvgQuality: s.AvgQuality,
 			CostPer1k: cpk, QualityPerDollar: qpd,
@@ -164,11 +197,7 @@ func (a *Advisor) Refresh(ctx context.Context) error {
 	for k := range next {
 		sortCandidates(next[k])
 	}
-	a.mu.Lock()
-	a.cohorts = next
-	a.lastRefresh = a.now()
-	a.mu.Unlock()
-	return nil
+	return next
 }
 
 // sortCandidates orders priced candidates by quality-per-dollar desc, then
@@ -217,11 +246,19 @@ func (a *Advisor) StartRefresh(ctx context.Context) {
 // Recommend is the HOT-PATH entry: in-memory lookup only. Returns a
 // none-basis recommendation when disabled, below floor, or no allowed
 // candidate — the proxy then keeps the default. Records the basis metric.
-func (a *Advisor) Recommend(_ context.Context, _ string, feature string, inputTokens int, provider string, allowedModels, allowedProviders []string) Recommendation {
+func (a *Advisor) Recommend(_ context.Context, _ string, feature string, inputTokens int, complexity, provider string, allowedModels, allowedProviders []string) Recommendation {
 	if !a.Enabled() {
 		return Recommendation{Basis: BasisNone, Reason: "routing intelligence disabled"}
 	}
-	rec := a.evaluate(feature, mining.InputBucketFor(inputTokens), provider, allowedModels, allowedProviders)
+	var rec Recommendation
+	if a.cfg.TierCohorts {
+		// Tier-conditioned: the complexity tier picks a finer cohort; below-floor / missing tiers
+		// fall back to the non-tiered cohort, then the proxy's default.
+		rec = a.evaluateTiered(feature, mining.InputBucketFor(inputTokens), complexity, provider, allowedModels, allowedProviders)
+	} else {
+		// Flag OFF: the exact current path — complexity ignored, byte-identical to today.
+		rec = a.evaluate(feature, mining.InputBucketFor(inputTokens), provider, allowedModels, allowedProviders)
+	}
 	metrics.RoutingRecommendation(string(rec.Basis))
 	return rec
 }
@@ -239,18 +276,50 @@ func (a *Advisor) RecommendByRange(_ context.Context, _ string, feature, inputRa
 // provider + the workspace's allowed models, enforce the sample floor, and
 // return the best (the cohort is pre-sorted). Never invents a target.
 func (a *Advisor) evaluate(feature, inputRange, provider string, allowedModels, allowedProviders []string) Recommendation {
-	if provider == "" {
-		return Recommendation{Basis: BasisNone, Reason: "no provider"}
+	if rec, ok := providerGuard(provider, allowedProviders); !ok {
+		return rec
 	}
-	// Never recommend a provider the workspace can't use.
-	if len(allowedProviders) > 0 && !contains(allowedProviders, provider) {
-		return Recommendation{Provider: provider, Basis: BasisNone, Reason: "provider not in workspace allow-list"}
-	}
-
 	a.mu.RLock()
 	cands := a.cohorts[cohortKey(feature, inputRange)]
 	a.mu.RUnlock()
+	return a.pickFromCohort(cands, feature, inputRange, provider, allowedModels)
+}
 
+// evaluateTiered is the tier-conditioned selection (TierCohorts on): try the complexity-tier
+// cohort first; on a miss OR a below-floor tier (Condition 1: per-tier COUNT(DISTINCT workspace_id)
+// < MinWorkspaces ⇒ pickFromCohort returns BasisNone), fall back to the NON-tiered cohort
+// (Condition 2), and if that also misses, BasisNone ⇒ the proxy keeps the default. A finer slice
+// that fails the per-tier floor never surfaces.
+func (a *Advisor) evaluateTiered(feature, inputRange, complexity, provider string, allowedModels, allowedProviders []string) Recommendation {
+	if rec, ok := providerGuard(provider, allowedProviders); !ok {
+		return rec
+	}
+	a.mu.RLock()
+	tcands := a.tieredCohorts[cohortKeyTiered(feature, inputRange, complexity)]
+	ncands := a.cohorts[cohortKey(feature, inputRange)]
+	a.mu.RUnlock()
+	if rec := a.pickFromCohort(tcands, feature, inputRange, provider, allowedModels); rec.Basis != BasisNone {
+		return rec
+	}
+	return a.pickFromCohort(ncands, feature, inputRange, provider, allowedModels)
+}
+
+// providerGuard returns (rec, false) when the request's provider is missing or not in the
+// workspace allow-list; (zero, true) to proceed.
+func providerGuard(provider string, allowedProviders []string) (Recommendation, bool) {
+	if provider == "" {
+		return Recommendation{Basis: BasisNone, Reason: "no provider"}, false
+	}
+	if len(allowedProviders) > 0 && !contains(allowedProviders, provider) {
+		return Recommendation{Provider: provider, Basis: BasisNone, Reason: "provider not in workspace allow-list"}, false
+	}
+	return Recommendation{}, true
+}
+
+// pickFromCohort filters a cohort's candidates to the request's provider + the workspace's allowed
+// models, enforces the per-cohort sample/workspace floor (the privacy floor — for a TIERED cohort
+// these are the per-tier counts), and returns the best (pre-sorted). BasisNone if none qualifies.
+func (a *Advisor) pickFromCohort(cands []Candidate, feature, inputRange, provider string, allowedModels []string) Recommendation {
 	for _, c := range cands {
 		if c.Provider != provider { // v1 stays within the request's provider
 			continue

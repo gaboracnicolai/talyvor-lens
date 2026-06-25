@@ -400,6 +400,14 @@ type Config struct {
 	// LENS_ROUTING_INTELLIGENCE_ENABLED=true.
 	RoutingIntelligenceEnabled bool
 
+	// RoutingTierCohortsEnabled refines RoutingIntelligence (Shape 3): when on, the Advisor
+	// conditions its cohorts on the request's complexity tier (worktier.ComplexityBucketFor),
+	// picking the best model PER work-type, with a tiered→non-tiered→default fallback. OFF by
+	// default and in the kill-switch force-off block: when off, routing is byte-for-byte as
+	// before (the complexity dimension is ignored). Only meaningful when RoutingIntelligence is
+	// also on. Opt in via LENS_ROUTING_TIER_COHORTS_ENABLED=true.
+	RoutingTierCohortsEnabled bool
+
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
 	// force-OFFs every economy state-creation gate below (regardless of its own
@@ -642,6 +650,7 @@ func Load() (*Config, error) {
 		WorkTierEnabled:   parseBoolEnv("LENS_WORKTIER_ENABLED"),
 
 		RoutingIntelligenceEnabled: parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
+		RoutingTierCohortsEnabled:  parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
@@ -1174,6 +1183,7 @@ func Load() (*Config, error) {
 		c.CachePoolableEnabled = false
 		c.DistillPoolableEnabled = false
 		c.RoutingIntelligenceEnabled = false
+		c.RoutingTierCohortsEnabled = false
 		// U18: LXCGatingEnabled / LXCShadowSpendEnabled are DELIBERATELY NOT
 		// forced off here — LXC is the fiat-pegged usage credit, not token
 		// economy. They keep their own env values so a fiat-SaaS deployment can

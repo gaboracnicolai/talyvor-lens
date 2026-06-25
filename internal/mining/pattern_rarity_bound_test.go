@@ -99,7 +99,7 @@ func TestScoreRarity_FeatureExcluded_Integration(t *testing.T) {
 			provider_used TEXT NOT NULL, input_token_range TEXT NOT NULL, output_quality DOUBLE PRECISION NOT NULL DEFAULT 0,
 			latency_bucket TEXT NOT NULL, cache_hit_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
 			success_rate DOUBLE PRECISION NOT NULL DEFAULT 1, sample_count INT NOT NULL DEFAULT 1,
-			rarity DOUBLE PRECISION NOT NULL DEFAULT 0, opted_in BOOLEAN NOT NULL DEFAULT FALSE,
+			rarity DOUBLE PRECISION NOT NULL DEFAULT 0, complexity_bucket TEXT NOT NULL DEFAULT '', opted_in BOOLEAN NOT NULL DEFAULT FALSE,
 			earned DOUBLE PRECISION NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		// 3 OTHER opted-in workspaces, SAME proxy-set tuple, DIFFERENT feature each.
 		`INSERT INTO routing_patterns (workspace_id, feature_category, model_used, provider_used, input_token_range, latency_bucket, opted_in)

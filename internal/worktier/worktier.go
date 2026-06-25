@@ -116,6 +116,13 @@ func complexityBucket(score int) Complexity {
 	}
 }
 
+// ComplexityBucketFor is the EXPORTED bucketer (the same mapping Classify uses). It is the
+// single source of truth shared by the routing tier-cohort consumer: pattern-capture stamps
+// routing_patterns.complexity_bucket with it (the WRITE bucket) and the serve path passes it to
+// the Advisor (the LOOKUP bucket), so write-bucket == lookup-bucket by construction. Pure +
+// mint-free (this package imports nothing that reaches a ledger).
+func ComplexityBucketFor(score int) Complexity { return complexityBucket(score) }
+
 // sensitivityFor applies precedence restricted > elevated > normal: a no-logging
 // workspace is restricted regardless of PII/guardrail; otherwise PII OR a
 // guardrail trip is elevated.

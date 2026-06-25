@@ -73,6 +73,28 @@ func TestClassify_SizeUsesTotal(t *testing.T) {
 	}
 }
 
+// TestComplexityBucketFor_Deterministic — the exported bucketer (the routing tier-cohort
+// consumer's write==lookup source of truth) is deterministic AND equals Classify's mapping, so a
+// pattern-capture stamp and a serve-path lookup of the same score always land in the same bucket.
+func TestComplexityBucketFor_Deterministic(t *testing.T) {
+	for _, c := range []struct {
+		score int
+		want  Complexity
+	}{
+		{-1, ComplexityTrivial}, {0, ComplexityTrivial},
+		{1, ComplexitySimple}, {2, ComplexitySimple},
+		{3, ComplexityModerate}, {4, ComplexityModerate},
+		{5, ComplexityComplex}, {6, ComplexityComplex},
+	} {
+		if got := ComplexityBucketFor(c.score); got != c.want {
+			t.Errorf("ComplexityBucketFor(%d) = %q, want %q", c.score, got, c.want)
+		}
+		if got := Classify(0, 0, 0, c.score, false, false, "").Complexity; got != c.want {
+			t.Errorf("Classify complexity for score %d = %q, want %q (must equal ComplexityBucketFor)", c.score, got, c.want)
+		}
+	}
+}
+
 // TestWorkTier_MintFree_ImportGuard — the architectural mint-free guarantee: the
 // worktier package imports NO minting package, so no code path here can reach a
 // ledger credit. (The store's db field is Exec/Query-only — no Begin — which is

@@ -55,7 +55,7 @@ func (p *Proxy) SetPatternEarn(sink patternEarnSink, enabled func() bool) {
 // Gate: PatternEarningEnabled AND a real authenticated non-default workspace
 // AND opted-in. The economic unit is the WORK PRODUCT — requestID is a
 // content hash over (model, prompt, response), so identical work earns once.
-func (p *Proxy) earnPattern(ctx context.Context, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy, feature, model, provider, prompt string, response []byte, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64) bool {
+func (p *Proxy) earnPattern(ctx context.Context, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy, feature, model, provider, prompt string, response []byte, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64, complexityBucket string) bool {
 	// FLAG-OFF: first, cheapest guard — no auth read, no DB read, no hash.
 	if p == nil || p.patternEarnSink == nil || p.patternEarnEnabled == nil || !p.patternEarnEnabled() {
 		return false
@@ -105,6 +105,7 @@ func (p *Proxy) earnPattern(ctx context.Context, piiDetected, guardrailFired boo
 			poolroyalty.SHA256Hex(response),
 	))
 	pat := mining.ExtractPattern(feature, model, provider, inputTokens, outputTokens, quality, latencyMs, false)
+	pat.ComplexityBucket = complexityBucket // tier-cohort dimension; earned rows carry it too (parity with capture)
 	if err := p.patternEarnSink.RecordPattern(dctx, earnWS, pat, true, rid); err != nil {
 		// Logged-and-swallowed, like the capture/shadow paths — never touches
 		// the served response. The earn still "took" the row decision (we return
