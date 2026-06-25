@@ -2,8 +2,8 @@
 
 **Single source of truth for "what is built," derived from the actual code at the SHA below — never from the roadmap, notes, or assumptions.** Regenerated (never hand-edited) whenever it goes stale.
 
-- **Derived from main:** `11aabe8`
-- **Latest migration:** `0065_royalty_detector_findings.sql`
+- **Derived from main:** `6d36725`
+- **Latest migration:** `0066_reputation_events.sql`
 - **Config:** all `config.go:LINE` citations are `internal/config/config.go`.
 - **Method:** every cell was grep'd / read from code. Where code and a note/roadmap disagree, **the code wins** — see [§C Discrepancies](#c-discrepancies-code-wins).
 
@@ -93,10 +93,10 @@ Mint components gate on `LENS_POOL_ROYALTY_MINTING_ENABLED` **false** (config.go
 | real-PG test | **yes** (`internal/billing/billing_integration_test.go`, runs migration 0054, money idempotency + concurrency) |
 
 ### A6 · Routing-intelligence
-**BUILT-INERT** · `LENS_ROUTING_INTELLIGENCE_ENABLED` **false** (config.go:635), **in the kill-switch block**. Feeds pattern aggregates into auto-route selection; live only on `auto`/`X-Talyvor-Auto-Route` requests (`internal/routing/routing.go`, `proxy.go:992`). Pinned models unaffected. real-PG test: not found (in-memory).
+**BUILT-INERT** · `LENS_ROUTING_INTELLIGENCE_ENABLED` **false** (config.go:635), **in the kill-switch block**. Feeds pattern aggregates into auto-route selection; live only on `auto`/`X-Talyvor-Auto-Route` requests (`internal/routing/routing.go`, `proxy.go:992`). Pinned models unaffected. The per-request `Recommend` is an in-memory map lookup (never a DB query); the corpus loads on a timer via `mining.PatternMiner.AggregateCohorts` (`pattern_mining.go:679`, `aggregateCohortsSQL`). real-PG test: **yes** — `internal/mining/aggregate_cohorts_integration_test.go` (#236 `6d36725`) executes `aggregateCohortsSQL` against real `routing_patterns`, proving the opt-out **privacy exclusion** (`opted_in=FALSE` rows excluded from COUNT/AVG/COUNT-DISTINCT; an all-opted-out cohort never surfaces) + aggregation/grouping; the Advisor's in-memory ranking + floors stay unit-tested (`routing_test.go`, `mockSource`).
 
 ### A7 · WorkTier
-**BUILT-INERT** · `LENS_WORKTIER_ENABLED` **false** (config.go:633), **NOT** in the kill-switch block (descriptive ⇒ off=safe). **Doctrine enforced in code:** mint-free by construction (`internal/worktier/worktier.go:3-8`, import-guard test fails if mining/economy/ledger imported). **Captured-but-unconsumed** — `main.go:844-845`: "Nothing consumes the tier yet." Write-only post-flush to `work_tier_observations` (migration 0059). real-PG test: not found (unit + import-guard).
+**BUILT-INERT** (capture) · `LENS_WORKTIER_ENABLED` **false** (config.go:633), **NOT** in the kill-switch block (descriptive ⇒ off=safe). **Doctrine enforced in code:** mint-free by construction (`internal/worktier/worktier.go:3-8`, import-guard test fails if mining/economy/ledger imported; `worktier.Store` is Exec/Query-only, no `Begin`/ledger). Write-only post-flush to `work_tier_observations` (migration 0059). **Now CONSUMED by analytics** (no longer "unconsumed"): `GET /v1/admin/worktier/distribution` (`main.go:1366`, `authed.Get` + `requireAdmin` → 401 — **admin-gated, NOT economy-gated**, matching capture's exempt posture) reads `worktier.Store.Aggregate` (per-workspace, sliced by model; `workspace_id` REQUIRED → 400, no cross-tenant mode). real-PG test: **yes** — `cmd/lens/worktier_analytics_handler_test.go` (#235 `3396781`: tenant isolation, admin-gate no-leak, required-param, window) + the `worktier` mint-free import-guard. The **routing-Advisor tier-conditioning** consumer (conditions routing on the tier) remains a separate future PR.
 
 ### A8 · Guardrails
 `LENS_GUARDRAILS_ENABLED` **false** (config.go:632) gates **only the OUTPUT stage**; **input guardrails run unconditionally** (`internal/guardrails/engine.go`). Input = **BUILT-&-ON** (default redact PII / block injection); Output = **BUILT-INERT** (default off; even on, block actions are opt-in/observe). Not economy-killswitched. real-PG test: not found.
@@ -127,6 +127,21 @@ Read-only forensics over both economies. **Admin-gated (`requireAdmin` → 401) 
 - **Never-auto-act (structural):** `DetectorSweep` holds only the read-only detectors + a `Record`-only sink; `detector_sweep.go` imports no ledger and references no mutation primitive in code — pinned by `TestDetectorSweep_NeverActs_ImportGuard` (AST identifiers, comments excluded) **and** a money-safety test (mint tables byte-identical after a sweep over gaming rows).
 - **Single-leader / no double-emit:** `haComps.leader.Run` (Redis lease when HA on; runs `fn` directly single-instance) — `internal/ha/leader_test.go` `TestLeader_FnRunsOnlyOnce`.
 
+### A12 · Annotation-mining + reputation — `internal/mining/annotation_mining.go` + `internal/mining/reputation.go`
+Stake-to-annotate proof-of-useful-work: annotators stake LENS, review response pairs, and earn on consensus. **Economy-gated** (no own flag — the routes are `econ.get/econ.post`, 404 when `LENS_ECONOMY_ENABLED=false`); earning runs through the **U6 chokepoint** (§A9: `CreditTx → verifyEarn + checkMintRateCap`). Reputation (PR1–3, #232/#233/#234) is **money-decoupled by construction** — it gates task ACCESS + display, never earning.
+
+| Component | Status | Gating | file:line | Migration | real-PG | Last SHA |
+|---|---|---|---|---|---|---|
+| Annotation earn (base + high-agreement bonus) | BUILT-&-ON (economy-gated) | EconomyEnabled; U6 floor | `annotation_mining.go:368` `CreditTx`; earn = `AnnotationBaseReward 0.100` + `HighAgreementBonus 0.050` (agreement ≥0.80 + ≥3 others); stake `StakeRequirement 10.0`; `TypeAnnotationMine` | 0022 `annotation_tasks`/`annotations`/`annotator_stakes` | yes (`reputation_integration_test.go` earning-invariance) | — |
+| Reputation score (event-sourced) | BUILT-&-ON | EconomyEnabled (events only via the sweep) | `reputation.go:86` `reputationScore` = `clamp(0.5 + SUM(delta), 0, 1)`, baseline 0.5 | **0066** `reputation_events` (append-only; `BEFORE UPDATE/DELETE` trigger ⇒ immutable at the DB level) | yes (`reputation_integration_test.go`) | b38369b |
+| Access-floor gate (the live consumer) | BUILT-&-ON | EconomyEnabled | `annotation_mining.go:215` `GetPendingTask` returns no task when score `< AccessFloor 0.35` (`reputation.go:34`) — below baseline, so a new / dormant-decayed annotator is **never benched** | 0066 | yes (`reputation_gate_integration_test.go`) | 555d102 |
+| Admin re-entry (reset) | BUILT-&-ON (**admin-gated, NOT economy-gated**) | `requireAdmin` → 401 | `POST /v1/admin/annotation-reputation/reset` (`main.go:1373`) → `reputation.go:108` `Reset` APPENDS an `admin_reset` event ⇒ restores baseline (never UPDATE/DELETE) | 0066 | yes (`...reset_handler_test.go` admin-gate, no-leak) | 555d102 |
+| Dormancy decay | BUILT-&-ON | EconomyEnabled | `reputation.go:301` `DecayDormant` — earned reputation decays `ReputationDecayRate 0.01`/day toward baseline after `DormancyDays 7`; clamped so it **FLOORS AT baseline** (never below) | 0066 | yes (`reputation_decay_integration_test.go`) | c68a573 |
+| Resolution + decay sweep | BUILT-&-ON (economy-gated) | leader-elected `"annotation-reputation-resolution"` ttl 30s (`main.go:811`); runs iff `EconomyEnabled` | `reputation.go:372` `StartScheduler` runs `ResolveExpiredTasks` (`:156`, final-consensus agreement → `agreement_outcome` events) **+** `DecayDormant` per tick | 0066 | yes | c68a573 |
+| Display (real computed score) | BUILT-&-ON | EconomyEnabled | `annotation_mining.go:654` `GetAnnotatorStats` returns the computed score (was a hardcoded `1.0`) | 0066 | yes | b38369b |
+
+> **Money-decoupled (doctrine, structurally enforced):** all reputation code lives in `reputation.go`; the earning path (`SubmitAnnotation` :263 → `CreditTx` :368 = base + bonus) references **no** reputation symbol — pinned by `TestReputation_MoneyBoundary_ASTGuard` (`reputation_integration_test.go:223`, AST identifiers) + an earning-invariance test (two annotators with opposite reputations → byte-identical earning). The event log is append-only at the DB level (0066 trigger rejects UPDATE/DELETE); the resolution sweep, decay, and admin reset all only INSERT.
+
 ---
 
 ## §B — Every economy flag: default + what flipping it does
@@ -146,7 +161,7 @@ All booleans below are `parseBoolEnv` (**false** when unset) unless noted, and a
 | `LENS_CACHE_POOLABLE_ENABLED` | false | :619 | Cross-tenant cache pooling (cache-royalty substrate). |
 | `LENS_DISTILL_POOLABLE_ENABLED` | false | :620 | Cross-tenant OCR pooling (distill-royalty substrate); still needs per-WS dual consent. |
 | `LENS_ROUTING_INTELLIGENCE_ENABLED` | false | :635 | Pattern-aggregate auto-route model selection (auto requests only). |
-| `LENS_WORKTIER_ENABLED` | false | :633 | **(exempt)** Descriptive work-tier capture (mint-free; nothing consumes it yet). |
+| `LENS_WORKTIER_ENABLED` | false | :633 | **(exempt)** Descriptive work-tier capture (mint-free); the admin analytics endpoint `GET /v1/admin/worktier/distribution` reads the aggregate (§A7). |
 | `LENS_GUARDRAILS_ENABLED` | false | :632 | **(exempt)** Enables the **output**-stage guardrails (input always runs). |
 | `LENS_BILLING_ENABLED` | false | :637 | **(exempt)** Stripe checkout/webhook/refund. Requires both Stripe keys. |
 | `LENS_LXC_GATING_ENABLED` | false | :626 | **(exempt)** Pre-serve 402 when LXC exhausted (inert unless shadow also on). |
@@ -178,3 +193,6 @@ All booleans below are `parseBoolEnv` (**false** when unset) unless noted, and a
 2. **Stale config.go line citations in docs/compose.** `docs/closed-test-economy.md` and the trial-compose comments cite older line numbers (from SHA `ac6dc82`, e.g. 613/611/845/1094). The **current** lines are those in this manifest (e.g. mint flag :624, PoVI :622, holdback :881, economy :1130). The flag **names + defaults** are unchanged; only the line numbers drifted.
 3. **RESOLVED (was: "the detectors are not wired into `cmd/`").** The cache + distill `detect`/`resolve`/`margin` readers are now wired BOTH as on-demand admin endpoints (#227 `1024f15` cache, #228 `fc2eca8` + #229 `5bbc81d` distill) AND an automatic leader-elected sweep that records flagged findings (#230 `11aabe8`) — see **§A11**. The prior "exists-but-not-wired" gap is closed; the distill resolver (the one missing parity piece) was built in #229.
 4. **node-earning is PARTIAL, not "no substrate."** The `cmd/node` daemon + PoVI receipt→mint path exist and are wired; what's missing is a **running node** for the verifier↔prover round-trip — runtime substrate, not code.
+5. **RESOLVED (was: "routing-intelligence has no real-PG test").** `internal/mining/aggregate_cohorts_integration_test.go` (#236 `6d36725`) now EXECUTES `aggregateCohortsSQL` against real `routing_patterns` — the opt-out **privacy exclusion** is a proven DB behavior, not just a string assertion (`aggregate_cohorts_test.go`). The Advisor's in-memory ranking/floors stay unit-tested (`routing_test.go`). See §A6.
+6. **RESOLVED (was: "WorkTier captured-but-unconsumed / nothing consumes the tier yet").** The analytics endpoint `GET /v1/admin/worktier/distribution` (#235 `3396781`) consumes `worktier.Store.Aggregate` — admin-gated, tenant-scoped, money-decoupled. Capture stays mint-free + kill-switch-exempt; only the routing-Advisor tier-conditioning consumer remains future. See §A7.
+7. **Annotation-mining + reputation was absent from this manifest; now §A12.** The annotation track + the event-sourced reputation system (score / access-floor gate / dormancy decay / admin reset, migration 0066) are money-decoupled (AST-guarded) and were merged after the prior regen (#232–#234). Added in this pass.
