@@ -30,6 +30,16 @@ const (
 	// like any other workspace so the supply accounting works.
 	TalyvorWorkspace = "talyvor"
 
+	// TalyvorSeedWorkspace is the dedicated platform owner for L·seed warm-start
+	// cache entries. Single-purpose and DELIBERATELY never earn_verified and never
+	// the subject of an lxc_purchase, so earnverify.MayEarn always returns false for
+	// it → both royalty mint paths (cache + distill) credit it ZERO at the held-ledger
+	// verifyEarn chokepoint. Kept distinct from TalyvorWorkspace (which earns
+	// marketplace fees) so the never-verified invariant is isolated + auditable.
+	// Seeded entries owned by this id provably mint nothing. NOT earn_verified, NO
+	// lxc_purchase — ever.
+	TalyvorSeedWorkspace = "talyvor-seed"
+
 	// MinListingAmount is the floor for marketplace listings.
 	// Below this we discourage dust orders.
 	MinListingAmount = 1.0

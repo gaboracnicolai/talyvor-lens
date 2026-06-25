@@ -75,6 +75,12 @@ func CacheVersion(tier Tier) string {
 // served (the ConverterVersion discipline, for the vision path).
 const OCRVersion = "1"
 
+// PoolMarker namespaces the SHARED (cross-tenant) distill keyspace: pooled OCR artifacts are
+// written/read at PoolMarker+contentHash, disjoint from the per-workspace private keyspace.
+// Single source of truth — the proxy serve path and the L·seed warm-start tool both key pooled
+// distill entries with this, so a seed lands exactly where the serve path looks (write == read).
+const PoolMarker = "\x00distillpool\x00"
+
 // OCRCacheVersion is the OCR-cache key discriminator: a DISTINCT keyspace from
 // the conversion cache (the "ocr:" prefix can never collide with a conversion
 // version, which is a leading digit) that binds an entry to BOTH the OCR pipeline
