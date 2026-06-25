@@ -23,6 +23,12 @@ RUN go build -trimpath -ldflags="-w -s" -o /bin/lens ./cmd/lens
 # available for the request-path integration that lands in a later PR.
 RUN go build -trimpath -ldflags="-w -s" -o /bin/distill-worker ./cmd/distill-worker
 
+# cmd/node is the PoVI inference-node daemon (registers, serves via its provider, signs + submits
+# receipts, answers challenges). Shipped beside /lens for the CLOSED-TEST harness
+# (docker-compose.trial.yaml runs /node). Not part of a standard gateway deploy — operator/edge-infra
+# runs nodes separately in production.
+RUN go build -trimpath -ldflags="-w -s" -o /bin/node ./cmd/node
+
 # Alpine runtime gives us busybox wget for the docker-compose healthcheck
 # while keeping the image small (~10 MB) and ca-certificates available
 # for outbound TLS to the LLM providers. We still drop to a non-root
@@ -32,6 +38,7 @@ RUN apk add --no-cache ca-certificates wget && \
     addgroup -S lens && adduser -S -G lens -u 65532 lens
 COPY --from=builder /bin/lens /lens
 COPY --from=builder /bin/distill-worker /distill-worker
+COPY --from=builder /bin/node /node
 USER lens
 EXPOSE 8080
 ENTRYPOINT ["/lens"]

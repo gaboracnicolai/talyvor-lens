@@ -58,7 +58,11 @@ services:
       #    off, config.go:1094/1098-1106). Billing stays TEST-mode: NO live Stripe
       #    keys here (LENS_BILLING_ENABLED unset/false). See docs/closed-test-economy.md.
       - LENS_POOL_ROYALTY_MINTING_ENABLED=true   # Pool-B + distill reuse-royalty mint (default false, config.go:613). Cache royalty mints on cache-poolable cross-tenant hits; distill royalty mints when the trial-distill overlay adds LENS_DISTILL_POOLABLE_ENABLED.
-      - LENS_POVI_MINTING_ENABLED=true            # PoVI receipt mint (default false, config.go:611), per Nicolai. NOTE: idle until a real cmd/node submits staked, challenge-answerable receipts — see docs/closed-test-economy.md "Part 2 (validator-earning): what's needed".
+      - LENS_POVI_MINTING_ENABLED=false           # PoVI receipt mint stays OFF (default false, config.go:639): the node harness proves the receipt FLOWS + VERIFIES + RECORDS end-to-end (Minted:false). The "would-mint" path is proven separately in an isolated in-process test (internal/povi/node_harness_integration_test.go); the real mint is NOT flipped here.
+      # Fixed challenge key so the gateway's PoVI challenge keypair is STABLE across restarts —
+      # otherwise an ephemeral key invalidates the node's pinned pubkey (blocker 7). base64 ed25519
+      # seed; trial-only, supplied from the gitignored .env like LENS_API_KEY (NOT committed).
+      - "LENS_POVI_CHALLENGE_KEY=${LENS_POVI_CHALLENGE_KEY:?set LENS_POVI_CHALLENGE_KEY in .env to a base64 ed25519 seed (a fixed 32-byte seed, base64-encoded)}"
       - LENS_POOL_HOLDBACK_WINDOW=30s             # held->final settlement delay (default 72h, config.go:845). STAGING ONLY — short so finalize is observable; production stays 72h.
       # JWT fallback scenario (r) — closes the long-standing (h) gap. TRIAL-ONLY
       # EC P-256 key, supplied from the shell env (NOT committed; see README
@@ -87,4 +91,28 @@ services:
     volumes:
       - ./tools/trial/mock_vllm.py:/mock_vllm.py:ro
     command: ["python3", "/mock_vllm.py"]
+    restart: unless-stopped
+
+  # PoVI inference node (closed-test only) — the /node daemon from the same image, run instead of
+  # /lens via the entrypoint override (the `migrate` service uses the same image-reuse pattern). It
+  # registers with the gateway, serves via the mock provider, and submits SIGNED receipts. With
+  # LENS_POVI_MINTING_ENABLED=false above, those receipts verify + record but mint nothing.
+  node:
+    image: ghcr.io/gaboracnicolai/talyvor-lens:latest
+    build:
+      context: .
+    entrypoint: ["/node", "start"]
+    environment:
+      - LENS_URL=http://lens:8080
+      - LENS_API_KEY=${LENS_API_KEY:?set LENS_API_KEY in .env (openssl rand -hex 32)}
+      - LENS_WORKSPACE_ID=trial-node-ws
+      - NODE_URL=http://node:9090   # must match the node's listen port (NODE_PORT default 9090) so the gateway can reach it to serve
+      - NODE_PROVIDER=vllm
+      - NODE_PROVIDER_URL=http://mockvllm:8000
+      - NODE_MODELS=trial-mock
+    depends_on:
+      lens:
+        condition: service_started
+      mockvllm:
+        condition: service_started
     restart: unless-stopped
