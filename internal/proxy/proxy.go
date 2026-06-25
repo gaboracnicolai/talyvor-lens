@@ -1674,21 +1674,10 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 	}
 }
 
-// poolKeyMarker namespaces the shared (cross-tenant) cache keyspace so it is
-// PROVABLY disjoint from the workspace-private keyspace. A private key is hashed
-// from "wsID:prompt" where wsID comes from the X-Talyvor-Workspace HTTP header
-// (which cannot contain NUL); the marker's NUL bytes therefore can never appear
-// at the start of a private key's pre-image. Without this, a tenant could craft
-// a raw prompt equal to "victimWsID:victimPrompt" and collide with the victim's
-// PRIVATE key — reading a private entry that has no intentionally-pooled twin
-// (e.g. one written before the victim opted in). The marker makes that
-// impossible by construction, independent of the downstream consent check.
-const poolKeyMarker = "\x00pool\x00"
-
-// pooledPromptKey is the key material for the shared pool: the raw prompt under
-// the reserved marker. Two poolable workspaces sending the same prompt land on
-// the same pooled key (intended sharing); it can never equal a private key.
-func pooledPromptKey(prompt string) string { return poolKeyMarker + prompt }
+// pooledPromptKey is cache.PooledPromptKey — the shared-pool key material (raw prompt under the
+// reserved NUL marker), kept as a local alias so the serve path reads unchanged. Single source of
+// truth lives in internal/cache so the L·seed warm-start tool keys pooled entries identically.
+func pooledPromptKey(prompt string) string { return cache.PooledPromptKey(prompt) }
 
 // tryExactPooled looks up the shared POOLED key (marker + raw prompt, no wsID)
 // and returns the cached body plus the contributing workspace recorded on it.

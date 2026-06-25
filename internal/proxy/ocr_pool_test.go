@@ -25,7 +25,7 @@ func ocrPoolEntry(t *testing.T, d *distillIntegration, content, model string) (v
 		t.Fatal("test cache is not an ownerDistillCache")
 	}
 	b, o, err := pooled.GetWithOwner(context.Background(),
-		distillPoolMarker+distill.ContentHash([]byte(content)), distill.OCRCacheVersion(model))
+		distill.PoolMarker+distill.ContentHash([]byte(content)), distill.OCRCacheVersion(model))
 	if err != nil {
 		t.Fatalf("GetWithOwner: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestOCRPool_ConsentedServe_ByteIdentical_OwnerStamped(t *testing.T) {
 	// cost-basis-less copy (the basis the S4 royalty/PR2 needs).
 	pooled, _ := d.cache.(ownerDistillCache)
 	if b, _, _ := pooled.GetWithOwner(ctx,
-		distillPoolMarker+distill.ContentHash([]byte(content)),
+		distill.PoolMarker+distill.ContentHash([]byte(content)),
 		distill.CacheVersion(distill.TierFaithful)); len(b) > 0 {
 		t.Error("OCR result leaked into the conversion pooled keyspace; must be OCR-keyspace-only")
 	}

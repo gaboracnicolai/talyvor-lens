@@ -14,12 +14,10 @@ import (
 	"github.com/talyvor/lens/internal/workspace"
 )
 
-// distillPoolMarker namespaces the SHARED (cross-tenant) distill keyspace so it
-// is provably disjoint from every workspace's private keyspace. A private key
-// material is "wsID:contentHash" where wsID comes from the authenticated
-// credential / X-Talyvor-Workspace header (which cannot contain NUL); the
-// marker's leading NUL therefore can never begin a private key's pre-image.
-const distillPoolMarker = "\x00distillpool\x00"
+// The SHARED (cross-tenant) distill keyspace marker is distill.PoolMarker — provably disjoint
+// from every workspace's private keyspace ("wsID:contentHash" where wsID comes from the
+// authenticated credential / header, which cannot contain NUL; the marker's leading NUL can never
+// begin a private key's pre-image). Single source of truth so the L·seed tool keys identically.
 
 // ownerDistillCache is the pooled-keyspace capability the cross-tenant distill
 // share needs: store/read an artifact stamped with its contributing workspace.
@@ -250,7 +248,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	//     (Participant), AND the OWNER opted in (MaybeAllowPooledHit). With the
 	//     switch off / no opt-in this is skipped and serving stays private.
 	if pooled != nil && d.poolGate.Participant(wsID) {
-		if b, owner, _ := pooled.GetWithOwner(ctx, distillPoolMarker+hash, cacheVer); len(b) > 0 &&
+		if b, owner, _ := pooled.GetWithOwner(ctx, distill.PoolMarker+hash, cacheVer); len(b) > 0 &&
 			d.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 			if res, ok := distill.UnmarshalCached(b); ok && !res.NeedsVision && strings.TrimSpace(res.Markdown) != "" {
 				// S1 attribution: emit the consented cross-tenant serve fact for
@@ -279,7 +277,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	if pooled != nil && vision != nil && d.poolGate.Participant(wsID) {
 		if mp, okMP := vision.(distill.ModelPlanner); okMP {
 			if planModel, okPlan := mp.PlannedVisionModel(ctx); okPlan && planModel != "" {
-				if b, owner, _ := pooled.GetWithOwner(ctx, distillPoolMarker+hash, distill.OCRCacheVersion(planModel)); len(b) > 0 &&
+				if b, owner, _ := pooled.GetWithOwner(ctx, distill.PoolMarker+hash, distill.OCRCacheVersion(planModel)); len(b) > 0 &&
 					d.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					if co, okC := distill.UnmarshalCachedOCR(b); okC && !co.Result.NeedsVision && strings.TrimSpace(co.Result.Markdown) != "" {
 						// PR2: emit the consented cross-tenant OCR serve for serve() to
@@ -326,7 +324,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	//     the conversion keyspace (which (1) would otherwise serve first).
 	if pooled != nil && res.Method != distill.MethodVisionOCR && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
 		if b, mErr := distill.MarshalCached(res); mErr == nil {
-			_ = pooled.SetWithOwner(ctx, distillPoolMarker+hash, cacheVer, wsID, b)
+			_ = pooled.SetWithOwner(ctx, distill.PoolMarker+hash, cacheVer, wsID, b)
 		}
 	}
 
@@ -345,7 +343,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 		//      Best-effort; never fails the request.
 		if pooled != nil && strings.TrimSpace(sav.VisionModel) != "" && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
 			if b, mErr := distill.MarshalCachedOCR(res, sav); mErr == nil {
-				_ = pooled.SetWithOwner(ctx, distillPoolMarker+hash, distill.OCRCacheVersion(sav.VisionModel), wsID, b)
+				_ = pooled.SetWithOwner(ctx, distill.PoolMarker+hash, distill.OCRCacheVersion(sav.VisionModel), wsID, b)
 			}
 		}
 	}
