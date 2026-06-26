@@ -58,7 +58,11 @@ services:
       #    off, config.go:1094/1098-1106). Billing stays TEST-mode: NO live Stripe
       #    keys here (LENS_BILLING_ENABLED unset/false). See docs/closed-test-economy.md.
       - LENS_POOL_ROYALTY_MINTING_ENABLED=true   # Pool-B + distill reuse-royalty mint (default false, config.go:613). Cache royalty mints on cache-poolable cross-tenant hits; distill royalty mints when the trial-distill overlay adds LENS_DISTILL_POOLABLE_ENABLED.
-      - LENS_POVI_MINTING_ENABLED=false           # PoVI receipt mint stays OFF (default false, config.go:639): the node harness proves the receipt FLOWS + VERIFIES + RECORDS end-to-end (Minted:false). The "would-mint" path is proven separately in an isolated in-process test (internal/povi/node_harness_integration_test.go); the real mint is NOT flipped here.
+      - LENS_POVI_MINTING_ENABLED=true            # PoVI receipt mint ON (default false, config.go:639). A staked + earn_verified node's signed receipt MINTS fake LENS (type receipt_mine_provisional); the U6 floor still gates — an unverified/unstaked node's receipt records but mints nothing. Internal valueless ledger; no external dep. (Challenge security stays on via LENS_POVI_CHALLENGE_RATE default 0.1.)
+      # Routing intelligence + tier-cohorts: descriptive/selection only, NEVER a reward multiplier; off = byte-identical routing, no money path.
+      - LENS_ROUTING_INTELLIGENCE_ENABLED=true    # default false, config.go:652
+      - LENS_ROUTING_TIER_COHORTS_ENABLED=true    # default false, config.go:653 (effective only with routing-intelligence on)
+      - LENS_CACHE_SHARING_ENABLED=true           # default false, config.go:635. Cross-workspace cache economy (fake-money royalties on the internal ledger).
       # Fixed challenge key so the gateway's PoVI challenge keypair is STABLE across restarts —
       # otherwise an ephemeral key invalidates the node's pinned pubkey (blocker 7). base64 ed25519
       # seed; trial-only, supplied from the gitignored .env like LENS_API_KEY (NOT committed).
@@ -96,7 +100,8 @@ services:
   # PoVI inference node (closed-test only) — the /node daemon from the same image, run instead of
   # /lens via the entrypoint override (the `migrate` service uses the same image-reuse pattern). It
   # registers with the gateway, serves via the mock provider, and submits SIGNED receipts. With
-  # LENS_POVI_MINTING_ENABLED=false above, those receipts verify + record but mint nothing.
+  # LENS_POVI_MINTING_ENABLED=true above, a receipt from a STAKED + earn_verified node mints fake
+  # LENS; the U6 floor still gates an unstaked/unverified node's receipt to Minted:false.
   node:
     image: ghcr.io/gaboracnicolai/talyvor-lens:latest
     build:
