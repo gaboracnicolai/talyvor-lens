@@ -10,9 +10,12 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -140,6 +143,10 @@ func (s *InferenceServer) Handler() http.Handler {
 	mux.HandleFunc("/inference", s.handleInference)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/models", s.handleModels)
+	// /v1/models is the OpenAI/vllm-convention alias — the gateway's localRouterMulti health-probes
+	// a "vllm" endpoint at /v1/models (multi.go), so a registered node must answer it to be picked
+	// by SelectEndpoint for auto-route. Same handler as /models.
+	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/challenge", s.handleChallenge)
 	return mux
 }
@@ -195,23 +202,57 @@ func (s *InferenceServer) handleChallenge(w http.ResponseWriter, r *http.Request
 
 // ─── inference ───────────────────────────────────
 
+// verifyNodeToken validates a gateway-signed node-auth token (blocker 6 auto-route) against the
+// node's PINNED Lens challenge pubkey + its bindings (node_id == this node, body_sha256 == this
+// body, not expired). Mirrors handleChallenge: on first failure it reactively re-fetches Lens's
+// current key once (rate-limited) to survive a key rotation, then retries. Returns true iff valid.
+func (s *InferenceServer) verifyNodeToken(ctx context.Context, tok string, body []byte) bool {
+	if s.signer == nil {
+		return false // no node identity (no receipts) → not an auto-route target
+	}
+	pub := s.challengeKey()
+	if len(pub) != ed25519.PublicKeySize {
+		return false // fail closed: no pinned Lens key
+	}
+	sum := sha256.Sum256(body)
+	bodyHash := hex.EncodeToString(sum[:])
+	if povi.VerifyNodeAuthToken(tok, pub, s.signer.nodeID, bodyHash, time.Now()) == nil {
+		return true
+	}
+	// Lens may have rotated its challenge key — reactively re-fetch once (rate-limited) and retry.
+	if refreshed, ok := s.reactiveRefetchChallengeKey(ctx); ok {
+		return povi.VerifyNodeAuthToken(tok, refreshed, s.signer.nodeID, bodyHash, time.Now()) == nil
+	}
+	return false
+}
+
 func (s *InferenceServer) handleInference(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Shared-secret auth — verifies Lens (not a random caller) is
-	// driving the request. Empty configured secret means the
-	// operator's running in "registered without secret" mode (e.g.
-	// an older Lens that doesn't issue secrets); we still accept
-	// requests then, but log a warning at startup.
-	if s.secret != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Node-Secret")), []byte(s.secret)) != 1 {
+	// Read the body once — needed for BOTH the node-auth token's body-hash binding and the decode.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Auth (additive, backward-compatible): accept a valid gateway-signed node-auth token
+	// (auto-route, blocker 6) OR the EXISTING X-Node-Secret / no-secret path. Token verification is
+	// ALWAYS-ON (verify-if-present): a request with NO token takes the unchanged secret path, so the
+	// direct /inference drive (X-Node-Secret) and older gateways behave exactly as before.
+	if tok := r.Header.Get("X-Lens-Node-Token"); tok != "" {
+		if !s.verifyNodeToken(r.Context(), tok, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	} else if s.secret != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Node-Secret")), []byte(s.secret)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	var req InferRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}

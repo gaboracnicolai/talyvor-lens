@@ -227,3 +227,7 @@ func (f *fakeRegistry) List() []*localrouter.LocalEndpoint {
 	}
 	return out
 }
+
+func (f *fakeRegistry) CheckHealthByID(_ context.Context, _ string) (*localrouter.LocalEndpoint, error) {
+	return nil, nil
+}

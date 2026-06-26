@@ -14,6 +14,7 @@ type endpointRegistry interface {
 	Register(e *localrouter.LocalEndpoint)
 	Remove(id string) bool
 	List() []*localrouter.LocalEndpoint
+	CheckHealthByID(ctx context.Context, id string) (*localrouter.LocalEndpoint, error)
 }
 
 // NodeSyncer reads the latest NodeSnapshot from Redis and reconciles it into
@@ -65,6 +66,11 @@ func (s *NodeSyncer) Sync(ctx context.Context) {
 			MaxConcurrent: n.MaxConcurrent,
 			Active:        true,
 		})
+		// Immediately health-check the freshly-synced endpoint so the auto-route picker
+		// (SelectEndpoint) can use it on the next request — mirrors the admin register route, which
+		// fires the same check. Register preserves the Healthy flag across later reconciles, so this
+		// only needs to land once. Detached ctx so it outlives this Sync pass.
+		go func(id string) { _, _ = s.router.CheckHealthByID(context.Background(), id) }(n.ID)
 	}
 
 	// Remove mining endpoints that dropped off the snapshot.

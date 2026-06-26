@@ -3,6 +3,9 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +45,7 @@ import (
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/poolroyalty"
+	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/retry"
@@ -86,21 +90,31 @@ type budgetGate interface {
 }
 
 type Proxy struct {
-	exact             *cache.ExactCache
-	semantic          *cache.SemanticCache
-	embedder          cache.Embedder
-	compressor        *compressor.Compressor
-	router            *router.Router
-	piiDetector       *pii.Detector
-	alertManager      alertSink
-	templateDetector  *templates.TemplateDetector
-	scorer            *quality.Scorer
-	tracker           *attribution.Tracker
-	attrStore         *attribution.Store
-	budgetService     budgetGate
-	routingAdvisor    *routing.Advisor
-	workspaceManager  *workspace.Manager
-	localRouter       *localrouter.LocalRouter
+	exact            *cache.ExactCache
+	semantic         *cache.SemanticCache
+	embedder         cache.Embedder
+	compressor       *compressor.Compressor
+	router           *router.Router
+	piiDetector      *pii.Detector
+	alertManager     alertSink
+	templateDetector *templates.TemplateDetector
+	scorer           *quality.Scorer
+	tracker          *attribution.Tracker
+	attrStore        *attribution.Store
+	budgetService    budgetGate
+	routingAdvisor   *routing.Advisor
+	workspaceManager *workspace.Manager
+	localRouter      *localrouter.LocalRouter
+
+	// Node auto-route (blocker 6) — optional, flag-gated, nil-safe. When nodeAutoRouteEnabled AND
+	// nodeRouter has a healthy endpoint for the model, the gateway forwards to a registered node's
+	// /inference with a short-lived token signed by lensChallengePriv (the EXISTING challenge key);
+	// the node auto-signs + submits its own receipt. nil/false → fully inert (byte-identical serve).
+	nodeAutoRouteEnabled bool
+	nodeRouter           *localrouter.Router
+	lensChallengePriv    ed25519.PrivateKey
+	nodeHTTPClient       *http.Client
+
 	injectionDetector *injection.Detector
 	budgetEnforcer    *budget.Enforcer
 	batchRouter       *batch.BatchRouter
@@ -297,6 +311,18 @@ func (p *Proxy) setAlertSink(sink alertSink) {
 // pooled copy, and the request path never attempts a cross-tenant read.
 func (p *Proxy) SetPoolGate(gate *cache_pooling.PoolabilityGate) {
 	p.poolGate = gate
+}
+
+// SetNodeRouter wires gateway auto-routing to registered inference nodes (blocker 6). A setter so
+// proxy.New's signature stays put. enabled=false (the default) leaves the serve path byte-identical:
+// tryNodeRouting is never entered. lensPriv is the gateway's EXISTING challenge key — it signs the
+// short-lived, request-bound token the node verifies with its pinned challenge pubkey. No receipt or
+// mint code is involved: the node produces + submits its own receipt as today.
+func (p *Proxy) SetNodeRouter(r *localrouter.Router, lensPriv ed25519.PrivateKey, client *http.Client, enabled bool) {
+	p.nodeRouter = r
+	p.lensChallengePriv = lensPriv
+	p.nodeHTTPClient = client
+	p.nodeAutoRouteEnabled = enabled
 }
 
 // royaltySink is the Phase-2 Stage 2.1 Pool-B royalty surface: one call per
@@ -1433,6 +1459,116 @@ func rebuildBody(originalBody []byte, model, prompt string) ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// nodeInferReq / nodeInferResp mirror cmd/node's /inference wire shapes (the node package isn't
+// importable here) — only the fields the gateway sends/reads.
+type nodeInferReq struct {
+	Model    string         `json:"model"`
+	Messages []nodeInferMsg `json:"messages"`
+}
+type nodeInferMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+type nodeInferResp struct {
+	Text         string `json:"text"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+}
+
+// tryNodeRouting forwards the request to a REGISTERED inference node picked by the multi-router,
+// authenticated with a short-lived gateway-signed token bound to {node_id, request_id, body_sha256,
+// exp}. Returns true iff a node served it (response written). ANY miss/error returns false so the
+// caller falls through to the existing path — never errors, never drops the request.
+//
+// Touches NO receipt/mint code: the node auto-signs + auto-submits its OWN receipt off the response
+// path; minting stays gated downstream by stake + earn_verified. The gateway only forwards traffic.
+func (p *Proxy) tryNodeRouting(
+	w http.ResponseWriter,
+	ctx context.Context,
+	provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID string,
+	piiDetected bool,
+	redactedPrompt string,
+) bool {
+	ep, err := p.nodeRouter.SelectEndpoint(model, localrouter.StrategyLeastLoaded)
+	if err != nil {
+		return false // ErrNoHealthyEndpoint (or any selection error) → fall through to the direct path
+	}
+	body, err := json.Marshal(nodeInferReq{Model: model, Messages: []nodeInferMsg{{Role: "user", Content: prompt}}})
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(body)
+	bodyHash := hex.EncodeToString(sum[:])
+	exp := time.Now().Add(30 * time.Second).Unix() // short window; node enforces with a few-seconds skew
+	token, err := povi.SignNodeAuthToken(p.lensChallengePriv, ep.ID, requestID, bodyHash, exp)
+	if err != nil {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(ep.URL, "/")+"/inference", bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Lens-Node-Token", token)
+	req.Header.Set("X-Request-ID", requestID)
+	client := p.nodeHTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("node-autoroute: forward failed, falling through", slog.String("node", ep.ID), slog.String("err", err.Error()))
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("node-autoroute: node returned non-200, falling through", slog.String("node", ep.ID), slog.Int("status", resp.StatusCode))
+		return false
+	}
+	var nr nodeInferResp
+	if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
+		slog.Warn("node-autoroute: decode failed, falling through", slog.String("err", err.Error()))
+		return false
+	}
+	out, err := json.Marshal(nodeOpenAIEnvelope(model, nr))
+	if err != nil {
+		return false
+	}
+	w.Header().Set("X-Talyvor-Node-Served", ep.ID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out) // JSON API response (application/json), mirrors tryLocalRouting
+
+	if !piiDetected {
+		p.storeCaches(ctx, provider, model, cachePrompt, prompt, wsID, out)
+	}
+	eventPrompt := prompt
+	if piiDetected {
+		eventPrompt = redactedPrompt
+	}
+	p.recordTokenEvent(ctx, provider, model, eventPrompt, out, 0, piiDetected) // node-served = free (cost 0)
+	return true
+}
+
+// nodeOpenAIEnvelope wraps a node InferResponse in the OpenAI chat.completion shape the caller expects.
+func nodeOpenAIEnvelope(model string, nr nodeInferResp) map[string]any {
+	return map[string]any{
+		"id":     "chatcmpl-node",
+		"object": "chat.completion",
+		"model":  model,
+		"choices": []map[string]any{{
+			"index":         0,
+			"message":       map[string]any{"role": "assistant", "content": nr.Text},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]any{
+			"prompt_tokens":     nr.InputTokens,
+			"completion_tokens": nr.OutputTokens,
+			"total_tokens":      nr.InputTokens + nr.OutputTokens,
+		},
+	}
+}
+
 // tryLocalRouting attempts to serve the request from a locally-hosted
 // Ollama model. Returns true if the request was fully handled (response
 // written, caches/events updated). Any failure returns false so the
@@ -1444,6 +1580,15 @@ func (p *Proxy) tryLocalRouting(
 	piiDetected bool,
 	redactedPrompt string,
 ) bool {
+	// Blocker 6: gateway auto-route to a REGISTERED node (flag-gated, default off). On any miss —
+	// flag off, no node registry, no healthy node for the model, or any forward error — this
+	// returns false and we fall through to the EXISTING legacy localRouter / cloud path below.
+	// Byte-identical to today when the flag is off (the branch is never entered).
+	if p.nodeAutoRouteEnabled && p.nodeRouter != nil {
+		if p.tryNodeRouting(w, ctx, provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt) {
+			return true
+		}
+	}
 	if p.localRouter == nil {
 		return false
 	}
