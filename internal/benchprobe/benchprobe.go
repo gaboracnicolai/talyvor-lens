@@ -45,9 +45,11 @@ func BuildProbeRequest(model string, item EvalItem) ProbeRequest {
 	return ProbeRequest{Model: model, Input: item.Input}
 }
 
-// ProbeDelivery sends a probe to a node and returns the node's answer text. FAKED in PR-A (no network,
-// no receipt). The live implementation routes the input through the node's /inference path (gateway
-// token, #242) and lands in PR-A.5 alongside the receipt-mint suppression.
+// ProbeDelivery sends a probe to a node and returns the node's answer text. requestID is the
+// gateway-chosen probe request id (already committed to benchmark_probes); the live delivery sets it
+// as X-Request-ID so an HONEST node echoes it into the receipt it submits, where the gateway's
+// suppression (request_id ∈ benchmark_probes) records-but-skips the mint. The real implementation
+// (HTTPDelivery) routes the input through the node's /inference path with a #242 node-auth token.
 type ProbeDelivery interface {
-	Deliver(ctx context.Context, nodeID string, req ProbeRequest) (answer string, err error)
+	Deliver(ctx context.Context, nodeID, requestID string, req ProbeRequest) (answer string, err error)
 }

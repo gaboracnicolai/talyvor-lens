@@ -39,6 +39,7 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/batch"
+	"github.com/talyvor/lens/internal/benchprobe"
 	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
@@ -793,6 +794,39 @@ func run() error {
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "povi-challenge", 30*time.Second, func(lctx context.Context) {
 			challengeScheduler.StartScheduler(lctx, time.Minute)
+		})
+	}
+
+	// P1 #10 proof-of-benchmark (PR-A.5): wire the probe-mint SUPPRESSION into the receipt processor +
+	// start the probe scheduler. Gated by LENS_PROOF_OF_BENCHMARK_ENABLED (default false); off ⇒ no
+	// suppression checker (mint path byte-identical), no probes, no scheduler. MEASUREMENT, not economy
+	// — NOT in the kill-switch force-off block, and the scheduler runs independently of EconomyEnabled.
+	if cfg.ProofOfBenchmarkEnabled {
+		benchStore := benchprobe.NewStore(pool)
+		poviProcessor.SetProbeChecker(benchStore.IsProbe) // record-but-skip-mint for probe request_ids
+		benchSigner := func(nodeID, requestID, bodyHash string, exp int64) (string, error) {
+			return povi.SignNodeAuthToken(lensChallengePriv, nodeID, requestID, bodyHash, exp) // reuse the #242 challenge key
+		}
+		benchDelivery := benchprobe.NewHTTPDelivery(benchSigner, computeMiner.NodeURL, newNodeHTTPClient(cfg.NodeTLSSkipVerify, 30*time.Second))
+		benchScheduler := benchprobe.NewScheduler(benchStore, benchDelivery, func() bool { return cfg.ProofOfBenchmarkEnabled })
+		benchScheduler.SetNodeLister(func(lctx context.Context) ([]benchprobe.NodeTarget, error) {
+			rows, err := pool.Query(lctx, `SELECT id, COALESCE(models[1], '') FROM inference_nodes WHERE active`)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			var out []benchprobe.NodeTarget
+			for rows.Next() {
+				var t benchprobe.NodeTarget
+				if err := rows.Scan(&t.NodeID, &t.Model); err != nil {
+					return nil, err
+				}
+				out = append(out, t)
+			}
+			return out, rows.Err()
+		})
+		go haComps.leader.Run(ctx, "proof-of-benchmark", time.Minute, func(lctx context.Context) {
+			benchScheduler.StartScheduler(lctx, time.Minute)
 		})
 	}
 

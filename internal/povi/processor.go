@@ -30,6 +30,26 @@ type Processor struct {
 	lookup         PubKeyLookup
 	stakeEligible  StakeLookup
 	mintingEnabled bool
+	// isProbe (P1 #10, optional) is the proof-of-benchmark probe-mint SUPPRESSION: a point existence
+	// check on benchmark_probes.request_id. nil ⇒ no suppression (byte-identical). Wired only when
+	// LENS_PROOF_OF_BENCHMARK_ENABLED is on. SUPPRESSION-ONLY: it can return "this is a probe → don't
+	// mint", never cause a mint.
+	isProbe func(ctx context.Context, requestID string) (bool, error)
+}
+
+// SetProbeChecker wires the proof-of-benchmark probe-mint suppression (P1 #10). nil ⇒ no suppression
+// (the mint path is byte-identical). A setter so NewProcessor's signature stays put.
+//
+// HONEST-NODE guarantee + documented residual: this records-but-skips the mint for a receipt whose
+// request_id is a verifier-induced probe. A MALICIOUS node can BYPASS it by signing a non-probe
+// request_id for a probe response — but that is the SAME pre-existing receipt-fabrication capability
+// (the receipt request_id is node-asserted; a node can already mint receipts for fabricated work,
+// deterred by challenge-and-slash + stake + the 24h rate-cap + the reputation bond). Probes add NO new
+// surface: the node is BLIND (cannot distinguish a probe from real traffic), so it cannot selectively
+// target probes; any evasion is bounded by the probe rate and dominated by the pre-existing
+// fabrication path. The gateway-bound-request_id fix is the tracked pre-public-mint gate, NOT #10.
+func (p *Processor) SetProbeChecker(fn func(ctx context.Context, requestID string) (bool, error)) {
+	p.isProbe = fn
 }
 
 // NewProcessor wires the audit store, the ledger minter, the node pubkey
@@ -89,6 +109,18 @@ func (p *Processor) Process(ctx context.Context, r Receipt) (ProcessResult, erro
 		firstRecord = inserted
 	}
 
+	// P1 #10 probe-mint SUPPRESSION (point lookup on benchmark_probes.request_id; nil checker ⇒
+	// skipped, byte-identical). A verifier-induced probe receipt is RECORDED above (audit) but must
+	// NOT mint. Suppression-only — see SetProbeChecker for the honest-node guarantee + residual.
+	probe := false
+	if verified && p.isProbe != nil {
+		ip, err := p.isProbe(ctx, r.RequestID)
+		if err != nil {
+			return ProcessResult{}, err
+		}
+		probe = ip
+	}
+
 	res := ProcessResult{Verified: verified, Reason: reason}
 	if verified {
 		// Part 2: minting also requires the node to be stake-eligible (an
@@ -102,6 +134,9 @@ func (p *Processor) Process(ctx context.Context, r Receipt) (ProcessResult, erro
 			}
 		case !firstRecord:
 			res.Reason = "duplicate receipt (request_id already recorded) — replay, not minting"
+		case probe:
+			// Verifier-induced proof-of-benchmark probe: recorded for audit, never minted.
+			res.Reason = "probe receipt (verifier-induced measurement) — recorded, not minted"
 		default:
 			// MintFromReceipt is itself gated: it no-ops when mintingEnabled is
 			// false, so this never mints by default.

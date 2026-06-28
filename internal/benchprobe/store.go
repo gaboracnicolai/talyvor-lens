@@ -103,6 +103,35 @@ func (s *Store) RecordProbe(ctx context.Context, p Probe) error {
 	return nil
 }
 
+// SetProbeScore updates the score on an already-committed probe row (after the response). The row is
+// inserted BEFORE delivery (happens-before), so this only fills in the score.
+func (s *Store) SetProbeScore(ctx context.Context, requestID string, score float64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE benchmark_probes SET score=$2 WHERE request_id=$1`, requestID, score)
+	if err != nil {
+		return fmt.Errorf("benchprobe: set probe score: %w", err)
+	}
+	return nil
+}
+
+// IsProbe is the gateway-side mint-suppression lookup: does this receipt request_id belong to a
+// verifier-induced probe? A POINT existence check on the idx_benchmark_probes_request index (not a
+// scan). Wired into poviProcessor as the probe-mint suppression (record-but-skip-mint).
+func (s *Store) IsProbe(ctx context.Context, requestID string) (bool, error) {
+	if requestID == "" {
+		return false, nil
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM benchmark_probes WHERE request_id=$1)`, requestID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("benchprobe: probe lookup: %w", err)
+	}
+	return exists, nil
+}
+
+// NewProbeRequestID mints a fresh, unique probe request id (the X-Request-ID an honest node echoes
+// into its receipt; the suppression key). Prefixed for debuggability.
+func NewProbeRequestID() string { return "bench_" + newID() }
+
 // UpsertNodeScore folds one probe score into the node's running average for that model.
 func (s *Store) UpsertNodeScore(ctx context.Context, nodeID, model string, score float64) error {
 	_, err := s.pool.Exec(ctx,
