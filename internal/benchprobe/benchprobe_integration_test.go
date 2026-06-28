@@ -21,7 +21,7 @@ type fakeDelivery struct {
 	lastReq benchprobe.ProbeRequest
 }
 
-func (f *fakeDelivery) Deliver(_ context.Context, _ string, req benchprobe.ProbeRequest) (string, error) {
+func (f *fakeDelivery) Deliver(_ context.Context, _, _ string, req benchprobe.ProbeRequest) (string, error) {
 	f.called++
 	f.lastReq = req
 	return f.answer, nil
