@@ -828,6 +828,14 @@ func run() error {
 		go haComps.leader.Run(ctx, "proof-of-benchmark", time.Minute, func(lctx context.Context) {
 			benchScheduler.StartScheduler(lctx, time.Minute)
 		})
+
+		// P1 #10 PR-B: bias node auto-route by the per-node benchmark score (earning-DISTRIBUTION, no
+		// mint). SelectEndpoint composes quality WITHIN the strategy; the score loads via the periodic
+		// quality-sync loop (leader-elected), never per request. Same flag; off ⇒ no bias, no loop.
+		localRouterMulti.SetQualityEnabled(func() bool { return cfg.ProofOfBenchmarkEnabled })
+		go haComps.leader.Run(ctx, "proof-of-benchmark-quality-sync", time.Minute, func(lctx context.Context) {
+			localRouterMulti.StartQualitySync(lctx, 30*time.Second)
+		})
 	}
 
 	// Embedding mining (Batch 2 Item 3). Shares the ledger;

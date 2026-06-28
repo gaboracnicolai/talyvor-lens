@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/rand/v2" // nosemgrep: math-random-used — load-distribution RNG only, NOT security-critical (crypto/rand draw is in benchprobe)
 	"net/http"
 	"strings"
 	"sync"
@@ -42,6 +44,17 @@ const (
 	// healthCheckTimeout caps a single endpoint probe. Local
 	// servers should answer /api/tags or /v1/models in <100ms.
 	healthCheckTimeout = 3 * time.Second
+
+	// P1 #10 PR-B quality-bias tuning (all flag-gated; off ⇒ unused).
+	// qualityEpsilon is the ε-greedy exploration floor: ε of selections pick uniformly among eligible
+	// candidates so every node keeps ≥ ε/n share regardless of score (a new/unscored node still gets
+	// traffic; a one-bad-probe node stays in rotation).
+	qualityEpsilon = 0.15
+	// qualityPriorK is the Bayesian shrinkage strength: q_eff = (n·score + k·0.5)/(n + k). n=0 ⇒ 0.5
+	// (neutral, no penalty for new); n≫k ⇒ the running avg. k=5 ⇒ ~5 probes to half-trust the score.
+	qualityPriorK = 5.0
+	// qualityLatencyScale normalizes AvgLatencyMs into the LowestLatency base affinity.
+	qualityLatencyScale = 100.0
 
 	// latencyEMAWeight controls how fast AvgLatencyMs reacts to
 	// new samples. 0.2 = "the latest call counts for 20% of the
@@ -87,6 +100,13 @@ type LocalEndpoint struct {
 	// SelectEndpoint can read it under the router's RLock
 	// without taking the count.
 	activeCount int64 `json:"-"`
+
+	// quality / qualitySamples are the per-model proof-of-benchmark signal (P1 #10 PR-B): the
+	// running-avg score + sample_count from benchmark_node_scores, attached by the periodic
+	// quality-sync loop (NOT a per-request DB read). mu-guarded (read under Router.mu like the
+	// other fields). Preserved across Register re-registration. Absent model ⇒ neutral prior.
+	quality        map[string]float64 `json:"-"`
+	qualitySamples map[string]int     `json:"-"`
 }
 
 // Router is the multi-endpoint registry + selector.
@@ -99,6 +119,15 @@ type Router struct {
 	// rrCursor is the round-robin index. Atomic so we don't
 	// take a write lock just to advance the counter.
 	rrCursor uint64
+
+	// qualityEnabled gates the P1 #10 proof-of-benchmark quality bias (LENS_PROOF_OF_BENCHMARK_ENABLED).
+	// nil/false ⇒ SelectEndpoint runs the original deterministic switch VERBATIM (byte-identical).
+	qualityEnabled func() bool
+	// randFloat / randIntN are the selection RNG (math/rand/v2, concurrent-safe by default).
+	// Injectable so a test can seed a deterministic source. Distribution-only — NOT security-critical
+	// (the crypto/rand draw lives in benchprobe).
+	randFloat func() float64
+	randIntN  func(n int) int
 
 	// onRequestServed is the compute-mining hook the proxy
 	// invokes after a successful served request. Stays nil
@@ -157,6 +186,8 @@ func NewRouter(pool *pgxpool.Pool) *Router {
 	return &Router{
 		httpClient: &http.Client{Timeout: healthCheckTimeout},
 		pool:       pool,
+		randFloat:  rand.Float64, // math/rand/v2 top-level — concurrent-safe
+		randIntN:   rand.IntN,
 	}
 }
 
@@ -203,6 +234,10 @@ func (r *Router) Register(e *LocalEndpoint) {
 			e.AvgLatencyMs = ex.AvgLatencyMs
 			e.ErrorRate = ex.ErrorRate
 			atomic.StoreInt64(&e.activeCount, atomic.LoadInt64(&ex.activeCount))
+			// P1 #10 PR-B: preserve the benchmark quality the sync loop attached, across the
+			// NodeSyncer's ~30s re-register (same reason as the health/stats preservation above).
+			e.quality = ex.quality
+			e.qualitySamples = ex.qualitySamples
 			r.endpoints[i] = e
 			return
 		}
@@ -377,8 +412,11 @@ func (r *Router) sweepHealth(ctx context.Context) {
 // Never returns silently — if zero healthy endpoints, the
 // caller gets an explicit error and can fall back to cloud.
 func (r *Router) SelectEndpoint(model string, strategy RoutingStrategy) (*LocalEndpoint, error) {
+	qOn := r.qualityEnabled != nil && r.qualityEnabled()
+
 	r.mu.RLock()
 	candidates := make([]*LocalEndpoint, 0, len(r.endpoints))
+	var qeff []float64 // captured UNDER the lock (the quality maps are mu-guarded) — only when qOn
 	for _, e := range r.endpoints {
 		if !e.Active || !e.Healthy {
 			continue
@@ -387,11 +425,20 @@ func (r *Router) SelectEndpoint(model string, strategy RoutingStrategy) (*LocalE
 			continue
 		}
 		candidates = append(candidates, e)
+		if qOn {
+			qeff = append(qeff, qEffLocked(e, model))
+		}
 	}
 	r.mu.RUnlock()
 
 	if len(candidates) == 0 {
 		return nil, ErrNoHealthyEndpoint
+	}
+
+	// P1 #10 PR-B: quality-weighted ε-greedy selection (composes WITH the strategy). Flag-off skips
+	// this entirely and runs the original deterministic switch below VERBATIM (byte-identical).
+	if qOn {
+		return r.selectQualityWeighted(candidates, qeff, strategy)
 	}
 
 	switch strategy {
@@ -433,6 +480,151 @@ func (r *Router) SelectEndpoint(model string, strategy RoutingStrategy) (*LocalE
 		return best, nil
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownStrategy, strategy)
+	}
+}
+
+// SetQualityEnabled wires the P1 #10 quality-bias gate (LENS_PROOF_OF_BENCHMARK_ENABLED). nil/false ⇒
+// SelectEndpoint is byte-identical to today. A setter so the constructor signature stays put.
+func (r *Router) SetQualityEnabled(fn func() bool) {
+	r.mu.Lock()
+	r.qualityEnabled = fn
+	r.mu.Unlock()
+}
+
+// SetRand injects the selection RNG (test-only; production uses math/rand/v2 top-level). Lets a test
+// seed a deterministic source to assert the bounded shares.
+func (r *Router) SetRand(float64Fn func() float64, intNFn func(int) int) {
+	r.mu.Lock()
+	r.randFloat, r.randIntN = float64Fn, intNFn
+	r.mu.Unlock()
+}
+
+// qEffLocked returns the shrinkage-adjusted effective quality for (endpoint, model). Caller holds
+// Router.mu (the quality maps are mu-guarded). No row / no samples ⇒ exactly the neutral prior 0.5.
+func qEffLocked(e *LocalEndpoint, model string) float64 {
+	n := float64(e.qualitySamples[model])
+	score := e.quality[model]
+	return (n*score + qualityPriorK*0.5) / (n + qualityPriorK)
+}
+
+// selectQualityWeighted composes the per-model quality (qeff, captured under the lock) with the
+// strategy's OWN signal (base affinity) and picks ε-greedily: ε of the time uniformly among
+// candidates (the exploration floor), else weighted-random by base_i·qeff_i. Quality can never zero a
+// node out and never make one 100%. Returns ErrUnknownStrategy for an unknown strategy (parity).
+func (r *Router) selectQualityWeighted(candidates []*LocalEndpoint, qeff []float64, strategy RoutingStrategy) (*LocalEndpoint, error) {
+	base := make([]float64, len(candidates))
+	switch strategy {
+	case StrategyRoundRobin, "":
+		for i := range base {
+			base[i] = 1
+		}
+	case StrategyLeastLoaded:
+		for i, c := range candidates {
+			base[i] = 1.0 / (1.0 + float64(atomic.LoadInt64(&c.activeCount)))
+		}
+	case StrategyLowestLatency:
+		for i, c := range candidates {
+			lat := float64(c.AvgLatencyMs)
+			if lat <= 0 {
+				lat = qualityLatencyScale // unmeasured = neutral base
+			}
+			base[i] = 1.0 / (1.0 + lat/qualityLatencyScale)
+		}
+	case StrategyPriority:
+		minP := candidates[0].Priority
+		for _, c := range candidates[1:] {
+			if c.Priority < minP {
+				minP = c.Priority
+			}
+		}
+		for i, c := range candidates {
+			base[i] = math.Pow(2, -float64(c.Priority-minP))
+		}
+	default:
+		return nil, fmt.Errorf("%w: %q", ErrUnknownStrategy, strategy)
+	}
+
+	// ε-greedy exploration floor: every eligible node keeps ≥ ε/n share regardless of score.
+	if r.randFloat() < qualityEpsilon {
+		return candidates[r.randIntN(len(candidates))], nil
+	}
+
+	// Exploitation: weighted-random by base_i · qeff_i.
+	weights := make([]float64, len(candidates))
+	total := 0.0
+	for i := range candidates {
+		weights[i] = base[i] * qeff[i]
+		total += weights[i]
+	}
+	if total <= 0 { // degenerate (shouldn't happen: qeff ≥ floor > 0) — fall back to uniform
+		return candidates[r.randIntN(len(candidates))], nil
+	}
+	target := r.randFloat() * total
+	for i := range candidates {
+		target -= weights[i]
+		if target <= 0 {
+			return candidates[i], nil
+		}
+	}
+	return candidates[len(candidates)-1], nil
+}
+
+// UpdateQuality attaches a per-model benchmark score to a registered endpoint (called by the periodic
+// quality-sync loop, NOT per request). No-op if the node isn't registered.
+func (r *Router) UpdateQuality(nodeID, model string, score float64, samples int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.endpoints {
+		if e.ID != nodeID {
+			continue
+		}
+		if e.quality == nil {
+			e.quality = make(map[string]float64)
+			e.qualitySamples = make(map[string]int)
+		}
+		e.quality[model] = score
+		e.qualitySamples[model] = samples
+		return
+	}
+}
+
+// StartQualitySync periodically loads benchmark_node_scores into the routers' in-memory quality
+// (P1 #10 PR-B). BLOCKING (runs the ticker loop in the caller's goroutine until ctx is done) so it
+// composes with leader election. Reads from the router's pool — SelectEndpoint never touches the DB.
+func (r *Router) StartQualitySync(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = DefaultHealthCheckInterval
+	}
+	r.syncQuality(ctx) // initial load
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.syncQuality(ctx)
+		}
+	}
+}
+
+func (r *Router) syncQuality(ctx context.Context) {
+	if r.pool == nil {
+		return
+	}
+	rows, err := r.pool.Query(ctx, `SELECT node_id, model, score, sample_count FROM benchmark_node_scores`)
+	if err != nil {
+		return // best-effort; routing keeps the last-synced quality
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var nodeID, model string
+		var score float64
+		var samples int
+		if err := rows.Scan(&nodeID, &model, &score, &samples); err != nil {
+			return
+		}
+		r.UpdateQuality(nodeID, model, score, samples)
 	}
 }
 
