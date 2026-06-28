@@ -424,6 +424,13 @@ type Config struct {
 	// reputation read, no emitter). Env: LENS_REPUTATION_BONDED_MINTING_ENABLED.
 	ReputationBondedMintingEnabled bool
 
+	// ProofOfBenchmarkEnabled (P1 #10, PR-A) gates the proof-of-benchmark probe SCHEDULER: a verifier
+	// draws an unpredictable eval item from a private pool, sends only the input to a node, and scores
+	// the answer against held ground truth into a per-node quality signal. DEFAULT FALSE. MEASUREMENT
+	// only — the score feeds NO routing and NO mint, so it is NOT in the kill-switch force-off block.
+	// Off → no probes drawn, no scheduler. Env: LENS_PROOF_OF_BENCHMARK_ENABLED.
+	ProofOfBenchmarkEnabled bool
+
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
 	// force-OFFs every economy state-creation gate below (regardless of its own
@@ -669,6 +676,7 @@ func Load() (*Config, error) {
 		RoutingTierCohortsEnabled:      parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
 		NodeAutoRouteEnabled:           parseBoolEnv("LENS_NODE_AUTOROUTE_ENABLED"),
 		ReputationBondedMintingEnabled: parseBoolEnv("LENS_REPUTATION_BONDED_MINTING_ENABLED"),
+		ProofOfBenchmarkEnabled:        parseBoolEnv("LENS_PROOF_OF_BENCHMARK_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
