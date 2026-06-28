@@ -408,6 +408,13 @@ type Config struct {
 	// also on. Opt in via LENS_ROUTING_TIER_COHORTS_ENABLED=true.
 	RoutingTierCohortsEnabled bool
 
+	// NodeAutoRouteEnabled (blocker 6) gates gateway auto-routing of normal inference traffic to a
+	// registered inference node (which then auto-signs + submits its own receipt). DEFAULT FALSE.
+	// It is a ROUTING flag, NOT a mint gate — minting stays gated downstream by stake +
+	// earn_verified — so it is deliberately NOT in the kill-switch force-off block. Off → the serve
+	// path is byte-identical to today. Env: LENS_NODE_AUTOROUTE_ENABLED.
+	NodeAutoRouteEnabled bool
+
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
 	// force-OFFs every economy state-creation gate below (regardless of its own
@@ -651,6 +658,7 @@ func Load() (*Config, error) {
 
 		RoutingIntelligenceEnabled: parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 		RoutingTierCohortsEnabled:  parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
+		NodeAutoRouteEnabled:       parseBoolEnv("LENS_NODE_AUTOROUTE_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),

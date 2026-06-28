@@ -776,6 +776,10 @@ func run() error {
 	challengeClient := povi.NewChallengeClient(lensChallengePriv, 10*time.Second)
 	challengeClient.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 10*time.Second))
 	challengeStore := povi.NewChallengeStore(pool)
+	// Blocker 6: gateway auto-route to registered nodes. Wired here (not at proxy.New) because it
+	// reuses the EXISTING challenge private key (lensChallengePriv, just loaded above) to sign the
+	// per-request node-auth token. enabled=cfg.NodeAutoRouteEnabled (default false) → fully inert.
+	p.SetNodeRouter(localRouterMulti, lensChallengePriv, newNodeHTTPClient(cfg.NodeTLSSkipVerify, 30*time.Second), cfg.NodeAutoRouteEnabled)
 	poviChallenger := povi.NewChallenger(
 		computeMiner.NodeURL, challengeClient, poviStakeManager, challengeStore,
 		4, cfg.POVISlashFraction)

@@ -194,6 +194,15 @@ func (r *Router) Register(e *LocalEndpoint) {
 	defer r.mu.Unlock()
 	for i, ex := range r.endpoints {
 		if ex.ID == e.ID {
+			// Preserve RUNTIME health/stats across a config re-register. The control-plane
+			// NodeSyncer re-Registers every reconcile (~30s); without this the endpoint's Healthy
+			// flag (set by the periodic sweep) is reset to false on every tick, and SelectEndpoint
+			// — the auto-route picker — would only ever see it healthy in a brief race window.
+			e.Healthy = ex.Healthy
+			e.LastCheckAt = ex.LastCheckAt
+			e.AvgLatencyMs = ex.AvgLatencyMs
+			e.ErrorRate = ex.ErrorRate
+			atomic.StoreInt64(&e.activeCount, atomic.LoadInt64(&ex.activeCount))
 			r.endpoints[i] = e
 			return
 		}
