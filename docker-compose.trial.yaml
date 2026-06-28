@@ -63,6 +63,7 @@ services:
       - LENS_ROUTING_INTELLIGENCE_ENABLED=true    # default false, config.go:652
       - LENS_ROUTING_TIER_COHORTS_ENABLED=true    # default false, config.go:653 (effective only with routing-intelligence on)
       - LENS_CACHE_SHARING_ENABLED=true           # default false, config.go:635. Cross-workspace cache economy (fake-money royalties on the internal ledger).
+      - LENS_NODE_AUTOROUTE_ENABLED=true          # default false, config.go. Gateway auto-routes normal /v1/proxy traffic to a registered node (token-authed via the existing challenge key); the node serves + auto-submits its receipt. ROUTING flag, NOT in the kill-switch force-off block. Off → byte-identical direct path.
       # Fixed challenge key so the gateway's PoVI challenge keypair is STABLE across restarts —
       # otherwise an ephemeral key invalidates the node's pinned pubkey (blocker 7). base64 ed25519
       # seed; trial-only, supplied from the gitignored .env like LENS_API_KEY (NOT committed).
@@ -100,8 +101,11 @@ services:
   # PoVI inference node (closed-test only) — the /node daemon from the same image, run instead of
   # /lens via the entrypoint override (the `migrate` service uses the same image-reuse pattern). It
   # registers with the gateway, serves via the mock provider, and submits SIGNED receipts. With
-  # LENS_POVI_MINTING_ENABLED=true above, a receipt from a STAKED + earn_verified node mints fake
-  # LENS; the U6 floor still gates an unstaked/unverified node's receipt to Minted:false.
+  # LENS_NODE_AUTOROUTE_ENABLED=true above, normal /v1/proxy/* inference traffic for the node's model
+  # AUTO-ROUTES here (gateway-signed token over the existing challenge key) — the node serves it and
+  # submits its receipt, no direct /inference call needed. With LENS_POVI_MINTING_ENABLED=true, a
+  # receipt from a STAKED + earn_verified node mints fake LENS; the U6 floor still gates an
+  # unstaked/unverified node's receipt to Minted:false.
   node:
     image: ghcr.io/gaboracnicolai/talyvor-lens:latest
     build:
