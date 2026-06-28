@@ -612,6 +612,10 @@ func run() error {
 	// Sybil wash yield. Wired UNCONDITIONALLY (a safety restriction the economy
 	// kill must not lift, like the verifier). Default 1000 LENS/24h; 0 = off.
 	tokenLedger.SetMintRateCap(cfg.MintRateCapLENS24h, 24*time.Hour)
+	// P1 #9: the reputation bond on PoVI-receipt + pool-royalty mints. The gate func reads the flag
+	// live; OFF (default) ⇒ the mint path is byte-identical (no reputation read). An ADDITIVE
+	// constraint downstream of the U6 floor/rate-cap — only ever reduces or blocks a mint.
+	tokenLedger.SetReputationGate(func() bool { return cfg.ReputationBondedMintingEnabled })
 	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
 	_ = cacheMiner // hooks into the cache-hit path in a follow-up wire-up
 
@@ -811,6 +815,13 @@ func run() error {
 	// is MONEY-DECOUPLED: computed/gated/decayed/displayed but NEVER in the earning path
 	// (annotation_mining.go SubmitAnnotation stays base + bonus) — pinned by an AST guard.
 	reputationStore := mining.NewReputationStore(pool)
+	// P1 #9: wire the reputation SIGNAL emitters only when the flag is on (off ⇒ Slash/Challenge
+	// append nothing → byte-identical). slash → negative δ IN the slash tx (invariant 4); a passed
+	// challenge → small positive δ best-effort (the recoverability / good-behavior signal).
+	if cfg.ReputationBondedMintingEnabled {
+		poviStakeManager.SetReputationSink(reputationStore)
+		poviChallenger.SetReputationSink(reputationStore)
+	}
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "annotation-reputation-resolution", 30*time.Second, func(lctx context.Context) {
 			reputationStore.StartScheduler(lctx, time.Hour)

@@ -100,7 +100,25 @@ type StakeManager struct {
 	unbondPeriod time.Duration
 	now          func() time.Time
 	db           txBeginner // nil in tests → non-transactional path
+	// repSink (P1 #9, optional) appends a negative reputation event IN the slash tx — skin-in-the-
+	// game beyond stake (invariant 4). nil ⇒ no-op (byte-identical); wired only when the
+	// reputation-bonded-minting flag is on.
+	repSink SlashReputationSink
 }
+
+// SlashReputationSink appends a workspace-keyed reputation event on the slash tx (atomic with the
+// stake burn). Satisfied by *mining.ReputationStore.RecordEventTx. Wired only when the P1 #9 flag is on.
+type SlashReputationSink interface {
+	RecordEventTx(ctx context.Context, tx pgx.Tx, workspaceID, kind, idemKey string, delta float64, reason any) error
+}
+
+// SlashReputationDelta is the reputation hit a slash applies (P1 #9, invariant 4): a node slashed for
+// a failed challenge earns less on every future bonded mint until it rebuilds R.
+const SlashReputationDelta = -0.10
+
+// SetReputationSink wires the optional slash→reputation emitter (P1 #9). nil ⇒ Slash appends no
+// reputation event (byte-identical). A setter so NewStakeManager's signature stays put.
+func (m *StakeManager) SetReputationSink(sink SlashReputationSink) { m.repSink = sink }
 
 // NewStakeManager wires the store, the ledger lock primitive, the node→workspace
 // lookup, the minimum stake, the unbonding delay, and the DB pool used to open
@@ -329,6 +347,15 @@ func (m *StakeManager) Slash(ctx context.Context, nodeID string, fraction float6
 		}
 		if err := m.storePut(ctx, tx, *st); err != nil {
 			return err
+		}
+		// P1 #9 invariant 4: lower the node's reputation IN the slash tx (atomic with the burn). The
+		// idem_key is the challenge reason ("challenge_<result>:<requestID>", unique per attempt) so a
+		// retried slash is idempotent. tx==nil on the non-transactional test path → skip (best-effort).
+		if m.repSink != nil && tx != nil {
+			if err := m.repSink.RecordEventTx(ctx, tx, st.WorkspaceID, "slash", reason, SlashReputationDelta,
+				map[string]interface{}{"node_id": nodeID, "reason": reason, "slashed": slashAmt}); err != nil {
+				return err
+			}
 		}
 		slashed = slashAmt
 		return nil

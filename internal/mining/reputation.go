@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/talyvor/lens/internal/dbjson"
 	"github.com/talyvor/lens/internal/metrics"
 )
@@ -141,6 +143,32 @@ func (r *ReputationStore) recordEvent(ctx context.Context, annotatorID, kind, id
 	tag, err := r.pool.Exec(ctx, insertReputationEventSQL, annotatorID, kind, idemKey, delta, reasonJSON)
 	if err != nil {
 		return fmt.Errorf("reputation: record event: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		metrics.IncAnnotationReputationEvent(kind)
+	}
+	return nil
+}
+
+// RecordEvent appends ONE workspace-keyed reputation event best-effort (pool, non-tx). Exported for
+// the P1 #9 reputation-bonded-minting signal emitters (challenge_pass), wired only when the flag is
+// on. Append-only + idempotent like recordEvent. workspaceID lands in annotator_id (that column holds
+// the workspace id — annotation_mining keys identically).
+func (r *ReputationStore) RecordEvent(ctx context.Context, workspaceID, kind, idemKey string, delta float64, reason any) error {
+	return r.recordEvent(ctx, workspaceID, kind, idemKey, delta, reason)
+}
+
+// RecordEventTx appends ONE workspace-keyed reputation event on the CALLER'S tx — so a slash and its
+// reputation drop commit atomically (invariant 4). Exported for the P1 #9 slash emitter, wired only
+// when the flag is on. Append-only + idempotent (ON CONFLICT DO NOTHING).
+func (r *ReputationStore) RecordEventTx(ctx context.Context, tx pgx.Tx, workspaceID, kind, idemKey string, delta float64, reason any) error {
+	reasonJSON, err := dbjson.Marshal(reason)
+	if err != nil {
+		return fmt.Errorf("reputation: marshal reason (tx): %w", err)
+	}
+	tag, err := tx.Exec(ctx, insertReputationEventSQL, workspaceID, kind, idemKey, delta, reasonJSON)
+	if err != nil {
+		return fmt.Errorf("reputation: record event (tx): %w", err)
 	}
 	if tag.RowsAffected() == 1 {
 		metrics.IncAnnotationReputationEvent(kind)

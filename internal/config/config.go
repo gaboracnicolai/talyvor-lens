@@ -415,6 +415,15 @@ type Config struct {
 	// path is byte-identical to today. Env: LENS_NODE_AUTOROUTE_ENABLED.
 	NodeAutoRouteEnabled bool
 
+	// ReputationBondedMintingEnabled (P1 #9) gates the reputation BOND on PoVI-receipt + pool-royalty
+	// mints: a contributor's reputation R modulates the mint amount via f(R)∈[0,1] (never amplifies)
+	// and gates to 0 below the access floor. DEFAULT FALSE. It can only REDUCE or BLOCK a mint the U6
+	// floor/stake/rate-cap already allowed — never enable one — so it is deliberately NOT in the
+	// kill-switch force-off block (a mint-reducer, not a mint-enabler; when the economy is off all
+	// bonded mints are already force-off'd). Off → the mint path is byte-identical to today (no
+	// reputation read, no emitter). Env: LENS_REPUTATION_BONDED_MINTING_ENABLED.
+	ReputationBondedMintingEnabled bool
+
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
 	// force-OFFs every economy state-creation gate below (regardless of its own
@@ -656,9 +665,10 @@ func Load() (*Config, error) {
 		GuardrailsEnabled: parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
 		WorkTierEnabled:   parseBoolEnv("LENS_WORKTIER_ENABLED"),
 
-		RoutingIntelligenceEnabled: parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
-		RoutingTierCohortsEnabled:  parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
-		NodeAutoRouteEnabled:       parseBoolEnv("LENS_NODE_AUTOROUTE_ENABLED"),
+		RoutingIntelligenceEnabled:     parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
+		RoutingTierCohortsEnabled:      parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
+		NodeAutoRouteEnabled:           parseBoolEnv("LENS_NODE_AUTOROUTE_ENABLED"),
+		ReputationBondedMintingEnabled: parseBoolEnv("LENS_REPUTATION_BONDED_MINTING_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
