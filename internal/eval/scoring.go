@@ -23,6 +23,14 @@ const (
 	EvalJSONSchema EvalMethod = "json_schema"
 )
 
+// StaticScore is the exported deterministic scorer (exact/contains/regex/json_schema) for callers
+// outside the eval pipeline — e.g. proof-of-benchmark, which scores a node's answer against held
+// ground truth. handled=false ⇒ a non-static method (heuristic/llm_judge) the caller must score
+// itself. Pure + network-free; references no ledger/mint (keeps the benchprobe import-guard clean).
+func StaticScore(method EvalMethod, expected, response string) (score float64, handled bool, err error) {
+	return staticScore(method, expected, response)
+}
+
 // staticScore scores a response for the deterministic, network-free methods.
 // handled=false means the method is not a static one (heuristic / llm_judge),
 // so the caller should fall through to the scorer / judge path. A non-nil err
