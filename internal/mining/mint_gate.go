@@ -117,6 +117,78 @@ func (s *LedgerStore) verifyEarn(ctx context.Context, tx pgx.Tx, workspaceID, tx
 	return nil
 }
 
+// ─── P1 #9: reputation-bonded minting ──────────────────────────────────────
+
+// ErrReputationFloor is returned by a reputation-bonded mint when the workspace's reputation R is
+// below the access floor (AccessFloor, 0.35). The mint tx rolls back (no ledger row, no balance
+// change, no metrics) — same shape as ErrEarnNotVerified. ADDITIVE: it can only BLOCK a mint the U6
+// floor/stake/rate-cap already allowed, never enable one.
+var ErrReputationFloor = errors.New("mining: workspace reputation below access floor (reputation-bonded minting)")
+
+// isReputationBondedType — the ALLOW-LIST of mint txTypes the reputation bond applies to: PoVI
+// receipt mints + pool-royalty held mints ONLY. Deliberately EXCLUDES TypeAnnotationMine (annotation
+// earning stays money-decoupled — the AST money-boundary guard), and cache/compute/embedding/pattern
+// (out of scope for #9). Literal "receipt_mine_provisional" mirrors mintTypeList (cycle-free).
+func isReputationBondedType(txType string) bool {
+	return txType == "receipt_mine_provisional" || txType == TypePoolRoyaltyHeld
+}
+
+// reputationFactor maps reputation R∈[0,1] to the mint multiplier f(R)∈[0,1]: a baseline-saturating
+// ramp. 0 below AccessFloor (0.35); rises linearly to 1.0 at ReputationBaseline (0.50); SATURATES at
+// 1.0 above baseline (NEVER amplifies — invariant 2). So only a below-baseline (demonstrably
+// misbehaved) workspace takes a haircut; a neutral/new/good one (R≥0.5) mints at full base.
+func reputationFactor(r float64) float64 {
+	if r < AccessFloor {
+		return 0
+	}
+	f := (r - AccessFloor) / (ReputationBaseline - AccessFloor)
+	if f > 1 {
+		return 1
+	}
+	if f < 0 {
+		return 0
+	}
+	return f
+}
+
+// SetReputationGate wires the reputation-bonded-minting flag (P1 #9). nil OR a func returning false ⇒
+// total no-op: the mint path is byte-identical (no reputation read, no metadata mutation). Call once
+// at startup. A constraint that only ever REDUCES a mint, so wiring it is harmless.
+func (s *LedgerStore) SetReputationGate(gate func() bool) { s.reputationGate = gate }
+
+// reputationBondedAmount returns the EFFECTIVE (≤ base) mint amount for a bonded mint type, reading R
+// on the caller's tx (consistent within the mint). Returns base unchanged with NO db read when the
+// gate is off or txType is non-bonded (byte-identical-off). Returns ErrReputationFloor when R<floor
+// (caller rolls the whole mint back). On a scaled mint it records {base, score, effective} in the
+// mint metadata for audit. Reuses ReputationBaseline + clampReputation (same package — reputation.go).
+//
+// NOTE (logged for review): the read `SELECT SUM(delta) … WHERE annotator_id=$1` is an index-range
+// fold (idx_reputation_events_annotator, migration 0066) over THIS workspace's events — bounded per
+// read, but O(events-per-workspace) and unbounded over time. A materialized current-R is the
+// follow-up if a hot-minting workspace accumulates many events.
+func (s *LedgerStore) reputationBondedAmount(ctx context.Context, tx pgx.Tx, workspaceID, txType string, base float64, metadata map[string]interface{}) (float64, error) {
+	if s.reputationGate == nil || !s.reputationGate() || !isReputationBondedType(txType) {
+		return base, nil
+	}
+	var sum float64
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(delta), 0) FROM reputation_events WHERE annotator_id = $1`, workspaceID).Scan(&sum); err != nil {
+		return 0, fmt.Errorf("mining: reputation read for %q: %w", workspaceID, err)
+	}
+	r := clampReputation(ReputationBaseline + sum)
+	f := reputationFactor(r)
+	if f <= 0 {
+		return 0, ErrReputationFloor
+	}
+	eff := base * f
+	if metadata != nil {
+		metadata["reputation_base"] = base
+		metadata["reputation_score"] = r
+		metadata["reputation_effective"] = eff
+	}
+	return eff, nil
+}
+
 // ─── U6 PR2: per-identity mint rate cap ───────────────────────────────────
 
 // ErrMintRateCapExceeded is returned by a mint when the workspace would exceed

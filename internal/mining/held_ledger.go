@@ -133,6 +133,14 @@ func (s *LedgerStore) CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID s
 	if amount <= 0 {
 		return errors.New("mining: held credit amount must be positive")
 	}
+	// P1 #9: reputation bond on the held MINT (pool_royalty_held). Scale by f(R) / gate below floor
+	// BEFORE the transition closure captures the amount. heldInner still runs verifyEarn (U6 floor)
+	// + checkMintRateCap on the effective delta — compose, never bypass. No-op when off → byte-identical.
+	eff, rerr := s.reputationBondedAmount(ctx, tx, workspaceID, txType, amount, metadata)
+	if rerr != nil {
+		return rerr
+	}
+	amount = eff
 	return s.heldInner(ctx, tx, workspaceID, txType, description, metadata,
 		func(bal, held, earned float64) (float64, float64, float64, float64, float64, error) {
 			return bal, held + amount, earned, amount, bal, nil

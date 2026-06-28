@@ -112,6 +112,10 @@ type LedgerStore struct {
 	// applyTx/heldInner AFTER the balance FOR UPDATE — see checkMintRateCap.
 	mintRateCap    float64
 	mintRateWindow time.Duration
+	// reputationGate is the P1 #9 reputation-bonded-minting flag. nil/false ⇒ no-op (mint path
+	// byte-identical). When on, applyTx/CreditHeldTx scale a bonded mint by f(R) and gate it to 0
+	// below the access floor — an ADDITIVE constraint downstream of verifyEarn (mint_gate.go).
+	reputationGate func() bool
 }
 
 // NewLedgerStore wraps a real *pgxpool.Pool.
@@ -211,6 +215,14 @@ func (s *LedgerStore) applyTx(
 		if err := s.verifyEarn(ctx, tx, workspaceID, txType); err != nil {
 			return err
 		}
+		// P1 #9: reputation bond — DOWNSTREAM of the U6 floor (compose, never bypass). For a bonded
+		// mint type with the gate on, scale `amount` by f(R) and gate to ErrReputationFloor below
+		// the access floor. No-op (amount unchanged, no read) when off or non-bonded → byte-identical.
+		eff, rerr := s.reputationBondedAmount(ctx, tx, workspaceID, txType, amount, metadata)
+		if rerr != nil {
+			return rerr
+		}
+		amount = eff // the rest of the credit (delta, earned, rate-cap, ledger row) uses the effective amount
 	}
 
 	// Two-step pessimistic lock: ensure the row exists without touching

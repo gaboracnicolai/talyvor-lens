@@ -175,7 +175,25 @@ type Challenger struct {
 	slashFraction float64 // fraction of stake slashed on failure
 	now           func() time.Time
 	idGen         func() string
+	// repSink (P1 #9, optional) appends a small POSITIVE reputation event on a passed challenge — the
+	// verified good-behavior signal that lets a node build a buffer above baseline and rebuild after a
+	// slash. Best-effort (non-tx). nil ⇒ no-op; wired only when the flag is on.
+	repSink PassReputationSink
 }
+
+// PassReputationSink appends a workspace-keyed reputation event best-effort (P1 #9 challenge_pass).
+// Satisfied by *mining.ReputationStore.RecordEvent. Wired only when the reputation-bonded flag is on.
+type PassReputationSink interface {
+	RecordEvent(ctx context.Context, workspaceID, kind, idemKey string, delta float64, reason any) error
+}
+
+// ChallengePassReputationDelta is the reputation gain for a passed challenge (P1 #9): small + slow, so
+// R is EARNED over many honest challenges (a buffer above baseline), never bought.
+const ChallengePassReputationDelta = 0.02
+
+// SetReputationSink wires the optional challenge_pass→reputation emitter (P1 #9). nil ⇒ no event
+// (byte-identical). A setter so NewChallenger's signature stays put.
+func (c *Challenger) SetReputationSink(sink PassReputationSink) { c.repSink = sink }
 
 // NewChallenger wires the node-URL lookup, the path provider (HTTP in prod),
 // the slasher (StakeManager), the challenge store, and the deterrent knobs.
@@ -268,6 +286,12 @@ func (c *Challenger) Challenge(ctx context.Context, rec StoredReceipt) (*Challen
 			ch.SlashedAmount = slashed
 			metrics.POVIChallengeSlash(slashed)
 		}
+	} else if c.repSink != nil {
+		// P1 #9: a PASSED challenge is the verified good-behavior signal — append a small positive
+		// reputation event for the node's workspace, idempotent per request_id. Best-effort: a
+		// failure here must never fail the challenge (the slash/audit path is authoritative).
+		_ = c.repSink.RecordEvent(ctx, rec.WorkspaceID, "challenge_pass", rec.RequestID, ChallengePassReputationDelta,
+			map[string]interface{}{"node_id": rec.NodeID, "request_id": rec.RequestID})
 	}
 
 	metrics.POVIChallenge(string(ch.Result))
