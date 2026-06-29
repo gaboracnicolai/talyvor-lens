@@ -447,6 +447,14 @@ type Config struct {
 	// Env: LENS_EVAL_CONTRIBUTION_MINTING_ENABLED.
 	EvalContributionMintingEnabled bool
 
+	// RoutingPredictionEnabled (Proof-of-Improvement piece 3, PR-1) is a CAPABILITY flag gating SUBMISSION
+	// of routing predictions (the attributable "cohort C → model M" unit). DEFAULT FALSE — the
+	// routing_predictions table stays provably empty until the capability is deliberately enabled. This is
+	// NOT an earning flag (the proof-of-routing-prediction mint + its force-off flag land in PR-4): PR-1 is
+	// an inert data substrate with NO mint, so this is NOT in the kill-switch force-off block. Env:
+	// LENS_ROUTING_PREDICTION_ENABLED.
+	RoutingPredictionEnabled bool
+
 	// EvalContributionRatePerPoint is the LENS-per-discrimination-point rate for the proof-of-eval-
 	// contribution mint (amount = rate × clamp01(discrimination)). DEFAULT 0 ⇒ INERT: NewHeldBenchmarkAnchor
 	// refuses a non-positive rate, so the minter's anchor is nil and RunOnce is a total no-op even with
@@ -702,6 +710,7 @@ func Load() (*Config, error) {
 		ProofOfBenchmarkEnabled:        parseBoolEnv("LENS_PROOF_OF_BENCHMARK_ENABLED"),
 		ProofOfImprovementEnabled:      parseBoolEnv("LENS_PROOF_OF_IMPROVEMENT_ENABLED"),
 		EvalContributionMintingEnabled: parseBoolEnv("LENS_EVAL_CONTRIBUTION_MINTING_ENABLED"),
+		RoutingPredictionEnabled:       parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
