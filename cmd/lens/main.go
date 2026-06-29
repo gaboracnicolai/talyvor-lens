@@ -84,6 +84,7 @@ import (
 	"github.com/talyvor/lens/internal/roi"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
+	"github.com/talyvor/lens/internal/routingscore"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/status"
 	"github.com/talyvor/lens/internal/templates"
@@ -917,6 +918,24 @@ func run() error {
 	)
 	routingAdvisor.StartRefresh(ctx)
 	p.SetRoutingAdvisor(routingAdvisor)
+
+	// Proof-of-Improvement piece 3, PR-3a: the routing-prediction SCORER. Built behind an Inferer
+	// interface; PR-3a wires NO real Inferer (the third arg is nil), so the sweeper is PROVABLY INERT —
+	// RunOnce no-ops (no DB scan, no inference) even when LENS_ROUTING_PREDICTION_SCORING_ENABLED is on.
+	// PR-3b supplies the real provider-backed Inferer via the Option-Y internal/inference extraction;
+	// until then this runs no inference and produces no score. NOT economy-gated (measurement, no mint).
+	routingScorer := routingscore.NewScorer(
+		pool,
+		routingscore.NewAdvisorBaseliner(routingAdvisor),
+		nil, // no real Inferer in PR-3a — inert until PR-3b
+		func() bool { return cfg.RoutingPredictionScoringEnabled },
+	)
+	if cfg.RoutingPredictionScoringEnabled {
+		logger.Info("routing-prediction scorer: flag ON, but NO real Inferer is wired (PR-3a) — the scorer is inert (no inference, no score) until PR-3b supplies the provider-backed Inferer")
+	}
+	go haComps.leader.Run(ctx, "routing-prediction-score", 30*time.Second, func(lctx context.Context) {
+		routingScorer.StartScheduler(lctx, time.Minute) // RunOnce no-ops while inert (nil Inferer / flag off)
+	})
 
 	// Token marketplace + staking (Batch 3 Phase 1).
 	marketplace := economy.NewMarketplaceStore(tokenLedger, pool)

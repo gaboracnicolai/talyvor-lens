@@ -455,6 +455,14 @@ type Config struct {
 	// LENS_ROUTING_PREDICTION_ENABLED.
 	RoutingPredictionEnabled bool
 
+	// RoutingPredictionScoringEnabled (Proof-of-Improvement piece 3, PR-3a) gates the routing-prediction
+	// SCORER sweeper (run model M + the baseline on a cohort's held eval slice → skill-above-baseline
+	// score). DEFAULT FALSE. It is a CAPABILITY/MEASUREMENT flag (it produces a score, mints nothing), so
+	// it is NOT in the kill-switch force-off block — like LENS_PROOF_OF_BENCHMARK_ENABLED. INERT in PR-3a
+	// regardless: the scorer is wired with NO real Inferer, so even flag-on runs no inference until PR-3b
+	// supplies one. Env: LENS_ROUTING_PREDICTION_SCORING_ENABLED.
+	RoutingPredictionScoringEnabled bool
+
 	// EvalContributionRatePerPoint is the LENS-per-discrimination-point rate for the proof-of-eval-
 	// contribution mint (amount = rate × clamp01(discrimination)). DEFAULT 0 ⇒ INERT: NewHeldBenchmarkAnchor
 	// refuses a non-positive rate, so the minter's anchor is nil and RunOnce is a total no-op even with
@@ -703,14 +711,15 @@ func Load() (*Config, error) {
 		GuardrailsEnabled: parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
 		WorkTierEnabled:   parseBoolEnv("LENS_WORKTIER_ENABLED"),
 
-		RoutingIntelligenceEnabled:     parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
-		RoutingTierCohortsEnabled:      parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
-		NodeAutoRouteEnabled:           parseBoolEnv("LENS_NODE_AUTOROUTE_ENABLED"),
-		ReputationBondedMintingEnabled: parseBoolEnv("LENS_REPUTATION_BONDED_MINTING_ENABLED"),
-		ProofOfBenchmarkEnabled:        parseBoolEnv("LENS_PROOF_OF_BENCHMARK_ENABLED"),
-		ProofOfImprovementEnabled:      parseBoolEnv("LENS_PROOF_OF_IMPROVEMENT_ENABLED"),
-		EvalContributionMintingEnabled: parseBoolEnv("LENS_EVAL_CONTRIBUTION_MINTING_ENABLED"),
-		RoutingPredictionEnabled:       parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
+		RoutingIntelligenceEnabled:      parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
+		RoutingTierCohortsEnabled:       parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
+		NodeAutoRouteEnabled:            parseBoolEnv("LENS_NODE_AUTOROUTE_ENABLED"),
+		ReputationBondedMintingEnabled:  parseBoolEnv("LENS_REPUTATION_BONDED_MINTING_ENABLED"),
+		ProofOfBenchmarkEnabled:         parseBoolEnv("LENS_PROOF_OF_BENCHMARK_ENABLED"),
+		ProofOfImprovementEnabled:       parseBoolEnv("LENS_PROOF_OF_IMPROVEMENT_ENABLED"),
+		EvalContributionMintingEnabled:  parseBoolEnv("LENS_EVAL_CONTRIBUTION_MINTING_ENABLED"),
+		RoutingPredictionEnabled:        parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
+		RoutingPredictionScoringEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_SCORING_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
