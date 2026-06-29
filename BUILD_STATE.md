@@ -2,8 +2,8 @@
 
 **Single source of truth for "what is built," derived from the actual code at the SHA below — never from the roadmap, notes, or assumptions.** Regenerated (never hand-edited) whenever it goes stale.
 
-- **Derived from main:** `c4742ab`
-- **Latest migration:** `0068_proof_of_benchmark.sql`
+- **Derived from main:** `071d061`
+- **Latest migration:** `0072_routing_prediction_scores.sql`
 - **Config:** all `config.go:LINE` citations are `internal/config/config.go`.
 - **Method:** every cell was grep'd / read from code. Where code and a note/roadmap disagree, **the code wins** — see [§C Discrepancies](#c-discrepancies-code-wins).
 
@@ -17,11 +17,13 @@
 
 ## The master kill-switch (read this first)
 
-`LENS_ECONOMY_ENABLED` — **default TRUE** (`config.go:1198` sets `c.EconomyEnabled = true`, overridden only if the env var is explicitly set, `:1199`). When **false**, the force-off block force-sets **11** flags false regardless of their own env:
+`LENS_ECONOMY_ENABLED` — **default TRUE** (`config.go` sets `c.EconomyEnabled = true`, overridden only if the env var is explicitly set). When **false**, the force-off block force-sets **12** flags false regardless of their own env:
 
-`PatternMiningEnabled · PatternCaptureEnabled · PatternEarningEnabled · PoolRoyaltyMintingEnabled · POVIMintingEnabled · TrustfulComputeMintEnabled · CacheSharingEnabled · CachePoolableEnabled · DistillPoolableEnabled · RoutingIntelligenceEnabled · RoutingTierCohortsEnabled`
+`PatternMiningEnabled · PatternCaptureEnabled · PatternEarningEnabled · PoolRoyaltyMintingEnabled · POVIMintingEnabled · TrustfulComputeMintEnabled · CacheSharingEnabled · CachePoolableEnabled · DistillPoolableEnabled · RoutingIntelligenceEnabled · RoutingTierCohortsEnabled · EvalContributionMintingEnabled`
 
-**Deliberately NOT force-offed** (documented exceptions): `LXCGatingEnabled` / `LXCShadowSpendEnabled` (fiat-pegged, not the token economy), the **U6 floor + rate cap** (safety restrictions), `WorkTierEnabled` / `GuardrailsEnabled` (non-economic), and the three **measurement/routing/capability** flags added since the last regen — `NodeAutoRouteEnabled`, `ReputationBondedMintingEnabled`, `ProofOfBenchmarkEnabled` (each only ever *reduces/blocks/redistributes* a mint or routes traffic; none CREATES a mint, so none belongs in the force-off block). The manifest test `cmd/lens/economy_killswitch_test.go` asserts **`len(checks) == 11`** (`:64-65`) for the force-off set and that LXC stays wired; the `economyGateEnv` adversarial input list is **12** env vars (the 11 minus tier-cohorts, plus the 2 LXC force-ON inputs — a different count by construction).
+The **12th** is `EvalContributionMintingEnabled` (P-o-I piece 2, #250 — the proof-of-eval-contribution EARNING gate; it MINTS LENS so it joins the block, `config.go:1268`). **Deliberately NOT force-offed** (documented exceptions): `LXCGatingEnabled` / `LXCShadowSpendEnabled` (fiat-pegged, not the token economy), the **U6 floor + rate cap** (safety restrictions), `WorkTierEnabled` / `GuardrailsEnabled` (non-economic), and the **measurement/routing/capability** flags — `NodeAutoRouteEnabled`, `ReputationBondedMintingEnabled`, `ProofOfBenchmarkEnabled`, `ProofOfImprovementEnabled` (anchor-selection capability, #248), `RoutingPredictionEnabled` (prediction-submission capability, #252), `RoutingPredictionScoringEnabled` (scorer/measurement, #254) — each only ever *reduces/blocks/redistributes/measures* a mint or routes traffic; none CREATES a mint, so none belongs in the force-off block. The manifest test `cmd/lens/economy_killswitch_test.go` asserts **`len(checks) == 12`** (`:67-68`) for the force-off set and that LXC stays wired.
+
+> **Mint chokepoint count:** `mintTypeList` (`internal/mining/mint_gate.go`) is now **8** entries — the original 7 (`cache_mine · compute_mine · embedding_mine · annotation_mine · pattern_mine · receipt_mine_provisional · pool_royalty_held`) + **`eval_contribution_held`** (#250). `TestMintTypes_GateSet` pins all 8; `TestMintTypeList_IsSingleSource` pins `len(mintTypes)==len(mintTypeList)`. The U6 floor + 1000-LENS/24h rate cap cover every entry.
 
 ---
 
@@ -146,7 +148,37 @@ Challenge-verified per-node QUALITY → routing weight → emergent PoVI earning
 - **U6 chokepoint UNTOUCHED:** the anchor computes `amount` upstream; `verifyEarn` + reputation bond (#9, §A13) + 1000-LENS/24h rate cap run on `amount` downstream exactly as today (`held_ledger.go`/`mint_gate.go` not edited). **No migration** (`HeldBenchmarkAnchor`'s future score source `benchmark_node_scores` already exists in 0068; this PR reads nothing new).
 - **NO-LOOP:** `anchor.go` references no ledger/mining/benchprobe/DB symbol (import-guard `TestAnchor_NoLedgerNoMint_ImportGuard`); the held score is a pure `GainInput` (the anchor reads no DB and writes nothing), so a mint paid on it can never feed the score it prices. Regression oracle: the full `internal/poolroyalty` package (incl. `seed_zeromint`) passes **unchanged** — cost path byte-identical (amount + `royalty_share` JSONB).
 
-> **#4 is REFRAMED.** Recon confirmed federated-learning-as-named has no substrate (no training loop, no gradient/aggregation, all served models external) and the only Talyvor-owned model is parked Phase-6 — so #4 is reframed as the **Proof-of-Improvement** primitive built against the best existing shared artifact (the proof-of-savings cache, #2, the ✅-hard-readout/✅-clean-attribution baseline). Piece 1 (this PR) is the pluggable anchor. Queued next instances: **proof-of-eval-contribution** (held-benchmark anchor + a contributor-improvable eval surface) and **proof-of-routing-prediction**; an eventual Phase-6 owned-model gain would reuse the same rail.
+> **#4 is REFRAMED.** Recon confirmed federated-learning-as-named has no substrate (no training loop, no gradient/aggregation, all served models external) and the only Talyvor-owned model is parked Phase-6 — so #4 is reframed as the **Proof-of-Improvement** primitive built against the best existing shared artifact. Piece 1 (§A17) = the pluggable anchor. **Piece 2 (§A18) = proof-of-eval-contribution — DONE/inert.** **Piece 3 = proof-of-routing-prediction (§A19–§A22) — PR-1/PR-2/PR-3a + the inference extraction DONE; PR-3c (real Inferer) + PR-4 (mint) pending.** An eventual Phase-6 owned-model gain would reuse the same rail.
+
+### A18 · Proof-of-eval-contribution (P-o-I piece 2) — PR #250 (`eb2d501`)
+**BUILT-INERT** · the **first real `HeldBenchmarkAnchor` caller**. Rewards a contributor for a FAIR, VALIDATED, DISCRIMINATING eval item; paid on measured discrimination through the U6/held-ledger chokepoint. Ships **INERT** (rate 0 ⇒ `NewHeldBenchmarkAnchor` refuses to construct ⇒ the minter is a total no-op even with both flags on). Migration **0069** (`benchmark_eval_items` += `author_workspace_id`/`content_hash`/`status`; `eval_contribution_mints` claim table, `item_id` UNIQUE = mint-once).
+| Component | Status | file:line |
+|---|---|---|
+| `HeldBenchmarkAnchor` first live caller | BUILT-INERT | `internal/poolroyalty/eval_contribution_minter.go` `NewEvalContributionMinter` (the SOLE non-test `NewHeldBenchmarkAnchor` caller — `anchor_test.go` `TestHeldBenchmarkAnchor_ExactlyOneLiveCaller`) |
+| Discrimination readout | BUILT | `discrimination = clamp01(4·Var(score_w over distinct UNLINKED grader workspaces))`, `MinUnlinkedGraders=3` warmup; read-only over `benchmark_probes ⋈ inference_nodes`, excluding the author's workspace + fingerprint-linked set |
+| New mint type | BUILT | `TypeEvalContributionHeld = "eval_contribution_held"` → `mintTypeList` (**7→8**, `mint_gate.go` const + list only, no logic edit) |
+| Earning flag (force-off) | BUILT-INERT | `LENS_EVAL_CONTRIBUTION_MINTING_ENABLED` **false**, **IN the force-off block** (`config.go:1268`); manifest **11→12**. Rate `LENS_EVAL_CONTRIBUTION_RATE_PER_POINT` **0** (inert). |
+| Author exclusion (permanent) | BUILT | the author is excluded from drawing (`DrawItem`), grading, and earning on their own items (reuses #250's `author_workspace_id` + `workspace_card_fingerprints` self-deal join) |
+
+> NO-LOOP: the score producer (`benchprobe`/`eval.StaticScore`) is import-guarded mint-free; the minter reads `benchmark_probes` and writes only the ledger + claim table. **Residual (logged pre-public-mint gate):** different-card/no-card sockpuppet evades the fingerprint link — bounded by `MinUnlinkedGraders` + the U6 24h author cap, not eliminated.
+
+### A19 · Routing-prediction unit (P-o-I piece 3, PR-1) — PR #252 (`69a9dfb`)
+**BUILT-INERT** · the attributable prediction object recon R1 found missing (routing_patterns are anonymized post-serve OBSERVATIONS, not predictions). Migration **0070** `routing_predictions(workspace_id, feature_category, input_token_range, complexity_bucket, model, provider, status)`. **One LIVE prediction per (workspace, cohort)** via a partial `UNIQUE … WHERE status IN ('pending','active')` (anti-hedge-farm; retire frees the slot). Pure-CRUD `internal/routingpredict/` (import-guarded: no `internal/routing`/mining/anchor/ledger). `LENS_ROUTING_PREDICTION_ENABLED` **false** — a CAPABILITY flag gating SUBMISSION (table stays provably empty until on), **NOT** force-off (no mint). Operator tool `cmd/lens-routeseed`. NO mint, NO anchor caller.
+
+### A20 · Cohort-tag the held eval pool (P-o-I piece 3, PR-2) — PR #253 (`8187697`)
+**BUILT** · gives a prediction's "cohort C" a resolvable held slice (recon R2). Migration **0071** adds `feature_category`/`input_token_range`/`complexity_bucket` to `benchmark_eval_items` (nullable). Only **two** dims are pure-input derivations — `internal/cohort/DeriveInputCohort` composes the EXACT exported serve-path funcs (`mining.InputBucketFor` + `worktier.ComplexityBucketFor(router.AnalyseComplexity)`), pinned by a golden parity test (no `proxy` edit). `feature_category` is **client-declared** (the `X-Talyvor-Feature` header), so it's supplied at seed, not derived. `cmd/lens-benchseed --backfill` re-derives the two derived dims; node-blind preserved (the cohort tag never enters the probe payload). NO mint.
+
+### A21 · Routing-prediction scorer (P-o-I piece 3, PR-3a) — PR #254 (`1bfb807`)
+**BUILT-INERT (provably — no real inference backend wired)** · scores a prediction skill-above-baseline. Migration **0072** `routing_prediction_scores(prediction_id UNIQUE [score-once], slice_size, m_avg, baseline_avg, baseline_model, skill_margin)`. `internal/routingscore/` sweeper behind an **`Inferer` interface `{ Infer(ctx, model, input) (string,error) }`** with a **FAKE impl only** — `main.go` injects a **nil Inferer** ⇒ `RunOnce` no-ops even flag-on, until PR-3c. Baseline = `Advisor.RecommendByRange(cohort)` (skip if `BasisNone`); `skill_margin = clamp01(avg(M)−avg(baseline))`; the predictor's authored + fingerprint-linked items are excluded from the slice. Bounds: `MinSliceSize=3`, `SliceCap=20`, `BatchLimit=20`. `LENS_ROUTING_PREDICTION_SCORING_ENABLED` **false** — capability/measurement, **NOT** force-off. Import-guard: no `internal/proxy`, no `output_quality`, no mint/anchor symbol (reads held `StaticScore` only). NO mint, anchor guard still "exactly one".
+
+### A22 · Inference extraction (P-o-I piece 3, PR-3b A′) — PR #256 (`071d061`)
+**BUILT — behavior-preserving refactor, no functional change.** The provider round-trip + leaf helpers moved out of `internal/proxy` into a **new `internal/inference`** (cycle-free — imports `retry` + stdlib only, NO `internal/proxy`) so the future scorer (PR-3c) can run a model without importing the serve handler. `RunUpstream` = `proxy.forward`'s round-trip VERBATIM (header-copy skip-Host + setAuth-overwrite + retry, pinned by the #255 oracle); `TranslateToGemini/FromGemini`, `ModelToBedrockID`/bedrock translate+`SignRequest`, `Usage`+`ExtractUsage` moved+exported. **(A′ minimal cut)** the `providerConfig` TYPE + `configForProvider` + `applyKey` **STAYED in proxy** — the full type-move/`ConfigFor` is deferred to PR-3c. proxy delegates: `forward`→`inference.RunUpstream`; `type Usage = inference.Usage` / `type BedrockConfig = inference.BedrockConfig` aliases. The two oracle tests + all handler/forward/fallback tests are byte-identical and green.
+
+### A23 · Test-infra (not economy surface)
+- **CI race fix — PR #251 (`235bc11`, test-only):** a pre-existing public-schema DDL collision under `go test ./...` at default parallelism (`-race`), fixed AT SOURCE via a **per-package private-schema `TestMain`** (`search_path = lens_it_<pkg>,public`, advisory-locked `CREATE EXTENSION`/`CREATE SCHEMA`). **Requirement going forward:** every new DB-touching package needs its own `schema_isolation_test.go` `TestMain` (routingpredict/routingscore already have one; benchprobe uses per-harness search_path; inference has no DB).
+- **forward characterization oracle — PR #255 (`dbbbd6c`, test-only):** `internal/proxy/forward_authheaders_test.go` + `forward_retry_test.go` pin the two previously-untested `forward` branches (header/auth overwrite ordering; same-provider retry-then-success + attempt count). **UNTOUCHABLE** — they gated the #256 extraction byte-identical and guard any future move of the round-trip.
+
+> **P-o-I piece-3 arc status:** PR-1 (unit, §A19) · PR-2 (cohort tags, §A20) · PR-3a (scorer + Inferer seam, §A21) · the #255 oracle + #256 inference extraction (§A22) — **all DONE**. **PENDING:** **PR-3c** = the real provider-backed `Inferer` on `internal/inference` (needs a `ConfigFor`-style builder + catalog model→provider resolver — the deferred full-A type move, now with the oracle on main to guard it) wired into `routingscore` (replacing the nil); **PR-4** = the mint on `skill_margin` (the second `HeldBenchmarkAnchor` caller → `mintTypeList` 8→9, manifest 12→13, reachability guard "one→two").
 
 ---
 
@@ -156,7 +188,7 @@ All booleans are `parseBoolEnv` (**false** when unset) unless noted; **force-fal
 
 | Flag | Default | parse line | In force-off block? | Flipping ON does… |
 |---|---|---|---|---|
-| `LENS_ECONOMY_ENABLED` | **TRUE** | :1199 (set :1198) | n/a (the block itself) | Master switch; **false** force-offs the 11 gates below + unregisters the economy route surface. |
+| `LENS_ECONOMY_ENABLED` | **TRUE** | set in `Load()` | n/a (the block itself) | Master switch; **false** force-offs the 12 gates below + unregisters the economy route surface. |
 | `LENS_POOL_ROYALTY_MINTING_ENABLED` | false | :664 | **yes** | Arms the cache + distill reuse-royalty mint (held → finalized). |
 | `LENS_POVI_MINTING_ENABLED` | false | :662 | **yes** | Lets a verified, staked node's receipt mint LENS. |
 | `LENS_PATTERN_MINING_ENABLED` | false | :661 | **yes** | Opens the per-workspace pattern opt-in route. |
@@ -168,10 +200,13 @@ All booleans are `parseBoolEnv` (**false** when unset) unless noted; **force-fal
 | `LENS_DISTILL_POOLABLE_ENABLED` | false | :660 | **yes** | Cross-tenant OCR pooling (distill-royalty substrate). |
 | `LENS_ROUTING_INTELLIGENCE_ENABLED` | false | :675 | **yes** | Pattern-aggregate auto-route model selection. |
 | `LENS_ROUTING_TIER_COHORTS_ENABLED` | false | :676 | **yes** | Tier-conditioned cohorts (#238); needs routing-intelligence on. |
+| `LENS_EVAL_CONTRIBUTION_MINTING_ENABLED` | false | field :448, force-off `:1268` | **yes** | The proof-of-eval-contribution EARNING gate (§A18). MINTS LENS ⇒ in the force-off block (the 12th). Needs a positive rate too. |
 | `LENS_NODE_AUTOROUTE_ENABLED` | false | :677 | **no** | Gateway auto-route to a registered node (§A16). Routing, not a mint. |
 | `LENS_REPUTATION_BONDED_MINTING_ENABLED` | false | :678 | **no** | `f(R)` bond on PoVI/royalty mints (§A13). Reduces/blocks, never enables. |
 | `LENS_PROOF_OF_BENCHMARK_ENABLED` | false | :679 | **no** | Probe scheduler + quality routing bias + probe-mint suppression (§A14). Measurement/routing. |
-| `LENS_PROOF_OF_IMPROVEMENT_ENABLED` | false | field :440 | **no** | Capability to select a non-cost reward anchor in a future eval-contribution mint (§A17). Wires nothing reachable today; cannot outrun U6. |
+| `LENS_PROOF_OF_IMPROVEMENT_ENABLED` | false | field :440 | **no** | Capability to SELECT the held-benchmark anchor; now has a reachable caller (the §A18 eval-contribution mint, gated by the earning flag above). Capability, cannot outrun U6. |
+| `LENS_ROUTING_PREDICTION_ENABLED` | false | field :456 | **no** | Capability gating routing-PREDICTION submission (§A19). Inert data substrate, no mint. |
+| `LENS_ROUTING_PREDICTION_SCORING_ENABLED` | false | field :464 | **no** | Capability/measurement gating the routing-prediction SCORER sweep (§A21). Produces a score, mints nothing; inert (nil Inferer) until PR-3c. |
 | `LENS_WORKTIER_ENABLED` | false | :673 | **(exempt)** | Descriptive work-tier capture (mint-free). |
 | `LENS_GUARDRAILS_ENABLED` | false | :672 | **(exempt)** | Output-stage guardrails (input always runs). |
 | `LENS_QUALITY_AUTO_RETRY` | false | :656 | **(exempt)** | One-shot re-call on low quality (provider COGS). |
@@ -187,13 +222,21 @@ All booleans are `parseBoolEnv` (**false** when unset) unless noted; **force-fal
 | `LENS_MINT_RATE_CAP_LENS_24H` | **1000** | set :917 | U6 per-identity rate cap (0 disables). **(exempt)** safety. |
 | `LENS_POVI_MIN_STAKE` | **100.0** | set :823 | Min LENS a node stakes to be mint-eligible. |
 | `LENS_DETECTOR_SWEEP_ENABLED` | **TRUE** | set :988 | Scheduled cache+distill detector sweep. Net gate = `EconomyEnabled && DetectorSweepEnabled`. |
+| `LENS_EVAL_CONTRIBUTION_RATE_PER_POINT` | **0** (inert) | set :877 | LENS-per-discrimination-point for the §A18 mint. 0 ⇒ `NewHeldBenchmarkAnchor` refuses ⇒ minter no-ops. A deliberate later flip. |
 
 ---
 
 ## §C — Discrepancies (code wins)
 
-1. **Force-off set is 11, not 10.** `RoutingTierCohortsEnabled` (#238) joined the block; `economy_killswitch_test.go:64` asserts `len(checks)==11`. The three flags added since (`NodeAutoRoute`, `ReputationBondedMinting`, `ProofOfBenchmark`) are DELIBERATELY excluded — each only routes / reduces / suppresses, never creates a mint.
-2. **Reputation is no longer purely money-decoupled.** P1 #9 (PR #244) couples reputation to PoVI-receipt + pool-royalty-held minting via `f(R)` at the ledger chokepoint (§A13). Annotation EARNING stays decoupled (AST guard green); the two paths are distinct.
-3. **node-earning is no longer PARTIAL.** PR #240's closed-test harness proves the full register→stake→vouch→receipt→mint round-trip on real PG; `cmd/node` ships in the image and runs in the trial overlay (§A1, §A10).
-4. **Stale config.go line citations everywhere prior to this regen** (the file grew by ~70 lines: the three new flags + their force-off-exclusion comments). All §B parse lines above are re-grep'd at `abd1572`. Package-internal citations in `internal/poolroyalty/*` and `internal/mining/pattern_mining.go` were not re-verified this pass (those files were untouched by #238–#247) and are carried forward.
-5. **The two phase axes do not correspond.** The wishlist token-economy items (P1 #1–#10: two-token / PoVI / reputation-bonded / proof-of-benchmark …) are a DIFFERENT numbering from the repo's Lens-build phases (ROADMAP "Phase 2/3/…"). The repo references the token axis only obliquely as "PoVI Phases 1–5" (COORDINATION.md:14); PoVI's own internal sub-structure is "Part 1/2/3" (receipt/stake/challenge). See the chat state-capture for the verbatim phase dumps.
+1. **Force-off set is 12** (verified `economy_killswitch_test.go` `len(checks) == 12`). The 12 are the original 11 (pattern trio, pool-royalty, povi, trustful-compute, cache-sharing/poolable, distill-poolable, routing-intelligence, tier-cohorts) + `EvalContributionMintingEnabled` (#250 — it MINTS). The capability/measurement flags (`NodeAutoRoute`, `ReputationBondedMinting`, `ProofOfBenchmark`, `ProofOfImprovement`, `RoutingPrediction`, `RoutingPredictionScoring`) are DELIBERATELY excluded — each routes / reduces / suppresses / measures, never creates a mint.
+2. **`mintTypeList` is 8** (verified — `mint_gate.go` + `TestMintTypes_GateSet`): the original 7 + `eval_contribution_held` (#250). PR-4 (pending) will add a 9th for the routing-prediction mint.
+3. **Reputation is no longer purely money-decoupled.** P1 #9 (PR #244) couples reputation to PoVI-receipt + pool-royalty-held minting via `f(R)` at the ledger chokepoint (§A13). Annotation EARNING stays decoupled (AST guard green); the two paths are distinct.
+4. **node-earning is no longer PARTIAL.** PR #240's closed-test harness proves the full register→stake→vouch→receipt→mint round-trip on real PG; `cmd/node` ships in the image and runs in the trial overlay (§A1, §A10).
+5. **config.go line citations: §A1–§A17 + the §B numeric knobs are CARRIED FORWARD from the `c4742ab` regen and NOT re-verified this pass** (config.go grew with the new flags, so older `:NNN` cites have shifted by tens of lines — treat them as approximate; the subsystems themselves are unchanged). The NEW flags' lines (§A18–§A22, the new §B rows) ARE verified at `071d061`. The structural counts — manifest **12**, `mintTypeList` **8**, latest migration **0072** — are verified, not transcribed.
+6. **New packages this arc** (all import-guarded mint-free, all with the #251 `schema_isolation_test.go` TestMain where they touch the DB): `internal/routingpredict` (§A19), `internal/cohort` (§A20, no DB), `internal/routingscore` (§A21), `internal/inference` (§A22, no DB, cycle-free).
+7. **The two phase axes do not correspond.** The wishlist token-economy items (P1 #1–#10) are a DIFFERENT numbering from the repo's Lens-build phases (ROADMAP "Phase 2/3/…"). The repo references the token axis only obliquely as "PoVI Phases 1–5" (COORDINATION.md:14); PoVI's own internal sub-structure is "Part 1/2/3".
+
+### Logged residuals + pre-public-mint gates (carried)
+- **Different-card / no-card sockpuppet** (§A18 eval-contribution + the routing-prediction author exclusion): evades the `workspace_card_fingerprints` link (default-allow-on-missing); bounded by `MinUnlinkedGraders`/`MinSliceSize` + the U6 24h author cap, NOT eliminated.
+- **Gateway-bound `request_id`** (§A14 #10): the receipt `request_id` is node-asserted; the probe-mint suppression is honest-node-robust but a malicious node can bypass via a non-probe id — the pre-existing receipt-fabrication surface, tracked as a pre-public-mint gate.
+- **Reputation `SUM(delta)` materialization** (§A13): the per-mint fold is O(events-per-workspace); a materialized current-R is a logged follow-up.
