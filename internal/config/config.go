@@ -431,6 +431,14 @@ type Config struct {
 	// Off → no probes drawn, no scheduler. Env: LENS_PROOF_OF_BENCHMARK_ENABLED.
 	ProofOfBenchmarkEnabled bool
 
+	// ProofOfImprovementEnabled (Proof-of-Improvement rail, piece 1) is a CAPABILITY flag for selecting
+	// a non-cost reward anchor (e.g. the held-benchmark anchor) in a FUTURE eval-contribution mint.
+	// DEFAULT FALSE. It can never outrun the U6 floor/stake/rate-cap (those gate the amount downstream),
+	// so it is NOT in the kill-switch force-off block. This PR wires NO reachable selection — the cost
+	// anchor stands unconditionally — so the flag is byte-identical on or off today. Env:
+	// LENS_PROOF_OF_IMPROVEMENT_ENABLED.
+	ProofOfImprovementEnabled bool
+
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
 	// force-OFFs every economy state-creation gate below (regardless of its own
@@ -677,6 +685,7 @@ func Load() (*Config, error) {
 		NodeAutoRouteEnabled:           parseBoolEnv("LENS_NODE_AUTOROUTE_ENABLED"),
 		ReputationBondedMintingEnabled: parseBoolEnv("LENS_REPUTATION_BONDED_MINTING_ENABLED"),
 		ProofOfBenchmarkEnabled:        parseBoolEnv("LENS_PROOF_OF_BENCHMARK_ENABLED"),
+		ProofOfImprovementEnabled:      parseBoolEnv("LENS_PROOF_OF_IMPROVEMENT_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),

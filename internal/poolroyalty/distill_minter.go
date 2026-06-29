@@ -102,6 +102,18 @@ type DistillMinter struct {
 	capPerPair     int           // PR1: max mints per (owner, requester) pair in capWindow; 0 = off
 	capPerContent  int           // PR1: max mints per content_hash in capWindow; 0 = off
 	capWindow      time.Duration // rolling window both caps count over (default 24h)
+
+	// anchor VALUES the gain (Proof-of-Improvement piece 1). Default CostAnchor{Share} ⇒ byte-identical
+	// `share × avoided_COGS`. Never touches the ledger.
+	anchor Anchor
+}
+
+// SetAnchor overrides the gain-valuation anchor (reserved for the future held-benchmark caller).
+// Unused on any live path this PR. nil is ignored.
+func (m *DistillMinter) SetAnchor(a Anchor) {
+	if a != nil {
+		m.anchor = a
+	}
 }
 
 // NewDistillMinter wires the pool, the held ledger, the contributor share s (the
@@ -115,7 +127,7 @@ func NewDistillMinter(db distillMinterDB, ledger ledgerCreditTx, share float64, 
 	if share > 1 {
 		share = 1
 	}
-	return &DistillMinter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour, capWindow: 24 * time.Hour}
+	return &DistillMinter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour, capWindow: 24 * time.Hour, anchor: CostAnchor{Share: share}}
 }
 
 // SetOwnerLinkageCheck enables the U6 PR2 owner-linkage wash guard: deny a
@@ -233,7 +245,7 @@ func (m *DistillMinter) mintOne(ctx context.Context, r distillRelationship) (boo
 	if r.owner == "" || r.requester == "" || r.owner == r.requester {
 		return false, nil
 	}
-	amount := m.share * r.avoidedCOGSUSD
+	amount := m.anchor.Value(GainInput{AvoidedCOGSUSD: r.avoidedCOGSUSD}) // default CostAnchor ⇒ share × avoided_COGS (byte-identical)
 	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
 		return false, nil
 	}
