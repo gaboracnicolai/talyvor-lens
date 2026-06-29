@@ -21,10 +21,10 @@ func (f fakeVerifier) MayEarn(context.Context, pgx.Tx, string) (bool, error) { r
 // aligning the two would silently un-gate the held mint or double-gate finalize
 // — a Sybil hole introduced by tidying. This test is the tripwire for that.
 func TestMintTypes_GateSet(t *testing.T) {
-	// The seven mint-MOMENT types must be gated.
+	// The eight mint-MOMENT types must be gated.
 	for _, ty := range []string{
 		TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine,
-		TypePatternMine, "receipt_mine_provisional", TypePoolRoyaltyHeld,
+		TypePatternMine, "receipt_mine_provisional", TypePoolRoyaltyHeld, TypeEvalContributionHeld,
 	} {
 		if !IsMintType(ty) {
 			t.Errorf("%q must be a gated mint type", ty)

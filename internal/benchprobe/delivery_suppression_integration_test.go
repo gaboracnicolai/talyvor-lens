@@ -72,12 +72,15 @@ func suppressionHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore, *mini
 			leaf_count INTEGER NOT NULL DEFAULT 0, leaf_kind TEXT NOT NULL DEFAULT 'rune', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE benchmark_eval_items (id TEXT PRIMARY KEY, input TEXT NOT NULL, expected_output TEXT NOT NULL,
 			eval_method TEXT NOT NULL DEFAULT 'exact', pass_threshold DOUBLE PRECISION NOT NULL DEFAULT 1.0,
-			active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), retired_at TIMESTAMPTZ)`,
+			active BOOLEAN NOT NULL DEFAULT TRUE, content_hash TEXT, status TEXT NOT NULL DEFAULT 'active',
+			author_workspace_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), retired_at TIMESTAMPTZ)`,
 		`CREATE TABLE benchmark_node_scores (node_id TEXT NOT NULL, model TEXT NOT NULL, score DOUBLE PRECISION NOT NULL DEFAULT 0,
 			sample_count INTEGER NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (node_id, model))`,
 		`CREATE TABLE benchmark_probes (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, item_id TEXT NOT NULL, request_id TEXT,
 			served_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), score DOUBLE PRECISION NOT NULL DEFAULT 0, UNIQUE (node_id, item_id))`,
 		`CREATE INDEX idx_benchmark_probes_request ON benchmark_probes (request_id)`,
+		// Referenced by the author-exclusion DrawItem predicate (P-o-I instance 1); empty here.
+		`CREATE TABLE workspace_card_fingerprints (workspace_id TEXT NOT NULL, fingerprint_hash TEXT NOT NULL, PRIMARY KEY (workspace_id, fingerprint_hash))`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
