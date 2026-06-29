@@ -3,18 +3,21 @@ package proxy
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/talyvor/lens/internal/inference"
 )
 
-// translateFromGemini must carry Gemini's usageMetadata into the normalized
-// OpenAI usage block so the (shared, OpenAI-shape) usage extractor can bill
-// Gemini on its real reported counts instead of a len/4 estimate.
+// TranslateFromGemini must carry Gemini's usageMetadata into the normalized OpenAI usage block so the
+// (shared) usage extractor bills Gemini on its real reported counts. This stays in package proxy because
+// it also asserts the providerConfig.ExtractUsage SEAM (which stays in proxy, A′); only the moved-func
+// reference (translateFromGemini → inference.TranslateFromGemini) updated.
 func TestTranslateFromGemini_CarriesUsageMetadata(t *testing.T) {
 	gemini := []byte(`{
 		"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"}}],
 		"usageMetadata":{"promptTokenCount":123,"candidatesTokenCount":45,"totalTokenCount":168}
 	}`)
 
-	out, err := translateFromGemini(gemini, "gemini-2.5-flash")
+	out, err := inference.TranslateFromGemini(gemini, "gemini-2.5-flash")
 	if err != nil {
 		t.Fatalf("translateFromGemini: %v", err)
 	}
