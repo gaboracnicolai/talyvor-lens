@@ -1,4 +1,4 @@
-package proxy
+package inference
 
 import (
 	"encoding/json"
@@ -7,19 +7,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// translateToGemini converts an OpenAI-compatible chat-completions body
-// into Gemini's generateContent body, returning the new JSON, the model
-// the caller requested (so the URL builder can substitute it into the
-// path), and any decode error.
+// TranslateToGemini converts an OpenAI-compatible chat-completions body into Gemini's generateContent
+// body, returning the new JSON, the model the caller requested (so the URL builder can substitute it into
+// the path), and any decode error. Moved verbatim from internal/proxy (PR-3b A′); exported for proxy +
+// the future scorer.
 //
 //   - "user" messages stay as "user" in Gemini.
 //   - "assistant" messages map to "model".
 //   - "system" messages are pulled out and packed into systemInstruction.
-//   - Content blocks that are JSON arrays (rare in practice) get joined
-//     into a single text string per part — Gemini's parts field is also
-//     an array of typed objects, but our cache flow only ever produces
-//     plain text content, so flattening is safe here.
-func translateToGemini(body []byte) ([]byte, string, error) {
+//   - Content blocks that are JSON arrays get joined into a single text string per part.
+func TranslateToGemini(body []byte) ([]byte, string, error) {
 	var in struct {
 		Model    string `json:"model"`
 		Messages []struct {
@@ -69,9 +66,8 @@ func translateToGemini(body []byte) ([]byte, string, error) {
 	return encoded, in.Model, nil
 }
 
-// contentToString flattens a message content field into a plain string
-// regardless of whether the value was a string or an array of typed
-// content blocks (the same flattening extractPrompt uses).
+// contentToString flattens a message content field into a plain string regardless of whether the value
+// was a string or an array of typed content blocks.
 func contentToString(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -93,10 +89,9 @@ func contentToString(raw json.RawMessage) string {
 	return ""
 }
 
-// translateFromGemini converts a Gemini generateContent response into an
-// OpenAI chat-completion shape so downstream callers (cache, client,
-// scorer) treat Gemini responses identically to OpenAI/Anthropic ones.
-func translateFromGemini(body []byte, model string) ([]byte, error) {
+// TranslateFromGemini converts a Gemini generateContent response into an OpenAI chat-completion shape so
+// downstream callers (cache, client, scorer) treat Gemini responses identically to OpenAI/Anthropic ones.
+func TranslateFromGemini(body []byte, model string) ([]byte, error) {
 	var in struct {
 		Candidates []struct {
 			Content struct {
@@ -135,10 +130,8 @@ func translateFromGemini(body []byte, model string) ([]byte, error) {
 			},
 			"finish_reason": "stop",
 		}},
-		// Carry Gemini's usageMetadata into the OpenAI usage block so the
-		// shared (OpenAI-shape) usage extractor bills Gemini on its real
-		// reported counts. Gemini folds image cost into promptTokenCount,
-		// so this is the exact TOTAL input — not itemized per image.
+		// Carry Gemini's usageMetadata into the OpenAI usage block so the shared (OpenAI-shape) usage
+		// extractor bills Gemini on its real reported counts.
 		"usage": map[string]any{
 			"prompt_tokens":     in.UsageMetadata.PromptTokenCount,
 			"completion_tokens": in.UsageMetadata.CandidatesTokenCount,

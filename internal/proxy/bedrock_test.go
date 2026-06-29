@@ -16,134 +16,9 @@ import (
 	"github.com/talyvor/lens/internal/router"
 )
 
-func TestModelToBedrockID_MapsClaudeSonnet46Correctly(t *testing.T) {
-	id, ok := modelToBedrockID("claude-sonnet-4-6")
-	if !ok {
-		t.Fatal("claude-sonnet-4-6 should be supported")
-	}
-	if id != "anthropic.claude-sonnet-4-6-20251101-v1:0" {
-		t.Errorf("got %q, want anthropic.claude-sonnet-4-6-20251101-v1:0", id)
-	}
-}
-
-func TestModelToBedrockID_UnknownModelReturnsFalse(t *testing.T) {
-	if _, ok := modelToBedrockID("gpt-4"); ok {
-		t.Error("gpt-4 should NOT be supported on Bedrock")
-	}
-	if _, ok := modelToBedrockID("gemini-2.5-pro"); ok {
-		t.Error("gemini-2.5-pro should NOT be supported on Bedrock")
-	}
-	if _, ok := modelToBedrockID(""); ok {
-		t.Error("empty model must not map")
-	}
-}
-
-func TestTranslateToBedrockFormat_RemovesModelField(t *testing.T) {
-	in := []byte(`{"model":"claude-sonnet-4-6","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`)
-	out, err := translateToBedrockFormat(in)
-	if err != nil {
-		t.Fatalf("translateToBedrockFormat: %v", err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if _, present := got["model"]; present {
-		t.Errorf("Bedrock body still contains 'model' field: %s", out)
-	}
-}
-
-func TestTranslateToBedrockFormat_AddsAnthropicVersion(t *testing.T) {
-	in := []byte(`{"model":"claude-sonnet-4-6","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`)
-	out, _ := translateToBedrockFormat(in)
-	var got map[string]any
-	_ = json.Unmarshal(out, &got)
-	if got["anthropic_version"] != "bedrock-2023-05-31" {
-		t.Errorf("anthropic_version = %v, want bedrock-2023-05-31", got["anthropic_version"])
-	}
-}
-
-func TestTranslateFromBedrockFormat_ReturnsOpenAIShape(t *testing.T) {
-	in := []byte(`{"content":[{"type":"text","text":"hi from claude"}],"role":"assistant"}`)
-	out, err := translateFromBedrockFormat(in, "claude-sonnet-4-6")
-	if err != nil {
-		t.Fatalf("translateFromBedrockFormat: %v", err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got["object"] != "chat.completion" {
-		t.Errorf("object = %v, want chat.completion (client should see OpenAI shape)", got["object"])
-	}
-	choices, _ := got["choices"].([]any)
-	if len(choices) == 0 {
-		t.Fatalf("no choices in translated response: %v", got)
-	}
-	msg := choices[0].(map[string]any)["message"].(map[string]any)
-	if !strings.Contains(msg["content"].(string), "hi from claude") {
-		t.Errorf("content lost in translation: %v", msg["content"])
-	}
-}
-
-func TestSignRequest_AddsAuthorizationHeader(t *testing.T) {
-	cfg := BedrockConfig{
-		Region: "us-east-1", AccessKeyID: "AKIA-TEST", SecretAccessKey: "SECRET",
-	}
-	req, _ := http.NewRequest(http.MethodPost,
-		"https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-sonnet-4-6-20251101-v1:0/invoke",
-		strings.NewReader(`{"messages":[]}`))
-	if err := signRequest(req, cfg); err != nil {
-		t.Fatalf("signRequest: %v", err)
-	}
-	auth := req.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "AWS4-HMAC-SHA256 ") {
-		t.Errorf("Authorization missing SigV4 prefix: %q", auth)
-	}
-	if !strings.Contains(auth, "Credential=AKIA-TEST/") {
-		t.Errorf("Authorization missing credential: %q", auth)
-	}
-	if !strings.Contains(auth, "SignedHeaders=host;x-amz-date") {
-		t.Errorf("Authorization missing signed headers: %q", auth)
-	}
-	if !strings.Contains(auth, "Signature=") {
-		t.Errorf("Authorization missing signature: %q", auth)
-	}
-}
-
-func TestSignRequest_AddsAmzDateHeader(t *testing.T) {
-	cfg := BedrockConfig{
-		Region: "us-east-1", AccessKeyID: "k", SecretAccessKey: "s",
-	}
-	req, _ := http.NewRequest(http.MethodPost,
-		"https://bedrock-runtime.us-east-1.amazonaws.com/model/m/invoke",
-		strings.NewReader(`{}`))
-	_ = signRequest(req, cfg)
-	dt := req.Header.Get("X-Amz-Date")
-	if dt == "" {
-		dt = req.Header.Get("x-amz-date")
-	}
-	if dt == "" {
-		t.Fatal("x-amz-date header missing")
-	}
-	if len(dt) != 16 || !strings.HasSuffix(dt, "Z") {
-		t.Errorf("x-amz-date = %q, want ISO8601 basic format YYYYMMDDTHHMMSSZ", dt)
-	}
-}
-
-func TestSignRequest_AddsSessionTokenWhenSet(t *testing.T) {
-	cfg := BedrockConfig{
-		Region: "us-east-1", AccessKeyID: "k", SecretAccessKey: "s",
-		SessionToken: "fake-temp-token",
-	}
-	req, _ := http.NewRequest(http.MethodPost,
-		"https://bedrock-runtime.us-east-1.amazonaws.com/model/m/invoke",
-		strings.NewReader(`{}`))
-	_ = signRequest(req, cfg)
-	if got := req.Header.Get("X-Amz-Security-Token"); got != "fake-temp-token" {
-		t.Errorf("x-amz-security-token = %q, want fake-temp-token", got)
-	}
-}
+// NOTE (PR-3b A′): the bedrock UNIT tests (TestModelToBedrockID_*, TestTranslateToBedrockFormat_*,
+// TestTranslateFromBedrockFormat_*, TestSignRequest_*) moved to internal/inference with their funcs. The
+// handler-level TestHandleBedrock_* tests below stay here, byte-identical.
 
 // newBedrockProxy is a test helper that builds a Proxy with Bedrock
 // credentials configured and a swappable bedrockURL pointing at the
@@ -194,9 +69,9 @@ func TestHandleBedrock_Returns400ForUnsupportedModel(t *testing.T) {
 
 func TestHandleBedrock_ForwardsCorrectlyToMockBedrock(t *testing.T) {
 	var (
-		gotPath  string
-		gotAuth  string
-		gotBody  []byte
+		gotPath string
+		gotAuth string
+		gotBody []byte
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path

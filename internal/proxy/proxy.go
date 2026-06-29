@@ -37,6 +37,7 @@ import (
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
+	"github.com/talyvor/lens/internal/inference"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/learner"
@@ -452,10 +453,10 @@ func (p *Proxy) HandleGoogle(w http.ResponseWriter, r *http.Request) {
 		// Adapter drops the model return value — serve() already has the
 		// upstream model in scope; we only need the translated body here.
 		translateRequest: func(body []byte) ([]byte, error) {
-			out, _, err := translateToGemini(body)
+			out, _, err := inference.TranslateToGemini(body)
 			return out, err
 		},
-		translateResponse: translateFromGemini,
+		translateResponse: inference.TranslateFromGemini,
 	})
 }
 
@@ -1890,38 +1891,13 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 		metrics.RecordUpstream(upstreamProviderLabel(cfg.name), upstreamStatusClass(resp, err), time.Since(start))
 	}()
 
-	upstreamURL := cfg.upstreamURLFn(model)
-	result := retry.Do(ctx, p.retryConfig, func(c context.Context) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(c, http.MethodPost, upstreamURL, bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("build upstream request: %w", err)
-		}
-		for name, values := range r.Header {
-			if strings.EqualFold(name, "Host") {
-				continue
-			}
-			for _, v := range values {
-				req.Header.Add(name, v)
-			}
-		}
-		cfg.setAuth(req)
-		// Inject our current span context as traceparent on the upstream
-		// request. If OpenAI / Anthropic ever surface OTel themselves the
-		// trace will stay continuous; until then this is harmless metadata.
-		otel.GetTextMapPropagator().Inject(c, propagation.HeaderCarrier(req.Header))
-		return p.httpClient.Do(req)
-	})
-	if result.LastError != nil {
-		return nil, nil, result.Attempts, result.LastError
-	}
-	resp = result.Response
-	defer resp.Body.Close()
-
-	respBody, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil, result.Attempts, fmt.Errorf("read upstream response: %w", err)
-	}
-	return resp, respBody, result.Attempts, nil
+	// The round-trip body moved VERBATIM to internal/inference.RunUpstream (PR-3b A′) — header-copy
+	// skip-Host + setAuth-overwrite + retry.Do/httpClient.Do, exactly as forward_authheaders_test.go and
+	// forward_retry_test.go pin it. forward keeps its signature + the deferred RecordUpstream above and
+	// passes the closures cfg already holds (the ProviderConfig type does NOT move). r.Header is the
+	// inbound client headers (a scorer passes nil).
+	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, cfg.upstreamURLFn(model), cfg.setAuth, body, r.Header)
+	return resp, respBody, attempts, err
 }
 
 // upstreamProviderLabel guards the provider metric label so an empty provider
@@ -2412,10 +2388,10 @@ func (p *Proxy) configForProvider(name string) providerConfig {
 			},
 			setAuth: func(*http.Request) {},
 			translateRequest: func(body []byte) ([]byte, error) {
-				out, _, err := translateToGemini(body)
+				out, _, err := inference.TranslateToGemini(body)
 				return out, err
 			},
-			translateResponse: translateFromGemini,
+			translateResponse: inference.TranslateFromGemini,
 		}
 	case "mistral":
 		base := p.mistralURL
@@ -2466,17 +2442,17 @@ func (p *Proxy) configForProvider(name string) providerConfig {
 		return providerConfig{
 			name: "bedrock",
 			upstreamURLFn: func(model string) string {
-				id, ok := modelToBedrockID(model)
+				id, ok := inference.ModelToBedrockID(model)
 				if !ok {
 					id = model
 				}
 				return baseURL + "/model/" + id + "/invoke"
 			},
 			setAuth: func(req *http.Request) {
-				_ = signRequest(req, bedCfg)
+				_ = inference.SignRequest(req, bedCfg)
 			},
-			translateRequest:  translateToBedrockFormat,
-			translateResponse: translateFromBedrockFormat,
+			translateRequest:  inference.TranslateToBedrockFormat,
+			translateResponse: inference.TranslateFromBedrockFormat,
 		}
 	}
 	return providerConfig{}
