@@ -72,12 +72,15 @@ func repoRoot(t *testing.T) string {
 	return ""
 }
 
-// (proof 3) NO NEW MINT SURFACE — mechanically enforced: NewHeldBenchmarkAnchor and SetAnchor are
-// CONSTRUCTED/CALLED in NO non-test .go file anywhere in the repo. The held-benchmark anchor is
-// reachable only from tests this PR; the live minters keep the default CostAnchor.
-func TestHeldBenchmarkAnchor_TestOnly_NoLiveSelection(t *testing.T) {
+// (proof 7) EXACTLY ONE LIVE CALLER — mechanically enforced: NewHeldBenchmarkAnchor is constructed in
+// EXACTLY ONE non-test .go file (the proof-of-eval-contribution minter) and NO other, and there is NO
+// stray live SetAnchor call anywhere. PR #248 shipped this anchor reachable from nothing; instance 1
+// (proof-of-eval-contribution) is its sole live home. A second caller — any other mint trying to select
+// the held-benchmark anchor without its own review — turns this red.
+func TestHeldBenchmarkAnchor_ExactlyOneLiveCaller(t *testing.T) {
 	root := repoRoot(t)
-	var offenders []string
+	const wantCaller = "eval_contribution_minter.go" // the ONE sanctioned live caller
+	var newCallers, setAnchorCallers []string
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			if info != nil && info.IsDir() && (info.Name() == ".git" || info.Name() == "node_modules" || info.Name() == "vendor") {
@@ -98,23 +101,30 @@ func TestHeldBenchmarkAnchor_TestOnly_NoLiveSelection(t *testing.T) {
 			if !ok {
 				return true
 			}
-			// NewHeldBenchmarkAnchor(...) or x.SetAnchor(...) in a non-test file = a live selection.
 			switch fn := call.Fun.(type) {
 			case *ast.Ident:
 				if fn.Name == "NewHeldBenchmarkAnchor" {
-					offenders = append(offenders, path+": NewHeldBenchmarkAnchor")
+					newCallers = append(newCallers, path)
 				}
 			case *ast.SelectorExpr:
-				if fn.Sel.Name == "NewHeldBenchmarkAnchor" || fn.Sel.Name == "SetAnchor" {
-					offenders = append(offenders, path+": "+fn.Sel.Name)
+				if fn.Sel.Name == "NewHeldBenchmarkAnchor" {
+					newCallers = append(newCallers, path)
+				}
+				if fn.Sel.Name == "SetAnchor" {
+					setAnchorCallers = append(setAnchorCallers, path) // no live SetAnchor: the eval minter takes the rate in its ctor
 				}
 			}
 			return true
 		})
 		return nil
 	})
-	if len(offenders) > 0 {
-		t.Errorf("HeldBenchmarkAnchor/SetAnchor reached from a NON-test file (this PR wires no new mint surface):\n  %s", strings.Join(offenders, "\n  "))
+	if len(newCallers) != 1 {
+		t.Errorf("NewHeldBenchmarkAnchor must have EXACTLY ONE non-test caller, got %d: %v", len(newCallers), newCallers)
+	} else if !strings.HasSuffix(newCallers[0], wantCaller) {
+		t.Errorf("the sole NewHeldBenchmarkAnchor caller must be %s, got %s", wantCaller, newCallers[0])
+	}
+	if len(setAnchorCallers) != 0 {
+		t.Errorf("no live SetAnchor call is sanctioned (the eval minter constructs its own anchor), got: %v", setAnchorCallers)
 	}
 }
 

@@ -13,13 +13,23 @@ package benchprobe
 import "context"
 
 // EvalItem is one verifier-private pool entry. ExpectedOutput is held verifier-side and is NEVER put
-// in a payload sent to a node.
+// in a payload sent to a node. AuthorWorkspaceID/ContentHash/Status (P-o-I instance 1) are likewise
+// verifier-private — BuildProbeRequest reads ONLY Input, so none of them can reach a node.
 type EvalItem struct {
 	ID             string
 	Input          string
 	ExpectedOutput string
 	EvalMethod     string // exact | contains | regex | json_schema (eval.StaticScore)
 	PassThreshold  float64
+	// AuthorWorkspaceID is the contributor (proof-of-eval-contribution). Empty/NULL = operator-seeded
+	// (ownerless). It NEVER enters a node payload and is the key for author draw-exclusion + the mint.
+	AuthorWorkspaceID string
+	// ContentHash = hex(sha256(input)) — the exact-dedup key (mirrors distill.ContentHash). Empty on read
+	// of a legacy 0068 row; set by SeedItem/ContributeItem.
+	ContentHash string
+	// Status is the validation lifecycle: "pending" (contributed, not yet drawable) | "active" (drawable)
+	// | "quarantined". Operator-seeded items are "active"; contributed items land "pending".
+	Status string
 }
 
 // Probe is one recorded (node, item) measurement — the never-reuse ledger row + audit.

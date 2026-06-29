@@ -3,12 +3,26 @@ package benchprobe
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrDuplicateItem is returned by ContributeItem when an item with the same content_hash already
+// exists — the exact-dedup anti-farming reject at the contribution boundary.
+var ErrDuplicateItem = errors.New("benchprobe: duplicate eval item (content_hash already present)")
+
+// ContentHash is the exact-dedup key over the item input — hex(sha256(input)), the same algorithm as
+// distill.ContentHash (replicated locally so benchprobe stays dependency-free / mint-free).
+func ContentHash(input string) string {
+	sum := sha256.Sum256([]byte(input))
+	return hex.EncodeToString(sum[:])
+}
 
 // Store is the verifier-private pool + per-node score + never-reuse probe ledger over the 0068
 // tables. It holds no ledger and reaches no mint path.
@@ -28,13 +42,58 @@ func (s *Store) SeedItem(ctx context.Context, item EvalItem) error {
 	if thr == 0 {
 		thr = 1.0
 	}
+	// Operator-seeded items are immediately active and OWNERLESS (author NULL). content_hash is set so
+	// operator seeds also dedup; status defaults 'active'.
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO benchmark_eval_items (id, input, expected_output, eval_method, pass_threshold, active)
-		 VALUES ($1,$2,$3,$4,$5,true)
-		 ON CONFLICT (id) DO UPDATE SET input=$2, expected_output=$3, eval_method=$4, pass_threshold=$5`,
-		item.ID, item.Input, item.ExpectedOutput, method, thr)
+		`INSERT INTO benchmark_eval_items (id, input, expected_output, eval_method, pass_threshold, active, content_hash, status)
+		 VALUES ($1,$2,$3,$4,$5,true,$6,'active')
+		 ON CONFLICT (id) DO UPDATE SET input=$2, expected_output=$3, eval_method=$4, pass_threshold=$5, content_hash=$6`,
+		item.ID, item.Input, item.ExpectedOutput, method, thr, ContentHash(item.Input))
 	if err != nil {
 		return fmt.Errorf("benchprobe: seed item: %w", err)
+	}
+	return nil
+}
+
+// ContributeItem inserts a CONTRIBUTED eval item (proof-of-eval-contribution): authored, exact-deduped,
+// and landing 'pending' (active=false) so it is NOT drawn or mint-eligible until an operator validates
+// it to 'active'. A content_hash collision (a duplicate question) returns ErrDuplicateItem — the
+// anti-farming reject at the contribution boundary, BEFORE the item can ever earn. AuthorWorkspaceID is
+// required; it is verifier-private and never reaches a node (BuildProbeRequest reads only Input).
+func (s *Store) ContributeItem(ctx context.Context, item EvalItem) error {
+	if item.AuthorWorkspaceID == "" {
+		return errors.New("benchprobe: contribute requires AuthorWorkspaceID")
+	}
+	method := item.EvalMethod
+	if method == "" {
+		method = "exact"
+	}
+	thr := item.PassThreshold
+	if thr == 0 {
+		thr = 1.0
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO benchmark_eval_items (id, input, expected_output, eval_method, pass_threshold, active, content_hash, status, author_workspace_id)
+		 VALUES ($1,$2,$3,$4,$5,false,$6,'pending',$7)`,
+		item.ID, item.Input, item.ExpectedOutput, method, thr, ContentHash(item.Input), item.AuthorWorkspaceID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation on idx_eval_items_content_hash
+			return ErrDuplicateItem
+		}
+		return fmt.Errorf("benchprobe: contribute item: %w", err)
+	}
+	return nil
+}
+
+// ValidateItem flips a contributed item from 'pending' to 'active' (operator-mediated validation), so
+// it becomes drawable and — once it accumulates ≥ MinUnlinkedGraders distinct unlinked graders —
+// mint-eligible. Quarantine uses status='quarantined' (never drawn, never paid).
+func (s *Store) ValidateItem(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE benchmark_eval_items SET active=true, status='active' WHERE id=$1 AND status='pending'`, id)
+	if err != nil {
+		return fmt.Errorf("benchprobe: validate item: %w", err)
 	}
 	return nil
 }
@@ -45,9 +104,25 @@ func (s *Store) SeedItem(ctx context.Context, item EvalItem) error {
 // nil when the pool is exhausted for this node (no item left to draw) — the caller treats nil as a
 // no-op, never an error.
 func (s *Store) DrawItem(ctx context.Context, nodeID string) (*EvalItem, error) {
+	// Author-exclusion (proof-of-eval-contribution sockpuppet defense): an item is NEVER drawn for a
+	// node whose owning workspace is the item's author OR in the author's owner-linkage fingerprint-
+	// linked set (the SAME workspace_card_fingerprints self-deal join the royalty minter uses,
+	// minter.go:120). So an author can neither grade their own item nor grade it via a same-card sister
+	// workspace's node. RESIDUAL (blessed bound, not eliminated): a different-card/no-card sock evades
+	// the fingerprint link (default-allow on missing) and CAN grade — bounded downstream by the
+	// MinUnlinkedGraders warmup + the U6 24h author cap (a logged pre-public-mint gate). status='active'
+	// also drops 'pending'/'quarantined' contributed items. Operator-seeded items (author NULL) are
+	// never excluded. The probe path is the ONLY way an item reaches a node.
 	rows, err := s.pool.Query(ctx,
-		`SELECT id FROM benchmark_eval_items
-		 WHERE active AND id NOT IN (SELECT item_id FROM benchmark_probes WHERE node_id = $1)`, nodeID)
+		`SELECT id FROM benchmark_eval_items e
+		 WHERE e.active AND e.status = 'active'
+		   AND e.id NOT IN (SELECT item_id FROM benchmark_probes WHERE node_id = $1)
+		   AND (e.author_workspace_id IS NULL OR (
+		         e.author_workspace_id <> (SELECT workspace_id FROM inference_nodes WHERE id = $1)
+		         AND e.author_workspace_id NOT IN (
+		             SELECT b.workspace_id FROM workspace_card_fingerprints a
+		             JOIN workspace_card_fingerprints b ON a.fingerprint_hash = b.fingerprint_hash
+		             WHERE a.workspace_id = (SELECT workspace_id FROM inference_nodes WHERE id = $1))))`, nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("benchprobe: draw candidates: %w", err)
 	}

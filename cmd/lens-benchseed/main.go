@@ -29,6 +29,8 @@ type seedItem struct {
 func main() {
 	file := flag.String("file", "", "path to a JSONL file of {id?, input, expected_output, eval_method?, pass_threshold?}")
 	dryRun := flag.Bool("dry-run", false, "parse + validate without writing")
+	author := flag.String("author", "", "contributor workspace_id — when set, items are CONTRIBUTED (pending validation, "+
+		"exact-deduped, author-excluded from grading) for the proof-of-eval-contribution mint, instead of operator-seeded (active)")
 	flag.Parse()
 	if *file == "" {
 		fatalf("-file is required")
@@ -78,10 +80,18 @@ func main() {
 			n++
 			continue
 		}
-		if err := store.SeedItem(ctx, benchprobe.EvalItem{
+		item := benchprobe.EvalItem{
 			ID: it.ID, Input: it.Input, ExpectedOutput: it.ExpectedOutput,
 			EvalMethod: it.EvalMethod, PassThreshold: it.PassThreshold,
-		}); err != nil {
+		}
+		if *author != "" {
+			// CONTRIBUTED: lands pending (not drawable until validated), exact-deduped on content_hash,
+			// author-attributed so the contributor is excluded from grading/earning on their own item.
+			item.AuthorWorkspaceID = *author
+			if err := store.ContributeItem(ctx, item); err != nil {
+				fatalf("line %d: contribute: %v", line, err)
+			}
+		} else if err := store.SeedItem(ctx, item); err != nil {
 			fatalf("line %d: seed: %v", line, err)
 		}
 		n++

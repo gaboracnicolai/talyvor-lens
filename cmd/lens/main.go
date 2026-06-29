@@ -693,15 +693,34 @@ func run() error {
 	// capability flag is reserved for a future eval-contribution mint that supplies a held-benchmark
 	// anchor; it wires nothing reachable today.
 	if cfg.ProofOfImprovementEnabled {
-		logger.Info("proof-of-improvement: capability flag ON, but no non-cost reward anchor is wired yet (piece 1 generalizes gain-valuation only; royalty mints stay on the cost anchor)")
+		logger.Info("proof-of-improvement: capability flag ON — the cost anchor stands for the royalty mints; the held-benchmark anchor is selected ONLY by the eval-contribution minter (instance 1)")
 	}
 	distillFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "distill_royalty_mints")
+
+	// Proof-of-Improvement instance 1: proof-of-eval-contribution. NewEvalContributionMinter is the SOLE
+	// live caller of HeldBenchmarkAnchor (it constructs it from the rate). INERT by default: rate 0 ⇒ nil
+	// anchor ⇒ RunOnce is a total no-op even with both flags on. Mints only when BOTH the dedicated
+	// earning flag AND the capability flag are on AND the rate is positive. Routes through the SAME
+	// held-ledger/U6 chokepoint (TypeEvalContributionHeld ∈ mintTypeList).
+	evalContributionMinter := poolroyalty.NewEvalContributionMinter(
+		pool, tokenLedger, cfg.EvalContributionRatePerPoint,
+		func() bool { return cfg.EvalContributionMintingEnabled && cfg.ProofOfImprovementEnabled },
+	)
+	evalContributionMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
+	evalContributionFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "eval_contribution_mints")
+
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "distill-royalty-mint", 30*time.Second, func(lctx context.Context) {
 			distillMinter.StartScheduler(lctx, time.Minute) // RunOnce no-ops while the mint flag is off
 		})
 		go haComps.leader.Run(ctx, "distill-royalty-finalize", 30*time.Second, func(lctx context.Context) {
 			distillFinalizeSweeper.StartScheduler(lctx, time.Minute)
+		})
+		go haComps.leader.Run(ctx, "eval-contribution-mint", 30*time.Second, func(lctx context.Context) {
+			evalContributionMinter.StartScheduler(lctx, time.Minute) // RunOnce no-ops while inert (rate 0 / flags off)
+		})
+		go haComps.leader.Run(ctx, "eval-contribution-finalize", 30*time.Second, func(lctx context.Context) {
+			evalContributionFinalizeSweeper.StartScheduler(lctx, time.Minute)
 		})
 
 		// The "smoke detector" — the scheduled cache+distill fraud-detector sweep. Mirrors

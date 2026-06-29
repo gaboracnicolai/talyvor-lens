@@ -43,6 +43,12 @@ import (
 const (
 	TypePoolRoyaltyHeld    = "pool_royalty_held"
 	TypePoolRoyaltyRevoked = "pool_royalty_revoked"
+	// TypeEvalContributionHeld is the proof-of-eval-contribution held mint moment (Proof-of-Improvement
+	// instance 1): a contributor's held credit for a discriminating eval item. It is a HELD mint like
+	// pool_royalty_held — gated by the U6 floor + 24h rate cap via mintTypeList — and settled by the
+	// generic FinalizeSweeper over eval_contribution_mints. It is NOT reputation-bonded (absent from
+	// isReputationBondedType): the bond code path runs and no-ops for this type — no logic change.
+	TypeEvalContributionHeld = "eval_contribution_held"
 )
 
 // ErrInsufficientHeld is returned when held_balance can't cover a finalize

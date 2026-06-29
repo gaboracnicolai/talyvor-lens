@@ -439,6 +439,21 @@ type Config struct {
 	// LENS_PROOF_OF_IMPROVEMENT_ENABLED.
 	ProofOfImprovementEnabled bool
 
+	// EvalContributionMintingEnabled (Proof-of-Improvement instance 1) is the dedicated EARNING flag for
+	// the proof-of-eval-contribution mint. DEFAULT FALSE. Unlike ProofOfImprovementEnabled (the
+	// capability that authorizes selecting the held-benchmark anchor), this gates the mint FIRING — so
+	// it is a state-creation gate and IS in the kill-switch force-off block (mirrors POVIMintingEnabled).
+	// The mint fires only when BOTH this AND ProofOfImprovementEnabled are on AND a positive rate is set.
+	// Env: LENS_EVAL_CONTRIBUTION_MINTING_ENABLED.
+	EvalContributionMintingEnabled bool
+
+	// EvalContributionRatePerPoint is the LENS-per-discrimination-point rate for the proof-of-eval-
+	// contribution mint (amount = rate × clamp01(discrimination)). DEFAULT 0 ⇒ INERT: NewHeldBenchmarkAnchor
+	// refuses a non-positive rate, so the minter's anchor is nil and RunOnce is a total no-op even with
+	// both flags on. The rate is a deliberate later flip, set only when the economy goes live. Env:
+	// LENS_EVAL_CONTRIBUTION_RATE_PER_POINT.
+	EvalContributionRatePerPoint float64
+
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
 	// force-OFFs every economy state-creation gate below (regardless of its own
@@ -686,6 +701,7 @@ func Load() (*Config, error) {
 		ReputationBondedMintingEnabled: parseBoolEnv("LENS_REPUTATION_BONDED_MINTING_ENABLED"),
 		ProofOfBenchmarkEnabled:        parseBoolEnv("LENS_PROOF_OF_BENCHMARK_ENABLED"),
 		ProofOfImprovementEnabled:      parseBoolEnv("LENS_PROOF_OF_IMPROVEMENT_ENABLED"),
+		EvalContributionMintingEnabled: parseBoolEnv("LENS_EVAL_CONTRIBUTION_MINTING_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
@@ -837,6 +853,18 @@ func Load() (*Config, error) {
 		}
 		c.POVIMinStake = f
 	}
+	// EvalContributionRatePerPoint: LENS per discrimination-point. Default 0 ⇒ INERT (the held-benchmark
+	// anchor refuses a non-positive rate → the eval-contribution minter is a total no-op). A deliberate
+	// later flip.
+	c.EvalContributionRatePerPoint = 0
+	if v := os.Getenv("LENS_EVAL_CONTRIBUTION_RATE_PER_POINT"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_EVAL_CONTRIBUTION_RATE_PER_POINT (must be ≥ 0): %s", v)
+		}
+		c.EvalContributionRatePerPoint = f
+	}
+
 	c.POVIUnbondPeriod = 7 * 24 * time.Hour
 	if v := os.Getenv("LENS_POVI_UNBOND_PERIOD"); v != "" {
 		d, err := time.ParseDuration(v) // Go duration units (h/m/s); e.g. 168h = 7 days
@@ -1219,6 +1247,7 @@ func Load() (*Config, error) {
 		c.DistillPoolableEnabled = false
 		c.RoutingIntelligenceEnabled = false
 		c.RoutingTierCohortsEnabled = false
+		c.EvalContributionMintingEnabled = false // P-o-I instance 1: the eval-contribution EARNING gate (mints LENS) — force-off with the economy
 		// U18: LXCGatingEnabled / LXCShadowSpendEnabled are DELIBERATELY NOT
 		// forced off here — LXC is the fiat-pegged usage credit, not token
 		// economy. They keep their own env values so a fiat-SaaS deployment can
