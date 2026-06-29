@@ -173,6 +173,18 @@ type Minter struct {
 	// card fingerprint (owner-linkage wash). false (default) skips the check —
 	// existing tests and pre-flip behave exactly as before; production wires it on.
 	linkageEnabled bool
+
+	// anchor VALUES the gain (Proof-of-Improvement piece 1). Default CostAnchor{Share} ⇒ the mint
+	// amount is byte-identical to today's `share × avoided_COGS`. Never touches the ledger.
+	anchor Anchor
+}
+
+// SetAnchor overrides the gain-valuation anchor (reserved for the future held-benchmark caller).
+// Unused on any live path this PR — main.go injects nothing; the cost default stands. nil is ignored.
+func (m *Minter) SetAnchor(a Anchor) {
+	if a != nil {
+		m.anchor = a
+	}
 }
 
 // SetOwnerLinkageCheck enables/disables the U6 PR2 owner-linkage wash guard.
@@ -235,7 +247,7 @@ func NewMinter(db txBeginner, ledger ledgerCreditTx, share float64, enabled func
 	if share > 1 {
 		share = 1
 	}
-	return &Minter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour, capWindow: 24 * time.Hour}
+	return &Minter{db: db, ledger: ledger, share: share, enabled: enabled, holdWindow: 72 * time.Hour, capWindow: 24 * time.Hour, anchor: CostAnchor{Share: share}}
 }
 
 // Share returns the clamped contributor royalty share s.
@@ -268,7 +280,7 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	if h.AnswerSHA256 == "" || h.PromptSHA256 == "" {
 		return Result{}, nil
 	}
-	amount := m.share * h.AvoidedCOGSUSD
+	amount := m.anchor.Value(GainInput{AvoidedCOGSUSD: h.AvoidedCOGSUSD}) // default CostAnchor ⇒ share × avoided_COGS (byte-identical)
 	// Non-finite amounts must NEVER reach the ledger: a NaN or ±Inf written
 	// to lens_token_balances poisons the balance permanently (every later
 	// bal+delta stays non-finite). amount <= 0 alone does NOT catch NaN.

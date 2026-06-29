@@ -688,6 +688,13 @@ func run() error {
 	// PR1 distill mint caps (default 0/0 = off; deflationary — a cap only denies).
 	distillMinter.SetCap(cfg.DistillMintCapPerPair, cfg.DistillMintCapWindow)
 	distillMinter.SetContentCap(cfg.DistillMintCapPerContent, cfg.DistillMintCapWindow)
+	// Proof-of-Improvement piece 1: both royalty minters keep the DEFAULT CostAnchor (share ×
+	// avoided_COGS) — no SetAnchor call here, so the mint amount is byte-identical to #2. The
+	// capability flag is reserved for a future eval-contribution mint that supplies a held-benchmark
+	// anchor; it wires nothing reachable today.
+	if cfg.ProofOfImprovementEnabled {
+		logger.Info("proof-of-improvement: capability flag ON, but no non-cost reward anchor is wired yet (piece 1 generalizes gain-valuation only; royalty mints stay on the cost anchor)")
+	}
 	distillFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "distill_royalty_mints")
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "distill-royalty-mint", 30*time.Second, func(lctx context.Context) {
