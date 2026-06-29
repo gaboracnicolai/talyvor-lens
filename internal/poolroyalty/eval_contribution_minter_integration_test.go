@@ -24,21 +24,22 @@ func evalHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 	if url == "" {
 		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG eval-contribution test")
 	}
-	pool, err := pgxpool.New(context.Background(), url)
+	// Private schema (not public): the CI test DB has the FULL migrated schema where node_metrics has an
+	// FK to inference_nodes, so DROP-ing migration-owned tables in public fails. A dedicated schema fully
+	// isolates this harness's tables from the migrated public ones (and avoids cross-package -p collisions).
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = "lens_evalcontrib_test"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
 	for _, ddl := range []string{
-		`DROP TABLE IF EXISTS lens_token_ledger`,
-		`DROP TABLE IF EXISTS lens_token_balances`,
-		`DROP TABLE IF EXISTS eval_contribution_mints`,
-		`DROP TABLE IF EXISTS benchmark_probes`,
-		`DROP TABLE IF EXISTS benchmark_eval_items`,
-		`DROP TABLE IF EXISTS inference_nodes`,
-		`DROP TABLE IF EXISTS workspace_card_fingerprints`,
-		`DROP TABLE IF EXISTS workspaces`,
-		`DROP TABLE IF EXISTS lxc_purchases`,
+		`DROP SCHEMA IF EXISTS lens_evalcontrib_test CASCADE`,
+		`CREATE SCHEMA lens_evalcontrib_test`,
 		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
 			held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
 			lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,

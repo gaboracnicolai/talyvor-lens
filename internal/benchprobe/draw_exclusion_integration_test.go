@@ -22,16 +22,21 @@ func drawHarness(t *testing.T) (*Store, *pgxpool.Pool) {
 	if url == "" {
 		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG draw-exclusion test")
 	}
-	pool, err := pgxpool.New(context.Background(), url)
+	// Private schema (not public): the CI test DB's migrated inference_nodes has dependent FKs (node_metrics),
+	// so DROP-ing it in public fails. A dedicated schema isolates this harness from the migrated tables.
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = "lens_drawexcl_test"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
 	for _, ddl := range []string{
-		`DROP TABLE IF EXISTS benchmark_probes`,
-		`DROP TABLE IF EXISTS benchmark_eval_items`,
-		`DROP TABLE IF EXISTS inference_nodes`,
-		`DROP TABLE IF EXISTS workspace_card_fingerprints`,
+		`DROP SCHEMA IF EXISTS lens_drawexcl_test CASCADE`,
+		`CREATE SCHEMA lens_drawexcl_test`,
 		`CREATE TABLE benchmark_eval_items (id TEXT PRIMARY KEY, input TEXT NOT NULL, expected_output TEXT NOT NULL,
 			eval_method TEXT NOT NULL DEFAULT 'exact', pass_threshold DOUBLE PRECISION NOT NULL DEFAULT 1.0,
 			active BOOLEAN NOT NULL DEFAULT TRUE, content_hash TEXT, status TEXT NOT NULL DEFAULT 'active',
