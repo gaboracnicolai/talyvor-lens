@@ -30,6 +30,15 @@ type EvalItem struct {
 	// Status is the validation lifecycle: "pending" (contributed, not yet drawable) | "active" (drawable)
 	// | "quarantined". Operator-seeded items are "active"; contributed items land "pending".
 	Status string
+	// Cohort dimensions (P-o-I piece 3, PR-2) — the SAME three keys routing_predictions uses, so PR-3 can
+	// resolve "the held items in cohort C." InputTokenRange + ComplexityBucket are DERIVED from Input by
+	// internal/cohort.DeriveInputCohort (the shared serve-path functions); FeatureCategory is DECLARED at
+	// seed. All verifier-private — BuildProbeRequest reads ONLY Input, so none reaches a node. Empty on a
+	// legacy/untagged row. benchprobe only STORES these strings (the derivation lives in the seed tool, so
+	// this package imports no cohort/mining and stays mint-free).
+	FeatureCategory  string
+	InputTokenRange  string
+	ComplexityBucket string
 }
 
 // Probe is one recorded (node, item) measurement — the never-reuse ledger row + audit.

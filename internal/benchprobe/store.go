@@ -43,16 +43,29 @@ func (s *Store) SeedItem(ctx context.Context, item EvalItem) error {
 		thr = 1.0
 	}
 	// Operator-seeded items are immediately active and OWNERLESS (author NULL). content_hash is set so
-	// operator seeds also dedup; status defaults 'active'.
+	// operator seeds also dedup; status defaults 'active'. Cohort columns (PR-2) are stored as the caller
+	// supplied them (the seed tool derives input_token_range/complexity_bucket via cohort.DeriveInputCohort
+	// and declares feature_category); empty ⇒ NULL (untagged, not matchable).
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO benchmark_eval_items (id, input, expected_output, eval_method, pass_threshold, active, content_hash, status)
-		 VALUES ($1,$2,$3,$4,$5,true,$6,'active')
-		 ON CONFLICT (id) DO UPDATE SET input=$2, expected_output=$3, eval_method=$4, pass_threshold=$5, content_hash=$6`,
-		item.ID, item.Input, item.ExpectedOutput, method, thr, ContentHash(item.Input))
+		`INSERT INTO benchmark_eval_items (id, input, expected_output, eval_method, pass_threshold, active, content_hash, status, feature_category, input_token_range, complexity_bucket)
+		 VALUES ($1,$2,$3,$4,$5,true,$6,'active',$7,$8,$9)
+		 ON CONFLICT (id) DO UPDATE SET input=$2, expected_output=$3, eval_method=$4, pass_threshold=$5, content_hash=$6,
+		   feature_category=$7, input_token_range=$8, complexity_bucket=$9`,
+		item.ID, item.Input, item.ExpectedOutput, method, thr, ContentHash(item.Input),
+		nullIfEmpty(item.FeatureCategory), nullIfEmpty(item.InputTokenRange), nullIfEmpty(item.ComplexityBucket))
 	if err != nil {
 		return fmt.Errorf("benchprobe: seed item: %w", err)
 	}
 	return nil
+}
+
+// nullIfEmpty maps an empty string to a SQL NULL so an untagged cohort dimension is NULL (not ”) —
+// keeping "untagged ⇒ not matchable" exact (the cohort index is WHERE feature_category IS NOT NULL).
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // ContributeItem inserts a CONTRIBUTED eval item (proof-of-eval-contribution): authored, exact-deduped,
@@ -73,9 +86,10 @@ func (s *Store) ContributeItem(ctx context.Context, item EvalItem) error {
 		thr = 1.0
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO benchmark_eval_items (id, input, expected_output, eval_method, pass_threshold, active, content_hash, status, author_workspace_id)
-		 VALUES ($1,$2,$3,$4,$5,false,$6,'pending',$7)`,
-		item.ID, item.Input, item.ExpectedOutput, method, thr, ContentHash(item.Input), item.AuthorWorkspaceID)
+		`INSERT INTO benchmark_eval_items (id, input, expected_output, eval_method, pass_threshold, active, content_hash, status, author_workspace_id, feature_category, input_token_range, complexity_bucket)
+		 VALUES ($1,$2,$3,$4,$5,false,$6,'pending',$7,$8,$9,$10)`,
+		item.ID, item.Input, item.ExpectedOutput, method, thr, ContentHash(item.Input), item.AuthorWorkspaceID,
+		nullIfEmpty(item.FeatureCategory), nullIfEmpty(item.InputTokenRange), nullIfEmpty(item.ComplexityBucket))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation on idx_eval_items_content_hash
@@ -84,6 +98,39 @@ func (s *Store) ContributeItem(ctx context.Context, item EvalItem) error {
 		return fmt.Errorf("benchprobe: contribute item: %w", err)
 	}
 	return nil
+}
+
+// BackfillCohort sets the two DERIVED cohort dimensions (input_token_range, complexity_bucket) on an
+// existing item — used by the seed tool's --backfill pass to tag legacy rows from their stored input.
+// feature_category is NOT touched (it is declared, never derived; it stays NULL until re-seeded).
+func (s *Store) BackfillCohort(ctx context.Context, id, inputTokenRange, complexityBucket string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE benchmark_eval_items SET input_token_range=$2, complexity_bucket=$3 WHERE id=$1`,
+		id, nullIfEmpty(inputTokenRange), nullIfEmpty(complexityBucket))
+	if err != nil {
+		return fmt.Errorf("benchprobe: backfill cohort: %w", err)
+	}
+	return nil
+}
+
+// ItemsMissingCohort returns (id, input) for items whose derived cohort is not yet set — the --backfill
+// work-list. Read-only; the tool re-derives and calls BackfillCohort per row.
+func (s *Store) ItemsMissingCohort(ctx context.Context, limit int) ([]struct{ ID, Input string }, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, input FROM benchmark_eval_items WHERE input_token_range IS NULL OR complexity_bucket IS NULL LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("benchprobe: items missing cohort: %w", err)
+	}
+	defer rows.Close()
+	var out []struct{ ID, Input string }
+	for rows.Next() {
+		var r struct{ ID, Input string }
+		if err := rows.Scan(&r.ID, &r.Input); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // ValidateItem flips a contributed item from 'pending' to 'active' (operator-mediated validation), so
