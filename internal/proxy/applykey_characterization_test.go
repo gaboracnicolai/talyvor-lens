@@ -38,12 +38,12 @@ func TestApplyKey_CredentialSubstitution_Characterization(t *testing.T) {
 	}
 	const pooled = "POOLKEY-sentinel"
 
-	// authHeaders runs a config's setAuth on a fresh request and returns the resulting header set.
+	// authHeaders runs a config's auth on a fresh request and returns the resulting header set. Observed
+	// via the exported ApplyAuth method (= nil-guarded setAuth) since the providerConfig fields moved to
+	// internal/inference and are unexported (PR-3c). Observation-only: every assertion below is unchanged.
 	authHeaders := func(cfg providerConfig) http.Header {
 		req := httptest.NewRequest(http.MethodPost, "http://upstream/", nil)
-		if cfg.setAuth != nil {
-			cfg.setAuth(req)
-		}
+		cfg.ApplyAuth(req)
 		return req.Header
 	}
 
@@ -79,7 +79,7 @@ func TestApplyKey_CredentialSubstitution_Characterization(t *testing.T) {
 	// 3 · google → the pooled key goes in the URL QUERY (key=<pooled>), not a header; setAuth stays a no-op.
 	t.Run("google_url_query_pooled_no_header", func(t *testing.T) {
 		cfg := p.applyKey(p.configForProvider("google"), pooled)
-		gotURL := cfg.upstreamURLFn("gemini-2.5-flash")
+		gotURL := cfg.UpstreamURL("gemini-2.5-flash")
 		t.Logf("PINNED google   upstreamURL = %q", gotURL)
 		if !strings.Contains(gotURL, "key="+pooled) {
 			t.Fatalf("google URL = %q, want it to contain key=%s (pooled key in the query string)", gotURL, pooled)

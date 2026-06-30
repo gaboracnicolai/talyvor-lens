@@ -12,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -405,33 +404,18 @@ func isAutoRoute(r *http.Request, model string) bool {
 // providerConfig holds the per-provider knobs HandleOpenAI/HandleAnthropic/
 // HandleGoogle differ on. Everything else is shared in serve(). The URL
 // is a function of the model so Gemini's path-style routing fits cleanly.
-type providerConfig struct {
-	name              string
-	upstreamURLFn     func(model string) string
-	setAuth           func(*http.Request)
-	translateRequest  func(body []byte) ([]byte, error)
-	translateResponse func(body []byte, model string) ([]byte, error)
-}
+// providerConfig is an alias for the type that moved to internal/inference (PR-3c). The alias keeps every
+// in-proxy type-name reference (serve/forward/configForProvider/applyKey signatures) compiling unchanged;
+// the fields stay unexported in inference, so CONSTRUCTION is exclusively via inference.ConfigFor /
+// inference.ConfigForKey and FIELD ACCESS is via the exported Provider methods (ProviderName/UpstreamURL/…).
+type providerConfig = inference.ProviderConfig
 
 func (p *Proxy) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
-	p.serve(w, r, providerConfig{
-		name:          "openai",
-		upstreamURLFn: func(string) string { return p.openAIURL },
-		setAuth: func(req *http.Request) {
-			req.Header.Set("Authorization", "Bearer "+p.openAIKey)
-		},
-	})
+	p.serve(w, r, p.configForProvider("openai"))
 }
 
 func (p *Proxy) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
-	p.serve(w, r, providerConfig{
-		name:          "anthropic",
-		upstreamURLFn: func(string) string { return p.anthropicURL },
-		setAuth: func(req *http.Request) {
-			req.Header.Set("x-api-key", p.anthropicKey)
-			req.Header.Set("anthropic-version", "2023-06-01")
-		},
-	})
+	p.serve(w, r, p.configForProvider("anthropic"))
 }
 
 // HandleGoogle proxies an OpenAI-shaped request through to Gemini's
@@ -443,21 +427,7 @@ func (p *Proxy) HandleGoogle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "Google API key not configured")
 		return
 	}
-	p.serve(w, r, providerConfig{
-		name: "google",
-		upstreamURLFn: func(model string) string {
-			return p.googleURL + "/v1beta/models/" + model + ":generateContent?key=" + url.QueryEscape(p.googleKey)
-		},
-		// Gemini uses ?key=<value>; nothing to set on the request headers.
-		setAuth: func(*http.Request) {},
-		// Adapter drops the model return value — serve() already has the
-		// upstream model in scope; we only need the translated body here.
-		translateRequest: func(body []byte) ([]byte, error) {
-			out, _, err := inference.TranslateToGemini(body)
-			return out, err
-		},
-		translateResponse: inference.TranslateFromGemini,
-	})
+	p.serve(w, r, p.configForProvider("google"))
 }
 
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig) {
@@ -515,7 +485,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					"estimated_completion": "within 24 hours",
 					"cost_reduction":       "50%",
 				})
-				metrics.RequestsTotal.WithLabelValues(cfg.name, "batched").Inc()
+				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "batched").Inc()
 				return
 			}
 			slog.Warn("batch: Submit failed; falling through to live request",
@@ -569,10 +539,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// the workspace ID before it reaches the cache layer.
 	cachePrompt := prompt
 	if p.workspaceManager != nil {
-		policy := p.workspaceManager.CheckPolicy(ctx, wsID, cfg.name, model, len(prompt)/4)
+		policy := p.workspaceManager.CheckPolicy(ctx, wsID, cfg.ProviderName(), model, len(prompt)/4)
 		if !policy.Allowed {
 			writeError(w, http.StatusForbidden, policy.Violation)
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "workspace_blocked").Inc()
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "workspace_blocked").Inc()
 			return
 		}
 		cachePrompt = wsID + ":" + prompt
@@ -648,7 +618,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// provider/model/workspace/stream — and never the prompt content.
 	ctx, span := otel.Tracer("lens/proxy").Start(ctx, "proxy.serve",
 		trace.WithAttributes(
-			attribute.String("lens.provider", cfg.name),
+			attribute.String("lens.provider", cfg.ProviderName()),
 			attribute.String("lens.model", model),
 			attribute.String("lens.workspace", wsID),
 			attribute.Bool("lens.stream", streaming),
@@ -682,7 +652,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		estCost := alerts.CostUSD(model, len(prompt)/4, 0)
 		if p.budgetService.CheckBudget(ctx, wsID, team, sprint, estCost) == budgets.DecisionBlock {
 			writeError(w, http.StatusPaymentRequired, "budget exceeded for workspace/team/sprint")
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "budget_blocked").Inc()
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "budget_blocked").Inc()
 			return
 		}
 	}
@@ -693,7 +663,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// estimate is input-only (under-blocks); a balance-read error fails open.
 	if p.lxcGateBlocks(ctx, wsID, model, prompt, loggingPolicy) {
 		writeError(w, http.StatusPaymentRequired, "insufficient LXC balance for estimated request cost")
-		metrics.RequestsTotal.WithLabelValues(cfg.name, "lxc_blocked").Inc()
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "lxc_blocked").Inc()
 		return
 	}
 
@@ -722,8 +692,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					contentForRecord = "[REDACTED-PII]"
 				}
 			}
-			tmpl, pinned := p.templateDetector.RecordAndPin(ctx, contentForRecord, cfg.name)
-			if pinned && cfg.name == "anthropic" {
+			tmpl, pinned := p.templateDetector.RecordAndPin(ctx, contentForRecord, cfg.ProviderName())
+			if pinned && cfg.ProviderName() == "anthropic" {
 				if rewritten, err := p.templateDetector.ApplyAnthropicCaching(body, tmpl); err == nil {
 					body = rewritten
 				}
@@ -771,12 +741,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			}
 			metrics.GuardrailBlock(blockType)
 			slog.Warn("proxy: guardrail blocked",
-				slog.String("provider", cfg.name),
+				slog.String("provider", cfg.ProviderName()),
 				slog.String("workspace_id", wsID),
 				slog.Float64("risk_score", gr.RiskScore),
 				slog.Int("violation_count", len(gr.Violations)),
 			)
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "guardrail_blocked").Inc()
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "guardrail_blocked").Inc()
 			w.Header().Set("X-Talyvor-Guardrail-Blocked", "true")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -802,7 +772,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// fires. Carried, NON-CONTENT (a bool, never the matched span).
 		guardrailFired = len(gr.Violations) > 0
 		if len(gr.Violations) > 0 && piiDetected {
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "pii_skip_cache").Inc()
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "pii_skip_cache").Inc()
 		}
 	}
 
@@ -831,12 +801,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// LLM) therefore reports nothing and mints nothing.
 		var pooledHit *poolroyalty.ServedHit
 		span.AddEvent("cache.check.exact")
-		if c := p.tryExact(ctx, cfg.name, model, cachePrompt); c != nil {
+		if c := p.tryExact(ctx, cfg.ProviderName(), model, cachePrompt); c != nil {
 			cached, layer = c, "cache_hit_exact"
 			span.AddEvent("cache.hit.exact")
 		} else {
 			span.AddEvent("cache.check.semantic")
-			if c := p.trySemantic(ctx, cfg.name, model, cachePrompt, wsID); c != nil {
+			if c := p.trySemantic(ctx, cfg.ProviderName(), model, cachePrompt, wsID); c != nil {
 				cached, layer = c, "cache_hit_semantic"
 				span.AddEvent("cache.hit.semantic")
 			} else if p.poolGate.Participant(wsID) {
@@ -848,19 +818,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// needs global + requester + contributor all true. Inert by
 				// default: Participant is false when the gate is nil/off, so this
 				// whole branch (and its extra cache read) never runs.
-				if c, owner := p.tryExactPooled(ctx, cfg.name, model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+				if c, owner := p.tryExactPooled(ctx, cfg.ProviderName(), model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled"
 					pooledHit = &poolroyalty.ServedHit{
 						RequestID:            requestID,
 						RequesterWorkspace:   wsID,
 						ContributorWorkspace: owner,
 						Layer:                "exact",
-						EntryID:              p.exact.Key(cfg.name, model, pooledPromptKey(prompt)),
-						Provider:             cfg.name,
+						EntryID:              p.exact.Key(cfg.ProviderName(), model, pooledPromptKey(prompt)),
+						Provider:             cfg.ProviderName(),
 						Model:                model,
 					}
 					span.AddEvent("cache.hit.pooled")
-				} else if c, owner, entryID, sim := p.trySemanticPooled(ctx, cfg.name, model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+				} else if c, owner, entryID, sim := p.trySemanticPooled(ctx, cfg.ProviderName(), model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled_semantic"
 					pooledHit = &poolroyalty.ServedHit{
 						RequestID:            requestID,
@@ -868,7 +838,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 						ContributorWorkspace: owner,
 						Layer:                "semantic",
 						EntryID:              entryID,
-						Provider:             cfg.name,
+						Provider:             cfg.ProviderName(),
 						Model:                model,
 						Similarity:           sim,
 					}
@@ -896,8 +866,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// consume cache hits the same way they consume live
 				// responses. On parse failure we fall through and let
 				// the regular streaming path call the LLM.
-				if err := replayAsSSE(w, cfg.name, cached); err == nil {
-					metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
+				if err := replayAsSSE(w, cfg.ProviderName(), cached); err == nil {
+					metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), layer).Inc()
 					metrics.RecordCacheHit(layer)
 					// SERVE point: the replay succeeded, so a pooled hit
 					// (if that's what this was) now earns its royalty.
@@ -913,11 +883,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// pooled hit (if any) must NOT mint (claim at serve, not
 				// at lookup).
 				slog.Warn("proxy: cached payload not replayable as SSE; falling through to LLM",
-					slog.String("provider", cfg.name),
+					slog.String("provider", cfg.ProviderName()),
 				)
 			} else {
 				writeBytes(w, http.StatusOK, cached)
-				metrics.RequestsTotal.WithLabelValues(cfg.name, layer).Inc()
+				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), layer).Inc()
 				metrics.RecordCacheHit(layer)
 				// SERVE point: the cached body went out on the wire.
 				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
@@ -937,7 +907,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// routing must never break the main request. Multimodal requests
 	// skip local entirely (the local text models can't serve images) and
 	// fall through to the capability-aware cloud path below.
-	if !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.name, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt) {
+	if !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.ProviderName(), model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt) {
 		return
 	}
 
@@ -985,16 +955,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			modality: modSet.Label(), logging: loggingPolicy, estInputTokens: estIn,
 		}
 		var serr error
-		if cfg.name == "openai" {
-			serr = sh.ServeOpenAI(w, r, cfg.name, model, prompt, cachePrompt, body, piiDetected, sc)
+		if cfg.ProviderName() == "openai" {
+			serr = sh.ServeOpenAI(w, r, cfg.ProviderName(), model, prompt, cachePrompt, body, piiDetected, sc)
 		} else {
-			serr = sh.ServeAnthropic(w, r, cfg.name, model, prompt, cachePrompt, body, piiDetected, sc)
+			serr = sh.ServeAnthropic(w, r, cfg.ProviderName(), model, prompt, cachePrompt, body, piiDetected, sc)
 		}
 		if serr != nil {
-			metrics.RequestsTotal.WithLabelValues(cfg.name, "stream_error").Inc()
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "stream_error").Inc()
 			return
 		}
-		metrics.RequestsTotal.WithLabelValues(cfg.name, "streamed").Inc()
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "streamed").Inc()
 		return
 	}
 
@@ -1031,14 +1001,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// persisted post-serve WorkTier (unknowable here). The tier conditions the pick only when
 		// LENS_ROUTING_TIER_COHORTS_ENABLED is on; otherwise Recommend ignores it.
 		complexityScore := router.AnalyseComplexity(compressedPrompt).Score()
-		rec := p.routingAdvisor.Recommend(ctx, wsID, feature, len(compressedPrompt)/4, string(worktier.ComplexityBucketFor(complexityScore)), cfg.name, allowedModels, allowedProviders)
+		rec := p.routingAdvisor.Recommend(ctx, wsID, feature, len(compressedPrompt)/4, string(worktier.ComplexityBucketFor(complexityScore)), cfg.ProviderName(), allowedModels, allowedProviders)
 		// Base-path pick: the model an auto request gets if NO recommendation is
 		// applied (the complexity router). Pure/in-memory (no DB, no side
 		// effects), computed once — it is BOTH the downgrade baseline for the
 		// Shape-1 gate AND the model used when the gate suppresses the rec.
 		var base router.RoutingDecision
 		if p.router != nil {
-			base = p.router.Route(ctx, cfg.name, model, compressedPrompt)
+			base = p.router.Route(ctx, cfg.ProviderName(), model, compressedPrompt)
 		}
 		// Shape-1 work-tier gate: a request-local, PRE-SERVE decisionTier can
 		// only SUPPRESS the recommendation (sensitivity opt-out or downgrade
@@ -1062,7 +1032,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			metrics.RoutingFallback()
 		}
 	} else if p.router != nil {
-		decision := p.router.Route(ctx, cfg.name, model, compressedPrompt)
+		decision := p.router.Route(ctx, cfg.ProviderName(), model, compressedPrompt)
 		if p.router.ShouldOverride(model, decision) {
 			upstreamModel = decision.Model
 			overrideModel = decision.Model
@@ -1077,7 +1047,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	circuitOpen := false
 	if p.alertManager != nil && p.alertManager.IsCircuitOpen(team, feature) {
 		circuitOpen = true
-		upstreamModel = p.alertManager.GetDowngradeModel(cfg.name, model)
+		upstreamModel = p.alertManager.GetDowngradeModel(cfg.ProviderName(), model)
 	}
 
 	// Capability hard constraint (Upgrade 15). A multimodal request MUST go
@@ -1094,11 +1064,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			allowedModels = ws.AllowedModels
 		}
 		if isAutoRoute(r, model) {
-			capable, ok := modality.CapableModel(cfg.name, modSet, allowedModels)
+			capable, ok := modality.CapableModel(cfg.ProviderName(), modSet, allowedModels)
 			if !ok {
 				metrics.ModalityUnsupported()
 				writeError(w, http.StatusUnprocessableEntity,
-					"request contains "+modSet.Label()+" content but no configured "+cfg.name+" model supports it")
+					"request contains "+modSet.Label()+" content but no configured "+cfg.ProviderName()+" model supports it")
 				return
 			}
 			w.Header().Set("X-Talyvor-Vision-Redirect", upstreamModel+"→"+capable)
@@ -1125,7 +1095,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		upstreamBodyOut = disableStream(upstreamBodyOut)
 	}
 	if err != nil {
-		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "error").Inc()
 		writeError(w, http.StatusBadGateway, "rebuild request body: "+err.Error())
 		return
 	}
@@ -1137,11 +1107,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// which provider actually answered.
 	span.AddEvent("llm.forward.start")
 	upstreamBody, statusCode, fbResult, err := p.forwardWithFallback(
-		ctx, r, cfg.name, upstreamModel, wsID, upstreamBodyOut, w,
+		ctx, r, cfg.ProviderName(), upstreamModel, wsID, upstreamBodyOut, w,
 	)
 	attempts := fbResult.Attempts
 	if err != nil {
-		metrics.RequestsTotal.WithLabelValues(cfg.name, "error").Inc()
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "error").Inc()
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+err.Error())
@@ -1154,7 +1124,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// scoring entirely.
 	var qualityScore *quality.QualityScore
 	if p.scorer != nil && statusCode == http.StatusOK {
-		q := p.scorer.ScoreResponse(ctx, prompt, string(upstreamBody), cfg.name, model)
+		q := p.scorer.ScoreResponse(ctx, prompt, string(upstreamBody), cfg.ProviderName(), model)
 		qualityScore = &q
 	}
 
@@ -1278,7 +1248,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// originally requested model so repeat callers in the same
 			// workspace get cache hits but other workspaces don't. The raw
 			// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
-			p.storeCaches(ctx, cfg.name, model, cachePrompt, prompt, wsID, upstreamBody)
+			p.storeCaches(ctx, cfg.ProviderName(), model, cachePrompt, prompt, wsID, upstreamBody)
 		}
 		eventPrompt := prompt
 		if piiDetected {
@@ -1294,7 +1264,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 		if loggingPolicy == workspace.LoggingFull {
 			// Learner publishes to NATS — too verbose for metadata mode.
-			p.recordTokenEvent(ctx, cfg.name, model, eventPrompt, upstreamBody, savingsPct, piiDetected)
+			p.recordTokenEvent(ctx, cfg.ProviderName(), model, eventPrompt, upstreamBody, savingsPct, piiDetected)
 		}
 		// RecordSpend prices the model that was actually billed by the
 		// LLM (the upstream model, after any router or circuit override).
@@ -1366,16 +1336,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// bucket equals the live lookup bucket (write == lookup). Inert until
 			// LENS_ROUTING_TIER_COHORTS_ENABLED reads it; '' on legacy rows is excluded from the tiered aggregate.
 			routingComplexityBucket := string(worktier.ComplexityBucketFor(router.AnalyseComplexity(compressedPrompt).Score()))
-			if !p.earnPattern(ctx, piiDetected, guardrailFired, loggingPolicy, feature, upstreamModel, cfg.name, prompt, upstreamBody,
+			if !p.earnPattern(ctx, piiDetected, guardrailFired, loggingPolicy, feature, upstreamModel, cfg.ProviderName(), prompt, upstreamBody,
 				len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), routingComplexityBucket) {
-				p.capturePattern(ctx, piiDetected, guardrailFired, loggingPolicy, wsID, feature, upstreamModel, cfg.name,
+				p.capturePattern(ctx, piiDetected, guardrailFired, loggingPolicy, wsID, feature, upstreamModel, cfg.ProviderName(),
 					len(compressedPrompt)/4, outT, scoreVal, qualityScore != nil, time.Since(requestStart).Milliseconds(), false, routingComplexityBucket)
 			}
 			// WorkTier descriptive classification — post-flush, off-hot-path, void,
 			// best-effort, shares the obsLimiter; default-off. DESCRIPTIVE + mint-free
 			// (the sink has no ledger handle). Complexity is derived on the SAME input
 			// the router analyzed (compressedPrompt) so it equals the routing decision's.
-			p.captureWorkTier(ctx, wsID, feature, upstreamModel, cfg.name, compressedPrompt,
+			p.captureWorkTier(ctx, wsID, feature, upstreamModel, cfg.ProviderName(), compressedPrompt,
 				len(compressedPrompt)/4, outT, piiDetected, guardrailFired, string(loggingPolicy))
 			// S1 distill attribution (MINT-FREE) — record any consented
 			// cross-tenant pooled-distill serves surfaced from MaybeDistill.
@@ -1429,18 +1399,18 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			p.attrStore.RecordAsync(
 				attribution.ExtractFromRequest(r),
 				inT, outT, cost,
-				upstreamModel, cfg.name,
+				upstreamModel, cfg.ProviderName(),
 				time.Since(requestStart),
 			)
 		}
-		metrics.RequestsTotal.WithLabelValues(cfg.name, "forwarded").Inc()
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "forwarded").Inc()
 		span.SetAttributes(
 			attribute.Bool("lens.cached", false),
 			attribute.Float64("lens.cost_usd", alerts.CostUSD(upstreamModel, inT, outT)),
 		)
 		span.SetStatus(codes.Ok, "")
 	} else {
-		metrics.RequestsTotal.WithLabelValues(cfg.name, "upstream_error").Inc()
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "upstream_error").Inc()
 		span.SetStatus(codes.Error, fmt.Sprintf("upstream status %d", statusCode))
 	}
 }
@@ -1888,7 +1858,7 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 	// never alters control flow or the returned error.
 	start := time.Now()
 	defer func() {
-		metrics.RecordUpstream(upstreamProviderLabel(cfg.name), upstreamStatusClass(resp, err), time.Since(start))
+		metrics.RecordUpstream(upstreamProviderLabel(cfg.ProviderName()), upstreamStatusClass(resp, err), time.Since(start))
 	}()
 
 	// The round-trip body moved VERBATIM to internal/inference.RunUpstream (PR-3b A′) — header-copy
@@ -1896,7 +1866,7 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 	// forward_retry_test.go pin it. forward keeps its signature + the deferred RecordUpstream above and
 	// passes the closures cfg already holds (the ProviderConfig type does NOT move). r.Header is the
 	// inbound client headers (a scorer passes nil).
-	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, cfg.upstreamURLFn(model), cfg.setAuth, body, r.Header)
+	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, cfg.UpstreamURL(model), cfg.ApplyAuth, body, r.Header)
 	return resp, respBody, attempts, err
 }
 
@@ -2240,7 +2210,7 @@ func (p *Proxy) forwardWithFallback(
 
 	for i, a := range attempts {
 		cfg := p.configForProvider(a.provider)
-		if cfg.name == "" {
+		if cfg.ProviderName() == "" {
 			// Unknown provider name in the chain — treat as a no-op and move on.
 			continue
 		}
@@ -2266,18 +2236,16 @@ func (p *Proxy) forwardWithFallback(
 			attemptBody = setModelInBody(body, a.model)
 		}
 
-		sendBody := attemptBody
-		if cfg.translateRequest != nil {
-			translated, terr := cfg.translateRequest(attemptBody)
-			if terr != nil {
-				if poolKey != nil {
-					p.keyPool.RecordError(poolKey.ID)
-				}
-				lastErr = terr
-				lastUsed = a
-				continue
+		// BuildRequest nil-guards the translator: identity for OpenAI-compatible providers, the gemini/
+		// bedrock request translation otherwise — same result as the prior `if translateRequest != nil`.
+		sendBody, terr := cfg.BuildRequest(attemptBody)
+		if terr != nil {
+			if poolKey != nil {
+				p.keyPool.RecordError(poolKey.ID)
 			}
-			sendBody = translated
+			lastErr = terr
+			lastUsed = a
+			continue
 		}
 
 		resp, rb, _, ferr := p.forward(ctx, r, sendBody, a.model, cfg)
@@ -2320,9 +2288,10 @@ func (p *Proxy) forwardWithFallback(
 		// Non-fallbackable outcome (success, or 4xx that's the client's
 		// fault either way). Reverse-translate Gemini responses so the
 		// returned body is OpenAI-shaped for everyone downstream.
-		if ferr == nil && cfg.translateResponse != nil && status == http.StatusOK {
-			translated, terr := cfg.translateResponse(rb, a.model)
-			if terr == nil {
+		if ferr == nil && status == http.StatusOK {
+			// ParseResponse nil-guards the reverse-translator: identity for OpenAI-shaped providers,
+			// gemini/bedrock → OpenAI shape otherwise — same result as the prior translateResponse branch.
+			if translated, terr := cfg.ParseResponse(rb, a.model); terr == nil {
 				rb = translated
 			}
 		}
@@ -2362,100 +2331,34 @@ func (p *Proxy) forwardWithFallback(
 // closures capture the proxy's URL + key fields so test overrides of
 // openAIURL/anthropicURL/googleURL propagate naturally.
 func (p *Proxy) configForProvider(name string) providerConfig {
-	switch name {
-	case "openai":
-		return providerConfig{
-			name:          "openai",
-			upstreamURLFn: func(string) string { return p.openAIURL },
-			setAuth: func(req *http.Request) {
-				req.Header.Set("Authorization", "Bearer "+p.openAIKey)
-			},
-		}
-	case "anthropic":
-		return providerConfig{
-			name:          "anthropic",
-			upstreamURLFn: func(string) string { return p.anthropicURL },
-			setAuth: func(req *http.Request) {
-				req.Header.Set("x-api-key", p.anthropicKey)
-				req.Header.Set("anthropic-version", "2023-06-01")
-			},
-		}
-	case "google":
-		return providerConfig{
-			name: "google",
-			upstreamURLFn: func(model string) string {
-				return p.googleURL + "/v1beta/models/" + model + ":generateContent?key=" + url.QueryEscape(p.googleKey)
-			},
-			setAuth: func(*http.Request) {},
-			translateRequest: func(body []byte) ([]byte, error) {
-				out, _, err := inference.TranslateToGemini(body)
-				return out, err
-			},
-			translateResponse: inference.TranslateFromGemini,
-		}
-	case "mistral":
-		base := p.mistralURL
-		key := p.mistralKey
-		return providerConfig{
-			name:          "mistral",
-			upstreamURLFn: func(string) string { return base + "/v1/chat/completions" },
-			setAuth: func(req *http.Request) {
-				req.Header.Set("Authorization", "Bearer "+key)
-			},
-		}
-	case "groq":
-		base := p.groqURL
-		key := p.groqKey
-		return providerConfig{
-			name:          "groq",
-			upstreamURLFn: func(string) string { return base + "/openai/v1/chat/completions" },
-			setAuth: func(req *http.Request) {
-				req.Header.Set("Authorization", "Bearer "+key)
-			},
-		}
-	case "vllm":
-		base := p.vllmURL
-		key := p.vllmKey
-		return providerConfig{
-			name:          "vllm",
-			upstreamURLFn: func(string) string { return base + "/v1/chat/completions" },
-			setAuth: func(req *http.Request) {
-				// vLLM commonly runs without auth on private networks;
-				// only attach the header when an operator-supplied key
-				// is configured.
-				if key != "" {
-					req.Header.Set("Authorization", "Bearer "+key)
-				}
-			},
-		}
-	case "bedrock":
-		// Snapshot the bedrock state at config-build time so the closures
-		// don't race with a concurrent SetBedrockConfig call.
-		bedCfg := p.bedrockConfig
-		if bedCfg.Region == "" {
-			bedCfg.Region = "us-east-1"
-		}
-		baseURL := p.bedrockURL
-		if baseURL == "" {
-			baseURL = "https://bedrock-runtime." + bedCfg.Region + ".amazonaws.com"
-		}
-		return providerConfig{
-			name: "bedrock",
-			upstreamURLFn: func(model string) string {
-				id, ok := inference.ModelToBedrockID(model)
-				if !ok {
-					id = model
-				}
-				return baseURL + "/model/" + id + "/invoke"
-			},
-			setAuth: func(req *http.Request) {
-				_ = inference.SignRequest(req, bedCfg)
-			},
-			translateRequest:  inference.TranslateToBedrockFormat,
-			translateResponse: inference.TranslateFromBedrockFormat,
-		}
+	return inference.ConfigFor(name, p.endpoints())
+}
+
+// Endpoints exposes the gateway's configured provider URLs + keys (by value) so the routing-prediction
+// scorer's provider-backed Inferer can call the SAME providers with the SAME credentials the gateway uses
+// — without importing the serve path. Returns a copy; mutating it does not affect the proxy.
+func (p *Proxy) Endpoints() inference.Endpoints { return p.endpoints() }
+
+// endpoints snapshots the proxy's configured provider URLs + keys into an inference.Endpoints VALUE so a
+// built ProviderConfig captures them by-copy (the bedrock snapshot the by-value test pinned), never a
+// pointer back into mutable proxy state.
+func (p *Proxy) endpoints() inference.Endpoints {
+	return inference.Endpoints{
+		OpenAIURL:     p.openAIURL,
+		OpenAIKey:     p.openAIKey,
+		AnthropicURL:  p.anthropicURL,
+		AnthropicKey:  p.anthropicKey,
+		GoogleURL:     p.googleURL,
+		GoogleKey:     p.googleKey,
+		MistralURL:    p.mistralURL,
+		MistralKey:    p.mistralKey,
+		GroqURL:       p.groqURL,
+		GroqKey:       p.groqKey,
+		VLLMURL:       p.vllmURL,
+		VLLMKey:       p.vllmKey,
+		BedrockConfig: p.bedrockConfig,
+		BedrockURL:    p.bedrockURL,
 	}
-	return providerConfig{}
 }
 
 // applyKey returns a providerConfig identical to cfg except that the
@@ -2464,23 +2367,7 @@ func (p *Proxy) configForProvider(name string) providerConfig {
 // pooled credential; the original closures stay untouched in cfg's
 // source so each call gets a fresh closure capturing the right key.
 func (p *Proxy) applyKey(cfg providerConfig, key string) providerConfig {
-	switch cfg.name {
-	case "openai":
-		cfg.setAuth = func(req *http.Request) {
-			req.Header.Set("Authorization", "Bearer "+key)
-		}
-	case "anthropic":
-		cfg.setAuth = func(req *http.Request) {
-			req.Header.Set("x-api-key", key)
-			req.Header.Set("anthropic-version", "2023-06-01")
-		}
-	case "google":
-		base := p.googleURL
-		cfg.upstreamURLFn = func(model string) string {
-			return base + "/v1beta/models/" + model + ":generateContent?key=" + url.QueryEscape(key)
-		}
-	}
-	return cfg
+	return inference.ConfigForKey(cfg.ProviderName(), p.endpoints(), key)
 }
 
 // setModelInBody re-emits the JSON body with the model field swapped.

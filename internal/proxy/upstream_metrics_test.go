@@ -18,8 +18,6 @@ type rtFunc func(*http.Request) (*http.Response, error)
 
 func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func noAuth(*http.Request) {}
-
 func scrapeProxyMetrics(t *testing.T) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -36,15 +34,13 @@ func TestForward_TransportErrorReturnedUnchanged(t *testing.T) {
 	p := &Proxy{
 		httpClient:  &http.Client{Transport: rtFunc(func(*http.Request) (*http.Response, error) { return nil, sentinel })},
 		retryConfig: fastRetry(),
-	}
-	cfg := providerConfig{
-		name:          "openai",
-		upstreamURLFn: func(string) string { return "http://upstream.invalid" },
-		setAuth:       noAuth,
+		openAIURL:   "http://upstream.invalid",
 	}
 
+	// Construction via the real configForProvider→inference.ConfigFor path (PR-3c — the providerConfig
+	// type moved to inference with unexported fields). Assertions below are unchanged.
 	_, _, _, err := p.forward(context.Background(),
-		httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}")), []byte("{}"), "gpt-4", cfg)
+		httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}")), []byte("{}"), "gpt-4", p.configForProvider("openai"))
 
 	if err == nil {
 		t.Fatal("expected an error from a failing transport")
@@ -66,20 +62,21 @@ func TestForward_SuccessAndError_RecordUpstream(t *testing.T) {
 	}))
 	t.Cleanup(okSrv.Close)
 
-	pOK := &Proxy{httpClient: &http.Client{}, retryConfig: fastRetry()}
+	pOK := &Proxy{httpClient: &http.Client{}, retryConfig: fastRetry(), anthropicURL: okSrv.URL}
 	if _, _, _, err := pOK.forward(context.Background(),
 		httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}")), []byte("{}"), "claude-3",
-		providerConfig{name: "anthropic", upstreamURLFn: func(string) string { return okSrv.URL }, setAuth: noAuth}); err != nil {
+		pOK.configForProvider("anthropic")); err != nil {
 		t.Fatalf("success forward: %v", err)
 	}
 
 	pErr := &Proxy{
 		httpClient:  &http.Client{Transport: rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("boom") })},
 		retryConfig: fastRetry(),
+		openAIURL:   "http://upstream.invalid",
 	}
 	_, _, _, _ = pErr.forward(context.Background(),
 		httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}")), []byte("{}"), "gpt-4",
-		providerConfig{name: "openai", upstreamURLFn: func(string) string { return "http://upstream.invalid" }, setAuth: noAuth})
+		pErr.configForProvider("openai"))
 
 	body := scrapeProxyMetrics(t)
 	for _, want := range []string{

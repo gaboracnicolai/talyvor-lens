@@ -4,6 +4,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/talyvor/lens/internal/inference"
 	"github.com/talyvor/lens/internal/workspace"
 )
 
@@ -18,7 +19,7 @@ func TestProviderSeam_ExistingProvidersDispatchIdentically(t *testing.T) {
 	openAICompatible := map[string]bool{"openai": true, "mistral": true, "groq": true, "vllm": true}
 
 	for _, name := range []string{"openai", "anthropic", "google", "mistral", "groq", "vllm"} {
-		var prov Provider = p.configForProvider(name)
+		var prov inference.Provider = p.configForProvider(name)
 
 		if prov.ProviderName() != name {
 			t.Errorf("%s: ProviderName() = %q", name, prov.ProviderName())
