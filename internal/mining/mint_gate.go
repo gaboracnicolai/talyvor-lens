@@ -81,7 +81,8 @@ var mintTypeList = []string{
 	TypePatternMine,
 	"receipt_mine_provisional", // == povi.TypeReceiptMineProvisional (cycle-free literal)
 	TypePoolRoyaltyHeld,
-	TypeEvalContributionHeld, // P-o-I instance 1: proof-of-eval-contribution held mint — U6 floor + 24h cap apply
+	TypeEvalContributionHeld,  // P-o-I instance 1: proof-of-eval-contribution held mint — U6 floor + 24h cap apply
+	TypeRoutingPredictionHeld, // P-o-I instance 2: proof-of-routing-prediction held mint — U6 floor + 24h cap apply
 }
 
 // mintTypes is DERIVED from mintTypeList (not a second literal) for O(1) lookup.

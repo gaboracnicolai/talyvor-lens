@@ -49,6 +49,11 @@ const TypePoolRoyaltyHeld = mining.TypePoolRoyaltyHeld
 // the FinalizeSweeper. Canonical constant lives in mining.
 const TypeEvalContributionHeld = mining.TypeEvalContributionHeld
 
+// TypeRoutingPredictionHeld is the proof-of-routing-prediction HELD mint type (Proof-of-Improvement
+// instance 2) — like TypeEvalContributionHeld: gated by the U6 floor + 24h cap via mintTypeList, settled
+// by the FinalizeSweeper. Canonical constant lives in mining.
+const TypeRoutingPredictionHeld = mining.TypeRoutingPredictionHeld
+
 // DefaultRoyaltyShare is the default contributor share s of avoided_COGS
 // (LENS_POOL_ROYALTY_SHARE overrides; clamped to [0,1]). With share s the
 // contributor mints s × avoided_COGS and Talyvor nets (1−s) × avoided_COGS,
