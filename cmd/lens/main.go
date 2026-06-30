@@ -711,6 +711,19 @@ func run() error {
 	evalContributionMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
 	evalContributionFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "eval_contribution_mints")
 
+	// Proof-of-Improvement instance 2: proof-of-routing-prediction. NewRoutingPredictionMinter is the SECOND
+	// sanctioned caller of HeldBenchmarkAnchor (it constructs it from the rate). INERT by default: rate 0 ⇒
+	// nil anchor ⇒ RunOnce is a total no-op even with both flags on. Mints only when BOTH the dedicated
+	// earning flag AND the capability flag are on AND the rate is positive. Routes through the SAME
+	// held-ledger/U6 chokepoint (TypeRoutingPredictionHeld ∈ mintTypeList); the generic FinalizeSweeper
+	// settles routing_prediction_mints unchanged (generic request_id/contributor_workspace_id columns).
+	routingPredictionMinter := poolroyalty.NewRoutingPredictionMinter(
+		pool, tokenLedger, cfg.RoutingPredictionRatePerPoint,
+		func() bool { return cfg.RoutingPredictionMintingEnabled && cfg.ProofOfImprovementEnabled },
+	)
+	routingPredictionMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
+	routingPredictionFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "routing_prediction_mints")
+
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "distill-royalty-mint", 30*time.Second, func(lctx context.Context) {
 			distillMinter.StartScheduler(lctx, time.Minute) // RunOnce no-ops while the mint flag is off
@@ -723,6 +736,12 @@ func run() error {
 		})
 		go haComps.leader.Run(ctx, "eval-contribution-finalize", 30*time.Second, func(lctx context.Context) {
 			evalContributionFinalizeSweeper.StartScheduler(lctx, time.Minute)
+		})
+		go haComps.leader.Run(ctx, "routing-prediction-mint", 30*time.Second, func(lctx context.Context) {
+			routingPredictionMinter.StartScheduler(lctx, time.Minute) // RunOnce no-ops while inert (rate 0 / flags off)
+		})
+		go haComps.leader.Run(ctx, "routing-prediction-finalize", 30*time.Second, func(lctx context.Context) {
+			routingPredictionFinalizeSweeper.StartScheduler(lctx, time.Minute)
 		})
 
 		// The "smoke detector" — the scheduled cache+distill fraud-detector sweep. Mirrors

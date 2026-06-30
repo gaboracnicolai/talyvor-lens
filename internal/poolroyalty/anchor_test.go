@@ -72,14 +72,19 @@ func repoRoot(t *testing.T) string {
 	return ""
 }
 
-// (proof 7) EXACTLY ONE LIVE CALLER — mechanically enforced: NewHeldBenchmarkAnchor is constructed in
-// EXACTLY ONE non-test .go file (the proof-of-eval-contribution minter) and NO other, and there is NO
-// stray live SetAnchor call anywhere. PR #248 shipped this anchor reachable from nothing; instance 1
-// (proof-of-eval-contribution) is its sole live home. A second caller — any other mint trying to select
-// the held-benchmark anchor without its own review — turns this red.
-func TestHeldBenchmarkAnchor_ExactlyOneLiveCaller(t *testing.T) {
+// (proof 7) EXACTLY TWO LIVE CALLERS — mechanically enforced: NewHeldBenchmarkAnchor is constructed in
+// EXACTLY TWO non-test .go files — the two sanctioned Proof-of-Improvement mints (instance 1, proof-of-
+// eval-contribution; instance 2, proof-of-routing-prediction) and NO other — and there is NO stray live
+// SetAnchor call anywhere. PR #248 shipped this anchor reachable from nothing; PR #250 added the first
+// live home and PR-4 the second. A THIRD caller — any other mint trying to select the held-benchmark
+// anchor without its own review — turns this red.
+func TestHeldBenchmarkAnchor_ExactlyTwoLiveCallers(t *testing.T) {
 	root := repoRoot(t)
-	const wantCaller = "eval_contribution_minter.go" // the ONE sanctioned live caller
+	// the sanctioned live callers (by filename); each must appear exactly once, and no other file may call.
+	sanctioned := map[string]bool{
+		"eval_contribution_minter.go":  true, // P-o-I instance 1
+		"routing_prediction_minter.go": true, // P-o-I instance 2
+	}
 	var newCallers, setAnchorCallers []string
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -118,13 +123,29 @@ func TestHeldBenchmarkAnchor_ExactlyOneLiveCaller(t *testing.T) {
 		})
 		return nil
 	})
-	if len(newCallers) != 1 {
-		t.Errorf("NewHeldBenchmarkAnchor must have EXACTLY ONE non-test caller, got %d: %v", len(newCallers), newCallers)
-	} else if !strings.HasSuffix(newCallers[0], wantCaller) {
-		t.Errorf("the sole NewHeldBenchmarkAnchor caller must be %s, got %s", wantCaller, newCallers[0])
+	if len(newCallers) != 2 {
+		t.Errorf("NewHeldBenchmarkAnchor must have EXACTLY TWO non-test callers, got %d: %v", len(newCallers), newCallers)
+	}
+	seen := map[string]int{}
+	for _, c := range newCallers {
+		matched := false
+		for name := range sanctioned {
+			if strings.HasSuffix(c, name) {
+				seen[name]++
+				matched = true
+			}
+		}
+		if !matched {
+			t.Errorf("unsanctioned NewHeldBenchmarkAnchor caller %s — only the two P-o-I minters may construct the held-benchmark anchor", c)
+		}
+	}
+	for name := range sanctioned {
+		if seen[name] != 1 {
+			t.Errorf("sanctioned caller %s must appear EXACTLY once, got %d", name, seen[name])
+		}
 	}
 	if len(setAnchorCallers) != 0 {
-		t.Errorf("no live SetAnchor call is sanctioned (the eval minter constructs its own anchor), got: %v", setAnchorCallers)
+		t.Errorf("no live SetAnchor call is sanctioned (each minter constructs its own anchor), got: %v", setAnchorCallers)
 	}
 }
 

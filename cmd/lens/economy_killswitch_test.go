@@ -63,9 +63,11 @@ func TestEconomyKillSwitch_ForcesAllGatesOff(t *testing.T) {
 		"RoutingTierCohorts": cfg.RoutingTierCohortsEnabled,
 		// P-o-I instance 1: the proof-of-eval-contribution EARNING gate (mints LENS) — force-off with the economy.
 		"EvalContributionMinting": cfg.EvalContributionMintingEnabled,
+		// P-o-I instance 2: the proof-of-routing-prediction EARNING gate (mints LENS) — force-off with the economy.
+		"RoutingPredictionMinting": cfg.RoutingPredictionMintingEnabled,
 	}
-	if len(checks) != 12 {
-		t.Fatalf("expected 12 economy gates, got %d", len(checks))
+	if len(checks) != 13 {
+		t.Fatalf("expected 13 economy gates, got %d", len(checks))
 	}
 	// U18 INVERSE: LXC is FIAT — its gates survive the master kill (env-true → on),
 	// so a fiat-SaaS deployment can still meter/gate paid LXC credit economy-off.

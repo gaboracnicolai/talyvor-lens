@@ -49,6 +49,13 @@ const (
 	// generic FinalizeSweeper over eval_contribution_mints. It is NOT reputation-bonded (absent from
 	// isReputationBondedType): the bond code path runs and no-ops for this type — no logic change.
 	TypeEvalContributionHeld = "eval_contribution_held"
+	// TypeRoutingPredictionHeld is the proof-of-routing-prediction held mint moment (Proof-of-Improvement
+	// instance 2): a contributor's held credit for a routing prediction proven skill-above-baseline on the
+	// verifier-held eval slice. Like eval_contribution_held it is a HELD mint gated by the U6 floor + 24h
+	// rate cap via mintTypeList and settled by the generic FinalizeSweeper (over routing_prediction_mints).
+	// It is NOT reputation-bonded (absent from isReputationBondedType) — symmetric with the eval-contribution
+	// mint: the bond code path runs and no-ops for this type.
+	TypeRoutingPredictionHeld = "eval_routing_prediction_held"
 )
 
 // ErrInsufficientHeld is returned when held_balance can't cover a finalize

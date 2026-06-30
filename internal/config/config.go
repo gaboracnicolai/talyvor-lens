@@ -463,12 +463,26 @@ type Config struct {
 	// supplies one. Env: LENS_ROUTING_PREDICTION_SCORING_ENABLED.
 	RoutingPredictionScoringEnabled bool
 
+	// RoutingPredictionMintingEnabled (Proof-of-Improvement instance 2, PR-4) gates the proof-of-routing-
+	// prediction mint FIRING (pays a contributor whose prediction was proven skill-above-baseline). Like
+	// EvalContributionMintingEnabled it is a state-creation gate (mints LENS) and IS in the kill-switch
+	// force-off block. The mint fires only when BOTH this AND ProofOfImprovementEnabled are on AND a positive
+	// rate is set. Env: LENS_ROUTING_PREDICTION_MINTING_ENABLED.
+	RoutingPredictionMintingEnabled bool
+
 	// EvalContributionRatePerPoint is the LENS-per-discrimination-point rate for the proof-of-eval-
 	// contribution mint (amount = rate × clamp01(discrimination)). DEFAULT 0 ⇒ INERT: NewHeldBenchmarkAnchor
 	// refuses a non-positive rate, so the minter's anchor is nil and RunOnce is a total no-op even with
 	// both flags on. The rate is a deliberate later flip, set only when the economy goes live. Env:
 	// LENS_EVAL_CONTRIBUTION_RATE_PER_POINT.
 	EvalContributionRatePerPoint float64
+
+	// RoutingPredictionRatePerPoint is the LENS-per-skill-margin-point rate for the proof-of-routing-
+	// prediction mint (amount = rate × clamp01(skill_margin)). DEFAULT 0 ⇒ INERT: NewHeldBenchmarkAnchor
+	// refuses a non-positive rate, so the minter's anchor is nil and RunOnce is a total no-op even with both
+	// flags on. A deliberate later flip, set only when the economy goes live. Env:
+	// LENS_ROUTING_PREDICTION_RATE_PER_POINT.
+	RoutingPredictionRatePerPoint float64
 
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
@@ -718,6 +732,7 @@ func Load() (*Config, error) {
 		ProofOfBenchmarkEnabled:         parseBoolEnv("LENS_PROOF_OF_BENCHMARK_ENABLED"),
 		ProofOfImprovementEnabled:       parseBoolEnv("LENS_PROOF_OF_IMPROVEMENT_ENABLED"),
 		EvalContributionMintingEnabled:  parseBoolEnv("LENS_EVAL_CONTRIBUTION_MINTING_ENABLED"),
+		RoutingPredictionMintingEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_MINTING_ENABLED"),
 		RoutingPredictionEnabled:        parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
 		RoutingPredictionScoringEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_SCORING_ENABLED"),
 
@@ -881,6 +896,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_EVAL_CONTRIBUTION_RATE_PER_POINT (must be ≥ 0): %s", v)
 		}
 		c.EvalContributionRatePerPoint = f
+	}
+
+	// RoutingPredictionRatePerPoint — DEFAULT 0 (INERT: the held-benchmark anchor refuses a non-positive
+	// rate → the routing-prediction minter is a total no-op). A deliberate later flip.
+	c.RoutingPredictionRatePerPoint = 0
+	if v := os.Getenv("LENS_ROUTING_PREDICTION_RATE_PER_POINT"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_ROUTING_PREDICTION_RATE_PER_POINT (must be ≥ 0): %s", v)
+		}
+		c.RoutingPredictionRatePerPoint = f
 	}
 
 	c.POVIUnbondPeriod = 7 * 24 * time.Hour
@@ -1265,7 +1291,8 @@ func Load() (*Config, error) {
 		c.DistillPoolableEnabled = false
 		c.RoutingIntelligenceEnabled = false
 		c.RoutingTierCohortsEnabled = false
-		c.EvalContributionMintingEnabled = false // P-o-I instance 1: the eval-contribution EARNING gate (mints LENS) — force-off with the economy
+		c.EvalContributionMintingEnabled = false  // P-o-I instance 1: the eval-contribution EARNING gate (mints LENS) — force-off with the economy
+		c.RoutingPredictionMintingEnabled = false // P-o-I instance 2: the routing-prediction EARNING gate (mints LENS) — force-off with the economy
 		// U18: LXCGatingEnabled / LXCShadowSpendEnabled are DELIBERATELY NOT
 		// forced off here — LXC is the fiat-pegged usage credit, not token
 		// economy. They keep their own env values so a fiat-SaaS deployment can
