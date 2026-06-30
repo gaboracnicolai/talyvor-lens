@@ -64,6 +64,7 @@ import (
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/guardrails"
+	"github.com/talyvor/lens/internal/inference"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/learner"
@@ -919,19 +920,22 @@ func run() error {
 	routingAdvisor.StartRefresh(ctx)
 	p.SetRoutingAdvisor(routingAdvisor)
 
-	// Proof-of-Improvement piece 3, PR-3a: the routing-prediction SCORER. Built behind an Inferer
-	// interface; PR-3a wires NO real Inferer (the third arg is nil), so the sweeper is PROVABLY INERT —
-	// RunOnce no-ops (no DB scan, no inference) even when LENS_ROUTING_PREDICTION_SCORING_ENABLED is on.
-	// PR-3b supplies the real provider-backed Inferer via the Option-Y internal/inference extraction;
-	// until then this runs no inference and produces no score. NOT economy-gated (measurement, no mint).
+	// Proof-of-Improvement piece 3: the routing-prediction SCORER, behind an Inferer interface. PR-3c
+	// wires the REAL provider-backed Inferer (internal/inference) — it calls the SAME providers with the
+	// SAME credentials the gateway uses (p.Endpoints()), resolving model→provider via the catalog. Wiring
+	// it does NOT turn scoring on: RunOnce is still gated by LENS_ROUTING_PREDICTION_SCORING_ENABLED
+	// (default off ⇒ inert: no DB scan, no inference call). NOT economy-gated (measurement, no mint).
+	routingInferer := inference.NewProviderInferer(&http.Client{Timeout: 120 * time.Second}, retry.DefaultConfig(), p.Endpoints())
 	routingScorer := routingscore.NewScorer(
 		pool,
 		routingscore.NewAdvisorBaseliner(routingAdvisor),
-		nil, // no real Inferer in PR-3a — inert until PR-3b
+		routingInferer,
 		func() bool { return cfg.RoutingPredictionScoringEnabled },
 	)
 	if cfg.RoutingPredictionScoringEnabled {
-		logger.Info("routing-prediction scorer: flag ON, but NO real Inferer is wired (PR-3a) — the scorer is inert (no inference, no score) until PR-3b supplies the provider-backed Inferer")
+		logger.Info("routing-prediction scorer: flag ON with the real provider-backed Inferer (PR-3c) — scoring active")
+	} else {
+		logger.Info("routing-prediction scorer: real Inferer wired (PR-3c) but LENS_ROUTING_PREDICTION_SCORING_ENABLED is off — inert (RunOnce no-ops, no inference)")
 	}
 	go haComps.leader.Run(ctx, "routing-prediction-score", 30*time.Second, func(lctx context.Context) {
 		routingScorer.StartScheduler(lctx, time.Minute) // RunOnce no-ops while inert (nil Inferer / flag off)

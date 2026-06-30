@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/talyvor/lens/internal/distill"
+	"github.com/talyvor/lens/internal/inference"
 	"github.com/talyvor/lens/internal/modality"
 )
 
@@ -54,7 +55,7 @@ func (p *Proxy) newVisionDispatcher(r *http.Request, cfg providerConfig, wsID st
 			allowed = ws.AllowedModels
 		}
 	}
-	provider := cfg.name
+	provider := cfg.ProviderName()
 	return &visionDispatcher{
 		provider:      provider,
 		allowedModels: allowed,
@@ -216,7 +217,7 @@ func visionCost(provider string, respBody, docBytes []byte, text string) (in, ou
 	// A present-but-all-zero usage block alongside recovered text is as
 	// untrustworthy as a missing one — accepting it would book a FREE OCR, so we
 	// fall through to the non-zero estimate instead.
-	if u, ok := (providerConfig{name: provider}).ExtractUsage(respBody); ok && (u.InputTokens > 0 || u.OutputTokens > 0) {
+	if u, ok := inference.ExtractUsage(provider, respBody); ok && (u.InputTokens > 0 || u.OutputTokens > 0) {
 		return u.InputTokens, u.OutputTokens
 	}
 	// No usable reported usage: estimate. Document input is dominated by the rendered
