@@ -1528,7 +1528,7 @@ func (p *Proxy) tryNodeRouting(
 	// DESCRIPTIVE (P3 #6): capture the gateway-measured node latency into the per-(node,cohort) aggregate,
 	// off the serve path via the obsLimiter. Best-effort, void, mint-free — a capture failure never affects
 	// the already-flushed response. Pure additive observation before the early-return.
-	p.captureNodeLatency(ep.ID, feature, prompt, nodeLatencyMs)
+	p.captureNodeLatency(ep.ID, model, feature, prompt, nodeLatencyMs)
 	return true
 }
 

@@ -12,7 +12,7 @@ import (
 // *nodelatency.Store satisfies it. The sink CANNOT mint: nodelatency imports no ledger and exposes only an
 // Exec surface (see internal/nodelatency + its import-guard test).
 type nodeLatencySink interface {
-	RecordServe(ctx context.Context, nodeID, featureCategory, inputTokenRange, complexityBucket string, latencyMs int64, costScore int) error
+	RecordServe(ctx context.Context, nodeID, featureCategory, inputTokenRange, complexityBucket, model string, latencyMs int64, costScore int) error
 }
 
 // SetNodeLatencySink wires the descriptive node-latency capture sink + its enable flag (read per-call).
@@ -30,8 +30,9 @@ func (p *Proxy) SetNodeLatencySink(sink nodeLatencySink, enabled func() bool) {
 // latencyMs is the GATEWAY-MEASURED node round-trip (time.Since around client.Do in tryNodeRouting) — the
 // node cannot fake it without actually being fast. cohort + cost are derived here via the SAME pure
 // input-functions the router/cohort machinery use (cohort.DeriveInputCohort + router.AnalyseComplexity),
-// gateway-computed from the input the node was asked to serve — the node cannot influence them.
-func (p *Proxy) captureNodeLatency(nodeID, feature, prompt string, latencyMs int64) {
+// gateway-computed from the input the node was asked to serve — the node cannot influence them. model is the
+// gateway-selected served model (aligns the aggregate to benchmark_node_scores' (node,model) grain for C).
+func (p *Proxy) captureNodeLatency(nodeID, model, feature, prompt string, latencyMs int64) {
 	if p == nil || p.nodeLatencySink == nil || p.nodeLatencyEnabled == nil || !p.nodeLatencyEnabled() {
 		return
 	}
@@ -54,7 +55,7 @@ func (p *Proxy) captureNodeLatency(nodeID, feature, prompt string, latencyMs int
 
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), captureWriteTimeout)
 	defer cancel()
-	if err := p.nodeLatencySink.RecordServe(wctx, nodeID, feature, inputTokenRange, complexityBucket, latencyMs, costScore); err != nil {
+	if err := p.nodeLatencySink.RecordServe(wctx, nodeID, feature, inputTokenRange, complexityBucket, model, latencyMs, costScore); err != nil {
 		slog.Warn("nodelatency: observation write failed (observational; serve unaffected)",
 			slog.String("node", nodeID), slog.String("err", err.Error()))
 	}

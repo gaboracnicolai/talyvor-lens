@@ -47,9 +47,9 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // 0.2→0. The weight is a TRUSTED internal const (never user input), so the interpolation is injection-safe
 // (the batch-limit Sprintf pattern the minters use).
 var recordServeSQL = fmt.Sprintf(`INSERT INTO node_cohort_latency_stats
-    (node_id, feature_category, input_token_range, complexity_bucket, latency_ewma, cost_weight_accum, sample_count, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, 1, now())
-ON CONFLICT (node_id, feature_category, input_token_range, complexity_bucket) DO UPDATE SET
+    (node_id, feature_category, input_token_range, complexity_bucket, model, latency_ewma, cost_weight_accum, sample_count, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 1, now())
+ON CONFLICT (node_id, feature_category, input_token_range, complexity_bucket, model) DO UPDATE SET
     latency_ewma      = node_cohort_latency_stats.latency_ewma * %[1]g + EXCLUDED.latency_ewma * %[2]g,
     cost_weight_accum = node_cohort_latency_stats.cost_weight_accum + EXCLUDED.cost_weight_accum,
     sample_count      = node_cohort_latency_stats.sample_count + 1,
@@ -58,12 +58,12 @@ ON CONFLICT (node_id, feature_category, input_token_range, complexity_bucket) DO
 // RecordServe folds one gateway-measured serve (latencyMs) for nodeID on the given cohort into the EWMA
 // aggregate, accumulating the request's cost weight (AnalyseComplexity score). No-op when no db is wired.
 // Descriptive: writes ONLY node_cohort_latency_stats, credits nothing.
-func (s *Store) RecordServe(ctx context.Context, nodeID, featureCategory, inputTokenRange, complexityBucket string, latencyMs int64, costScore int) error {
+func (s *Store) RecordServe(ctx context.Context, nodeID, featureCategory, inputTokenRange, complexityBucket, model string, latencyMs int64, costScore int) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
 	_, err := s.db.Exec(ctx, recordServeSQL,
-		nodeID, featureCategory, inputTokenRange, complexityBucket,
+		nodeID, featureCategory, inputTokenRange, complexityBucket, model,
 		float64(latencyMs), float64(costScore))
 	if err != nil {
 		return fmt.Errorf("nodelatency: record serve: %w", err)
