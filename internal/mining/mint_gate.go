@@ -83,6 +83,7 @@ var mintTypeList = []string{
 	TypePoolRoyaltyHeld,
 	TypeEvalContributionHeld,  // P-o-I instance 1: proof-of-eval-contribution held mint — U6 floor + 24h cap apply
 	TypeRoutingPredictionHeld, // P-o-I instance 2: proof-of-routing-prediction held mint — U6 floor + 24h cap apply
+	TypeLatencyLocalityHeld,   // P-o-I instance 3: proof-of-latency-locality held mint — U6 floor + 24h cap apply
 }
 
 // mintTypes is DERIVED from mintTypeList (not a second literal) for O(1) lookup.

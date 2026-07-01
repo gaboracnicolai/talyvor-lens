@@ -78,12 +78,13 @@ func repoRoot(t *testing.T) string {
 // SetAnchor call anywhere. PR #248 shipped this anchor reachable from nothing; PR #250 added the first
 // live home and PR-4 the second. A THIRD caller — any other mint trying to select the held-benchmark
 // anchor without its own review — turns this red.
-func TestHeldBenchmarkAnchor_ExactlyTwoLiveCallers(t *testing.T) {
+func TestHeldBenchmarkAnchor_ExactlyThreeLiveCallers(t *testing.T) {
 	root := repoRoot(t)
 	// the sanctioned live callers (by filename); each must appear exactly once, and no other file may call.
 	sanctioned := map[string]bool{
 		"eval_contribution_minter.go":  true, // P-o-I instance 1
 		"routing_prediction_minter.go": true, // P-o-I instance 2
+		"latency_minter.go":            true, // P-o-I instance 3
 	}
 	var newCallers, setAnchorCallers []string
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -123,8 +124,8 @@ func TestHeldBenchmarkAnchor_ExactlyTwoLiveCallers(t *testing.T) {
 		})
 		return nil
 	})
-	if len(newCallers) != 2 {
-		t.Errorf("NewHeldBenchmarkAnchor must have EXACTLY TWO non-test callers, got %d: %v", len(newCallers), newCallers)
+	if len(newCallers) != 3 {
+		t.Errorf("NewHeldBenchmarkAnchor must have EXACTLY THREE non-test callers, got %d: %v", len(newCallers), newCallers)
 	}
 	seen := map[string]int{}
 	for _, c := range newCallers {

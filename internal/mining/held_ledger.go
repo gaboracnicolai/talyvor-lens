@@ -56,6 +56,12 @@ const (
 	// It is NOT reputation-bonded (absent from isReputationBondedType) — symmetric with the eval-contribution
 	// mint: the bond code path runs and no-ops for this type.
 	TypeRoutingPredictionHeld = "eval_routing_prediction_held"
+	// TypeLatencyLocalityHeld is the proof-of-latency-locality held mint moment (Proof-of-Improvement
+	// instance 3): a node's held credit for genuinely-fast, cohort-relative, quality-gated service. Like the
+	// other two P-o-I mints it is a HELD mint gated by the U6 floor + 24h rate cap via mintTypeList and
+	// settled by the generic FinalizeSweeper (over node_latency_mints). It is NOT reputation-bonded (absent
+	// from isReputationBondedType): the bond code path runs and no-ops for this type — no logic change.
+	TypeLatencyLocalityHeld = "eval_latency_locality_held"
 )
 
 // ErrInsufficientHeld is returned when held_balance can't cover a finalize
