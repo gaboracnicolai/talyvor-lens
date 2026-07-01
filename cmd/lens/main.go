@@ -73,6 +73,7 @@ import (
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/modality"
+	"github.com/talyvor/lens/internal/nodelatency"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/poolroyalty"
@@ -1002,6 +1003,11 @@ func run() error {
 	// Aggregate; the routing Advisor tier-conditioning is still a future PR.
 	worktierStore := worktier.NewStore(pool)
 	p.SetWorkTier(worktierStore, func() bool { return cfg.WorkTierEnabled })
+
+	// P3 #6: the DESCRIPTIVE node-latency capture sink (default-off, mint-free — writes the aggregate the
+	// future latency mint reads; RunOnce/capture no-ops while the flag is off).
+	nodeLatencyStore := nodelatency.NewStore(pool)
+	p.SetNodeLatencySink(nodeLatencyStore, func() bool { return cfg.NodeLatencyCaptureEnabled })
 	// S4 routing-pattern EARNING wire-up — the same miner, separate sink + flag.
 	// Default off; flag-off the serve path is byte-identical to capture-only.
 	p.SetPatternEarn(patternMiner, func() bool { return cfg.PatternEarningEnabled })
