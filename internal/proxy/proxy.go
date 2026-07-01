@@ -148,6 +148,11 @@ type Proxy struct {
 	workTierSink    workTierSink
 	workTierEnabled func() bool
 
+	// nodeLatency descriptive capture (optional, nil-safe post-serve on the node-route path). Shares the
+	// obsLimiter budget; default-off; mint-free (the sink has no ledger handle). See nodelatency_capture.go.
+	nodeLatencySink    nodeLatencySink
+	nodeLatencyEnabled func() bool
+
 	// obsLimiter bounds post-serve observational writes (pattern capture).
 	// nil = no bound. main wires the same limiter into attribution's
 	// RecordAsync so the total observational claim on the DB pool stays
@@ -1486,7 +1491,9 @@ func (p *Proxy) tryNodeRouting(
 	if client == nil {
 		client = http.DefaultClient
 	}
+	nodeStart := time.Now()
 	resp, err := client.Do(req)
+	nodeLatencyMs := time.Since(nodeStart).Milliseconds() // gateway-measured node round-trip — the latency signal
 	if err != nil {
 		slog.Warn("node-autoroute: forward failed, falling through", slog.String("node", ep.ID), slog.String("err", err.Error()))
 		return false
@@ -1518,6 +1525,10 @@ func (p *Proxy) tryNodeRouting(
 		eventPrompt = redactedPrompt
 	}
 	p.recordTokenEvent(ctx, provider, model, eventPrompt, out, 0, piiDetected) // node-served = free (cost 0)
+	// DESCRIPTIVE (P3 #6): capture the gateway-measured node latency into the per-(node,cohort) aggregate,
+	// off the serve path via the obsLimiter. Best-effort, void, mint-free — a capture failure never affects
+	// the already-flushed response. Pure additive observation before the early-return.
+	p.captureNodeLatency(ep.ID, feature, prompt, nodeLatencyMs)
 	return true
 }
 

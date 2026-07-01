@@ -391,6 +391,13 @@ type Config struct {
 	// LENS_WORKTIER_ENABLED.
 	WorkTierEnabled bool
 
+	// NodeLatencyCaptureEnabled gates the DESCRIPTIVE proof-of-latency capture (P3 #6) — a post-serve,
+	// off-path record of gateway-measured node serve latency into a per-(node,cohort) EWMA aggregate
+	// (node_cohort_latency_stats), the substrate a LATER mint reads. CAPABILITY flag, default false: off =
+	// no capture, no rows, zero behavior change. DESCRIPTIVE and mint-free (writes no ledger), so — like
+	// WorkTier — it is deliberately NOT in the economy force-off block. Env: LENS_NODE_LATENCY_CAPTURE_ENABLED.
+	NodeLatencyCaptureEnabled bool
+
 	// RoutingIntelligenceEnabled gates Upgrade 22 — feeding aggregated
 	// pattern-mining intelligence back into model selection. OFF by default:
 	// when false, routing behaves byte-for-byte as before. Even when on, it
@@ -722,8 +729,9 @@ func Load() (*Config, error) {
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 
-		GuardrailsEnabled: parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
-		WorkTierEnabled:   parseBoolEnv("LENS_WORKTIER_ENABLED"),
+		GuardrailsEnabled:         parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
+		WorkTierEnabled:           parseBoolEnv("LENS_WORKTIER_ENABLED"),
+		NodeLatencyCaptureEnabled: parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
 
 		RoutingIntelligenceEnabled:      parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 		RoutingTierCohortsEnabled:       parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
