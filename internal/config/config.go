@@ -491,6 +491,18 @@ type Config struct {
 	// LENS_ROUTING_PREDICTION_RATE_PER_POINT.
 	RoutingPredictionRatePerPoint float64
 
+	// LatencyRatePerPoint is the LENS-per-latency-skill-point rate for the proof-of-latency-locality mint
+	// (amount = rate × clamp01(latency_skill)). DEFAULT 0 ⇒ INERT: NewHeldBenchmarkAnchor refuses a
+	// non-positive rate, so the minter's anchor is nil and RunOnce is a total no-op even with both flags on.
+	// A deliberate later flip, set only when the economy goes live. Env: LENS_LATENCY_RATE_PER_POINT.
+	LatencyRatePerPoint float64
+
+	// LatencyMintingEnabled (Proof-of-Improvement instance 3) gates the proof-of-latency-locality mint FIRING
+	// (pays a NODE for cohort-relative, quality-gated fast service). Like the other two P-o-I mints it is a
+	// state-creation gate (mints LENS) and IS in the kill-switch force-off block. Fires only when BOTH this
+	// AND ProofOfImprovementEnabled are on AND a positive rate is set. Env: LENS_LATENCY_MINTING_ENABLED.
+	LatencyMintingEnabled bool
+
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
 	// force-OFFs every economy state-creation gate below (regardless of its own
@@ -741,6 +753,7 @@ func Load() (*Config, error) {
 		ProofOfImprovementEnabled:       parseBoolEnv("LENS_PROOF_OF_IMPROVEMENT_ENABLED"),
 		EvalContributionMintingEnabled:  parseBoolEnv("LENS_EVAL_CONTRIBUTION_MINTING_ENABLED"),
 		RoutingPredictionMintingEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_MINTING_ENABLED"),
+		LatencyMintingEnabled:           parseBoolEnv("LENS_LATENCY_MINTING_ENABLED"),
 		RoutingPredictionEnabled:        parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
 		RoutingPredictionScoringEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_SCORING_ENABLED"),
 
@@ -915,6 +928,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_ROUTING_PREDICTION_RATE_PER_POINT (must be ≥ 0): %s", v)
 		}
 		c.RoutingPredictionRatePerPoint = f
+	}
+
+	// LatencyRatePerPoint — DEFAULT 0 (INERT: the held-benchmark anchor refuses a non-positive rate → the
+	// latency minter is a total no-op). A deliberate later flip, set only when the economy goes live.
+	c.LatencyRatePerPoint = 0
+	if v := os.Getenv("LENS_LATENCY_RATE_PER_POINT"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_LATENCY_RATE_PER_POINT (must be ≥ 0): %s", v)
+		}
+		c.LatencyRatePerPoint = f
 	}
 
 	c.POVIUnbondPeriod = 7 * 24 * time.Hour
@@ -1301,6 +1325,7 @@ func Load() (*Config, error) {
 		c.RoutingTierCohortsEnabled = false
 		c.EvalContributionMintingEnabled = false  // P-o-I instance 1: the eval-contribution EARNING gate (mints LENS) — force-off with the economy
 		c.RoutingPredictionMintingEnabled = false // P-o-I instance 2: the routing-prediction EARNING gate (mints LENS) — force-off with the economy
+		c.LatencyMintingEnabled = false           // P-o-I instance 3: the latency-locality EARNING gate (mints LENS) — force-off with the economy
 		// U18: LXCGatingEnabled / LXCShadowSpendEnabled are DELIBERATELY NOT
 		// forced off here — LXC is the fiat-pegged usage credit, not token
 		// economy. They keep their own env values so a fiat-SaaS deployment can
