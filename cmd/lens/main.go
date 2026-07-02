@@ -738,6 +738,18 @@ func run() error {
 	latencyMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
 	latencyFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "node_latency_mints")
 
+	// Proof-of-Improvement instance 4: proof-of-confidential-compute. NewConfidentialMinter is the FOURTH
+	// sanctioned HeldBenchmarkAnchor caller. INERT by default (rate 0 ⇒ nil anchor ⇒ no-op) AND
+	// inert-by-substrate-absence (no key_bound=true attestation exists until CC hardware). Pays verified
+	// confidential capacity through the SAME held-ledger/U6 chokepoint (TypeConfidentialComputeHeld ∈
+	// mintTypeList); the generic FinalizeSweeper settles confidential_compute_mints unchanged.
+	confidentialMinter := poolroyalty.NewConfidentialMinter(
+		pool, tokenLedger, cfg.ConfidentialRatePerPoint,
+		func() bool { return cfg.ConfidentialMintingEnabled && cfg.ProofOfImprovementEnabled },
+	)
+	confidentialMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
+	confidentialFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "confidential_compute_mints")
+
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "distill-royalty-mint", 30*time.Second, func(lctx context.Context) {
 			distillMinter.StartScheduler(lctx, time.Minute) // RunOnce no-ops while the mint flag is off
@@ -753,6 +765,12 @@ func run() error {
 		})
 		go haComps.leader.Run(ctx, "routing-prediction-mint", 30*time.Second, func(lctx context.Context) {
 			routingPredictionMinter.StartScheduler(lctx, time.Minute) // RunOnce no-ops while inert (rate 0 / flags off)
+		})
+		go haComps.leader.Run(ctx, "confidential-compute-mint", 30*time.Second, func(lctx context.Context) {
+			confidentialMinter.StartScheduler(lctx, time.Minute) // RunOnce no-ops while inert (rate 0 / flags off / no key_bound=true rows)
+		})
+		go haComps.leader.Run(ctx, "confidential-compute-finalize", 30*time.Second, func(lctx context.Context) {
+			confidentialFinalizeSweeper.StartScheduler(lctx, time.Minute)
 		})
 		go haComps.leader.Run(ctx, "routing-prediction-finalize", 30*time.Second, func(lctx context.Context) {
 			routingPredictionFinalizeSweeper.StartScheduler(lctx, time.Minute)

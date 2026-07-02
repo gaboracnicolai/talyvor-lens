@@ -11,8 +11,8 @@ import (
 //
 // It handles two DSN formats:
 //
-//   URL form   postgres://host/db?key=val  (most common for LENS_DATABASE_URL)
-//   Keyword form   host=h dbname=d sslmode=…  (less common but valid for pgx)
+//	URL form   postgres://host/db?key=val  (most common for LENS_DATABASE_URL)
+//	Keyword form   host=h dbname=d sslmode=…  (less common but valid for pgx)
 //
 // If rawURL looks like a URL but cannot be parsed, the keyword-form fallback
 // appends " sslmode=<mode>" — pgx will reject the overall URL at connect time

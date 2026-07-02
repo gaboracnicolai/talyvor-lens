@@ -511,6 +511,18 @@ type Config struct {
 	// AND ProofOfImprovementEnabled are on AND a positive rate is set. Env: LENS_LATENCY_MINTING_ENABLED.
 	LatencyMintingEnabled bool
 
+	// ConfidentialRatePerPoint is the LENS-per-epoch FLAT rate for the proof-of-confidential-compute mint
+	// (amount = rate × 1.0 per eligible (node,class,epoch)). DEFAULT 0 ⇒ INERT (the anchor refuses).
+	// Env: LENS_CONFIDENTIAL_RATE_PER_POINT.
+	ConfidentialRatePerPoint float64
+
+	// ConfidentialMintingEnabled (Proof-of-Improvement instance 4) gates the proof-of-confidential-compute
+	// mint FIRING (pays a NODE for VERIFIED confidential capacity). State-creation gate (mints LENS) and IS in
+	// the kill-switch force-off block. Fires only when BOTH this AND ProofOfImprovementEnabled are on AND a
+	// positive rate is set — and even then mints ZERO until a key_bound=true attestation exists (CC hardware).
+	// Env: LENS_CONFIDENTIAL_MINTING_ENABLED.
+	ConfidentialMintingEnabled bool
+
 	// EconomyEnabled (U3) is the MASTER economy kill-switch. Env:
 	// LENS_ECONOMY_ENABLED, default TRUE (explicit opt-out). When false, Load()
 	// force-OFFs every economy state-creation gate below (regardless of its own
@@ -763,6 +775,7 @@ func Load() (*Config, error) {
 		EvalContributionMintingEnabled:  parseBoolEnv("LENS_EVAL_CONTRIBUTION_MINTING_ENABLED"),
 		RoutingPredictionMintingEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_MINTING_ENABLED"),
 		LatencyMintingEnabled:           parseBoolEnv("LENS_LATENCY_MINTING_ENABLED"),
+		ConfidentialMintingEnabled:      parseBoolEnv("LENS_CONFIDENTIAL_MINTING_ENABLED"),
 		RoutingPredictionEnabled:        parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
 		RoutingPredictionScoringEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_SCORING_ENABLED"),
 
@@ -948,6 +961,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_LATENCY_RATE_PER_POINT (must be ≥ 0): %s", v)
 		}
 		c.LatencyRatePerPoint = f
+	}
+
+	// ConfidentialRatePerPoint — DEFAULT 0 (INERT: the anchor refuses a non-positive rate → the confidential
+	// minter is a total no-op). A deliberate later flip, set only at CC-hardware go-live.
+	c.ConfidentialRatePerPoint = 0
+	if v := os.Getenv("LENS_CONFIDENTIAL_RATE_PER_POINT"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_CONFIDENTIAL_RATE_PER_POINT (must be ≥ 0): %s", v)
+		}
+		c.ConfidentialRatePerPoint = f
 	}
 
 	c.POVIUnbondPeriod = 7 * 24 * time.Hour
@@ -1335,6 +1359,7 @@ func Load() (*Config, error) {
 		c.EvalContributionMintingEnabled = false  // P-o-I instance 1: the eval-contribution EARNING gate (mints LENS) — force-off with the economy
 		c.RoutingPredictionMintingEnabled = false // P-o-I instance 2: the routing-prediction EARNING gate (mints LENS) — force-off with the economy
 		c.LatencyMintingEnabled = false           // P-o-I instance 3: the latency-locality EARNING gate (mints LENS) — force-off with the economy
+		c.ConfidentialMintingEnabled = false      // P-o-I instance 4: the confidential-compute EARNING gate (mints LENS) — force-off with the economy
 		// U18: LXCGatingEnabled / LXCShadowSpendEnabled are DELIBERATELY NOT
 		// forced off here — LXC is the fiat-pegged usage credit, not token
 		// economy. They keep their own env values so a fiat-SaaS deployment can

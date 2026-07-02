@@ -62,6 +62,12 @@ const (
 	// settled by the generic FinalizeSweeper (over node_latency_mints). It is NOT reputation-bonded (absent
 	// from isReputationBondedType): the bond code path runs and no-ops for this type — no logic change.
 	TypeLatencyLocalityHeld = "eval_latency_locality_held"
+	// TypeConfidentialComputeHeld is the proof-of-confidential-compute held mint moment (Proof-of-Improvement
+	// instance 4): a node's held credit for providing VERIFIED confidential capacity (NVIDIA CC attestation +
+	// key_bound + held-probe). Like the other three P-o-I mints it is a HELD mint gated by the U6 floor + 24h
+	// rate cap via mintTypeList and settled by the generic FinalizeSweeper (over confidential_compute_mints).
+	// NOT reputation-bonded (absent from isReputationBondedType): the bond code path runs and no-ops.
+	TypeConfidentialComputeHeld = "eval_confidential_compute_held"
 )
 
 // ErrInsufficientHeld is returned when held_balance can't cover a finalize
