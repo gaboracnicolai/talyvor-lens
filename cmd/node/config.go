@@ -35,6 +35,12 @@ type NodeConfig struct {
 	// (or is configured to skip verification for trusted private nets).
 	TLSCertFile string
 	TLSKeyFile  string
+
+	// AttestationEnabled + AttestationCmd arm the Proof-of-Confidential-Compute producer (step a). Default
+	// off; when on, AttestationCmd is the operator's NVIDIA attestation tool the daemon shells out to
+	// (NODE_ATTESTATION_CMD). Both unset ⇒ no Attestor wired ⇒ /attestation returns 501.
+	AttestationEnabled bool
+	AttestationCmd     string
 }
 
 // LoadConfig pulls every value from the environment and applies
@@ -52,6 +58,10 @@ func LoadConfig() NodeConfig {
 		Port:          parseIntDefault("NODE_PORT", 9090),
 		TLSCertFile:   os.Getenv("NODE_TLS_CERT"),
 		TLSKeyFile:    os.Getenv("NODE_TLS_KEY"),
+		// Proof-of-Confidential-Compute (step a) — INERT by default. Both must be set to arm the producer:
+		// the capability flag AND the operator's NVIDIA attestation command line.
+		AttestationEnabled: os.Getenv("NODE_ATTESTATION_ENABLED") == "true",
+		AttestationCmd:     os.Getenv("NODE_ATTESTATION_CMD"),
 	}
 }
 

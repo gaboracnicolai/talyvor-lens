@@ -136,6 +136,16 @@ func runStart(args []string) {
 			log.Printf("node: Lens challenge pubkey not yet available — Part-3 challenges refused (fail-closed) until a heartbeat re-fetch succeeds")
 		}
 	}
+	// Proof-of-Confidential-Compute (step a) — INERT by default. Wire the attestation producer only when the
+	// operator opts in with BOTH the flag and a command; otherwise /attestation stays 501. Mints nothing.
+	if cfg.AttestationEnabled {
+		if at := newExecAttestor(cfg.AttestationCmd); at != nil {
+			srv.SetAttestor(at)
+			log.Printf("🔐 hardware attestation enabled (Proof-of-Confidential-Compute handshake; minting stays OFF — no mint exists yet)")
+		} else {
+			log.Printf("node: NODE_ATTESTATION_ENABLED set but NODE_ATTESTATION_CMD empty — /attestation stays inert (501)")
+		}
+	}
 	httpServer, _ := srv.ListenAndServe(cfg.Port, cfg.TLSCertFile, cfg.TLSKeyFile)
 
 	// Heartbeat loop — runs until ctx is cancelled by the
