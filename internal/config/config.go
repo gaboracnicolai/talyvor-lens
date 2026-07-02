@@ -398,6 +398,14 @@ type Config struct {
 	// WorkTier — it is deliberately NOT in the economy force-off block. Env: LENS_NODE_LATENCY_CAPTURE_ENABLED.
 	NodeLatencyCaptureEnabled bool
 
+	// NodeAttestationVerifyEnabled gates the Proof-of-Confidential-Compute VERIFY sweep (step b): the gateway
+	// dials each node's /attestation, verifies the NVIDIA NRAS EAT (JWT sig + x5c chain to the pinned NVIDIA
+	// root + claims), and records the verified hardware class to node_attestations. CAPABILITY flag, default
+	// false: off = no sweep, no dials, no rows. Mint-free (records a class, credits nothing), so — like
+	// NodeLatencyCapture — it is deliberately NOT in the economy force-off block. Also needs the pinned root
+	// CA (LENS_NVIDIA_ROOT_CA_PEM) + the JWKS URL to be configured. Env: LENS_NODE_ATTESTATION_VERIFY_ENABLED.
+	NodeAttestationVerifyEnabled bool
+
 	// RoutingIntelligenceEnabled gates Upgrade 22 — feeding aggregated
 	// pattern-mining intelligence back into model selection. OFF by default:
 	// when false, routing behaves byte-for-byte as before. Even when on, it
@@ -741,9 +749,10 @@ func Load() (*Config, error) {
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 
-		GuardrailsEnabled:         parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
-		WorkTierEnabled:           parseBoolEnv("LENS_WORKTIER_ENABLED"),
-		NodeLatencyCaptureEnabled: parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
+		GuardrailsEnabled:            parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
+		WorkTierEnabled:              parseBoolEnv("LENS_WORKTIER_ENABLED"),
+		NodeLatencyCaptureEnabled:    parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
+		NodeAttestationVerifyEnabled: parseBoolEnv("LENS_NODE_ATTESTATION_VERIFY_ENABLED"),
 
 		RoutingIntelligenceEnabled:      parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 		RoutingTierCohortsEnabled:       parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
