@@ -38,6 +38,9 @@ type InferenceServer struct {
 	// for a node without a signing key.
 	signer *receiptSigner
 	lens   *LensClient
+	// attestor (optional) produces a hardware attestation report (Proof-of-Confidential-Compute, step a).
+	// nil ⇒ /attestation returns 501 (the default, inert posture). See attestation.go.
+	attestor Attestor
 	// challengePub is Lens's pinned challenge-signing public key (PoVI Part 3).
 	// The node verifies every /challenge is signed by Lens before answering, so
 	// arbitrary callers can't extract its served-response content.
@@ -148,7 +151,45 @@ func (s *InferenceServer) Handler() http.Handler {
 	// by SelectEndpoint for auto-route. Same handler as /models.
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/challenge", s.handleChallenge)
+	mux.HandleFunc("/attestation", s.handleAttestation)
 	return mux
+}
+
+// SetAttestor wires the hardware-attestation producer (Proof-of-Confidential-Compute, step a). A nil
+// attestor keeps /attestation inert (501). main wires it only when NODE_ATTESTATION_ENABLED + a command.
+func (s *InferenceServer) SetAttestor(a Attestor) { s.attestor = a }
+
+// handleAttestation answers a gateway nonce challenge with the node's hardware attestation: it relays the
+// nonce to the Attestor (NVIDIA producer), then binds the returned EAT to THIS node with the node's ed25519
+// receipt key (povi.SignAttestation) so the gateway gets both node identity + hardware attestation. INERT
+// by default: nil attestor ⇒ 501. The daemon does NOT verify the EAT (the NVIDIA signature is checked
+// gateway-side, step b) — it only relays + node-signs. Mints nothing.
+func (s *InferenceServer) handleAttestation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.attestor == nil {
+		http.Error(w, "node produces no attestation", http.StatusNotImplemented) // 501 — inert default
+		return
+	}
+	if s.signer == nil {
+		http.Error(w, "node has no signing key to bind the attestation", http.StatusServiceUnavailable)
+		return
+	}
+	var req povi.AttestationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	eat, err := s.attestor.Report(r.Context(), req.Nonce)
+	if err != nil {
+		http.Error(w, "attestation failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	resp := povi.SignAttestation(s.signer.priv, s.signer.nodeID, req.Nonce, eat)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleChallenge answers a PoVI Part-3 challenge: it verifies the challenge was
