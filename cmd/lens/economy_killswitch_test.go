@@ -33,7 +33,7 @@ var economyGateEnv = []string{
 	"LENS_POOL_ROYALTY_MINTING_ENABLED", "LENS_POVI_MINTING_ENABLED", "LENS_TRUSTFUL_COMPUTE_MINT_ENABLED",
 	"LENS_CACHE_SHARING_ENABLED", "LENS_CACHE_POOLABLE_ENABLED", "LENS_DISTILL_POOLABLE_ENABLED",
 	"LENS_LXC_GATING_ENABLED", "LENS_LXC_SHADOW_SPEND_ENABLED", "LENS_ROUTING_INTELLIGENCE_ENABLED",
-	"LENS_EVAL_CONTRIBUTION_MINTING_ENABLED", "LENS_LATENCY_MINTING_ENABLED",
+	"LENS_EVAL_CONTRIBUTION_MINTING_ENABLED", "LENS_LATENCY_MINTING_ENABLED", "LENS_CONFIDENTIAL_MINTING_ENABLED",
 }
 
 // TestEconomyKillSwitch_ForcesAllGatesOff — master off + all 12 gates env-true ⇒
@@ -67,9 +67,11 @@ func TestEconomyKillSwitch_ForcesAllGatesOff(t *testing.T) {
 		"RoutingPredictionMinting": cfg.RoutingPredictionMintingEnabled,
 		// P-o-I instance 3: the proof-of-latency-locality EARNING gate (mints LENS) — force-off with the economy.
 		"LatencyMinting": cfg.LatencyMintingEnabled,
+		// P-o-I instance 4: the proof-of-confidential-compute EARNING gate (mints LENS) — force-off with the economy.
+		"ConfidentialMinting": cfg.ConfidentialMintingEnabled,
 	}
-	if len(checks) != 14 {
-		t.Fatalf("expected 14 economy gates, got %d", len(checks))
+	if len(checks) != 15 {
+		t.Fatalf("expected 15 economy gates, got %d", len(checks))
 	}
 	// U18 INVERSE: LXC is FIAT — its gates survive the master kill (env-true → on),
 	// so a fiat-SaaS deployment can still meter/gate paid LXC credit economy-off.

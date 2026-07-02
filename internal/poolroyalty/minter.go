@@ -59,6 +59,10 @@ const TypeRoutingPredictionHeld = mining.TypeRoutingPredictionHeld
 // Canonical constant lives in mining.
 const TypeLatencyLocalityHeld = mining.TypeLatencyLocalityHeld
 
+// TypeConfidentialComputeHeld is the proof-of-confidential-compute HELD mint type (P-o-I instance 4) — like
+// the others: gated by the U6 floor + 24h cap via mintTypeList, settled by the FinalizeSweeper.
+const TypeConfidentialComputeHeld = mining.TypeConfidentialComputeHeld
+
 // DefaultRoyaltyShare is the default contributor share s of avoided_COGS
 // (LENS_POOL_ROYALTY_SHARE overrides; clamped to [0,1]). With share s the
 // contributor mints s × avoided_COGS and Talyvor nets (1−s) × avoided_COGS,
