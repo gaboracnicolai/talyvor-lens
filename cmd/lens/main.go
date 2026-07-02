@@ -1027,6 +1027,11 @@ func run() error {
 	// future latency mint reads; RunOnce/capture no-ops while the flag is off).
 	nodeLatencyStore := nodelatency.NewStore(pool)
 	p.SetNodeLatencySink(nodeLatencyStore, func() bool { return cfg.NodeLatencyCaptureEnabled })
+
+	// Proof-of-Confidential-Compute step (b): the gateway attestation VERIFY sweep. INERT unless the
+	// capability flag + the pinned NVIDIA root CA are configured; records a verified hardware class to
+	// node_attestations, mints nothing (the mint is step c). Flag-off ⇒ no scheduler, no dials, no writes.
+	startAttestationVerify(ctx, cfg, pool, haComps.leader)
 	// S4 routing-pattern EARNING wire-up — the same miner, separate sink + flag.
 	// Default off; flag-off the serve path is byte-identical to capture-only.
 	p.SetPatternEarn(patternMiner, func() bool { return cfg.PatternEarningEnabled })
