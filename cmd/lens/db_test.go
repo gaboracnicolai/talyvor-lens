@@ -4,10 +4,10 @@ import "testing"
 
 func TestInjectSSLMode(t *testing.T) {
 	tests := []struct {
-		name string
-		url  string
-		mode string
-		want string
+		name   string
+		url    string
+		mode   string
+		want   string
 	}{
 		{
 			name: "URL without sslmode gets mode injected",
