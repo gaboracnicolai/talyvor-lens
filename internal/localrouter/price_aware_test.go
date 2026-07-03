@@ -114,3 +114,39 @@ func TestPriceAware_InertOnDefaultPath(t *testing.T) {
 		t.Errorf("StrategyLeastLoaded must ignore price and pick the idle node; got %s", got.ID)
 	}
 }
+
+// (proof 1b) SELECTION-LEVEL unsynced-0 clamp — the clamp holds THROUGH selectPriceAware, not just in the
+// effectivePrice unit. Catches a future fast-path refactor that reads a raw 0 price as "cheapest". An
+// unsynced node (pricePerToken never set — the just-registered zero-value) is scored at the CEILING, so a
+// genuine cheap node beats it; and a LONE unsynced node is still selectable (served at the ceiling).
+func TestPriceAware_UnsyncedZeroClampedInSelection(t *testing.T) {
+	// (a) unsynced-0 loses to a genuine cheap node (same latency + quality). If the 0 read as "free" it
+	// would have the lowest cost and wrongly win.
+	r := NewRouter(nil)
+	r.SetPriceCeiling(func() float64 { return 0.50 })
+	// "unsynced": Register + quality only — NO SetNodePrice, so pricePerToken stays the zero-value (never synced).
+	r.Register(&LocalEndpoint{ID: "unsynced", Provider: "ollama", Models: []string{"m"}, Active: true, Healthy: true, AvgLatencyMs: 10})
+	r.UpdateQuality("unsynced", "m", 0.9, 10)
+	paEndpoint(r, "real", "m", 0.05, 10, 0.9, 10) // genuine cheap node
+	got, err := r.SelectEndpoint("m", StrategyPriceAware)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "real" {
+		t.Fatalf("unsynced-0 node must be scored at the ceiling (0.50) and LOSE to real (0.05); got %s — clamp bypassed at selection", got.ID)
+	}
+
+	// (b) a LONE unsynced-0 node is still selectable (scored at ceiling, but the only option) — a node
+	// pending its first price sync must still serve, just charged at the ceiling. Must NOT error.
+	r2 := NewRouter(nil)
+	r2.SetPriceCeiling(func() float64 { return 0.50 })
+	r2.Register(&LocalEndpoint{ID: "lonely", Provider: "ollama", Models: []string{"m"}, Active: true, Healthy: true, AvgLatencyMs: 10})
+	r2.UpdateQuality("lonely", "m", 0.9, 10)
+	got2, err := r2.SelectEndpoint("m", StrategyPriceAware)
+	if err != nil {
+		t.Fatalf("a lone unsynced node must still be selectable (served at the ceiling), got err=%v", err)
+	}
+	if got2.ID != "lonely" {
+		t.Fatalf("lone unsynced node must be returned; got %v", got2)
+	}
+}
