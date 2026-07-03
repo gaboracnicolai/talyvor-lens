@@ -93,6 +93,10 @@ type AuthContext struct {
 	Scopes      []string `json:"scopes"`
 	AuthMethod  string   `json:"auth_method"`
 	IsAdmin     bool     `json:"is_admin"`
+	// APIKeyID is the scoped API key's ID for API-key (workspace-key) auth; EMPTY for JWT/admin/other auth
+	// methods. Consumed by the F4 allocator (C.1) to key the per-agent LXC sub-budget on the scoped key —
+	// so an EMPTY APIKeyID (JWT/admin) structurally cannot enter the agent-allocation path.
+	APIKeyID string `json:"api_key_id,omitempty"`
 }
 
 // HasScope reports whether the resolved identity carries `scope`.
@@ -285,6 +289,7 @@ func (m *Manager) Authenticate(r *http.Request) (*AuthContext, error) {
 			Scopes:      key.Scopes,
 			AuthMethod:  MethodWorkspaceKey,
 			IsAdmin:     false,
+			APIKeyID:    key.ID, // F4 C.0: the scoped key's ID (the per-agent LXC sub-budget key). API-key branch ONLY.
 		}, nil
 	}
 
