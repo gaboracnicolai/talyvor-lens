@@ -326,7 +326,15 @@ type Config struct {
 	// it free when idle — no mints, nothing to scan); the flag is only a manual off-switch.
 	DetectorSweepEnabled  bool          // LENS_DETECTOR_SWEEP_ENABLED (default TRUE)
 	DetectorSweepInterval time.Duration // LENS_DETECTOR_SWEEP_INTERVAL (default 1h)
-	DetectorSweepWindow   time.Duration // LENS_DETECTOR_SWEEP_WINDOW (default 24h)
+
+	// LXCAgentAllocationEnabled gates the F4-capstone per-scoped-key LXC sub-budget path (step A). Defaults
+	// TRUE (owner's call — the capstone ships armed): when on, an agent's LXC spend is bounded by its
+	// sub-budget ceiling (default 50 LXC) and debited exactly-once; a zero-balance agent still spends nothing.
+	// When false, the sub-budget path is bypassed (today's plain SpendLXC behavior). It is a SPEND bound, not
+	// a mint — deliberately NOT in the economy force-off block (turning it off REMOVES a spend guard, so off
+	// is the less-safe state; it is not a mint gate). Env: LENS_LXC_AGENT_ALLOCATION_ENABLED (default TRUE).
+	LXCAgentAllocationEnabled bool          // LENS_LXC_AGENT_ALLOCATION_ENABLED (default TRUE)
+	DetectorSweepWindow       time.Duration // LENS_DETECTOR_SWEEP_WINDOW (default 24h)
 
 	// PoolRoyaltyShare is s, the contributor's share of avoided_COGS
 	// (Stage 2.1). Env: LENS_POOL_ROYALTY_SHARE. Default 0.5. Must be in
@@ -1132,6 +1140,13 @@ func Load() (*Config, error) {
 	c.DetectorSweepEnabled = true
 	if os.Getenv("LENS_DETECTOR_SWEEP_ENABLED") != "" {
 		c.DetectorSweepEnabled = parseBoolEnv("LENS_DETECTOR_SWEEP_ENABLED")
+	}
+
+	// LXC agent allocation — DEFAULT-TRUE (owner's call; the capstone ships armed). Off removes a spend
+	// guard, so the safe default is on. The flag is a manual off-switch (falls back to plain SpendLXC).
+	c.LXCAgentAllocationEnabled = true
+	if os.Getenv("LENS_LXC_AGENT_ALLOCATION_ENABLED") != "" {
+		c.LXCAgentAllocationEnabled = parseBoolEnv("LENS_LXC_AGENT_ALLOCATION_ENABLED")
 	}
 	c.DetectorSweepInterval = time.Hour
 	if v := os.Getenv("LENS_DETECTOR_SWEEP_INTERVAL"); v != "" {
