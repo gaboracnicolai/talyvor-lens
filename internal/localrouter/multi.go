@@ -56,6 +56,18 @@ const (
 	// qualityLatencyScale normalizes AvgLatencyMs into the LowestLatency base affinity.
 	qualityLatencyScale = 100.0
 
+	// F4-capstone step B — StrategyPriceAware tuning.
+	// defaultGatewayPriceCeiling clamps the node-declared price_per_token (min(declared, ceiling)) so a node
+	// can't set the agent's charge. 0.50 = 10× the 0.050 node default (compute_mining.ComputeMineBaseRate),
+	// so legitimate nodes — even premium ones a few× the base — are NEVER clamped; only inflated declarations
+	// (>0.50) are capped. It is a routing bound, not a mint gate (NOT in the economy force-off block).
+	defaultGatewayPriceCeiling = 0.50
+	// priceAwareQualityThreshold / priceAwareQualityWarmup are L4's EXACT held-probe C-gate: a candidate is
+	// eligible only with benchmark score ≥ threshold AND sample_count ≥ warmup. A cheap-but-unqualified node
+	// is ineligible.
+	priceAwareQualityThreshold = 0.7
+	priceAwareQualityWarmup    = 5
+
 	// latencyEMAWeight controls how fast AvgLatencyMs reacts to
 	// new samples. 0.2 = "the latest call counts for 20% of the
 	// new average". Spec-mandated.
@@ -77,6 +89,10 @@ const (
 	StrategyLeastLoaded   RoutingStrategy = "least_loaded"
 	StrategyLowestLatency RoutingStrategy = "lowest_latency"
 	StrategyPriority      RoutingStrategy = "priority"
+	// StrategyPriceAware (F4-capstone step B) picks the best price/latency deal among QUALITY-PASSING nodes,
+	// with the node-declared price CLAMPED to the gateway ceiling. Opt-in only — never the default; existing
+	// routes are unchanged unless a caller explicitly selects it.
+	StrategyPriceAware RoutingStrategy = "price_aware"
 )
 
 // LocalEndpoint is one configured local-model server. Mutable
@@ -107,6 +123,12 @@ type LocalEndpoint struct {
 	// other fields). Preserved across Register re-registration. Absent model ⇒ neutral prior.
 	quality        map[string]float64 `json:"-"`
 	qualitySamples map[string]int     `json:"-"`
+
+	// pricePerToken is the node-declared inference_nodes.price_per_token, attached by the periodic
+	// price-sync loop (NOT a per-request DB read). mu-guarded. CLAMPED to the gateway ceiling at selection
+	// — never used raw (a node cannot set the agent's charge). Preserved across Register re-registration.
+	// ≤0 (unsynced) ⇒ treated AS the ceiling at selection, never "free".
+	pricePerToken float64 `json:"-"`
 }
 
 // Router is the multi-endpoint registry + selector.
@@ -123,6 +145,9 @@ type Router struct {
 	// qualityEnabled gates the P1 #10 proof-of-benchmark quality bias (LENS_PROOF_OF_BENCHMARK_ENABLED).
 	// nil/false ⇒ SelectEndpoint runs the original deterministic switch VERBATIM (byte-identical).
 	qualityEnabled func() bool
+	// priceCeilingFn returns the gateway price ceiling (LENS_GATEWAY_PRICE_CEILING) used ONLY by
+	// StrategyPriceAware. nil ⇒ defaultGatewayPriceCeiling. Read under mu like qualityEnabled.
+	priceCeilingFn func() float64
 	// randFloat / randIntN are the selection RNG (math/rand/v2, concurrent-safe by default).
 	// Injectable so a test can seed a deterministic source. Distribution-only — NOT security-critical
 	// (the crypto/rand draw lives in benchprobe).
@@ -238,6 +263,7 @@ func (r *Router) Register(e *LocalEndpoint) {
 			// NodeSyncer's ~30s re-register (same reason as the health/stats preservation above).
 			e.quality = ex.quality
 			e.qualitySamples = ex.qualitySamples
+			e.pricePerToken = ex.pricePerToken // F4 step B: preserve synced price across re-register
 			r.endpoints[i] = e
 			return
 		}
@@ -413,10 +439,12 @@ func (r *Router) sweepHealth(ctx context.Context) {
 // caller gets an explicit error and can fall back to cloud.
 func (r *Router) SelectEndpoint(model string, strategy RoutingStrategy) (*LocalEndpoint, error) {
 	qOn := r.qualityEnabled != nil && r.qualityEnabled()
+	paOn := strategy == StrategyPriceAware // F4 step B — opt-in only
 
 	r.mu.RLock()
 	candidates := make([]*LocalEndpoint, 0, len(r.endpoints))
-	var qeff []float64 // captured UNDER the lock (the quality maps are mu-guarded) — only when qOn
+	var qeff []float64           // captured UNDER the lock (the quality maps are mu-guarded) — only when qOn
+	var paSig []priceAwareSignal // price/quality/latency captured under the lock — only when paOn
 	for _, e := range r.endpoints {
 		if !e.Active || !e.Healthy {
 			continue
@@ -428,11 +456,24 @@ func (r *Router) SelectEndpoint(model string, strategy RoutingStrategy) (*LocalE
 		if qOn {
 			qeff = append(qeff, qEffLocked(e, model))
 		}
+		if paOn {
+			paSig = append(paSig, priceAwareSignal{price: e.pricePerToken, score: e.quality[model], samples: e.qualitySamples[model], latencyMs: e.AvgLatencyMs})
+		}
+	}
+	ceiling := defaultGatewayPriceCeiling
+	if paOn && r.priceCeilingFn != nil {
+		ceiling = r.priceCeilingFn()
 	}
 	r.mu.RUnlock()
 
 	if len(candidates) == 0 {
 		return nil, ErrNoHealthyEndpoint
+	}
+
+	// F4 step B: explicit price-aware selection — deterministic, C-gated, clamped. Opt-in, so it takes
+	// precedence over the ε-greedy quality path (it already folds quality in via the hard C-gate).
+	if paOn {
+		return r.selectPriceAware(candidates, paSig, ceiling)
 	}
 
 	// P1 #10 PR-B: quality-weighted ε-greedy selection (composes WITH the strategy). Flag-off skips
@@ -497,6 +538,116 @@ func (r *Router) SetRand(float64Fn func() float64, intNFn func(int) int) {
 	r.mu.Lock()
 	r.randFloat, r.randIntN = float64Fn, intNFn
 	r.mu.Unlock()
+}
+
+// SetPriceCeiling wires the gateway price ceiling used by StrategyPriceAware (LENS_GATEWAY_PRICE_CEILING).
+// nil ⇒ defaultGatewayPriceCeiling. A setter so the constructor signature stays put. Only StrategyPriceAware
+// reads it — other strategies are unaffected.
+func (r *Router) SetPriceCeiling(fn func() float64) {
+	r.mu.Lock()
+	r.priceCeilingFn = fn
+	r.mu.Unlock()
+}
+
+// priceAwareSignal is the per-candidate price/quality/latency snapshot captured under Router.mu (the price +
+// quality maps are mu-guarded), so selectPriceAware never touches shared state post-lock.
+type priceAwareSignal struct {
+	price     float64
+	score     float64
+	samples   int
+	latencyMs int64
+}
+
+// effectivePrice clamps a node-declared price to the gateway ceiling: min(declared, ceiling). An unknown or
+// non-positive declared price (an unsynced node) is treated AS the ceiling — a node can't declare ≤0 to look
+// free. THE LOAD-BEARING GUARD: the node-declared price can never move the charge above the ceiling, and
+// can't be gamed below it via an out-of-band value.
+func effectivePrice(declared, ceiling float64) float64 {
+	if declared <= 0 || declared > ceiling {
+		return ceiling
+	}
+	return declared
+}
+
+// selectPriceAware picks the best price/latency deal among the QUALITY-PASSING candidates. C-gate FIRST
+// (reuse L4's held-probe bar: score ≥ threshold AND samples ≥ warmup) — a cheap but unqualified node is
+// ineligible however cheap. Then rank by cost = effective_price × (1 + latency/scale), lowest wins: price is
+// ONE factor, latency the other (never a pure race-to-the-bottom). Deterministic. ErrNoHealthyEndpoint if
+// none qualify.
+func (r *Router) selectPriceAware(candidates []*LocalEndpoint, sig []priceAwareSignal, ceiling float64) (*LocalEndpoint, error) {
+	var best *LocalEndpoint
+	var bestCost float64
+	for i, c := range candidates {
+		s := sig[i]
+		if s.samples < priceAwareQualityWarmup || s.score < priceAwareQualityThreshold {
+			continue // held-probe C-gate: unqualified ⇒ ineligible
+		}
+		eff := effectivePrice(s.price, ceiling)
+		lat := float64(s.latencyMs)
+		if lat <= 0 {
+			lat = qualityLatencyScale // unmeasured latency = neutral
+		}
+		cost := eff * (1 + lat/qualityLatencyScale)
+		if best == nil || cost < bestCost {
+			best, bestCost = c, cost
+		}
+	}
+	if best == nil {
+		return nil, ErrNoHealthyEndpoint // all candidates failed the C-gate
+	}
+	return best, nil
+}
+
+// SetNodePrice attaches the node-declared price_per_token to a registered endpoint (called by the periodic
+// price-sync loop, NOT per request). No-op if the node isn't registered.
+func (r *Router) SetNodePrice(nodeID string, price float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.endpoints {
+		if e.ID == nodeID {
+			e.pricePerToken = price
+			return
+		}
+	}
+}
+
+// StartPriceSync periodically loads inference_nodes.price_per_token into the routers' in-memory price (F4
+// step B). BLOCKING (runs the ticker in the caller's goroutine until ctx is done) so it composes with leader
+// election. Reads from the router's pool — SelectEndpoint never touches the DB.
+func (r *Router) StartPriceSync(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = DefaultHealthCheckInterval
+	}
+	r.syncPrice(ctx) // initial load
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.syncPrice(ctx)
+		}
+	}
+}
+
+func (r *Router) syncPrice(ctx context.Context) {
+	if r.pool == nil {
+		return
+	}
+	rows, err := r.pool.Query(ctx, `SELECT id, price_per_token FROM inference_nodes WHERE active = true`)
+	if err != nil {
+		return // best-effort; routing keeps the last-synced price
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var nodeID string
+		var price float64
+		if err := rows.Scan(&nodeID, &price); err != nil {
+			return
+		}
+		r.SetNodePrice(nodeID, price)
+	}
 }
 
 // qEffLocked returns the shrinkage-adjusted effective quality for (endpoint, model). Caller holds

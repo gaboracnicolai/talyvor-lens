@@ -513,6 +513,13 @@ type Config struct {
 	// A deliberate later flip, set only when the economy goes live. Env: LENS_LATENCY_RATE_PER_POINT.
 	LatencyRatePerPoint float64
 
+	// GatewayPriceCeiling (F4-capstone step B) is the per-token price cap StrategyPriceAware clamps the
+	// node-declared price to: effective_price = min(node_declared, ceiling). It bounds the ranking signal AND
+	// (in step C) the agent's charge, so a node cannot set what an agent pays. DEFAULT 0.50 = 10× the 0.050
+	// node default, so legitimate nodes are never clamped, only inflated declarations. A ROUTING bound, not a
+	// mint gate — NOT in the economy force-off block. Env: LENS_GATEWAY_PRICE_CEILING.
+	GatewayPriceCeiling float64
+
 	// LatencyMintingEnabled (Proof-of-Improvement instance 3) gates the proof-of-latency-locality mint FIRING
 	// (pays a NODE for cohort-relative, quality-gated fast service). Like the other two P-o-I mints it is a
 	// state-creation gate (mints LENS) and IS in the kill-switch force-off block. Fires only when BOTH this
@@ -969,6 +976,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_LATENCY_RATE_PER_POINT (must be ≥ 0): %s", v)
 		}
 		c.LatencyRatePerPoint = f
+	}
+
+	// GatewayPriceCeiling — DEFAULT 0.50 (10× the 0.050 node band; legitimate nodes never clamped). A routing
+	// bound used only by StrategyPriceAware; must be > 0. Env: LENS_GATEWAY_PRICE_CEILING.
+	c.GatewayPriceCeiling = 0.50
+	if v := os.Getenv("LENS_GATEWAY_PRICE_CEILING"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 {
+			return nil, fmt.Errorf("invalid LENS_GATEWAY_PRICE_CEILING (must be > 0): %s", v)
+		}
+		c.GatewayPriceCeiling = f
 	}
 
 	// ConfidentialRatePerPoint — DEFAULT 0 (INERT: the anchor refuses a non-positive rate → the confidential
