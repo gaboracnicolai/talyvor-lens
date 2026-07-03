@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -182,6 +183,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/spend/by-model", s.handleSpendBy("model"))
 	r.Get("/v1/api/spend/by-team", s.handleSpendBy("team"))
 	r.Get("/v1/api/spend/by-feature", s.handleSpendBy("feature"))
+	r.Get("/v1/api/spend/by-request", s.handleSpendByRequest) // T7 fu: per-request grain (read-only substrate)
 	r.Get("/v1/api/cache/stats", s.handleCacheStats)
 	r.Get("/v1/api/cache/top-patterns", s.handleCacheTopPatterns)
 	r.Get("/v1/api/models/usage", s.handleSpendBy("model"))
@@ -609,6 +611,116 @@ ORDER BY cost_usd DESC`
 		}
 		writeJSON(w, http.StatusOK, out)
 	}
+}
+
+// ── /v1/api/spend/by-request — T7 follow-up substrate ───────────────────────────────────────────────────
+// handleSpendByRequest serves UN-aggregated per-request spend rows — the exact token_events grain the
+// by-feature endpoint SUMs, plus request_id and the timestamp. It is the READ substrate the Track money-path
+// change consumes for per-request cost attribution + exactly-once dedup on request_id. No write, no ledger,
+// no change to any existing endpoint.
+//
+// TENANCY: byte-identical to handleSpendBy — workspace_id = effectiveWorkspaceID(r) AND the same window.
+// Per-request cost rows never cross a tenant boundary.
+//
+// BOUNDED: per-request over a day can be thousands of rows (unlike one-per-feature), so the endpoint is
+// capped — a page size clamped to spendByRequestMaxLimit and a keyset cursor on the unique row id. The walk
+// is dup-free + gap-free (ORDER BY id, strictly id > cursor). Default window = last 24h (the syncer's pull).
+const (
+	spendByRequestDefaultDays  = 1    // last 24h — the window the syncer pulls
+	spendByRequestMaxDays      = 30   // cap the window so it can't be widened unboundedly
+	spendByRequestDefaultLimit = 500  // default page size
+	spendByRequestMaxLimit     = 1000 // hard cap — the endpoint can never return more per page
+)
+
+// SAME table + SAME tenancy clause (workspace_id + window) as handleSpendBy; keyset-paginated on the unique
+// id. $1=workspace_id $2=days $3=cursor(uuid or NULL) $4=limit.
+const spendByRequestSQL = `SELECT id, request_id, feature, cost_usd, input_tokens, output_tokens, created_at
+FROM token_events
+WHERE workspace_id = $1
+  AND created_at > NOW() - INTERVAL '1 day' * $2
+  AND ($3::uuid IS NULL OR id > $3::uuid)
+ORDER BY id
+LIMIT $4`
+
+func (s *Server) handleSpendByRequest(w http.ResponseWriter, r *http.Request) {
+	if s.pool == nil {
+		writeError(w, http.StatusInternalServerError, "database not configured")
+		return
+	}
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "forbidden: no workspace identity")
+		return
+	}
+
+	days := queryInt(r, "days", spendByRequestDefaultDays)
+	if days < 1 {
+		days = spendByRequestDefaultDays
+	}
+	if days > spendByRequestMaxDays {
+		days = spendByRequestMaxDays
+	}
+
+	limit := queryInt(r, "limit", spendByRequestDefaultLimit)
+	if limit < 1 {
+		limit = spendByRequestDefaultLimit
+	}
+	if limit > spendByRequestMaxLimit {
+		limit = spendByRequestMaxLimit
+	}
+
+	// cursor: empty ⇒ NULL (first page); otherwise it MUST be a valid uuid (the prior page's last id).
+	var cursor any
+	if cur := r.URL.Query().Get("cursor"); cur != "" {
+		if _, err := uuid.Parse(cur); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid cursor")
+			return
+		}
+		cursor = cur
+	}
+
+	rows, err := s.pool.Query(r.Context(), spendByRequestSQL, wsID, days, cursor, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	out := []map[string]any{}
+	var lastID string
+	for rows.Next() {
+		var (
+			id, requestID, feature string
+			cost                   float64
+			inTok, outTok          int64
+			ts                     time.Time
+		)
+		if err := rows.Scan(&id, &requestID, &feature, &cost, &inTok, &outTok, &ts); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		lastID = id
+		out = append(out, map[string]any{
+			"request_id":    requestID,
+			"feature":       feature,
+			"cost_usd":      cost,
+			"input_tokens":  inTok,
+			"output_tokens": outTok,
+			"ts":            ts,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// next_cursor = the last row's id when a FULL page came back (more may exist); "" when the page was
+	// short (the walk is done). Keyset on the unique id ⇒ no dupes, no gaps.
+	nextCursor := ""
+	if len(out) == limit {
+		nextCursor = lastID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rows": out, "next_cursor": nextCursor})
 }
 
 // -------------------------------------------------------------------------
