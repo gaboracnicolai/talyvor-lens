@@ -138,6 +138,14 @@ type Proxy struct {
 	lxcGate          lxcBalanceReader
 	lxcGatingEnabled func() bool
 
+	// F4-capstone step C.1 — the agent allocator (see agent_allocator.go). agentSpender debits the pre-serve
+	// LXC estimate against the per-scoped-key sub-budget; agentAllocEnabled gates it; agentDebitSalt
+	// (process-start crypto/rand) seeds the server-derived debit key. All nil/empty ⇒ inert (non-agent
+	// behavior unchanged).
+	agentSpender      agentSpender
+	agentAllocEnabled func() bool
+	agentDebitSalt    []byte
+
 	// Routing-pattern capture (Phase-3) — optional, nil-safe post-serve
 	// producer for the routing Advisor. See pattern_capture.go.
 	patternSink           patternCaptureSink
@@ -672,6 +680,18 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
+	// F4-capstone step C.1 — the agent allocator (see agent_allocator.go). For an API-key-authed request with
+	// LXCAgentAllocationEnabled, DEBIT the input-only LXC estimate against the per-scoped-key sub-budget HERE,
+	// BEFORE node selection (tryLocalRouting) and BEFORE the upstream call — so a blocked agent does no
+	// routing work and physically cannot exceed its ceiling. Non-agent traffic (agentKeyID == "") skips this
+	// entirely and is unchanged. agentKeyID is reused below to pick the price-aware routing strategy.
+	agentKeyID := agentKeyIDFromContext(ctx)
+	if agentKeyID != "" && p.agentAllocationBlocks(ctx, agentKeyID, wsID, model, prompt) {
+		writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "agent_blocked").Inc()
+		return
+	}
+
 	// Branch / PR / commit attribution. Extracted up front so we can set
 	// response headers before WriteHeader; the actual DB write happens
 	// after the response body is sent so a slow INSERT can't hold up the
@@ -912,7 +932,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// routing must never break the main request. Multimodal requests
 	// skip local entirely (the local text models can't serve images) and
 	// fall through to the capability-aware cloud path below.
-	if !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.ProviderName(), model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt) {
+	if !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.ProviderName(), model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt, p.agentStrategy(agentKeyID)) {
 		return
 	}
 
@@ -1464,8 +1484,9 @@ func (p *Proxy) tryNodeRouting(
 	provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID string,
 	piiDetected bool,
 	redactedPrompt string,
+	strategy localrouter.RoutingStrategy, // F4 C.1: threaded from tryLocalRouting (price-aware for agents)
 ) bool {
-	ep, err := p.nodeRouter.SelectEndpoint(model, localrouter.StrategyLeastLoaded)
+	ep, err := p.nodeRouter.SelectEndpoint(model, strategy)
 	if err != nil {
 		return false // ErrNoHealthyEndpoint (or any selection error) → fall through to the direct path
 	}
@@ -1561,13 +1582,14 @@ func (p *Proxy) tryLocalRouting(
 	provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID string,
 	piiDetected bool,
 	redactedPrompt string,
+	strategy localrouter.RoutingStrategy, // F4 C.1: StrategyPriceAware for agents, else the default
 ) bool {
 	// Blocker 6: gateway auto-route to a REGISTERED node (flag-gated, default off). On any miss —
 	// flag off, no node registry, no healthy node for the model, or any forward error — this
 	// returns false and we fall through to the EXISTING legacy localRouter / cloud path below.
 	// Byte-identical to today when the flag is off (the branch is never entered).
 	if p.nodeAutoRouteEnabled && p.nodeRouter != nil {
-		if p.tryNodeRouting(w, ctx, provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt) {
+		if p.tryNodeRouting(w, ctx, provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt, strategy) {
 			return true
 		}
 	}
