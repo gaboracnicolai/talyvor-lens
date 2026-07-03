@@ -923,6 +923,15 @@ func run() error {
 		})
 	}
 
+	// F4-capstone step B/C.1 — price-aware routing for agent requests. The gateway price ceiling clamps the
+	// node-declared price (min(declared, ceiling)); the price loads via the leader-elected price-sync loop,
+	// never per request. Always wired (the ceiling is a harmless bound; StrategyPriceAware is opt-in per
+	// request via the agent path). StartPriceSync is blocking, so it composes with leader election.
+	localRouterMulti.SetPriceCeiling(func() float64 { return cfg.GatewayPriceCeiling })
+	go haComps.leader.Run(ctx, "price-sync", time.Minute, func(lctx context.Context) {
+		localRouterMulti.StartPriceSync(lctx, 30*time.Second)
+	})
+
 	// Embedding mining (Batch 2 Item 3). Shares the ledger;
 	// proxy wires RecordEmbeddingsServed in the semantic-cache
 	// path in a follow-up.
@@ -1028,6 +1037,10 @@ func run() error {
 	// LXC gating (Stage 2.4/2.5) — pre-serve block; inert unless LXCGatingEnabled
 	// AND LXCShadowSpendEnabled are both on. Default off.
 	p.SetLXCGate(dualToken, func() bool { return cfg.LXCGatingEnabled })
+	// F4-capstone step C.1 — the agent allocator: pre-serve estimate-debit against the per-scoped-key LXC
+	// sub-budget (SpendLXCForAgent), gated on LXCAgentAllocationEnabled. Non-agent traffic (empty APIKeyID)
+	// is unaffected. Mints the server-derived debit-key salt on wire.
+	p.SetAgentSpender(dualToken, func() bool { return cfg.LXCAgentAllocationEnabled })
 	// Phase-3 routing-pattern capture — post-serve, void, mint-free producer
 	// for the routing Advisor. Default off; persists observations for opted-in
 	// workspaces only (SQL gate). NEVER reaches ledger.Credit (earning is a
