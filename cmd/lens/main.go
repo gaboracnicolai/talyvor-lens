@@ -1302,11 +1302,15 @@ func run() error {
 	// Public: health probe and Prometheus passthrough never require a key.
 	apiServer.MountUnauthenticated(r)
 
-	// MCP server is exposed without API-key auth — MCP clients (Claude
-	// Desktop, agent frameworks, etc.) bring their own auth model.
+	// SEC: /mcp exposes per-workspace financial telemetry (spend, cache, sessions) via tools that read a
+	// workspace_id argument — so it MUST require a verified credential. It was previously mounted bare
+	// ("MCP clients bring their own auth"), letting any unauthenticated caller read any workspace's
+	// financials by naming it. Gate it with the same AuthMiddleware as the authed group; the tools
+	// additionally force the acted-on workspace to the verified caller (effectiveWorkspace).
 	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, "0.1.0")
-	r.Post("/mcp", mcpServer.HandleRPC)
-	r.Get("/mcp/sse", mcpServer.HandleSSE)
+	mcpAuth := auth.AuthMiddleware(keyStore, authManager)
+	r.With(mcpAuth).Post("/mcp", mcpServer.HandleRPC)
+	r.With(mcpAuth).Get("/mcp/sse", mcpServer.HandleSSE)
 
 	// Dashboard is public — same trust model as /healthz. The dashboard
 	// page itself is static; the live numbers come from /v1/api/* XHRs

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/session"
@@ -314,6 +315,26 @@ FROM token_events
 WHERE workspace_id = $1
   AND created_at > NOW() - INTERVAL '1 day' * $2`
 
+// effectiveWorkspace derives the workspace a tool may act on from the VERIFIED credential (the auth
+// context stamped by AuthMiddleware), never the caller-supplied argument. A non-admin is forced to its
+// own workspace — the arg is ignored, so it cannot read another tenant's financials by naming it. The
+// global admin may target any workspace via the arg (or its own / "default" when unset). An
+// unauthenticated context yields "" (fails closed); /mcp is mounted behind AuthMiddleware, so an
+// unauthenticated request never reaches a tool.
+func effectiveWorkspace(ctx context.Context, argWorkspace string) string {
+	verified, isAdmin := auth.WorkspaceIdentity(ctx)
+	if !isAdmin {
+		return verified
+	}
+	if argWorkspace != "" {
+		return argWorkspace
+	}
+	if verified != "" {
+		return verified
+	}
+	return "default"
+}
+
 func (s *Server) toolGetSpendSummary(ctx context.Context, args json.RawMessage) (any, error) {
 	if s.pool == nil {
 		return nil, fmt.Errorf("database not configured")
@@ -323,9 +344,7 @@ func (s *Server) toolGetSpendSummary(ctx context.Context, args json.RawMessage) 
 		Days        int    `json:"days"`
 	}
 	_ = json.Unmarshal(args, &in)
-	if in.WorkspaceID == "" {
-		in.WorkspaceID = "default"
-	}
+	in.WorkspaceID = effectiveWorkspace(ctx, in.WorkspaceID)
 	if in.Days <= 0 {
 		in.Days = 30
 	}
@@ -374,9 +393,7 @@ func (s *Server) toolGetCacheStats(ctx context.Context, args json.RawMessage) (a
 		WorkspaceID string `json:"workspace_id"`
 	}
 	_ = json.Unmarshal(args, &in)
-	if in.WorkspaceID == "" {
-		in.WorkspaceID = "default"
-	}
+	in.WorkspaceID = effectiveWorkspace(ctx, in.WorkspaceID)
 
 	var total, cached int64
 	var uncachedCost float64
@@ -505,4 +522,3 @@ func (s *Server) toolRouteModel(ctx context.Context, args json.RawMessage) (any,
 		"estimated_cost_per_1k_tokens": est,
 	}, nil
 }
-
