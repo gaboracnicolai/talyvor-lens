@@ -2824,7 +2824,10 @@ func run() error {
 		authed.Get("/v1/workspaces/{wsID}/experiments/{id}", func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
 			exp, ok := abEngine.GetExperiment(id)
-			if !ok {
+			// B-Lens: experiments are keyed by bare id — verify the caller owns the experiment's
+			// workspace (mirrors the eval-run / session callerOwns checks), else a member of another
+			// workspace could read/control another tenant's live routing experiment. 404, no oracle.
+			if !ok || !callerOwns(req, exp.WorkspaceID) {
 				writeJSONErr(w, http.StatusNotFound, "experiment not found")
 				return
 			}
@@ -2833,6 +2836,10 @@ func run() error {
 
 		authed.Post("/v1/workspaces/{wsID}/experiments/{id}/start", func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
+			if exp, ok := abEngine.GetExperiment(id); !ok || !callerOwns(req, exp.WorkspaceID) {
+				writeJSONErr(w, http.StatusNotFound, "experiment not found")
+				return
+			}
 			if err := abEngine.StartExperiment(req.Context(), id); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
 				return
@@ -2842,6 +2849,10 @@ func run() error {
 
 		authed.Post("/v1/workspaces/{wsID}/experiments/{id}/stop", func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
+			if exp, ok := abEngine.GetExperiment(id); !ok || !callerOwns(req, exp.WorkspaceID) {
+				writeJSONErr(w, http.StatusNotFound, "experiment not found")
+				return
+			}
 			if err := abEngine.StopExperiment(req.Context(), id); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
 				return
@@ -2851,6 +2862,10 @@ func run() error {
 
 		authed.Get("/v1/workspaces/{wsID}/experiments/{id}/analysis", func(w http.ResponseWriter, req *http.Request) {
 			id := chi.URLParam(req, "id")
+			if exp, ok := abEngine.GetExperiment(id); !ok || !callerOwns(req, exp.WorkspaceID) {
+				writeJSONErr(w, http.StatusNotFound, "experiment not found")
+				return
+			}
 			analysis, err := abEngine.AnalyzeExperiment(req.Context(), id)
 			if err != nil {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
@@ -2865,6 +2880,10 @@ func run() error {
 			// for ad-hoc debugging — same analysis aggregation but
 			// returned per variant.
 			id := chi.URLParam(req, "id")
+			if exp, ok := abEngine.GetExperiment(id); !ok || !callerOwns(req, exp.WorkspaceID) {
+				writeJSONErr(w, http.StatusNotFound, "experiment not found")
+				return
+			}
 			analysis, err := abEngine.AnalyzeExperiment(req.Context(), id)
 			if err != nil {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
