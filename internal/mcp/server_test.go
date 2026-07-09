@@ -15,6 +15,7 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/auth"
 )
 
 // embedded NATS for the alerts manager (it needs a connection even if
@@ -69,6 +70,10 @@ func rpcCall(t *testing.T, s *Server, method string, params any) rpcResponse {
 	body, _ := json.Marshal(bodyMap)
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	// Mirror production: /mcp is mounted behind AuthMiddleware, so every tool call carries a verified
+	// workspace in context. Tests stamp a non-admin "default" workspace (the tools force the acted-on
+	// workspace to this verified value via effectiveWorkspace).
+	req = req.WithContext(auth.WithAuthContext(req.Context(), &auth.AuthContext{WorkspaceID: "default"}))
 	w := httptest.NewRecorder()
 	s.HandleRPC(w, req)
 
