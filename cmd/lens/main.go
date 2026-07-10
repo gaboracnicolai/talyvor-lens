@@ -3255,6 +3255,13 @@ func run() error {
 		authed.Post("/v1/workspaces/{wsID}/eval/datasets/{dsID}/cases", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			dsID := chi.URLParam(req, "dsID")
+			// B-Lens: dsID is a bare id — verify the dataset belongs to the caller's authorized workspace
+			// (GetDataset is workspace-scoped) before adding a case, else a member of another workspace
+			// could inject cases into this dataset (poisoning its eval/regression gates). 404, no oracle.
+			if _, err := evalPipeline.GetDataset(req.Context(), wsID, dsID); err != nil {
+				writeJSONErr(w, http.StatusNotFound, "dataset not found")
+				return
+			}
 			var in eval.TestCase
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -3277,6 +3284,13 @@ func run() error {
 			}
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			// B-Lens: dataset_id comes from the body — verify it belongs to the caller's authorized
+			// workspace before running (RunEval loads its cases WHERE dataset_id only), else a member of
+			// another workspace could read that dataset's prompts/expected-outputs. 404, no oracle.
+			if _, err := evalPipeline.GetDataset(req.Context(), wsID, in.DatasetID); err != nil {
+				writeJSONErr(w, http.StatusNotFound, "dataset not found")
 				return
 			}
 			run, err := evalPipeline.RunEval(req.Context(), wsID, in.DatasetID, in.Target)
