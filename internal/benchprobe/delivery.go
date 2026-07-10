@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/talyvor/lens/internal/safehttp"
 )
 
 // TokenSigner produces the #242 gateway node-auth token for a probe /inference call. Injected (main.go
@@ -46,7 +48,7 @@ type HTTPDelivery struct {
 // NewHTTPDelivery wires the injected token-signer + node-URL lookup + http client.
 func NewHTTPDelivery(sign TokenSigner, nodeURL NodeURLLookup, client *http.Client) *HTTPDelivery {
 	if client == nil {
-		client = http.DefaultClient
+		client = safehttp.Client(30 * time.Second) // SSRF-guarded fallback (node URL is caller-supplied)
 	}
 	return &HTTPDelivery{sign: sign, nodeURL: nodeURL, client: client}
 }

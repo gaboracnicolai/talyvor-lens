@@ -20,7 +20,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/safehttp"
 )
+
+// auditWebhookClient is SSRF-guarded: the audit export can carry ALL tenants' token_events (admin +
+// empty filter), and webhookURL is caller/config-supplied — so it must not be dispatchable to an
+// internal / loopback / cloud-metadata address. (Was http.DefaultClient, which had no guard.)
+var auditWebhookClient = safehttp.Client(30 * time.Second)
 
 type pgxDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
@@ -67,6 +74,9 @@ const (
 
 type Exporter struct {
 	pool pgxDB
+	// webhookClient dispatches the audit webhook. Defaults to the SSRF-guarded auditWebhookClient; tests
+	// inject a loopback-capable client via WithHTTPClient (the guard is never weakened for production).
+	webhookClient *http.Client
 }
 
 func New(pool *pgxpool.Pool) *Exporter {
@@ -79,6 +89,13 @@ func New(pool *pgxpool.Pool) *Exporter {
 
 func newExporter(pool pgxDB) *Exporter {
 	return &Exporter{pool: pool}
+}
+
+// WithHTTPClient overrides the webhook client (test seam: a loopback httptest is blocked by the
+// production SSRF guard by design). Nil keeps the guarded default.
+func (e *Exporter) WithHTTPClient(c *http.Client) *Exporter {
+	e.webhookClient = c
+	return e
 }
 
 // Export streams rows from token_events to w in the requested format.
@@ -127,7 +144,11 @@ func (e *Exporter) ExportWebhook(ctx context.Context, webhookURL string, filter 
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	req.Header.Set("X-Talyvor-Export", "true")
 	req.Header.Set("X-Talyvor-Record-Count", strconv.Itoa(count))
-	resp, err := http.DefaultClient.Do(req)
+	client := e.webhookClient
+	if client == nil {
+		client = auditWebhookClient // SSRF-guarded default
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("audit: webhook POST: %w", err)
 	}
