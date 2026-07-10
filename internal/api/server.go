@@ -25,15 +25,15 @@ import (
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/costanomaly"
 	"github.com/talyvor/lens/internal/eval"
-	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/forecast"
+	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
-	"github.com/talyvor/lens/internal/guardrails"
+	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/modality"
+	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/roi"
 	"github.com/talyvor/lens/internal/routing"
-	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/workspace"
 )
 
@@ -59,45 +59,45 @@ type Server struct {
 	// → chi-native 404, consistent with the main.go economy chokepoint.
 	economyEnabled bool
 
-	pool             pgxDB
-	redisClient      *redis.Client
-	natsConn         *nats.Conn
-	exactCache       *cache.ExactCache
-	analyser         Analyser
-	alertManager     *alerts.AlertManager
-	tracker          *attribution.Tracker
-	wsManager        *workspace.Manager
-	localRouter      *localrouter.LocalRouter
-	anomalyDetector  *anomaly.Detector
-	budgetStore      *budgets.Store
-	forecaster       *forecast.Forecaster
-	costAnomaly      *costanomaly.Detector
-	roiReporter      *roi.Reporter
-	routingAdvisor   *routing.Advisor
-	guardrails       *guardrails.Engine
-	evalPipeline     *eval.Pipeline
-	poviStakes       *povi.StakeManager
-	poviChallenges   *povi.ChallengeStore
-	version          string
-	startTime        time.Time
+	pool            pgxDB
+	redisClient     *redis.Client
+	natsConn        *nats.Conn
+	exactCache      *cache.ExactCache
+	analyser        Analyser
+	alertManager    *alerts.AlertManager
+	tracker         *attribution.Tracker
+	wsManager       *workspace.Manager
+	localRouter     *localrouter.LocalRouter
+	anomalyDetector *anomaly.Detector
+	budgetStore     *budgets.Store
+	forecaster      *forecast.Forecaster
+	costAnomaly     *costanomaly.Detector
+	roiReporter     *roi.Reporter
+	routingAdvisor  *routing.Advisor
+	guardrails      *guardrails.Engine
+	evalPipeline    *eval.Pipeline
+	poviStakes      *povi.StakeManager
+	poviChallenges  *povi.ChallengeStore
+	version         string
+	startTime       time.Time
 }
 
 // serverDeps is the test-friendly constructor input. Public NewServer
 // translates *pgxpool.Pool + *learner.Learner into the interface fields so
 // the typed-nil interface trap can't bite.
 type serverDeps struct {
-	pool             pgxDB
-	redisClient      *redis.Client
-	natsConn         *nats.Conn
-	exactCache       *cache.ExactCache
-	analyser         Analyser
-	alertManager     *alerts.AlertManager
-	tracker          *attribution.Tracker
-	wsManager        *workspace.Manager
-	localRouter      *localrouter.LocalRouter
-	anomalyDetector  *anomaly.Detector
-	version          string
-	startTime        time.Time
+	pool            pgxDB
+	redisClient     *redis.Client
+	natsConn        *nats.Conn
+	exactCache      *cache.ExactCache
+	analyser        Analyser
+	alertManager    *alerts.AlertManager
+	tracker         *attribution.Tracker
+	wsManager       *workspace.Manager
+	localRouter     *localrouter.LocalRouter
+	anomalyDetector *anomaly.Detector
+	version         string
+	startTime       time.Time
 }
 
 func newServer(d serverDeps) *Server {
@@ -170,15 +170,19 @@ func (s *Server) Mount(r chi.Router) {
 }
 
 // MountUnauthenticated registers the routes that must NOT require an API
-// key: health probe and the Prometheus metrics passthrough.
+// key: only the health probe. (The Prometheus metrics passthrough used to
+// live here too, but it serves the same internal telemetry as the
+// admin-gated /metrics — moved to MountAuthenticated so the gate isn't
+// defeated; scrapers send Authorization: Bearer <LENS_API_KEY> like /metrics.)
 func (s *Server) MountUnauthenticated(r chi.Router) {
 	r.Get("/v1/api/health", s.handleHealth)
-	r.Handle("/v1/api/metrics/prometheus", metrics.Handler())
 }
 
 // MountAuthenticated registers the routes that should sit behind
 // AuthMiddleware: all analytics, model, workspace, and alerts endpoints.
 func (s *Server) MountAuthenticated(r chi.Router) {
+	// ITEM 5: metrics passthrough is gated here (same internal telemetry as the admin-gated /metrics).
+	r.Handle("/v1/api/metrics/prometheus", metrics.Handler())
 	r.Get("/v1/api/spend/summary", s.handleSpendSummary)
 	r.Get("/v1/api/spend/by-model", s.handleSpendBy("model"))
 	r.Get("/v1/api/spend/by-team", s.handleSpendBy("team"))
@@ -589,8 +593,8 @@ ORDER BY cost_usd DESC`
 		var out []map[string]any
 		for rows.Next() {
 			var (
-				key                          string
-				cost                         float64
+				key                           string
+				cost                          float64
 				requests, inTokens, outTokens int64
 			)
 			if err := rows.Scan(&key, &cost, &requests, &inTokens, &outTokens); err != nil {
@@ -934,9 +938,9 @@ func (s *Server) handleAlertsRules(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleLocalStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.localRouter == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"available":        false,
-			"models":           []any{},
-			"requests_served":  0,
+			"available":       false,
+			"models":          []any{},
+			"requests_served": 0,
 		})
 		return
 	}
