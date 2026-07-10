@@ -64,7 +64,13 @@ jobs:
       - name: go test
         env:
           LENS_TEST_DATABASE_URL: postgres://postgres:lens_test@localhost:5432/lens_test?sslmode=disable
-        run: go test -timeout 90s -race -count=1 ./...
+        # -p 1 serialises package test binaries so they never share the single lens_test DB concurrently.
+        # Without it, packages run in parallel against one DB and destructive resets collide intermittently
+        # — e.g. internal/proxy TestAgentAllocator's `TRUNCATE ... lxc_ledger` (blocked by the U14
+        # append-only trigger once a concurrent package has migrated it) and internal/api
+        # TestSpendByRequest's token_events seed — producing false reds on unrelated PRs (this caused #276's
+        # scary-but-harmless red). Serialising is the systemic fix; correctness over a little wall-clock.
+        run: go test -timeout 120s -race -count=1 -p 1 ./...
 
   # Formal static-analysis gate: golangci-lint (errcheck, govet, ineffassign,
   # staticcheck, unused). Config in .golangci.yml. Blocking — a finding fails the
