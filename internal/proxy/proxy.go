@@ -51,6 +51,7 @@ import (
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
+	"github.com/talyvor/lens/internal/safehttp"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/workspace"
@@ -1510,7 +1511,7 @@ func (p *Proxy) tryNodeRouting(
 	req.Header.Set("X-Request-ID", requestID)
 	client := p.nodeHTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = safehttp.Client(30 * time.Second) // SSRF-guarded fallback (node URL is caller-supplied)
 	}
 	nodeStart := time.Now()
 	resp, err := client.Do(req)

@@ -224,7 +224,9 @@ func TestExportWebhook_POSTsNDJSONWithExpectedHeaders(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	e := newExporter(pool)
+	// The production webhook client is SSRF-guarded (blocks the loopback httptest); inject the test
+	// server's client so this exercises the dispatch logic without weakening the guard.
+	e := newExporter(pool).WithHTTPClient(srv.Client())
 	if err := e.ExportWebhook(context.Background(), srv.URL, ExportFilter{}); err != nil {
 		t.Fatalf("ExportWebhook: %v", err)
 	}

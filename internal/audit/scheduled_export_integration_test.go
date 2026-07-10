@@ -41,7 +41,9 @@ func TestScheduledExport_AdvancesWatermarkOnSuccess(t *testing.T) {
 	defer srv.Close()
 
 	before := readWatermark(t, pool)
-	if err := NewScheduledExport(pool, srv.URL).ExportOnce(context.Background()); err != nil {
+	// Inject the test server's client: the production webhook client is SSRF-guarded and blocks the
+	// loopback httptest sink by design — this exercises the dispatch without weakening the guard.
+	if err := NewScheduledExport(pool, srv.URL).WithHTTPClient(srv.Client()).ExportOnce(context.Background()); err != nil {
 		t.Fatalf("ExportOnce: %v", err)
 	}
 	if posts != 1 {
@@ -63,7 +65,9 @@ func TestScheduledExport_NoAdvanceOnSinkFailure(t *testing.T) {
 	defer srv.Close()
 
 	before := readWatermark(t, pool)
-	if err := NewScheduledExport(pool, srv.URL).ExportOnce(context.Background()); err == nil {
+	// Seam in the test client so this exercises the real 5xx-sink failure path, not the SSRF guard
+	// (which would also block the loopback sink — but that's not what this test is asserting).
+	if err := NewScheduledExport(pool, srv.URL).WithHTTPClient(srv.Client()).ExportOnce(context.Background()); err == nil {
 		t.Error("ExportOnce must error on a 5xx sink")
 	}
 	if after := readWatermark(t, pool); !after.Equal(before) {

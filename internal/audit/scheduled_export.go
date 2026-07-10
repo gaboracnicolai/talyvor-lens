@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,14 @@ type ScheduledExport struct {
 // NewScheduledExport builds the loop. An empty url disables it (default off).
 func NewScheduledExport(pool *pgxpool.Pool, url string) *ScheduledExport {
 	return &ScheduledExport{pool: pool, exporter: New(pool), url: url, log: slog.Default()}
+}
+
+// WithHTTPClient overrides the webhook client on the underlying exporter (test seam: the production SSRF
+// guard blocks a loopback httptest sink by design). Nil keeps the guarded default. Returns the receiver
+// for chaining.
+func (s *ScheduledExport) WithHTTPClient(c *http.Client) *ScheduledExport {
+	s.exporter.WithHTTPClient(c)
+	return s
 }
 
 // ExportOnce reads the watermark, exports (watermark, now] to the sink, and
