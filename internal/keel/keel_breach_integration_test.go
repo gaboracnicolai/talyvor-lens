@@ -151,10 +151,10 @@ func countFindings(t *testing.T, pool *pgxpool.Pool, unit string, self map[strin
 	return total, idiosyncratic
 }
 
-// BREACH 3+4 — QUERY-ONLY / NEVER-ACTS + NO-RAW-COUNTERPARTY, proven at BOTH thresholds on the SAME seeded
-// data: (A) at the SHIPPED DefaultConfig 3.0σ the tenancy boundary holds AND — documented explicitly — the
-// drifter does not cross 3.0σ so NOTHING is emitted (the breach suite must never depend on a config the
-// production default wouldn't emit under); (B) at a mechanism-proving 2.0σ the drifter IS recorded
+// BREACH 3+4 — QUERY-ONLY / NEVER-ACTS + NO-RAW-COUNTERPARTY, proven at BOTH thresholds pinned as EXPLICIT
+// LITERALS on the SAME seeded data (independent of DefaultConfig): (A) at 3.0σ the tenancy boundary holds
+// AND — documented explicitly — the drifter (~2.2σ) does not cross 3.0σ so NOTHING is emitted (the boundary
+// holds even at a threshold stricter than today's default); (B) at 2.0σ the drifter IS recorded
 // idiosyncratic and a common-mode shift is NOT flagged idiosyncratic. In BOTH: routing_patterns is
 // byte-identical after RunOnce (Keel never mutates the corpus) and no row names a counterparty.
 func TestBreach_QueryOnlyAndNoRawCounterparty(t *testing.T) {
@@ -198,16 +198,19 @@ func TestBreach_QueryOnlyAndNoRawCounterparty(t *testing.T) {
 		}
 	}
 
-	// (A) SHIPPED PLACEHOLDER 3.0σ — boundary holds; the drifter (~2.2σ) does NOT cross 3.0σ ⇒ NOTHING emitted.
-	runAt(keel.DefaultConfig().DeviationSigma) // == 3.0
+	// (A) EXPLICIT 3.0σ (pinned literal — independent of DefaultConfig, now 2.0): boundary holds; the
+	// drifter (~2.2σ) does NOT cross 3.0σ ⇒ NOTHING emitted. Proves the boundary at a threshold stricter
+	// than today's default, so the suite never depends on a config the default wouldn't emit under.
+	runAt(3.0)
 	if tot, _ := countFindings(t, pool, provider+"/m", self); tot != 0 {
-		t.Errorf("at the shipped 3.0σ default the drifter must NOT emit (below threshold), got %d findings", tot)
+		t.Errorf("at an explicit 3.0σ the drifter must NOT emit (below threshold), got %d findings", tot)
 	}
 	if tot, _ := countFindings(t, pool, provider+"/c", self); tot != 0 {
-		t.Errorf("at the shipped 3.0σ default the common-mode outlier must NOT emit, got %d findings", tot)
+		t.Errorf("at an explicit 3.0σ the common-mode outlier must NOT emit, got %d findings", tot)
 	}
 
-	// (B) MECHANISM-PROVING 2.0σ — the drifter IS idiosyncratic; the common-mode shift is NOT idiosyncratic.
+	// (B) EXPLICIT 2.0σ (pinned literal — also today's default): the drifter IS idiosyncratic; the
+	// common-mode cohort-wide shift is NOT flagged idiosyncratic.
 	runAt(2.0)
 	if _, idio := countFindings(t, pool, provider+"/m", self); idio < 1 {
 		t.Errorf("at 2.0σ the drifter 'a' must be recorded idiosyncratic, got %d idiosyncratic findings", idio)

@@ -1169,9 +1169,17 @@ func Load() (*Config, error) {
 		c.DetectorSweepEnabled = parseBoolEnv("LENS_DETECTOR_SWEEP_ENABLED")
 	}
 
-	// Keel (U25) cross-tenant drift attribution — DEFAULT-OFF; thresholds are placeholders.
-	c.KeelEnabled = parseBoolEnv("LENS_KEEL_ENABLED") // default false
-	c.KeelDeviationSigma = 3.0
+	// Keel (U25) cross-tenant drift attribution.
+	// DEFAULT-ON — closed-test, no external tenants; runs on synthetic/internal corpus so the mechanism is
+	// observable. Recalibrate at N3 turn-on. A fresh deploy with no LENS_KEEL_ENABLED env runs the sweep;
+	// the env var can still force it OFF (LENS_KEEL_ENABLED=false).
+	c.KeelEnabled = true
+	if os.Getenv("LENS_KEEL_ENABLED") != "" {
+		c.KeelEnabled = parseBoolEnv("LENS_KEEL_ENABLED")
+	}
+	// PLACEHOLDER — chosen so the detector emits observably in closed-test; NOT a calibrated production
+	// threshold. MUST be recalibrated against real-scale distribution at N3 turn-on before any external traffic.
+	c.KeelDeviationSigma = 2.0
 	if v := os.Getenv("LENS_KEEL_DEVIATION_SIGMA"); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
 			c.KeelDeviationSigma = f

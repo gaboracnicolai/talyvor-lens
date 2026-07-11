@@ -38,9 +38,11 @@ type Config struct {
 	DeviationSigma float64 // |deviation| ≥ this (in cohort-stddev units) to emit a finding (placeholder)
 }
 
-// DefaultConfig returns the placeholder thresholds. The sweep is separately behind a default-off flag.
+// DefaultConfig returns the placeholder thresholds.
+// PLACEHOLDER — chosen so the detector emits observably in closed-test; NOT a calibrated production
+// threshold. MUST be recalibrated against real-scale distribution at N3 turn-on before any external traffic.
 func DefaultConfig() Config {
-	return Config{MinWorkspaces: DefaultMinWorkspaces, DeviationSigma: 3.0}
+	return Config{MinWorkspaces: DefaultMinWorkspaces, DeviationSigma: 2.0}
 }
 
 // Observation is one per-(unit, workspace, window) aggregated quality point from the CONSENTED corpus.
