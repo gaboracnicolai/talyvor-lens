@@ -53,7 +53,7 @@ var ErrAmountNotAllowed = errors.New("billing: usd_cents is not an allowed top-u
 // *economy.DualTokenStore. Billing passes its OWN tx so the idempotency claim and
 // the credit commit atomically.
 type lxcCrediter interface {
-	CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount float64, reason string, metadata map[string]interface{}) (float64, error)
+	CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount int64, reason string, metadata map[string]interface{}) (int64, error)
 }
 
 // stripeAPI abstracts the live Stripe calls (customer + checkout session) so the
@@ -74,7 +74,7 @@ type CheckoutParams struct {
 	WorkspaceID string
 	CustomerID  string
 	USDCents    int64
-	LXCAmount   float64
+	LXCAmount   int64 // µLXC (SEC-2)
 }
 
 // Service is the billing core. Construct with New.
@@ -120,9 +120,11 @@ func defaultWorkspaceExists(pool *pgxpool.Pool) func(context.Context, string) (b
 }
 
 // lxcForCents recomputes LXC from USD cents at the fixed peg — the SINGLE price
-// truth. No LXC amount is hardcoded anywhere else in billing.
-func lxcForCents(usdCents int64) float64 {
-	return (float64(usdCents) / 100.0) / economy.LXCUSDValue
+// truth, in µLXC (SEC-2). No LXC amount is hardcoded anywhere else in billing.
+// A fiat purchase mints LXC to the payer, so it rounds DOWN (floor) — never
+// over-credit. At the $0.10 peg the division is exact for integer cents anyway.
+func lxcForCents(usdCents int64) int64 {
+	return int64(math.Floor((float64(usdCents) / 100.0) / economy.LXCUSDValue * 1e6))
 }
 
 // AllowedTopUpCents returns the configured allow-list (for the checkout UI / docs).
@@ -241,7 +243,7 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 	}
 
 	wsID := sess.Metadata["workspace_id"]
-	metaLXC, _ := strconv.ParseFloat(sess.Metadata["lxc_amount"], 64)
+	metaLXC, _ := strconv.ParseInt(sess.Metadata["lxc_amount"], 10, 64) // µLXC (SEC-2)
 	usdCents := sess.AmountTotal
 	recomp := lxcForCents(usdCents)
 
@@ -390,7 +392,7 @@ func (s *Service) handleRefund(w http.ResponseWriter, ctx context.Context, event
 // classify returns a non-empty anomaly reason when the (signed) event must NOT be
 // credited, or a non-nil error when the outcome cannot be VERIFIED (caller retries
 // with 5xx rather than guessing). NEVER trusts session metadata as the amount.
-func (s *Service) classify(ctx context.Context, currency string, usdCents int64, wsID string, recomp, metaLXC float64) (string, error) {
+func (s *Service) classify(ctx context.Context, currency string, usdCents int64, wsID string, recomp, metaLXC int64) (string, error) {
 	if !strings.EqualFold(currency, "usd") {
 		return "currency", nil
 	}
@@ -410,7 +412,9 @@ func (s *Service) classify(ctx context.Context, currency string, usdCents int64,
 	if !ok {
 		return "unknown_workspace", nil
 	}
-	if math.Abs(recomp-metaLXC) > 1e-6 {
+	// SEC-2: µLXC is an exact integer, so the server recomputation and the
+	// client-metadata value must be BIT-EQUAL (the float-epsilon check is gone).
+	if recomp != metaLXC {
 		return "amount_mismatch", nil
 	}
 	return "", nil
@@ -434,7 +438,7 @@ type Purchase struct {
 	StripeSessionID string     `json:"stripe_session_id"`
 	WorkspaceID     string     `json:"workspace_id"`
 	USDCents        int64      `json:"usd_cents"`
-	LXCAmount       float64    `json:"lxc_amount"`
+	LXCAmount       int64      `json:"lxc_amount_ulxc"` // µLXC (SEC-2)
 	Status          string     `json:"status"`
 	CreatedAt       time.Time  `json:"created_at"`
 	RefundedAt      *time.Time `json:"refunded_at,omitempty"`

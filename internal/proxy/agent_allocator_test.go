@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -52,9 +51,9 @@ func agentAllocHarness(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.
 	return p, store, pool
 }
 
-func agentSpent(t *testing.T, pool *pgxpool.Pool, key string) float64 {
+func agentSpent(t *testing.T, pool *pgxpool.Pool, key string) int64 {
 	t.Helper()
-	var spent float64
+	var spent int64
 	_ = pool.QueryRow(context.Background(), `SELECT COALESCE(spent_lxc,0) FROM agent_lxc_subbudgets WHERE scoped_key_id=$1`, key).Scan(&spent)
 	return spent
 }
@@ -72,9 +71,9 @@ func TestAgentAllocator_AdversarialOverBudget(t *testing.T) {
 		t.Fatalf("test setup: lxcEstimate must be > 0, got %v", e)
 	}
 	const allowedWant = 5
-	ceiling := float64(allowedWant) * e
+	ceiling := int64(allowedWant) * e
 
-	if _, err := store.CreditLXC(ctx, "wsAgent", 1000, "fund", nil); err != nil { // ample balance
+	if _, err := store.CreditLXC(ctx, "wsAgent", micro(1000), "fund", nil); err != nil { // ample balance
 		t.Fatal(err)
 	}
 	if err := store.SetAgentCeiling(ctx, "keyAgent", "wsAgent", ceiling); err != nil {
@@ -100,8 +99,8 @@ func TestAgentAllocator_AdversarialOverBudget(t *testing.T) {
 
 	spent := agentSpent(t, pool, "keyAgent")
 	// (a) exactly the ceiling debited — not a cent more.
-	if math.Abs(spent-ceiling) > 1e-9 || spent > ceiling+1e-9 {
-		t.Fatalf("spent_lxc must equal the ceiling EXACTLY: spent=%.9f ceiling=%.9f (e=%.9f)", spent, ceiling, e)
+	if spent != ceiling {
+		t.Fatalf("spent_lxc must equal the ceiling EXACTLY: spent=%d ceiling=%d (e=%d)", spent, ceiling, e)
 	}
 	// (b)+(c) exactly allowedWant served (debited); the rest blocked; the upstream stand-in ran ONLY for the
 	// successful debits (served == allowedWant, NOT N).
@@ -122,7 +121,7 @@ func TestAgentAllocator_ServerDerivedKey_NoDodge(t *testing.T) {
 	if e <= 0 {
 		t.Fatal("estimate must be > 0")
 	}
-	_, _ = store.CreditLXC(ctx, "wsD", 1000, "fund", nil)
+	_, _ = store.CreditLXC(ctx, "wsD", micro(1000), "fund", nil)
 	_ = store.SetAgentCeiling(ctx, "keyD", "wsD", 100*e) // ample ceiling
 
 	// The debit-key derivation takes ONLY the apiKeyID (no client header param) — two derivations differ.
@@ -142,8 +141,8 @@ func TestAgentAllocator_ServerDerivedKey_NoDodge(t *testing.T) {
 	if p.agentAllocationBlocks(ctx, "keyD", "wsD", agentTestModel, prompt) {
 		t.Fatal("second allocation should ALSO succeed (fresh key — no idempotent dodge)")
 	}
-	if spent := agentSpent(t, pool, "keyD"); math.Abs(spent-2*e) > 1e-9 {
-		t.Fatalf("a client cannot dodge: two requests must debit TWICE, spent=%.9f want %.9f", spent, 2*e)
+	if spent := agentSpent(t, pool, "keyD"); spent != 2*e {
+		t.Fatalf("a client cannot dodge: two requests must debit TWICE, spent=%d want %d", spent, 2*e)
 	}
 }
 
@@ -153,7 +152,7 @@ func TestAgentAllocator_BlockIsPreServe(t *testing.T) {
 	ctx := context.Background()
 	const prompt = "pre-serve block prompt padded out so the input estimate is strictly positive for a debit ok"
 	e := lxcEstimate(agentTestModel, prompt)
-	_, _ = store.CreditLXC(ctx, "wsP", 1000, "fund", nil)
+	_, _ = store.CreditLXC(ctx, "wsP", micro(1000), "fund", nil)
 	_ = store.SetAgentCeiling(ctx, "keyP", "wsP", e/2) // ceiling below one request → always blocks
 
 	served := 0
@@ -164,7 +163,7 @@ func TestAgentAllocator_BlockIsPreServe(t *testing.T) {
 		t.Fatal("an over-ceiling agent request must block BEFORE serve (served must be 0)")
 	}
 	if spent := agentSpent(t, pool, "keyP"); spent != 0 {
-		t.Fatalf("blocked request must debit nothing, spent=%.9f", spent)
+		t.Fatalf("blocked request must debit nothing, spent=%d", spent)
 	}
 }
 
@@ -173,13 +172,13 @@ func TestAgentAllocator_NonAgentSkipped(t *testing.T) {
 	p, store, pool := agentAllocHarness(t)
 	ctx := context.Background()
 	const prompt = "non agent prompt padded so the estimate would be positive were the path even entered here"
-	_, _ = store.CreditLXC(ctx, "wsN", 1000, "fund", nil)
+	_, _ = store.CreditLXC(ctx, "wsN", micro(1000), "fund", nil)
 	// empty apiKeyID (JWT/admin/anon) ⇒ never blocks, never debits.
 	if p.agentAllocationBlocks(ctx, "", "wsN", agentTestModel, prompt) {
 		t.Fatal("non-agent (empty APIKeyID) must NOT be blocked by the agent path")
 	}
 	if spent := agentSpent(t, pool, ""); spent != 0 {
-		t.Fatalf("non-agent must not touch any sub-budget, spent=%.9f", spent)
+		t.Fatalf("non-agent must not touch any sub-budget, spent=%d", spent)
 	}
 }
 
@@ -189,12 +188,15 @@ func TestAgentAllocator_FlagOffSkips(t *testing.T) {
 	p.SetAgentSpender(store, func() bool { return false }) // flag OFF
 	ctx := context.Background()
 	const prompt = "flag off prompt padded so the estimate would be positive were the path entered at all now"
-	_, _ = store.CreditLXC(ctx, "wsF", 1000, "fund", nil)
-	_ = store.SetAgentCeiling(ctx, "keyF", "wsF", 0.0001) // tiny ceiling — would block IF the path ran
+	_, _ = store.CreditLXC(ctx, "wsF", micro(1000), "fund", nil)
+	_ = store.SetAgentCeiling(ctx, "keyF", "wsF", micro(0.0001)) // tiny ceiling — would block IF the path ran
 	if p.agentAllocationBlocks(ctx, "keyF", "wsF", agentTestModel, prompt) {
 		t.Fatal("flag OFF ⇒ agent path must be skipped (no block) even for an API-key request")
 	}
 	if spent := agentSpent(t, pool, "keyF"); spent != 0 {
-		t.Fatalf("flag OFF must debit nothing, spent=%.9f", spent)
+		t.Fatalf("flag OFF must debit nothing, spent=%d", spent)
 	}
 }
+
+// micro converts a whole-LXC test value to integer µLXC (SEC-2: 1 LXC = 1e6 µLXC).
+func micro(lxc float64) int64 { return int64(lxc * 1e6) }

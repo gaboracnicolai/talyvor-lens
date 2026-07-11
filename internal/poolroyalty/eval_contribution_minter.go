@@ -215,9 +215,13 @@ func (m *EvalContributionMinter) mintOne(ctx context.Context, itemID, authorWS s
 	if discrimination > 1 {
 		discrimination = 1
 	}
-	amount := m.anchor.Value(GainInput{HeldScore: discrimination}) // rate × clamp01(discrimination)
-	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
+	valuation := m.anchor.Value(GainInput{HeldScore: discrimination}) // rate × clamp01(discrimination) (Tier-2 float LENS)
+	if math.IsNaN(valuation) || math.IsInf(valuation, 0) || valuation <= 0 {
 		return false, nil // non-discriminating (Var 0) or rate-0 ⇒ nothing to mint, no claim, re-eligible
+	}
+	amount := microFloorLENS(valuation) // SEC-2 site #4: mint valuation → µLENS, rounded DOWN
+	if amount <= 0 {
+		return false, nil // sub-µLENS valuation ⇒ nothing to mint, no claim, re-eligible
 	}
 
 	// (1) Claim the item ONCE. ON CONFLICT DO NOTHING + RowsAffected is the exactly-once guard.

@@ -23,22 +23,18 @@ func newMockEmbMiner(t *testing.T) (*EmbeddingMiner, pgxmock.PgxPoolIface) {
 
 func TestEmbeddingEarningRate_PerModel(t *testing.T) {
 	// All for 1000 embeddings — should produce base × multiplier.
-	cases := map[string]float64{
-		"nomic-embed-text":       0.002, // small
-		"e5-large":               0.003, // medium
-		"mxbai-embed-large":      0.004, // large
-		"text-embedding-3-small": 0.002,
-		"text-embedding-3-large": 0.004,
+	cases := map[string]int64{ // µLENS (SEC-2)
+		"nomic-embed-text":       micro(0.002), // small
+		"e5-large":               micro(0.003), // medium
+		"mxbai-embed-large":      micro(0.004), // large
+		"text-embedding-3-small": micro(0.002),
+		"text-embedding-3-large": micro(0.004),
 	}
 	for model, expected := range cases {
 		t.Run(model, func(t *testing.T) {
 			got := EmbeddingEarningRate(model, 1000)
-			diff := got - expected
-			if diff < 0 {
-				diff = -diff
-			}
-			if diff > 1e-9 {
-				t.Fatalf("model=%q expected %f, got %f", model, expected, got)
+			if got != expected { // integer µLENS — exact
+				t.Fatalf("model=%q expected %d, got %d µLENS", model, expected, got)
 			}
 		})
 	}
@@ -48,7 +44,7 @@ func TestEmbeddingEarningRate_ScalesWithCount(t *testing.T) {
 	r1 := EmbeddingEarningRate("nomic-embed-text", 1000)
 	r2 := EmbeddingEarningRate("nomic-embed-text", 5000)
 	if r2 != r1*5 {
-		t.Fatalf("expected 5× scaling: %f vs %f", r1, r2)
+		t.Fatalf("expected 5× scaling: %d vs %d", r1, r2)
 	}
 	if EmbeddingEarningRate("nomic-embed-text", 0) != 0 {
 		t.Fatal("zero count should earn zero")
@@ -57,13 +53,9 @@ func TestEmbeddingEarningRate_ScalesWithCount(t *testing.T) {
 
 func TestEmbeddingEarningRate_UnknownModelFallsBackToSmall(t *testing.T) {
 	got := EmbeddingEarningRate("unknown-model-xyz", 1000)
-	want := EmbeddingMineBaseRate * ModelMultiplierSmall
-	diff := got - want
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > 1e-9 {
-		t.Fatalf("unknown model should fall back to small, got %f", got)
+	want := MulFloor(EmbeddingMineBaseRate, ModelMultiplierSmall) // µLENS
+	if got != want {
+		t.Fatalf("unknown model should fall back to small, got %d want %d", got, want)
 	}
 }
 
@@ -131,7 +123,7 @@ func TestRecordEmbeddingsServed_CreditsOwner(t *testing.T) {
 	}
 	expectGetEmbeddingNode(mock, node)
 	// 2000 embeddings × e5-large (medium=1.5) → 0.002 × 1.5 × 2 = 0.006.
-	expectCreditOnce(mock, "req-1", "ws_owner", TypeEmbeddingMine, 0, 0, 0, 0.006, 0.006, 0.006, 0)
+	expectCreditOnce(mock, "req-1", "ws_owner", TypeEmbeddingMine, 0, 0, 0, micro(0.006), micro(0.006), micro(0.006), 0)
 	if err := miner.RecordEmbeddingsServed(context.Background(),
 		"e1", "ws_other", "req-1", 2000); err != nil {
 		t.Fatalf("RecordEmbeddingsServed: %v", err)
@@ -205,7 +197,7 @@ func TestGetStats_ReturnsCorrectTotals(t *testing.T) {
 	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(\\(metadata->>'embedding_count'\\)").
 		WithArgs("ws_s", TypeEmbeddingMine).
 		WillReturnRows(pgxmock.NewRows([]string{"embeddings", "amount"}).
-			AddRow(int64(50_000), 0.15))
+			AddRow(int64(50_000), micro(0.15)))
 	mock.ExpectQuery("SELECT COALESCE\\(MIN\\(created_at\\)").
 		WithArgs("ws_s", TypeEmbeddingMine).
 		WillReturnRows(pgxmock.NewRows([]string{"min"}).AddRow(time.Now().Add(-15 * 24 * time.Hour)))
@@ -216,11 +208,11 @@ func TestGetStats_ReturnsCorrectTotals(t *testing.T) {
 	if stats.NodesActive != 3 || stats.EmbeddingsServed != 50_000 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
-	if stats.TotalEarned != 0.15 {
-		t.Fatalf("expected 0.15 earned, got %f", stats.TotalEarned)
+	if stats.TotalEarned != micro(0.15) {
+		t.Fatalf("expected %d µLENS earned, got %d", micro(0.15), stats.TotalEarned)
 	}
 	if stats.EstimatedMonthly <= 0 {
-		t.Fatalf("expected positive monthly projection, got %f", stats.EstimatedMonthly)
+		t.Fatalf("expected positive monthly projection, got %d", stats.EstimatedMonthly)
 	}
 }
 

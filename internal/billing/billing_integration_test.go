@@ -121,7 +121,7 @@ type flakyCrediter struct {
 	failNext atomic.Bool
 }
 
-func (f *flakyCrediter) CreditLXCTx(ctx context.Context, tx pgx.Tx, ws string, amt float64, reason string, md map[string]interface{}) (float64, error) {
+func (f *flakyCrediter) CreditLXCTx(ctx context.Context, tx pgx.Tx, ws string, amt int64, reason string, md map[string]interface{}) (int64, error) {
 	if f.failNext.Swap(false) {
 		return 0, errors.New("simulated credit failure")
 	}
@@ -143,7 +143,7 @@ func signed(secret, eventID, eventType string, object map[string]any) ([]byte, s
 	return body, fmt.Sprintf("t=%d,v1=%s", now.Unix(), hex.EncodeToString(sig))
 }
 
-func sessionObj(sessID, wsID string, usdCents int64, currency, payStatus, pi string, metaLXC float64) map[string]any {
+func sessionObj(sessID, wsID string, usdCents int64, currency, payStatus, pi string, metaLXC int64) map[string]any {
 	return map[string]any{
 		"id":             sessID,
 		"amount_total":   usdCents,
@@ -152,7 +152,7 @@ func sessionObj(sessID, wsID string, usdCents int64, currency, payStatus, pi str
 		"payment_intent": pi,
 		"metadata": map[string]string{
 			"workspace_id": wsID,
-			"lxc_amount":   strconv.FormatFloat(metaLXC, 'f', -1, 64),
+			"lxc_amount":   strconv.FormatInt(metaLXC, 10),
 			"usd_cents":    strconv.FormatInt(usdCents, 10),
 		},
 	}
@@ -168,9 +168,9 @@ func post(svc *Service, body []byte, sig string) int {
 	return rec.Code
 }
 
-func balance(t *testing.T, pool *pgxpool.Pool, ws string) float64 {
+func balance(t *testing.T, pool *pgxpool.Pool, ws string) int64 {
 	t.Helper()
-	var b float64
+	var b int64
 	err := pool.QueryRow(context.Background(),
 		`SELECT balance FROM lxc_balances WHERE workspace_id=$1`, ws).Scan(&b)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -182,7 +182,7 @@ func balance(t *testing.T, pool *pgxpool.Pool, ws string) float64 {
 	return b
 }
 
-func sessionRows(t *testing.T, pool *pgxpool.Pool, sessID string) (count int, sumLXC float64) {
+func sessionRows(t *testing.T, pool *pgxpool.Pool, sessID string) (count int, sumLXC int64) {
 	t.Helper()
 	if err := pool.QueryRow(context.Background(),
 		`SELECT count(*), COALESCE(sum(lxc_amount),0) FROM lxc_purchases WHERE stripe_session_id=$1`,
@@ -200,7 +200,7 @@ func TestWebhook_Idempotency_SameEventTwice_OneCredit(t *testing.T) {
 	seedWS(t, pool, ws)
 
 	body, sig := signed(testWebhookSecret, evt, "checkout.session.completed",
-		sessionObj(sess, ws, 1000, "usd", "paid", "pi_idem", 100)) // 1000c/$0.10 = 100 LXC
+		sessionObj(sess, ws, 1000, "usd", "paid", "pi_idem", micro(100))) // 1000c/$0.10 = 100 LXC
 
 	if got := post(svc, body, sig); got != http.StatusOK {
 		t.Fatalf("first delivery: got %d, want 200", got)
@@ -209,10 +209,10 @@ func TestWebhook_Idempotency_SameEventTwice_OneCredit(t *testing.T) {
 		t.Fatalf("second delivery: got %d, want 200 (idempotent ack)", got)
 	}
 
-	if c, sum := sessionRows(t, pool, sess); c != 1 || sum != 100 {
+	if c, sum := sessionRows(t, pool, sess); c != 1 || sum != micro(100) {
 		t.Errorf("rows=%d sumLXC=%v, want exactly 1 row crediting 100", c, sum)
 	}
-	if b := balance(t, pool, ws); b != 100 {
+	if b := balance(t, pool, ws); b != micro(100) {
 		t.Errorf("balance=%v, want 100 (credited ONCE)", b)
 	}
 }
@@ -222,7 +222,7 @@ func TestWebhook_BadSignature_400_NoWrites(t *testing.T) {
 	const ws, sess = "ws_badsig", "cs_badsig"
 	seedWS(t, pool, ws)
 	body, _ := signed(testWebhookSecret, "evt_badsig", "checkout.session.completed",
-		sessionObj(sess, ws, 1000, "usd", "paid", "pi_x", 100))
+		sessionObj(sess, ws, 1000, "usd", "paid", "pi_x", micro(100)))
 
 	if got := post(svc, body, "t=1,v1=deadbeef"); got != http.StatusBadRequest {
 		t.Fatalf("bad signature: got %d, want 400", got)
@@ -241,7 +241,7 @@ func TestWebhook_AmountMismatch_Anomalous_NoCredit(t *testing.T) {
 	seedWS(t, pool, ws)
 	// usd 1000c ⇒ recompute 100 LXC, but metadata claims 9999 → refuse + anomaly.
 	body, sig := signed(testWebhookSecret, "evt_mismatch", "checkout.session.completed",
-		sessionObj(sess, ws, 1000, "usd", "paid", "pi_m", 9999))
+		sessionObj(sess, ws, 1000, "usd", "paid", "pi_m", micro(9999)))
 
 	if got := post(svc, body, sig); got != http.StatusOK {
 		t.Fatalf("got %d, want 200 (anomalous claimed)", got)
@@ -257,7 +257,7 @@ func TestWebhook_UnknownWorkspace_Refused_NoCredit(t *testing.T) {
 	const sess = "cs_unknownws"
 	// NOTE: workspace "ws_ghost" is deliberately NOT seeded.
 	body, sig := signed(testWebhookSecret, "evt_unknownws", "checkout.session.completed",
-		sessionObj(sess, "ws_ghost", 1000, "usd", "paid", "pi_g", 100))
+		sessionObj(sess, "ws_ghost", 1000, "usd", "paid", "pi_g", micro(100)))
 
 	if got := post(svc, body, sig); got != http.StatusOK {
 		t.Fatalf("got %d, want 200 (anomalous claimed)", got)
@@ -273,7 +273,7 @@ func TestWebhook_CurrencyNotUSD_Anomalous(t *testing.T) {
 	const ws, sess = "ws_eur", "cs_eur"
 	seedWS(t, pool, ws)
 	body, sig := signed(testWebhookSecret, "evt_eur", "checkout.session.completed",
-		sessionObj(sess, ws, 1000, "eur", "paid", "pi_e", 100))
+		sessionObj(sess, ws, 1000, "eur", "paid", "pi_e", micro(100)))
 	if got := post(svc, body, sig); got != http.StatusOK {
 		t.Fatalf("got %d, want 200", got)
 	}
@@ -289,7 +289,7 @@ func TestWebhook_NonpositiveAndDisallowed_Anomalous(t *testing.T) {
 	for name, cents := range map[string]int64{"zero": 0, "negative": -500, "disallowed": 2000} {
 		t.Run(name, func(t *testing.T) {
 			sess := "cs_amt_" + name
-			lxc := float64(cents) / 100 / economy.LXCUSDValue
+			lxc := lxcForCents(cents)
 			body, sig := signed(testWebhookSecret, "evt_amt_"+name, "checkout.session.completed",
 				sessionObj(sess, "ws_amt", cents, "usd", "paid", "pi_"+name, lxc))
 			if got := post(svc, body, sig); got != http.StatusOK {
@@ -309,7 +309,7 @@ func TestWebhook_Refund_MarksRefunded_BalanceUnchanged(t *testing.T) {
 	seedWS(t, pool, ws)
 	// credit first.
 	body, sig := signed(testWebhookSecret, "evt_refund_pay", "checkout.session.completed",
-		sessionObj(sess, ws, 5000, "usd", "paid", pi, 500))
+		sessionObj(sess, ws, 5000, "usd", "paid", pi, micro(500)))
 	if got := post(svc, body, sig); got != http.StatusOK {
 		t.Fatalf("credit: got %d", got)
 	}
@@ -337,21 +337,21 @@ func TestWebhook_AsyncDoubleCredit_OneCredit(t *testing.T) {
 
 	// completed(PAID) credits.
 	cb, cs := signed(testWebhookSecret, "evt_async_completed", "checkout.session.completed",
-		sessionObj(sess, ws, 1000, "usd", "paid", "pi_async", 100))
+		sessionObj(sess, ws, 1000, "usd", "paid", "pi_async", micro(100)))
 	if got := post(svc, cb, cs); got != http.StatusOK {
 		t.Fatalf("completed: got %d", got)
 	}
 	// a stray async_payment_succeeded for the SAME session, DIFFERENT event id.
 	ab, as := signed(testWebhookSecret, "evt_async_succeeded", "checkout.session.async_payment_succeeded",
-		sessionObj(sess, ws, 1000, "usd", "paid", "pi_async", 100))
+		sessionObj(sess, ws, 1000, "usd", "paid", "pi_async", micro(100)))
 	if got := post(svc, ab, as); got != http.StatusOK {
 		t.Fatalf("async after completed: got %d, want 200 (blocked, already credited)", got)
 	}
 
-	if c, sum := sessionRows(t, pool, sess); c != 1 || sum != 100 {
+	if c, sum := sessionRows(t, pool, sess); c != 1 || sum != micro(100) {
 		t.Errorf("rows=%d sumLXC=%v, want exactly ONE credit of 100", c, sum)
 	}
-	if b := balance(t, pool, ws); b != 100 {
+	if b := balance(t, pool, ws); b != micro(100) {
 		t.Errorf("balance=%v, want 100 (credited exactly once across completed+async)", b)
 	}
 }
@@ -363,7 +363,7 @@ func TestWebhook_UnpaidCompletedThenAsync_CreditsOnce(t *testing.T) {
 
 	// delayed method: completed arrives UNPAID first → no claim, no credit.
 	ub, us := signed(testWebhookSecret, "evt_delayed_unpaid", "checkout.session.completed",
-		sessionObj(sess, ws, 1000, "usd", "unpaid", "pi_delayed", 100))
+		sessionObj(sess, ws, 1000, "usd", "unpaid", "pi_delayed", micro(100)))
 	if got := post(svc, ub, us); got != http.StatusOK {
 		t.Fatalf("unpaid completed: got %d", got)
 	}
@@ -372,11 +372,11 @@ func TestWebhook_UnpaidCompletedThenAsync_CreditsOnce(t *testing.T) {
 	}
 	// then the money settles via async_payment_succeeded → credit.
 	ab, as := signed(testWebhookSecret, "evt_delayed_succeeded", "checkout.session.async_payment_succeeded",
-		sessionObj(sess, ws, 1000, "usd", "paid", "pi_delayed", 100))
+		sessionObj(sess, ws, 1000, "usd", "paid", "pi_delayed", micro(100)))
 	if got := post(svc, ab, as); got != http.StatusOK {
 		t.Fatalf("async succeeded: got %d", got)
 	}
-	if b := balance(t, pool, ws); b != 100 {
+	if b := balance(t, pool, ws); b != micro(100) {
 		t.Errorf("balance=%v, want 100 (credited on async only)", b)
 	}
 }
@@ -386,7 +386,7 @@ func TestWebhook_AsyncFailed_NoCredit(t *testing.T) {
 	const ws, sess = "ws_asyncfail", "cs_asyncfail"
 	seedWS(t, pool, ws)
 	fb, fs := signed(testWebhookSecret, "evt_asyncfail", "checkout.session.async_payment_failed",
-		sessionObj(sess, ws, 1000, "usd", "unpaid", "pi_af", 100))
+		sessionObj(sess, ws, 1000, "usd", "unpaid", "pi_af", micro(100)))
 	if got := post(svc, fb, fs); got != http.StatusOK {
 		t.Fatalf("async failed: got %d, want 200 noop", got)
 	}
@@ -411,7 +411,7 @@ func TestWebhook_CreditFailure_5xx_ThenRetryOneCredit(t *testing.T) {
 	svc := New(pool, flaky, &fakeStripe{}, testWebhookSecret)
 
 	body, sig := signed(testWebhookSecret, evt, "checkout.session.completed",
-		sessionObj(sess, ws, 1000, "usd", "paid", "pi_cf", 100))
+		sessionObj(sess, ws, 1000, "usd", "paid", "pi_cf", micro(100)))
 
 	if got := post(svc, body, sig); got < 500 { // first attempt: credit fails → 5xx
 		t.Fatalf("credit failure: got %d, want 5xx (so Stripe retries)", got)
@@ -422,10 +422,10 @@ func TestWebhook_CreditFailure_5xx_ThenRetryOneCredit(t *testing.T) {
 	if got := post(svc, body, sig); got != http.StatusOK { // redeliver SAME event → credits
 		t.Fatalf("retry: got %d, want 200", got)
 	}
-	if c, sum := sessionRows(t, pool, sess); c != 1 || sum != 100 {
+	if c, sum := sessionRows(t, pool, sess); c != 1 || sum != micro(100) {
 		t.Errorf("rows=%d sumLXC=%v, want exactly one credit after retry", c, sum)
 	}
-	if b := balance(t, pool, ws); b != 100 {
+	if b := balance(t, pool, ws); b != micro(100) {
 		t.Errorf("balance=%v, want 100 (credited exactly once after retry)", b)
 	}
 }
@@ -437,7 +437,7 @@ func TestWebhook_ConcurrentSameEvent_OneCredit(t *testing.T) {
 	const ws, sess, evt = "ws_concurrent", "cs_concurrent", "evt_concurrent"
 	seedWS(t, pool, ws)
 	body, sig := signed(testWebhookSecret, evt, "checkout.session.completed",
-		sessionObj(sess, ws, 10000, "usd", "paid", "pi_cc", 1000))
+		sessionObj(sess, ws, 10000, "usd", "paid", "pi_cc", micro(1000)))
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -509,12 +509,12 @@ func TestListPurchases_IncludesAnomalousNewestFirst(t *testing.T) {
 	seedWS(t, pool, ws)
 
 	cb, cs := signed(testWebhookSecret, "evt_list_ok", "checkout.session.completed",
-		sessionObj("cs_list_ok", ws, 1000, "usd", "paid", "pi_ok", 100))
+		sessionObj("cs_list_ok", ws, 1000, "usd", "paid", "pi_ok", micro(100)))
 	if post(svc, cb, cs) != http.StatusOK {
 		t.Fatal("seed credited row")
 	}
 	ab, as := signed(testWebhookSecret, "evt_list_anom", "checkout.session.completed",
-		sessionObj("cs_list_anom", ws, 1000, "usd", "paid", "pi_anom", 9999)) // mismatch ⇒ anomalous
+		sessionObj("cs_list_anom", ws, 1000, "usd", "paid", "pi_anom", micro(9999))) // mismatch ⇒ anomalous
 	if post(svc, ab, as) != http.StatusOK {
 		t.Fatal("seed anomalous row")
 	}
@@ -616,3 +616,6 @@ func TestWebhook_FingerprintCaptureSuccess_StoresHash(t *testing.T) {
 		t.Error("must store the HASH, never the raw fingerprint")
 	}
 }
+
+// micro converts a whole-LXC test value to integer µLXC (SEC-2: 1 LXC = 1e6 µLXC).
+func micro(lxc float64) int64 { return int64(lxc * 1e6) }

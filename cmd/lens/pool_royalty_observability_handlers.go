@@ -116,7 +116,7 @@ type detectResponse struct {
 type candidateDTO struct {
 	RequestID            string  `json:"request_id"`
 	ContributorWorkspace string  `json:"contributor_workspace"`
-	MintedAmount         float64 `json:"minted_amount"`
+	MintedAmount         int64   `json:"minted_amount_ulens"` // µLENS (SEC-2)
 	Status               string  `json:"status"`
 	Similarity           float64 `json:"similarity"`
 	TimeLeftSeconds      float64 `json:"time_left_seconds"`

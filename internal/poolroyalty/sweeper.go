@@ -73,7 +73,7 @@ type sweeperDB interface {
 // heldFinalizer is the minimal settle surface; *mining.LedgerStore's
 // FinalizeHeldTx satisfies it exactly.
 type heldFinalizer interface {
-	FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, description string, metadata map[string]interface{}) error
+	FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, description string, metadata map[string]interface{}) error
 }
 
 // FinalizeSweeper settles due held mints (Stage 2.3a) for ONE claim table. The
@@ -107,7 +107,7 @@ func NewFinalizeSweeper(db sweeperDB, ledger heldFinalizer, table string) *Final
 type dueMint struct {
 	requestID   string
 	contributor string
-	amount      float64
+	amount      int64 // µLENS (SEC-2: minted_amount is BIGINT)
 }
 
 // RunOnce sweeps due held rows and settles each in its own CAS-guarded tx.
@@ -192,11 +192,11 @@ func (s *FinalizeSweeper) settleOne(ctx context.Context, d dueMint) error {
 	}
 	// The mint enters circulation NOW (the counted TypePoolRoyalty row was
 	// just committed) — this is where the supply counter agrees with SQL.
-	metrics.MintedTokens(d.amount)
+	metrics.MintedTokens(microToFloatLENS(d.amount))
 	slog.Info("poolroyalty: royalty finalized (held → spendable)",
 		slog.String("request_id", d.requestID),
 		slog.String("contributor", d.contributor),
-		slog.Float64("amount", d.amount),
+		slog.Int64("amount_ulens", d.amount),
 	)
 	return nil
 }

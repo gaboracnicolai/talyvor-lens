@@ -149,7 +149,7 @@ func TestSubmitAnnotation_InsufficientStake(t *testing.T) {
 	// Stake lookup with FOR UPDATE returns 5 LENS < 10 requirement.
 	mock.ExpectQuery("SELECT staked FROM annotator_stakes").
 		WithArgs("ws_anno").
-		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(5.0))
+		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(micro(5.0)))
 	mock.ExpectRollback()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t1", AnnotatorID: "ws_anno", Decision: "a_better", Confidence: 4,
@@ -168,7 +168,7 @@ func TestSubmitAnnotation_RejectsDuplicate(t *testing.T) {
 			AddRow("ws_src", time.Now().Add(time.Hour)))
 	mock.ExpectQuery("SELECT staked FROM annotator_stakes").
 		WithArgs("ws_anno").
-		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(20.0))
+		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(micro(20.0)))
 	// Confidence: 0 is clamped to 1 by the miner.
 	mock.ExpectExec("INSERT INTO annotations").
 		WithArgs("t_dup", "ws_anno", "a_better", 1, 0).
@@ -192,7 +192,7 @@ func TestSubmitAnnotation_CreditsBaseReward(t *testing.T) {
 	// FOR UPDATE stake read inside the outer tx.
 	mock.ExpectQuery("SELECT staked FROM annotator_stakes").
 		WithArgs("ws_anno").
-		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(20.0))
+		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(micro(20.0)))
 	mock.ExpectExec("INSERT INTO annotations").
 		WithArgs("t_credit", "ws_anno", "a_better", 4, 5000).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -201,7 +201,7 @@ func TestSubmitAnnotation_CreditsBaseReward(t *testing.T) {
 		WithArgs("t_credit").
 		WillReturnRows(pgxmock.NewRows([]string{"decision"}).AddRow("a_better"))
 	// CreditTx runs inside the outer tx (no nested Begin/Commit).
-	expectApplyTx(mock, "ws_anno", 0, 0, 0, 0.100, 0.100, 0.100, 0)
+	expectApplyTx(mock, "ws_anno", 0, 0, 0, micro(0.100), micro(0.100), micro(0.100), 0)
 	mock.ExpectCommit()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t_credit", AnnotatorID: "ws_anno",
@@ -224,7 +224,7 @@ func TestSubmitAnnotation_PaysAgreementBonus(t *testing.T) {
 			AddRow("ws_src", time.Now().Add(time.Hour)))
 	mock.ExpectQuery("SELECT staked FROM annotator_stakes").
 		WithArgs("ws_anno").
-		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(20.0))
+		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(micro(20.0)))
 	mock.ExpectExec("INSERT INTO annotations").
 		WithArgs("t_bonus", "ws_anno", "a_better", 5, 3000).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -238,7 +238,7 @@ func TestSubmitAnnotation_PaysAgreementBonus(t *testing.T) {
 			AddRow("a_better").
 			AddRow("a_better"))
 	// Base 0.100 + bonus 0.050 = 0.150 via CreditTx (no nested Begin/Commit).
-	expectApplyTx(mock, "ws_anno", 0, 0, 0, 0.150, 0.150, 0.150, 0)
+	expectApplyTx(mock, "ws_anno", 0, 0, 0, micro(0.150), micro(0.150), micro(0.150), 0)
 	mock.ExpectCommit()
 	err := miner.SubmitAnnotation(context.Background(), Annotation{
 		TaskID: "t_bonus", AnnotatorID: "ws_anno",
@@ -297,8 +297,8 @@ func TestCheckAgreement_PartialMajority(t *testing.T) {
 func expectApplyTx(
 	mock pgxmock.PgxPoolIface,
 	workspaceID string,
-	startingBalance, startingEarned, startingSpent float64,
-	delta, expectedBalance, expectedEarned, expectedSpent float64,
+	startingBalance, startingEarned, startingSpent int64,
+	delta, expectedBalance, expectedEarned, expectedSpent int64,
 ) {
 	mock.ExpectExec("INSERT INTO lens_token_balances").
 		WithArgs(workspaceID).
@@ -319,12 +319,12 @@ func TestStake_DeductsFromBalance(t *testing.T) {
 	miner, mock := newMockAnnotator(t)
 	// Stake() owns the transaction; DebitTx runs inside it without Begin/Commit.
 	mock.ExpectBegin()
-	expectApplyTx(mock, "ws_stake", 15.0, 15.0, 0, -10.0, 5.0, 15.0, 10.0)
+	expectApplyTx(mock, "ws_stake", micro(15.0), micro(15.0), 0, -micro(10.0), micro(5.0), micro(15.0), micro(10.0))
 	mock.ExpectExec("INSERT INTO annotator_stakes").
-		WithArgs("ws_stake", 10.0).
+		WithArgs("ws_stake", micro(10.0)).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectCommit()
-	if err := miner.Stake(context.Background(), "ws_stake", 10.0); err != nil {
+	if err := miner.Stake(context.Background(), "ws_stake", micro(10.0)); err != nil {
 		t.Fatalf("Stake: %v", err)
 	}
 }
@@ -347,11 +347,11 @@ func TestGetAnnotatorStats_ReturnsTotals(t *testing.T) {
 	// Earnings.
 	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(amount\\), 0\\)\\s+FROM lens_token_ledger").
 		WithArgs("ws_stats", TypeAnnotationMine).
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(4.20))
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(4.20)))
 	// Stake.
 	mock.ExpectQuery("SELECT staked FROM annotator_stakes").
 		WithArgs("ws_stats").
-		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(25.0))
+		WillReturnRows(pgxmock.NewRows([]string{"staked"}).AddRow(micro(25.0)))
 	// Agreement query.
 	mock.ExpectQuery("WITH mine AS").
 		WithArgs("ws_stats").
@@ -364,7 +364,7 @@ func TestGetAnnotatorStats_ReturnsTotals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAnnotatorStats: %v", err)
 	}
-	if stats.Annotations != 42 || stats.EarnedTokens != 4.20 || stats.StakedTokens != 25.0 {
+	if stats.Annotations != 42 || stats.EarnedTokens != micro(4.20) || stats.StakedTokens != micro(25.0) {
 		t.Fatalf("unexpected totals: %+v", stats)
 	}
 	if stats.Agreement < 0.81 || stats.Agreement > 0.83 {
@@ -380,14 +380,15 @@ func TestGetAnnotatorStats_ReturnsTotals(t *testing.T) {
 func TestAnnotationRates(t *testing.T) {
 	r := AnnotationRates()
 	for _, k := range []string{
-		"base_reward", "high_agreement_bonus", "stake_requirement",
+		"base_reward_ulens", "high_agreement_bonus_ulens", "stake_requirement_ulens",
 		"reputation_decay_daily", "high_agreement_threshold",
 	} {
 		if _, ok := r[k]; !ok {
 			t.Fatalf("missing rate key %q", k)
 		}
 	}
-	if r["base_reward"] != AnnotationBaseReward {
-		t.Fatal("base_reward value drift")
+	// base_reward is µLENS (SEC-2); AnnotationRates() is map[string]any now.
+	if got, _ := r["base_reward_ulens"].(int64); got != AnnotationBaseReward {
+		t.Fatalf("base_reward value drift: %v", r["base_reward_ulens"])
 	}
 }

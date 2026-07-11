@@ -35,7 +35,7 @@ import (
 // on a baseline (RTX 4090-class) GPU. Scaled by GPUMultiplier
 // to reflect that an H100 produces tokens many times faster
 // than a CPU.
-const ComputeMineBaseRate = 0.050
+const ComputeMineBaseRate int64 = 50_000 // 0.050 LENS in µLENS (SEC-2)
 
 // GPU multipliers. Keep them in sync with knownGPUTypes — the
 // allowlist is the source of truth for what RegisterNode
@@ -51,10 +51,10 @@ const (
 // gpu_type column. Anything outside this set is rejected at
 // RegisterNode time.
 var knownGPUTypes = map[string]float64{
-	"cpu":      GPUMultiplierCPU,
-	"rtx4090":  GPUMultiplierRTX4090,
-	"a100":     GPUMultiplierA100,
-	"h100":     GPUMultiplierH100,
+	"cpu":     GPUMultiplierCPU,
+	"rtx4090": GPUMultiplierRTX4090,
+	"a100":    GPUMultiplierA100,
+	"h100":    GPUMultiplierH100,
 }
 
 // TypeComputeMine is the ledger row type for earnings from this
@@ -106,9 +106,9 @@ type ComputeMiningStats struct {
 // ─── errors ──────────────────────────────────────
 
 var (
-	ErrInvalidNodeURL  = errors.New("compute mining: node URL must be http:// or https:// with a host")
-	ErrInvalidGPUType  = errors.New("compute mining: unknown gpu_type (allowed: cpu, rtx4090, a100, h100)")
-	ErrNodeNotFound    = errors.New("compute mining: node not found")
+	ErrInvalidNodeURL = errors.New("compute mining: node URL must be http:// or https:// with a host")
+	ErrInvalidGPUType = errors.New("compute mining: unknown gpu_type (allowed: cpu, rtx4090, a100, h100)")
+	ErrNodeNotFound   = errors.New("compute mining: node not found")
 )
 
 // ─── EarningRate ─────────────────────────────────
@@ -123,29 +123,17 @@ func GPUMultiplier(gpuType string) float64 {
 	return GPUMultiplierCPU
 }
 
-// EarningRate is the LENS payout for serving `tokens` tokens
-// on a node of the given GPU type. Result is rounded to six
-// decimals so IEEE-754 quirks (0.05×3 = 0.15000000000000002)
-// don't leak into the ledger.
-func EarningRate(gpuType string, tokens int) float64 {
+// EarningRate is the µLENS payout for serving `tokens` tokens on a node of the
+// given GPU type (SEC-2: integer smallest-unit). The Tier-2 GPU multiplier and
+// tokens/1000 factor scale the integer base rate; the result is floored
+// (MulFloor) because a mint rounds DOWN — the dropped sub-µLENS remainder is not
+// minted (retained by the protocol). Integers make this exact; the old
+// roundTo(_,6) IEEE-754 band-aid is gone.
+func EarningRate(gpuType string, tokens int) int64 {
 	if tokens <= 0 {
 		return 0
 	}
-	raw := ComputeMineBaseRate * GPUMultiplier(gpuType) * (float64(tokens) / 1000.0)
-	return roundTo(raw, 6)
-}
-
-func roundTo(v float64, places int) float64 {
-	scale := 1.0
-	for i := 0; i < places; i++ {
-		scale *= 10
-	}
-	// math.Round-equivalent that doesn't pull math: half-up
-	// works fine since v is always non-negative here.
-	if v >= 0 {
-		return float64(int64(v*scale+0.5)) / scale
-	}
-	return float64(int64(v*scale-0.5)) / scale
+	return MulFloor(ComputeMineBaseRate, GPUMultiplier(gpuType)*(float64(tokens)/1000.0))
 }
 
 // ─── ComputeMiner ────────────────────────────────
@@ -197,7 +185,9 @@ func (m *ComputeMiner) RegisterNode(ctx context.Context, in InferenceNode) (*Inf
 		in.MaxConcurrent = 1
 	}
 	if in.PricePerToken <= 0 {
-		in.PricePerToken = ComputeMineBaseRate
+		// PricePerToken is a Tier-2 float LENS rate (inference_nodes.price_per_token
+		// stays DOUBLE); convert the µLENS base rate back to whole-LENS for it.
+		in.PricePerToken = MicroToFloat(ComputeMineBaseRate)
 	}
 	in.GPUType = strings.ToLower(in.GPUType)
 	in.URL = strings.TrimRight(in.URL, "/")
@@ -349,6 +339,7 @@ func (m *ComputeMiner) verifyNodeAsync(nodeID, nodeURL, provider string) {
 //     accounting — rare race),
 //   - the requester IS the owner (no self-serving),
 //   - tokens is zero or negative.
+//
 // RecordServedRequest mints compute LENS to the node owner for a served
 // cross-workspace request. requestID MUST be a SERVER-DERIVED work-product key
 // (the future live wire-up threads it through NotifyServed; a caller-supplied id

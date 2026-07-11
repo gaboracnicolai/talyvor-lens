@@ -37,7 +37,7 @@ import (
 // capabilities as narrow interfaces, never concrete economy stores).
 // *economy.DualTokenStore.SpendLXC satisfies it.
 type lxcSpendSink interface {
-	SpendLXC(ctx context.Context, workspaceID string, lxcAmount float64, desc string) error
+	SpendLXC(ctx context.Context, workspaceID string, lxcAmount int64, desc string) error
 }
 
 // SetLXCSpendSink wires the shadow LXC spend capability. enabled is read
@@ -60,9 +60,11 @@ func (p *Proxy) shadowSpendLXC(ctx context.Context, workspaceID string, costUSD 
 	if costUSD <= 0 {
 		return
 	}
-	// cost_usd → LXC at the fixed peg ($0.10/LXC), 6-dp to match dualtoken's
-	// roundTo(_,6) and how lxc_balances stores a float64 balance.
-	lxcAmount := math.Round(costUSD/economy.LXCUSDValue*1e6) / 1e6
+	// cost_usd → µLXC at the fixed peg ($0.10/LXC). SEC-2: µLXC is an integer
+	// smallest-unit (1e-6 LXC, the old roundTo(_,6) precision). This is a CHARGE
+	// (billing debit) for the served call, so it rounds UP (ceil) — the shadow
+	// debit never under-bills a sub-µLXC.
+	lxcAmount := int64(math.Ceil(costUSD / economy.LXCUSDValue * 1e6)) // µLXC
 	if lxcAmount <= 0 {
 		// A sub-threshold positive cost rounds to 0 — nothing to debit, and no
 		// spurious SpendLXC(0) / "debit failed" warning.
@@ -73,7 +75,7 @@ func (p *Proxy) shadowSpendLXC(ctx context.Context, workspaceID string, costUSD 
 		// Insufficient LXC, DB errors — none of it touches the served response.
 		slog.Warn("economy: shadow LXC debit failed (observational; serve unaffected)",
 			slog.String("workspace", workspaceID),
-			slog.Float64("lxc", lxcAmount),
+			slog.Int64("lxc_ulxc", lxcAmount),
 			slog.Float64("cost_usd", costUSD),
 			slog.String("err", err.Error()),
 		)

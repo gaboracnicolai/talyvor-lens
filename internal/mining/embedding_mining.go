@@ -31,7 +31,7 @@ import (
 // EmbeddingMineBaseRate is the LENS earned for serving 1000
 // embeddings on a baseline small model. Embedding work is CPU-
 // friendly so the rate is much lower than ComputeMineBaseRate.
-const EmbeddingMineBaseRate = 0.002
+const EmbeddingMineBaseRate int64 = 2_000 // 0.002 LENS in µLENS (SEC-2)
 
 // Model-family multipliers — bigger models do more semantic work
 // per call, so we pay them more.
@@ -48,11 +48,11 @@ const TypeEmbeddingMine = "embedding_mine"
 // column. New models go in here once we know their multiplier.
 // Keep the values lowercase — RegisterNode lowercases input.
 var knownEmbeddingModels = map[string]float64{
-	"nomic-embed-text":        ModelMultiplierSmall,
-	"e5-large":                ModelMultiplierMedium,
-	"mxbai-embed-large":       ModelMultiplierLarge,
-	"text-embedding-3-small":  ModelMultiplierSmall,
-	"text-embedding-3-large":  ModelMultiplierLarge,
+	"nomic-embed-text":       ModelMultiplierSmall,
+	"e5-large":               ModelMultiplierMedium,
+	"mxbai-embed-large":      ModelMultiplierLarge,
+	"text-embedding-3-small": ModelMultiplierSmall,
+	"text-embedding-3-large": ModelMultiplierLarge,
 }
 
 // knownEmbeddingDimensions is the validation set for the
@@ -88,11 +88,11 @@ type EmbeddingNode struct {
 // EmbeddingMiningStats is the response shape for the
 // /v1/workspaces/:wsID/tokens/mining/embeddings endpoint.
 type EmbeddingMiningStats struct {
-	WorkspaceID      string  `json:"workspace_id"`
-	NodesActive      int     `json:"nodes_active"`
-	EmbeddingsServed int64   `json:"embeddings_served"`
-	TotalEarned      float64 `json:"total_earned"`
-	EstimatedMonthly float64 `json:"estimated_monthly"`
+	WorkspaceID      string `json:"workspace_id"`
+	NodesActive      int    `json:"nodes_active"`
+	EmbeddingsServed int64  `json:"embeddings_served"`
+	TotalEarned      int64  `json:"total_earned_ulens"`      // µLENS (SEC-2)
+	EstimatedMonthly int64  `json:"estimated_monthly_ulens"` // µLENS (SEC-2)
 }
 
 // ─── errors ──────────────────────────────────────
@@ -114,27 +114,27 @@ func EmbeddingModelMultiplier(model string) float64 {
 	return ModelMultiplierSmall
 }
 
-// EmbeddingEarningRate is the LENS payout for `count` embeddings
-// on a `model`. Rounded to 6 decimals so IEEE-754 drift doesn't
-// leak into the ledger.
-func EmbeddingEarningRate(model string, count int) float64 {
+// EmbeddingEarningRate is the µLENS payout for `count` embeddings on a `model`
+// (SEC-2: integer smallest-unit). The Tier-2 model multiplier and count/1000
+// factor scale the integer base rate; the result is floored (MulFloor) — a mint
+// rounds DOWN, the dropped sub-µLENS remainder retained by the protocol.
+func EmbeddingEarningRate(model string, count int) int64 {
 	if count <= 0 {
 		return 0
 	}
-	raw := EmbeddingMineBaseRate * EmbeddingModelMultiplier(model) * (float64(count) / 1000.0)
-	return roundTo(raw, 6)
+	return MulFloor(EmbeddingMineBaseRate, EmbeddingModelMultiplier(model)*(float64(count)/1000.0))
 }
 
 // EmbeddingRates returns the public rate table — backs the
-// embedding section of /v1/tokens/rates.
+// embedding section of /v1/tokens/rates. base_per_1k is µLENS (SEC-2).
 func EmbeddingRates() map[string]any {
 	models := map[string]float64{}
 	for m, mult := range knownEmbeddingModels {
 		models[m] = mult
 	}
 	return map[string]any{
-		"base_per_1k": EmbeddingMineBaseRate,
-		"models":      models,
+		"base_per_1k_ulens": EmbeddingMineBaseRate,
+		"models":            models,
 	}
 }
 
@@ -429,7 +429,7 @@ func (m *EmbeddingMiner) GetStats(ctx context.Context, workspaceID string) (*Emb
 		if days < 30 {
 			days = 30
 		}
-		stats.EstimatedMonthly = stats.TotalEarned / days * 30
+		stats.EstimatedMonthly = int64(float64(stats.TotalEarned) / days * 30)
 	}
 
 	return stats, nil

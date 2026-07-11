@@ -54,10 +54,10 @@ type slashCall struct {
 type fakeSlasher struct {
 	mu     sync.Mutex
 	calls  []slashCall
-	amount float64
+	amount int64
 }
 
-func (f *fakeSlasher) Slash(_ context.Context, nodeID string, fraction float64, _ string) (float64, error) {
+func (f *fakeSlasher) Slash(_ context.Context, nodeID string, fraction float64, _ string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, slashCall{nodeID, fraction})
@@ -83,7 +83,7 @@ func (s *memChallengeStore) Record(_ context.Context, c Challenge) error {
 	s.byID[c.ID] = c
 	return nil
 }
-func (s *memChallengeStore) UpdateResult(_ context.Context, id string, result ChallengeResult, slashedAmount float64, reason string) error {
+func (s *memChallengeStore) UpdateResult(_ context.Context, id string, result ChallengeResult, slashedAmount int64, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.byID[id]

@@ -22,11 +22,11 @@ type countingSlasher struct {
 	n  int
 }
 
-func (s *countingSlasher) Slash(_ context.Context, _ string, fraction float64, _ string) (float64, error) {
+func (s *countingSlasher) Slash(_ context.Context, _ string, fraction float64, _ string) (int64, error) {
 	s.mu.Lock()
 	s.n++
 	s.mu.Unlock()
-	return fraction * 100, nil
+	return int64(fraction * 100), nil
 }
 func (s *countingSlasher) count() int { s.mu.Lock(); defer s.mu.Unlock(); return s.n }
 
@@ -34,7 +34,7 @@ func (s *countingSlasher) count() int { s.mu.Lock(); defer s.mu.Unlock(); return
 type noopChallengeStore struct{}
 
 func (noopChallengeStore) Record(context.Context, povi.Challenge) error { return nil }
-func (noopChallengeStore) UpdateResult(context.Context, string, povi.ChallengeResult, float64, string) error {
+func (noopChallengeStore) UpdateResult(context.Context, string, povi.ChallengeResult, int64, string) error {
 	return nil
 }
 func (noopChallengeStore) AlreadyChallenged(context.Context, string) (bool, error) {

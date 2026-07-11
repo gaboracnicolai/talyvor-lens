@@ -13,7 +13,7 @@ import (
 // observable behavior is "which sink calls did it make".
 type lxcCall struct {
 	ws     string
-	amount float64
+	amount int64
 	desc   string
 }
 
@@ -22,7 +22,7 @@ type fakeLXCSink struct {
 	err   error
 }
 
-func (f *fakeLXCSink) SpendLXC(_ context.Context, ws string, amount float64, desc string) error {
+func (f *fakeLXCSink) SpendLXC(_ context.Context, ws string, amount int64, desc string) error {
 	f.calls = append(f.calls, lxcCall{ws, amount, desc})
 	return f.err
 }
@@ -53,8 +53,8 @@ func TestShadowSpendLXC_FlagOn_DebitsConverted(t *testing.T) {
 		t.Fatalf("flag ON must call the sink once; got %d", len(sink.calls))
 	}
 	c := sink.calls[0]
-	if c.ws != "wsA" || c.amount != 10.0 || c.desc != "shadow: AI call billing" {
-		t.Errorf("sink call = %+v, want wsA / 10.0 / 'shadow: AI call billing'", c)
+	if c.ws != "wsA" || c.amount != micro(10) || c.desc != "shadow: AI call billing" {
+		t.Errorf("sink call = %+v, want wsA / micro(10) / shadow: AI call billing", c)
 	}
 }
 
@@ -66,8 +66,8 @@ func TestShadowSpendLXC_SixDecimalRounding(t *testing.T) {
 	if len(sink.calls) != 1 {
 		t.Fatalf("want 1 call, got %d", len(sink.calls))
 	}
-	if got, want := sink.calls[0].amount, math.Round(0.12345678/0.10*1e6)/1e6; got != want || got != 1.234568 {
-		t.Errorf("lxcAmount = %v, want %v (6-dp of costUSD/0.10)", got, want)
+	if got, want := sink.calls[0].amount, int64(math.Ceil(0.12345678/0.10*1e6)); got != want || got != 1234568 {
+		t.Errorf("lxcAmount = %d, want %d µLXC (ceil of costUSD/0.10)", got, want)
 	}
 }
 
@@ -130,11 +130,21 @@ func TestShadowSpendLXC_NilSafe(t *testing.T) {
 
 // Sub-threshold positive cost that rounds to 0 LXC: no debit, no spurious
 // SpendLXC(0) / "debit failed" warning.
-func TestShadowSpendLXC_RoundsToZero_NoDebit(t *testing.T) {
-	sink := &fakeLXCSink{}
-	p := proxyWithSink(sink, true)
-	p.shadowSpendLXC(context.Background(), "wsA", 0.00000004) // /0.10 = 0.0000004 → 6-dp → 0
-	if len(sink.calls) != 0 {
-		t.Fatalf("a cost that rounds to 0 LXC must not debit; got %d calls", len(sink.calls))
+// SEC-2: the shadow debit is a CHARGE, so it rounds UP (ceil, house-favoring) —
+// a sub-µLXC positive cost now bills the MINIMUM 1 µLXC, never 0. Only a zero /
+// non-positive cost skips (costUSD <= 0). This replaces the old round-to-zero
+// behavior (which could under-bill a tiny real cost to 0).
+func TestShadowSpendLXC_ZeroCost_NoDebit_TinyCostBillsMinimum(t *testing.T) {
+	// (a) zero cost → no debit at all.
+	sinkZero := &fakeLXCSink{}
+	proxyWithSink(sinkZero, true).shadowSpendLXC(context.Background(), "wsA", 0)
+	if len(sinkZero.calls) != 0 {
+		t.Fatalf("zero cost must not debit; got %d calls", len(sinkZero.calls))
+	}
+	// (b) a tiny positive cost (< 1 µLXC before ceil) bills exactly 1 µLXC.
+	sinkTiny := &fakeLXCSink{}
+	proxyWithSink(sinkTiny, true).shadowSpendLXC(context.Background(), "wsA", 0.00000004) // /0.10 = 0.4 µLXC → ceil 1
+	if len(sinkTiny.calls) != 1 || sinkTiny.calls[0].amount != 1 {
+		t.Fatalf("a tiny positive cost must bill the minimum 1 µLXC (ceil); got %+v", sinkTiny.calls)
 	}
 }

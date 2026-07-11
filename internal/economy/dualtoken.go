@@ -53,9 +53,9 @@ const (
 	// LENS price discovery on the order book.
 	Phase1FloorRate = 1.0
 
-	// MinConversionLXC is the smallest LXC amount a single
-	// conversion can mint — blocks dust conversions.
-	MinConversionLXC = 0.10
+	// MinConversionLXC is the smallest LXC amount a single conversion can mint,
+	// in µLXC (SEC-2) — blocks dust conversions. 100_000 µLXC = 0.10 LXC.
+	MinConversionLXC int64 = 100_000
 
 	// Ledger row types for the LXC + conversion paths.
 	LXCTypeConvertFromLENS = "convert_from_lens"
@@ -68,7 +68,7 @@ const (
 
 var (
 	ErrInsufficientLXC     = errors.New("economy: insufficient LXC balance")
-	ErrConversionTooSmall  = fmt.Errorf("economy: conversion below minimum of %v LXC", MinConversionLXC)
+	ErrConversionTooSmall  = fmt.Errorf("economy: conversion below minimum of %d µLXC", MinConversionLXC)
 	ErrInsufficientLENSFor = errors.New("economy: insufficient LENS balance for conversion")
 )
 
@@ -88,22 +88,24 @@ type RateComputation struct {
 	Floored      bool    `json:"floored"`       // true if the Phase1 floor applied
 }
 
-// ConvertResult is what ConvertLENStoLXC returns.
+// ConvertResult is what ConvertLENStoLXC returns. LXC amounts are integer µLXC,
+// LENS amounts integer µLENS (SEC-2). Rate is a Tier-2 float (LENS per LXC).
 type ConvertResult struct {
-	LXCMinted      float64 `json:"lxc_minted"`
-	LENSSpent      float64 `json:"lens_spent"`
+	LXCMinted      int64   `json:"lxc_minted_ulxc"`
+	LENSSpent      int64   `json:"lens_spent_ulens"`
 	Rate           float64 `json:"rate"`
-	NewLXCBalance  float64 `json:"new_lxc_balance"`
-	NewLENSBalance float64 `json:"new_lens_balance"`
+	NewLXCBalance  int64   `json:"new_lxc_balance_ulxc"`
+	NewLENSBalance int64   `json:"new_lens_balance_ulens"`
 }
 
-// LXCSnapshot mirrors a row of lxc_balances.
+// LXCSnapshot mirrors a row of lxc_balances. Balances are integer µLXC (SEC-2);
+// USDValue is the balance's worth in integer µUSD (1e-6 USD) at the fixed peg.
 type LXCSnapshot struct {
-	WorkspaceID    string  `json:"workspace_id"`
-	Balance        float64 `json:"balance"`
-	LifetimeMinted float64 `json:"lifetime_minted"`
-	LifetimeSpent  float64 `json:"lifetime_spent"`
-	USDValue       float64 `json:"usd_value"`
+	WorkspaceID    string `json:"workspace_id"`
+	Balance        int64  `json:"balance_ulxc"`
+	LifetimeMinted int64  `json:"lifetime_minted_ulxc"`
+	LifetimeSpent  int64  `json:"lifetime_spent_ulxc"`
+	USDValue       int64  `json:"usd_value_uusd"`
 }
 
 // ─── RateEngine ──────────────────────────────────
@@ -159,17 +161,23 @@ func (e *RateEngine) ComputeFairRate(ctx context.Context) (RateComputation, erro
 		return RateComputation{}, err
 	}
 
+	// SEC-2: supply is integer µLENS; the rate math (Tier-2) works in whole LENS,
+	// so convert to float LENS here. RateComputation.Circulating is a Tier-2
+	// display/audit value (conversion_rate_history.circulating stays DOUBLE).
+	totalMintedLENS := mining.MicroToFloat(totalMinted)
+	circulatingLENS := mining.MicroToFloat(circulating)
+
 	comp := RateComputation{
 		Spread:       ConversionSpread,
-		Circulating:  circulating,
+		Circulating:  circulatingLENS,
 		PreviousRate: prev,
 	}
 
 	// Backing + fair rate. Guard against an empty economy (no LENS
 	// minted yet or everything burned) — fall through to the floor.
 	if totalMinted > 0 && circulating > 0 {
-		totalWorkUSD := totalMinted * LXCUSDValue
-		comp.BackingValue = totalWorkUSD / circulating
+		totalWorkUSD := totalMintedLENS * LXCUSDValue
+		comp.BackingValue = totalWorkUSD / circulatingLENS
 		comp.FairRate = LXCUSDValue / comp.BackingValue
 	} else {
 		comp.BackingValue = 0
@@ -197,7 +205,11 @@ func (e *RateEngine) ComputeFairRate(ctx context.Context) (RateComputation, erro
 		comp.Floored = true
 	}
 
-	comp.AdminRate = roundTo(rAdmin, 6)
+	// SEC-2: AdminRate is a Tier-2 rate (LENS per LXC), not a conserved amount, so
+	// it stays float64 and the roundTo(_,6) band-aid is removed. Full Tier-2 rate
+	// treatment is deferred; the conversion path that consumes this rate rounds
+	// its conserved µLENS RESULT house-favoring (see ConvertLENStoLXC).
+	comp.AdminRate = rAdmin
 	return comp, nil
 }
 
@@ -321,7 +333,7 @@ func newDualTokenStore(lens *mining.LedgerStore, db pgxDB, engine *RateEngine) *
 // The whole operation runs in a single transaction: read+debit
 // the LENS balance, read+credit the LXC balance, and append a row
 // to each token's ledger. Any failure rolls the lot back.
-func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID string, lxcAmount float64) (ConvertResult, error) {
+func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID string, lxcAmount int64) (ConvertResult, error) {
 	if lxcAmount < MinConversionLXC {
 		return ConvertResult{}, ErrConversionTooSmall
 	}
@@ -329,7 +341,12 @@ func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID strin
 	if err != nil {
 		return ConvertResult{}, err
 	}
-	lensCost := roundTo(lxcAmount*rate, 6)
+	// SEC-2 site #1 (LXC→LENS conversion). lxcAmount is conserved µLXC; rate is a
+	// Tier-2 float (LENS per LXC). µLXC × (LENS/LXC) = µLENS (same 1e6 scale). The
+	// LENS cost is a CHARGE the buyer pays to mint LXC, so it rounds UP (MulCeil)
+	// — the buyer is never under-charged a sub-µLENS; the extra sub-unit is a
+	// larger debit retained by the protocol. The LXC minted is exactly lxcAmount.
+	lensCost := mining.MulCeil(lxcAmount, rate)
 
 	if s.pool == nil {
 		// No-DB path (unit tests of the pure arithmetic).
@@ -354,7 +371,7 @@ func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID strin
 	if lensBal < lensCost {
 		return ConvertResult{}, ErrInsufficientLENSFor
 	}
-	newLENS := roundTo(lensBal-lensCost, 6)
+	newLENS := lensBal - lensCost // exact integer µLENS
 	meta := map[string]interface{}{"lxc_minted": lxcAmount, "rate": rate}
 	if err := insertLENSLedger(ctx, tx, workspaceID, -lensCost, newLENS,
 		LENSTypeConvertToLXC, "converted to LXC", meta); err != nil {
@@ -369,7 +386,7 @@ func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID strin
 	if err != nil {
 		return ConvertResult{}, err
 	}
-	newLXC := roundTo(lxcBal+lxcAmount, 6)
+	newLXC := lxcBal + lxcAmount // exact integer µLXC
 	lxcMeta := map[string]interface{}{"lens_spent": lensCost, "rate": rate}
 	if err := insertLXCLedger(ctx, tx, workspaceID, lxcAmount, newLXC,
 		LXCTypeConvertFromLENS, "converted from LENS", lxcMeta); err != nil {
@@ -382,7 +399,7 @@ func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID strin
 	if err := tx.Commit(ctx); err != nil {
 		return ConvertResult{}, fmt.Errorf("economy: commit conversion: %w", err)
 	}
-	metrics.ConvertedLXC(lxcAmount) // LXC minted via LENS→LXC conversion
+	metrics.ConvertedLXC(mining.MicroToFloat(lxcAmount)) // LXC minted via LENS→LXC conversion
 	return ConvertResult{
 		LXCMinted:      lxcAmount,
 		LENSSpent:      lensCost,
@@ -395,7 +412,7 @@ func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID strin
 // SpendLXC debits the workspace's LXC balance — this is what the
 // proxy bills against on each AI call. Fails with ErrInsufficientLXC
 // when the balance can't cover the spend.
-func (s *DualTokenStore) SpendLXC(ctx context.Context, workspaceID string, lxcAmount float64, description string) error {
+func (s *DualTokenStore) SpendLXC(ctx context.Context, workspaceID string, lxcAmount int64, description string) error {
 	if lxcAmount <= 0 {
 		return errors.New("economy: spend amount must be positive")
 	}
@@ -415,7 +432,7 @@ func (s *DualTokenStore) SpendLXC(ctx context.Context, workspaceID string, lxcAm
 	if bal < lxcAmount {
 		return ErrInsufficientLXC
 	}
-	newBal := roundTo(bal-lxcAmount, 6)
+	newBal := bal - lxcAmount // exact integer µLXC
 	if err := insertLXCLedger(ctx, tx, workspaceID, -lxcAmount, newBal,
 		LXCTypeSpend, description, nil); err != nil {
 		return err
@@ -433,7 +450,7 @@ func (s *DualTokenStore) SpendLXC(ctx context.Context, workspaceID string, lxcAm
 // lxc_purchases INSERT ... ON CONFLICT) and this credit commit ATOMICALLY — the
 // money guarantee. Returns the new LXC balance. The caller owns Begin/Commit/
 // Rollback (and must never let billing write lxc_ledger/lxc_balances directly).
-func (s *DualTokenStore) CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount float64, reason string, metadata map[string]interface{}) (float64, error) {
+func (s *DualTokenStore) CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount int64, reason string, metadata map[string]interface{}) (int64, error) {
 	if lxcAmount <= 0 {
 		return 0, errors.New("economy: credit amount must be positive")
 	}
@@ -441,7 +458,7 @@ func (s *DualTokenStore) CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID
 	if err != nil {
 		return 0, err
 	}
-	newBal := roundTo(bal+lxcAmount, 6)
+	newBal := bal + lxcAmount // exact integer µLXC
 	if err := insertLXCLedger(ctx, tx, workspaceID, lxcAmount, newBal,
 		LXCTypePurchase, reason, metadata); err != nil {
 		return 0, err
@@ -454,7 +471,7 @@ func (s *DualTokenStore) CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID
 
 // CreditLXC is the standalone (own-transaction) form of CreditLXCTx, for callers
 // that are not already inside a tx. Mirrors the convert path's tx envelope.
-func (s *DualTokenStore) CreditLXC(ctx context.Context, workspaceID string, lxcAmount float64, reason string, metadata map[string]interface{}) (float64, error) {
+func (s *DualTokenStore) CreditLXC(ctx context.Context, workspaceID string, lxcAmount int64, reason string, metadata map[string]interface{}) (int64, error) {
 	if lxcAmount <= 0 {
 		return 0, errors.New("economy: credit amount must be positive")
 	}
@@ -478,12 +495,12 @@ func (s *DualTokenStore) CreditLXC(ctx context.Context, workspaceID string, lxcA
 
 // GetLXCBalance returns the current LXC balance (0 for a fresh
 // workspace — not an error).
-func (s *DualTokenStore) GetLXCBalance(ctx context.Context, workspaceID string) (float64, error) {
+func (s *DualTokenStore) GetLXCBalance(ctx context.Context, workspaceID string) (int64, error) {
 	if s.pool == nil {
 		return 0, nil
 	}
 	row := s.pool.QueryRow(ctx, `SELECT balance FROM lxc_balances WHERE workspace_id = $1`, workspaceID)
-	var b float64
+	var b int64
 	if err := row.Scan(&b); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, nil
@@ -508,7 +525,11 @@ func (s *DualTokenStore) GetLXCSnapshot(ctx context.Context, workspaceID string)
 			return LXCSnapshot{}, fmt.Errorf("economy: lxc snapshot: %w", err)
 		}
 	}
-	snap.USDValue = roundTo(snap.Balance*LXCUSDValue, 6)
+	// SEC-2 site #6 (USD-value display). Balance is conserved µLXC; LXCUSDValue
+	// ($0.10, Tier-2 peg) is a float. µLXC × (USD/LXC) = µUSD (1e-6 USD, same 1e6
+	// scale). This is a DISPLAY of value the workspace holds, so it rounds DOWN
+	// (MulFloor) — never overstate the balance's worth.
+	snap.USDValue = mining.MulFloor(snap.Balance, LXCUSDValue)
 	return snap, nil
 }
 
@@ -517,7 +538,7 @@ func (s *DualTokenStore) GetLXCSnapshot(ctx context.Context, workspaceID string)
 // here because the conversion tx spans both token schemas and
 // the mining helpers are package-private.
 
-func readLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, minted, spent float64, err error) {
+func readLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, minted, spent int64, err error) {
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO lxc_balances (workspace_id, balance, lifetime_minted, lifetime_spent)
 		VALUES ($1, 0, 0, 0) ON CONFLICT (workspace_id) DO NOTHING`, workspaceID); err != nil {
@@ -532,7 +553,7 @@ func readLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, mi
 	return
 }
 
-func writeLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, minted, spent float64) error {
+func writeLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, minted, spent int64) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE lxc_balances
 		SET balance = $2, lifetime_minted = $3, lifetime_spent = $4, updated_at = NOW()
@@ -543,7 +564,7 @@ func writeLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, mi
 	return nil
 }
 
-func insertLXCLedger(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter float64,
+func insertLXCLedger(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter int64,
 	txType, description string, metadata map[string]interface{}) error {
 	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
 	if err != nil {
@@ -562,7 +583,7 @@ func insertLXCLedger(ctx context.Context, tx pgx.Tx, workspaceID string, delta, 
 // same tx that mints LXC, so we re-implement the minimal SQL
 // against lens_token_* here.
 
-func readLENSBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, earned, spent float64, err error) {
+func readLENSBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, earned, spent int64, err error) {
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO lens_token_balances (workspace_id, balance, lifetime_earned, lifetime_spent)
 		VALUES ($1, 0, 0, 0) ON CONFLICT (workspace_id) DO NOTHING`, workspaceID); err != nil {
@@ -577,7 +598,7 @@ func readLENSBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, e
 	return
 }
 
-func writeLENSBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, earned, spent float64) error {
+func writeLENSBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, earned, spent int64) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE lens_token_balances
 		SET balance = $2, lifetime_earned = $3, lifetime_spent = $4, updated_at = NOW()
@@ -588,7 +609,7 @@ func writeLENSBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, e
 	return nil
 }
 
-func insertLENSLedger(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter float64,
+func insertLENSLedger(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter int64,
 	txType, description string, metadata map[string]interface{}) error {
 	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
 	if err != nil {

@@ -57,12 +57,12 @@ const stakeBalanceUpdateSQL = `
 
 // LockStake atomically moves `amount` LENS from available balance to locked.
 // Returns ErrInsufficientBalance when the workspace can't cover it.
-func (s *LedgerStore) LockStake(ctx context.Context, workspaceID string, amount float64, metadata map[string]interface{}) error {
+func (s *LedgerStore) LockStake(ctx context.Context, workspaceID string, amount int64, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: stake lock amount must be positive")
 	}
 	return s.stakeTx(ctx, workspaceID, amount, TypeStakeLock, "stake locked (collateral)", metadata,
-		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+		func(bal, locked int64) (newBal, newLocked, delta, balanceAfter int64, err error) {
 			if bal < amount {
 				return 0, 0, 0, 0, ErrInsufficientBalance
 			}
@@ -73,12 +73,12 @@ func (s *LedgerStore) LockStake(ctx context.Context, workspaceID string, amount 
 }
 
 // ReleaseStake atomically moves `amount` LENS from locked back to available.
-func (s *LedgerStore) ReleaseStake(ctx context.Context, workspaceID string, amount float64, metadata map[string]interface{}) error {
+func (s *LedgerStore) ReleaseStake(ctx context.Context, workspaceID string, amount int64, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: stake release amount must be positive")
 	}
 	return s.stakeTx(ctx, workspaceID, amount, TypeStakeRelease, "stake released (collateral returned)", metadata,
-		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+		func(bal, locked int64) (newBal, newLocked, delta, balanceAfter int64, err error) {
 			if locked < amount {
 				return 0, 0, 0, 0, ErrInsufficientLocked
 			}
@@ -91,12 +91,12 @@ func (s *LedgerStore) ReleaseStake(ctx context.Context, workspaceID string, amou
 // SlashStake atomically BURNS `amount` LENS out of locked — it leaves locked and
 // does NOT return to available, reducing total supply. Available balance is
 // unchanged.
-func (s *LedgerStore) SlashStake(ctx context.Context, workspaceID string, amount float64, metadata map[string]interface{}) error {
+func (s *LedgerStore) SlashStake(ctx context.Context, workspaceID string, amount int64, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: stake slash amount must be positive")
 	}
 	return s.stakeTx(ctx, workspaceID, amount, TypeStakeSlash, "stake slashed (collateral burned)", metadata,
-		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+		func(bal, locked int64) (newBal, newLocked, delta, balanceAfter int64, err error) {
 			if locked < amount {
 				return 0, 0, 0, 0, ErrInsufficientLocked
 			}
@@ -106,11 +106,11 @@ func (s *LedgerStore) SlashStake(ctx context.Context, workspaceID string, amount
 }
 
 // LockedBalance returns the workspace's currently-locked LENS (0 if no row).
-func (s *LedgerStore) LockedBalance(ctx context.Context, workspaceID string) (float64, error) {
+func (s *LedgerStore) LockedBalance(ctx context.Context, workspaceID string) (int64, error) {
 	if s.pool == nil {
 		return 0, nil
 	}
-	var locked float64
+	var locked int64
 	err := s.pool.QueryRow(ctx,
 		`SELECT locked_balance FROM lens_token_balances WHERE workspace_id = $1`, workspaceID,
 	).Scan(&locked)
@@ -132,15 +132,15 @@ func (s *LedgerStore) stakeInner(
 	ctx context.Context,
 	tx pgx.Tx,
 	workspaceID string,
-	amount float64,
+	amount int64,
 	txType, description string,
 	metadata map[string]interface{},
-	transition func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error),
+	transition func(bal, locked int64) (newBal, newLocked, delta, balanceAfter int64, err error),
 ) error {
 	if _, err := tx.Exec(ctx, stakeEnsureBalanceSQL, workspaceID); err != nil {
 		return fmt.Errorf("mining: ensure balance row: %w", err)
 	}
-	var bal, locked float64
+	var bal, locked int64
 	if err := tx.QueryRow(ctx, stakeLockSelectSQL, workspaceID).Scan(&bal, &locked); err != nil {
 		return fmt.Errorf("mining: read balance: %w", err)
 	}
@@ -171,10 +171,10 @@ func (s *LedgerStore) stakeInner(
 func (s *LedgerStore) stakeTx(
 	ctx context.Context,
 	workspaceID string,
-	amount float64,
+	amount int64,
 	txType, description string,
 	metadata map[string]interface{},
-	transition func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error),
+	transition func(bal, locked int64) (newBal, newLocked, delta, balanceAfter int64, err error),
 ) error {
 	if s.pool == nil {
 		return nil
@@ -199,12 +199,12 @@ func (s *LedgerStore) stakeTx(
 // an external transaction supplied by the caller (used by StakeManager to bundle
 // the ledger op + stake-record update into one atomic transaction).
 
-func (s *LedgerStore) LockStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error {
+func (s *LedgerStore) LockStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: stake lock amount must be positive")
 	}
 	return s.stakeInner(ctx, tx, workspaceID, amount, TypeStakeLock, "stake locked (collateral)", metadata,
-		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+		func(bal, locked int64) (newBal, newLocked, delta, balanceAfter int64, err error) {
 			if bal < amount {
 				return 0, 0, 0, 0, ErrInsufficientBalance
 			}
@@ -212,12 +212,12 @@ func (s *LedgerStore) LockStakeTx(ctx context.Context, tx pgx.Tx, workspaceID st
 		})
 }
 
-func (s *LedgerStore) ReleaseStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error {
+func (s *LedgerStore) ReleaseStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: stake release amount must be positive")
 	}
 	return s.stakeInner(ctx, tx, workspaceID, amount, TypeStakeRelease, "stake released (collateral returned)", metadata,
-		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+		func(bal, locked int64) (newBal, newLocked, delta, balanceAfter int64, err error) {
 			if locked < amount {
 				return 0, 0, 0, 0, ErrInsufficientLocked
 			}
@@ -225,12 +225,12 @@ func (s *LedgerStore) ReleaseStakeTx(ctx context.Context, tx pgx.Tx, workspaceID
 		})
 }
 
-func (s *LedgerStore) SlashStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error {
+func (s *LedgerStore) SlashStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: stake slash amount must be positive")
 	}
 	return s.stakeInner(ctx, tx, workspaceID, amount, TypeStakeSlash, "stake slashed (collateral burned)", metadata,
-		func(bal, locked float64) (newBal, newLocked, delta, balanceAfter float64, err error) {
+		func(bal, locked int64) (newBal, newLocked, delta, balanceAfter int64, err error) {
 			if locked < amount {
 				return 0, 0, 0, 0, ErrInsufficientLocked
 			}

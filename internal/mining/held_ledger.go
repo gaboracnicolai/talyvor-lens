@@ -103,7 +103,7 @@ func (s *LedgerStore) heldInner(
 	workspaceID string,
 	txType, description string,
 	metadata map[string]interface{},
-	transition func(bal, held, earned float64) (newBal, newHeld, newEarned, delta, balanceAfter float64, err error),
+	transition func(bal, held, earned int64) (newBal, newHeld, newEarned, delta, balanceAfter int64, err error),
 ) error {
 	// U6 Sybil floor: gate the held MINT (pool_royalty_held) — the worst Sybil
 	// hole — on verified-to-earn. Finalize (pool_royalty) and revoke
@@ -116,7 +116,7 @@ func (s *LedgerStore) heldInner(
 	if _, err := tx.Exec(ctx, heldEnsureBalanceSQL, workspaceID); err != nil {
 		return fmt.Errorf("mining: ensure balance row: %w", err)
 	}
-	var bal, held, earned float64
+	var bal, held, earned int64
 	if err := tx.QueryRow(ctx, heldLockSelectSQL, workspaceID).Scan(&bal, &held, &earned); err != nil {
 		return fmt.Errorf("mining: read held balance: %w", err)
 	}
@@ -154,7 +154,7 @@ func (s *LedgerStore) heldInner(
 // and lifetime_earned are untouched (earnings recognize at finalize). The
 // ledger row records +amount against the UNCHANGED spendable balance_after,
 // with the caller's txType (TypePoolRoyaltyHeld from the mint path).
-func (s *LedgerStore) CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, txType, description string, metadata map[string]interface{}) error {
+func (s *LedgerStore) CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, txType, description string, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: held credit amount must be positive")
 	}
@@ -167,7 +167,7 @@ func (s *LedgerStore) CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID s
 	}
 	amount = eff
 	return s.heldInner(ctx, tx, workspaceID, txType, description, metadata,
-		func(bal, held, earned float64) (float64, float64, float64, float64, float64, error) {
+		func(bal, held, earned int64) (int64, int64, int64, int64, int64, error) {
 			return bal, held + amount, earned, amount, bal, nil
 		})
 }
@@ -177,12 +177,12 @@ func (s *LedgerStore) CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID s
 // value (bal+held), recognizes lifetime_earned, and writes the EXISTING
 // counted TypePoolRoyalty ledger row — this is the moment the mint enters
 // supply.
-func (s *LedgerStore) FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, description string, metadata map[string]interface{}) error {
+func (s *LedgerStore) FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, description string, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: finalize amount must be positive")
 	}
 	return s.heldInner(ctx, tx, workspaceID, TypePoolRoyalty, description, metadata,
-		func(bal, held, earned float64) (float64, float64, float64, float64, float64, error) {
+		func(bal, held, earned int64) (int64, int64, int64, int64, int64, error) {
 			if held < amount {
 				return 0, 0, 0, 0, 0, ErrInsufficientHeld
 			}
@@ -195,12 +195,12 @@ func (s *LedgerStore) FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID
 // transaction — the confirmed-bad-mint write. Spendable and lifetime_earned
 // untouched; the held LENS never entered supply, so this must not (and does
 // not) appear in the burned list either.
-func (s *LedgerStore) RevokeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, description string, metadata map[string]interface{}) error {
+func (s *LedgerStore) RevokeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, description string, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: revoke amount must be positive")
 	}
 	return s.heldInner(ctx, tx, workspaceID, TypePoolRoyaltyRevoked, description, metadata,
-		func(bal, held, earned float64) (float64, float64, float64, float64, float64, error) {
+		func(bal, held, earned int64) (int64, int64, int64, int64, int64, error) {
 			if held < amount {
 				return 0, 0, 0, 0, 0, ErrInsufficientHeld
 			}

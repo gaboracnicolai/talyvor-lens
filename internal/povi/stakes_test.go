@@ -14,7 +14,7 @@ import (
 
 type ledgerCall struct {
 	workspaceID string
-	amount      float64
+	amount      int64
 }
 
 type fakeLedger struct {
@@ -23,7 +23,7 @@ type fakeLedger struct {
 	lockErr                  error
 }
 
-func (f *fakeLedger) LockStake(_ context.Context, ws string, amount float64, _ map[string]interface{}) error {
+func (f *fakeLedger) LockStake(_ context.Context, ws string, amount int64, _ map[string]interface{}) error {
 	if f.lockErr != nil {
 		return f.lockErr
 	}
@@ -32,13 +32,13 @@ func (f *fakeLedger) LockStake(_ context.Context, ws string, amount float64, _ m
 	f.locks = append(f.locks, ledgerCall{ws, amount})
 	return nil
 }
-func (f *fakeLedger) ReleaseStake(_ context.Context, ws string, amount float64, _ map[string]interface{}) error {
+func (f *fakeLedger) ReleaseStake(_ context.Context, ws string, amount int64, _ map[string]interface{}) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releases = append(f.releases, ledgerCall{ws, amount})
 	return nil
 }
-func (f *fakeLedger) SlashStake(_ context.Context, ws string, amount float64, _ map[string]interface{}) error {
+func (f *fakeLedger) SlashStake(_ context.Context, ws string, amount int64, _ map[string]interface{}) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.slashes = append(f.slashes, ledgerCall{ws, amount})
@@ -46,13 +46,13 @@ func (f *fakeLedger) SlashStake(_ context.Context, ws string, amount float64, _ 
 }
 
 // Tx variants delegate to the non-Tx methods (no real transaction in tests).
-func (f *fakeLedger) LockStakeTx(_ context.Context, _ pgx.Tx, ws string, amount float64, m map[string]interface{}) error {
+func (f *fakeLedger) LockStakeTx(_ context.Context, _ pgx.Tx, ws string, amount int64, m map[string]interface{}) error {
 	return f.LockStake(context.Background(), ws, amount, m)
 }
-func (f *fakeLedger) ReleaseStakeTx(_ context.Context, _ pgx.Tx, ws string, amount float64, m map[string]interface{}) error {
+func (f *fakeLedger) ReleaseStakeTx(_ context.Context, _ pgx.Tx, ws string, amount int64, m map[string]interface{}) error {
 	return f.ReleaseStake(context.Background(), ws, amount, m)
 }
-func (f *fakeLedger) SlashStakeTx(_ context.Context, _ pgx.Tx, ws string, amount float64, m map[string]interface{}) error {
+func (f *fakeLedger) SlashStakeTx(_ context.Context, _ pgx.Tx, ws string, amount int64, m map[string]interface{}) error {
 	return f.SlashStake(context.Background(), ws, amount, m)
 }
 
@@ -100,7 +100,7 @@ func fixedWS(ws string) NodeWorkspaceLookup {
 	return func(_ context.Context, _ string) (string, error) { return ws, nil }
 }
 
-const testMin = 50.0
+const testMin = int64(50)
 
 func newTestManager(t *testing.T) (*StakeManager, *fakeLedger, *memStore) {
 	t.Helper()

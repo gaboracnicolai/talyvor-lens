@@ -13,7 +13,7 @@ import (
 // *mining.LedgerStore.FinalizeHeldTx matches the signature).
 type finalizeCall struct {
 	workspaceID string
-	amount      float64
+	amount      int64
 }
 
 type fakeFinalizer struct {
@@ -21,7 +21,7 @@ type fakeFinalizer struct {
 	err   error
 }
 
-func (f *fakeFinalizer) FinalizeHeldTx(_ context.Context, _ pgx.Tx, ws string, amount float64, _ string, _ map[string]interface{}) error {
+func (f *fakeFinalizer) FinalizeHeldTx(_ context.Context, _ pgx.Tx, ws string, amount int64, _ string, _ map[string]interface{}) error {
 	f.calls = append(f.calls, finalizeCall{workspaceID: ws, amount: amount})
 	return f.err
 }
@@ -40,8 +40,8 @@ func TestSweeperRunOnce_FinalizesDueRows(t *testing.T) {
 	s := NewFinalizeSweeper(pool, fin, "pool_royalty_mints")
 
 	expectSweep(pool, pgxmock.NewRows([]string{"request_id", "contributor_workspace_id", "minted_amount"}).
-		AddRow("req-a", "wsA", 1.0).
-		AddRow("req-b", "wsC", 2.5))
+		AddRow("req-a", "wsA", micro(1.0)).
+		AddRow("req-b", "wsC", micro(2.5)))
 
 	for _, req := range []string{"req-a", "req-b"} {
 		pool.ExpectBegin()
@@ -58,8 +58,8 @@ func TestSweeperRunOnce_FinalizesDueRows(t *testing.T) {
 	if n != 2 {
 		t.Errorf("finalized=%d want 2", n)
 	}
-	if len(fin.calls) != 2 || fin.calls[0].workspaceID != "wsA" || fin.calls[0].amount != 1.0 ||
-		fin.calls[1].workspaceID != "wsC" || fin.calls[1].amount != 2.5 {
+	if len(fin.calls) != 2 || fin.calls[0].workspaceID != "wsA" || fin.calls[0].amount != micro(1.0) ||
+		fin.calls[1].workspaceID != "wsC" || fin.calls[1].amount != micro(2.5) {
 		t.Errorf("finalize calls = %+v", fin.calls)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -76,7 +76,7 @@ func TestSweeperRunOnce_CASLost_SkipsWithoutBalanceTouch(t *testing.T) {
 	s := NewFinalizeSweeper(pool, fin, "pool_royalty_mints")
 
 	expectSweep(pool, pgxmock.NewRows([]string{"request_id", "contributor_workspace_id", "minted_amount"}).
-		AddRow("req-a", "wsA", 1.0))
+		AddRow("req-a", "wsA", micro(1.0)))
 	pool.ExpectBegin()
 	pool.ExpectExec(`UPDATE pool_royalty_mints SET status = 'final'`).
 		WithArgs("req-a").
@@ -104,8 +104,8 @@ func TestSweeperRunOnce_RowErrorIsolated(t *testing.T) {
 	s := NewFinalizeSweeper(pool, fin, "pool_royalty_mints")
 
 	expectSweep(pool, pgxmock.NewRows([]string{"request_id", "contributor_workspace_id", "minted_amount"}).
-		AddRow("req-a", "wsA", 1.0).
-		AddRow("req-b", "wsC", 2.5))
+		AddRow("req-a", "wsA", micro(1.0)).
+		AddRow("req-b", "wsC", micro(2.5)))
 	for _, req := range []string{"req-a", "req-b"} {
 		pool.ExpectBegin()
 		pool.ExpectExec(`UPDATE pool_royalty_mints SET status = 'final'`).

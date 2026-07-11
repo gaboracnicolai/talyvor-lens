@@ -18,13 +18,13 @@ import (
 var ErrSubBudgetExceeded = errors.New("economy: agent LXC sub-budget ceiling exceeded")
 
 // DefaultAgentCeilingLXC is the ceiling applied to a scoped key with no explicit ceiling — 50 LXC ($5 at the
-// 1 LXC = $0.10 peg). Baked here per the owner's step-A instruction (the capstone ships armed with a test
-// ceiling). A funded agent spends up to this; an unfunded one (zero LXC balance) spends nothing.
-const DefaultAgentCeilingLXC = 50.0
+// 1 LXC = $0.10 peg), in µLXC (SEC-2). Baked here per the owner's step-A instruction (the capstone ships
+// armed with a test ceiling). A funded agent spends up to this; an unfunded one (zero LXC balance) spends nothing.
+const DefaultAgentCeilingLXC int64 = 50_000_000
 
-// SetAgentCeiling upserts a scoped key's LXC ceiling (preserving spent_lxc). This is how an operator sets a
-// per-agent cap other than the default.
-func (s *DualTokenStore) SetAgentCeiling(ctx context.Context, scopedKeyID, workspaceID string, ceilingLXC float64) error {
+// SetAgentCeiling upserts a scoped key's LXC ceiling in µLXC (preserving spent_lxc). This is how an operator
+// sets a per-agent cap other than the default.
+func (s *DualTokenStore) SetAgentCeiling(ctx context.Context, scopedKeyID, workspaceID string, ceilingLXC int64) error {
 	if s == nil || s.pool == nil {
 		return nil
 	}
@@ -50,7 +50,7 @@ func (s *DualTokenStore) SetAgentCeiling(ctx context.Context, scopedKeyID, works
 // Returns nil on a fresh successful debit AND on an idempotent replay (a requestID already claimed ⇒ nothing
 // debited). Returns ErrSubBudgetExceeded (ceiling) or ErrInsufficientLXC (balance) on a rejected debit —
 // both roll the whole tx back (no orphan claim, retriable).
-func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount float64, description string) error {
+func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string) error {
 	if lxcAmount <= 0 {
 		return errors.New("economy: agent spend amount must be positive")
 	}
@@ -86,7 +86,7 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 		scopedKeyID, workspaceID, DefaultAgentCeilingLXC); err != nil {
 		return fmt.Errorf("economy: ensure sub-budget: %w", err)
 	}
-	var ceiling, spent float64
+	var ceiling, spent int64 // µLXC
 	if err := tx.QueryRow(ctx,
 		`SELECT ceiling_lxc, spent_lxc FROM agent_lxc_subbudgets WHERE scoped_key_id = $1 FOR UPDATE`,
 		scopedKeyID).Scan(&ceiling, &spent); err != nil {
@@ -106,7 +106,7 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	if bal < lxcAmount {
 		return ErrInsufficientLXC // rollback ⇒ no orphan claim; retriable after funding
 	}
-	newBal := roundTo(bal-lxcAmount, 6)
+	newBal := bal - lxcAmount // exact integer µLXC
 	if err := insertLXCLedger(ctx, tx, workspaceID, -lxcAmount, newBal, LXCTypeSpend, description, nil); err != nil {
 		return err
 	}

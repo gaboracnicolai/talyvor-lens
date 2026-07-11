@@ -26,17 +26,17 @@ import (
 // ─── constants ───────────────────────────────────
 
 const (
-	// AnnotationBaseReward is the LENS per validated annotation
-	// — the floor regardless of agreement quality.
-	AnnotationBaseReward = 0.100
+	// AnnotationBaseReward is the µLENS per validated annotation (SEC-2)
+	// — the floor regardless of agreement quality. 100_000 µLENS = 0.100 LENS.
+	AnnotationBaseReward int64 = 100_000
 
 	// HighAgreementBonus stacks on top of AnnotationBaseReward
-	// when the annotator's decision matches consensus at ≥ 80%.
-	HighAgreementBonus = 0.050
+	// when the annotator's decision matches consensus at ≥ 80%. µLENS (SEC-2).
+	HighAgreementBonus int64 = 50_000 // 0.050 LENS
 
-	// StakeRequirement is the minimum LENS lockup before an
-	// annotator can submit reviews. Acts as a soft Sybil filter.
-	StakeRequirement = 10.0
+	// StakeRequirement is the minimum LENS lockup before an annotator can submit
+	// reviews, in µLENS (SEC-2). Acts as a soft Sybil filter. 10 LENS.
+	StakeRequirement int64 = 10_000_000
 
 	// ReputationDecayRate is how fast a dormant annotator's
 	// reputation drops per day. (Surfaced for the API; not
@@ -123,8 +123,8 @@ type AnnotatorStats struct {
 	WorkspaceID  string  `json:"workspace_id"`
 	Annotations  int     `json:"annotations"`
 	Agreement    float64 `json:"agreement"`
-	StakedTokens float64 `json:"staked_tokens"`
-	EarnedTokens float64 `json:"earned_tokens"`
+	StakedTokens int64   `json:"staked_tokens_ulens"` // µLENS (SEC-2)
+	EarnedTokens int64   `json:"earned_tokens_ulens"` // µLENS (SEC-2)
 	Reputation   float64 `json:"reputation"`
 }
 
@@ -307,7 +307,7 @@ func (m *AnnotationMiner) SubmitAnnotation(ctx context.Context, a Annotation) er
 	//    their stake has been withdrawn.  Concurrent SubmitAnnotation calls for
 	//    the same annotator also serialise here, so the stake threshold is
 	//    checked under the same lock that protects the INSERT below.
-	var staked float64
+	var staked int64 // µLENS
 	stakeErr := tx.QueryRow(ctx,
 		`SELECT staked FROM annotator_stakes WHERE workspace_id = $1 FOR UPDATE`,
 		a.AnnotatorID).Scan(&staked)
@@ -340,7 +340,7 @@ func (m *AnnotationMiner) SubmitAnnotation(ctx context.Context, a Annotation) er
 
 	// 5. Credit — inside the same tx so INSERT + credit are atomic.
 	//    On agreement error we still pay the base reward and proceed.
-	earning := AnnotationBaseReward
+	earning := AnnotationBaseReward // µLENS
 	bonusPaid := false
 	if agreementErr == nil {
 		bonusPaid = otherCount >= MinAnnotationsForBonus-1 && agreement >= HighAgreementThreshold
@@ -348,9 +348,8 @@ func (m *AnnotationMiner) SubmitAnnotation(ctx context.Context, a Annotation) er
 			earning += HighAgreementBonus
 		}
 	}
-	// Round to 6 decimals — IEEE-754 (0.1 + 0.05 → 0.15000000000000002)
-	// otherwise leaks into the ledger.
-	earning = roundTo(earning, 6)
+	// SEC-2: earning is an exact integer µLENS sum of integer µLENS constants —
+	// no rounding needed (the old roundTo(_,6) IEEE-754 band-aid is gone).
 	desc := "annotation submitted"
 	meta := map[string]interface{}{
 		"task_id":       a.TaskID,
@@ -475,13 +474,13 @@ func (m *AnnotationMiner) checkAgreementInternal(ctx context.Context, taskID, ne
 
 // GetStake returns the locked-up LENS for `workspaceID`. Zero
 // (not error) for workspaces that never staked.
-func (m *AnnotationMiner) GetStake(ctx context.Context, workspaceID string) (float64, error) {
+func (m *AnnotationMiner) GetStake(ctx context.Context, workspaceID string) (int64, error) {
 	if m.pool == nil {
 		return 0, nil
 	}
 	row := m.pool.QueryRow(ctx,
 		`SELECT staked FROM annotator_stakes WHERE workspace_id = $1`, workspaceID)
-	var s float64
+	var s int64 // µLENS
 	if err := row.Scan(&s); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, nil
@@ -495,7 +494,7 @@ func (m *AnnotationMiner) GetStake(ctx context.Context, workspaceID string) (flo
 // to the stake row (UPSERT). Both the ledger Debit and the stake
 // UPSERT run inside a single transaction — if either fails the
 // whole thing rolls back, so LENS is never lost in transit.
-func (m *AnnotationMiner) Stake(ctx context.Context, workspaceID string, amount float64) error {
+func (m *AnnotationMiner) Stake(ctx context.Context, workspaceID string, amount int64) error {
 	if amount <= 0 {
 		return errors.New("annotation: stake amount must be positive")
 	}
@@ -576,7 +575,7 @@ func (m *AnnotationMiner) Unstake(ctx context.Context, workspaceID string) error
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var amount float64
+	var amount int64 // µLENS
 	err = tx.QueryRow(ctx,
 		`DELETE FROM annotator_stakes WHERE workspace_id = $1 RETURNING staked`,
 		workspaceID).Scan(&amount)
@@ -662,12 +661,12 @@ func (m *AnnotationMiner) GetAnnotatorStats(ctx context.Context, workspaceID str
 
 // AnnotationRates exports the public rate table — backs the
 // annotation section of /v1/tokens/rates.
-func AnnotationRates() map[string]float64 {
-	return map[string]float64{
-		"base_reward":              AnnotationBaseReward,
-		"high_agreement_bonus":     HighAgreementBonus,
-		"stake_requirement":        StakeRequirement,
-		"reputation_decay_daily":   ReputationDecayRate,
-		"high_agreement_threshold": HighAgreementThreshold,
+func AnnotationRates() map[string]any {
+	return map[string]any{
+		"base_reward_ulens":          AnnotationBaseReward, // µLENS (SEC-2)
+		"high_agreement_bonus_ulens": HighAgreementBonus,   // µLENS (SEC-2)
+		"stake_requirement_ulens":    StakeRequirement,     // µLENS (SEC-2)
+		"reputation_decay_daily":     ReputationDecayRate,
+		"high_agreement_threshold":   HighAgreementThreshold,
 	}
 }

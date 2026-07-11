@@ -70,7 +70,7 @@ type revokerDB interface {
 // heldRevoker is the held-burn surface; *mining.LedgerStore.RevokeHeldTx
 // satisfies it exactly (we CALL it, never change it).
 type heldRevoker interface {
-	RevokeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, description string, metadata map[string]interface{}) error
+	RevokeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, description string, metadata map[string]interface{}) error
 }
 
 // Revoker turns the held-burn primitive into a production operation. The
@@ -147,7 +147,7 @@ func (r *Revoker) revokeOne(ctx context.Context, requestID string) RevokeOutcome
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var contributor string
-	var amount float64
+	var amount int64 // µLENS (SEC-2: minted_amount is BIGINT)
 	err = tx.QueryRow(ctx, revokeCASSQLFor(r.table), requestID).Scan(&contributor, &amount)
 	if err == nil {
 		// The CAS transitioned the row (held → revoked) and returned its

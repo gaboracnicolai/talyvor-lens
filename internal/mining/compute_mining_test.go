@@ -25,22 +25,18 @@ func newMockMiner(t *testing.T) (*ComputeMiner, *LedgerStore, pgxmock.PgxPoolIfa
 func TestEarningRate_PerGPU(t *testing.T) {
 	cases := []struct {
 		gpu      string
-		expected float64
+		expected int64 // µLENS (SEC-2)
 	}{
-		{"cpu", 0.025},      // 0.050 × 0.5
-		{"rtx4090", 0.050},  // 0.050 × 1.0
-		{"a100", 0.100},     // 0.050 × 2.0
-		{"h100", 0.150},     // 0.050 × 3.0
+		{"cpu", micro(0.025)},     // 0.050 × 0.5
+		{"rtx4090", micro(0.050)}, // 0.050 × 1.0
+		{"a100", micro(0.100)},    // 0.050 × 2.0
+		{"h100", micro(0.150)},    // 0.050 × 3.0
 	}
 	for _, c := range cases {
 		t.Run(c.gpu, func(t *testing.T) {
 			got := EarningRate(c.gpu, 1000)
-			diff := got - c.expected
-			if diff < 0 {
-				diff = -diff
-			}
-			if diff > 1e-9 {
-				t.Fatalf("expected %f, got %f", c.expected, got)
+			if got != c.expected { // integer µLENS — exact
+				t.Fatalf("expected %d, got %d µLENS", c.expected, got)
 			}
 		})
 	}
@@ -50,7 +46,7 @@ func TestEarningRate_ScalesWithTokens(t *testing.T) {
 	r1 := EarningRate("rtx4090", 1000)
 	r2 := EarningRate("rtx4090", 2000)
 	if r2 != r1*2 {
-		t.Fatalf("expected 2× scaling, got %f vs %f", r1, r2)
+		t.Fatalf("expected 2× scaling, got %d vs %d", r1, r2)
 	}
 	if EarningRate("rtx4090", 0) != 0 {
 		t.Fatal("zero tokens should earn zero")
@@ -59,9 +55,9 @@ func TestEarningRate_ScalesWithTokens(t *testing.T) {
 
 func TestEarningRate_UnknownGPUFallsBackToCPU(t *testing.T) {
 	got := EarningRate("nvidia-fake-9999", 1000)
-	want := ComputeMineBaseRate * GPUMultiplierCPU
+	want := MulFloor(ComputeMineBaseRate, GPUMultiplierCPU) // µLENS
 	if got != want {
-		t.Fatalf("unknown gpu should fall back to CPU multiplier, got %f", got)
+		t.Fatalf("unknown gpu should fall back to CPU multiplier, got %d want %d", got, want)
 	}
 }
 
@@ -135,7 +131,7 @@ func TestRecordServedRequest_CreditsOwner(t *testing.T) {
 	}
 	expectGetNode(mock, node)
 	// 2000 tokens × rtx4090 (1.0×) → 0.10 LENS.
-	expectCreditOnce(mock, "req-1", "ws_owner", TypeComputeMine, 0, 0, 0, 0.10, 0.10, 0.10, 0)
+	expectCreditOnce(mock, "req-1", "ws_owner", TypeComputeMine, 0, 0, 0, micro(0.10), micro(0.10), micro(0.10), 0)
 	// metrics UPDATE
 	mock.ExpectExec("UPDATE node_metrics").
 		WithArgs("node1", 2000, int64(250)).
@@ -159,7 +155,7 @@ func TestRecordServedRequest_UsesGPUMultiplier(t *testing.T) {
 	}
 	expectGetNode(mock, node)
 	// 1000 tokens × h100 (3.0×) → 0.15 LENS.
-	expectCreditOnce(mock, "req-1", "ws_h", TypeComputeMine, 0, 0, 0, 0.15, 0.15, 0.15, 0)
+	expectCreditOnce(mock, "req-1", "ws_h", TypeComputeMine, 0, 0, 0, micro(0.15), micro(0.15), micro(0.15), 0)
 	mock.ExpectExec("UPDATE node_metrics").
 		WithArgs("h100node", 1000, int64(180)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))

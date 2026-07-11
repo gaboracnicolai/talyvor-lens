@@ -76,19 +76,18 @@ func TestExtractPattern_CacheHitFlagMapsToRate(t *testing.T) {
 // ─── PatternEarning ──────────────────────────────
 
 func TestPatternEarning_Base(t *testing.T) {
-	// Rarity 0 → base × 1 = 0.001.
+	// Rarity 0 → base × 1 = 0.001 LENS = micro(0.001) µLENS.
 	got := PatternEarning(RoutingPattern{Rarity: 0})
-	if got != 0.001 {
-		t.Fatalf("expected 0.001, got %f", got)
+	if got != micro(0.001) {
+		t.Fatalf("expected %d, got %d µLENS", micro(0.001), got)
 	}
 }
 
 func TestPatternEarning_RarityMultiplier(t *testing.T) {
-	// Rarity 0.5 → base × (1 + 0.5 × 4) = 0.001 × 3 = 0.003.
+	// Rarity 0.5 → base × (1 + 0.5 × 4) = 0.001 × 3 = 0.003 (exact in µLENS).
 	got := PatternEarning(RoutingPattern{Rarity: 0.5})
-	diff := got - 0.003
-	if diff < -1e-9 || diff > 1e-9 {
-		t.Fatalf("expected 0.003, got %f", got)
+	if got != micro(0.003) {
+		t.Fatalf("expected %d, got %d µLENS", micro(0.003), got)
 	}
 }
 
@@ -157,14 +156,14 @@ func TestRecordPattern_CreditsOptedInWorkspace(t *testing.T) {
 	mock.ExpectBegin()
 	// S3 claim-first (earning): RowsAffected 1 = claim taken (not a dup).
 	mock.ExpectExec("INSERT INTO pattern_mine_credits").
-		WithArgs("req1", "ws_opt", 0.001).
+		WithArgs("req1", "ws_opt", micro(0.001)).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_opt", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", true, 0.001).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", true, micro(0.001)).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("p1", time.Now()))
-	expectApplyTx(mock, "ws_opt", 0, 0, 0, 0.001, 0.001, 0.001, 0) // credit 0.001 (unchanged effect)
+	expectApplyTx(mock, "ws_opt", 0, 0, 0, micro(0.001), micro(0.001), micro(0.001), 0) // credit 0.001 (unchanged effect)
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM routing_patterns").
 		WithArgs("ws_opt", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1))) // 1 ≤ default cap 50000
@@ -191,7 +190,7 @@ func TestRecordPattern_SkipsCreditWhenNotOptedIn(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_off", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", false, 0.0).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", false, int64(0)).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("p_off", time.Now()))
 	mock.ExpectCommit()
@@ -219,12 +218,12 @@ func TestGetContribution_ReturnsTotals(t *testing.T) {
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\),").
 		WithArgs("ws_c").
 		WillReturnRows(pgxmock.NewRows([]string{"count", "earned", "last"}).
-			AddRow(125, 0.85, last))
+			AddRow(125, micro(0.85), last))
 	c, err := miner.GetContribution(context.Background(), "ws_c")
 	if err != nil {
 		t.Fatalf("GetContribution: %v", err)
 	}
-	if c.PatternsShared != 125 || c.TotalEarned != 0.85 {
+	if c.PatternsShared != 125 || c.TotalEarned != micro(0.85) {
 		t.Fatalf("unexpected contribution: %+v", c)
 	}
 }
@@ -304,8 +303,8 @@ func TestIsOptedIn_ReturnsFalseWhenAbsent(t *testing.T) {
 
 func TestPatternRates_TruthfulPostS1(t *testing.T) {
 	r := PatternRates()
-	// Only EARNABLE economics are advertised.
-	for _, k := range []string{"base_per_pattern", "rarity_multiplier_max"} {
+	// Only EARNABLE economics are advertised. base_per_pattern is now µLENS (SEC-2).
+	for _, k := range []string{"base_per_pattern_ulens", "rarity_multiplier_max"} {
 		if _, ok := r[k]; !ok {
 			t.Fatalf("missing rate key %q", k)
 		}
@@ -317,12 +316,12 @@ func TestPatternRates_TruthfulPostS1(t *testing.T) {
 		}
 	}
 	// rarity_multiplier_max is the REACHABLE ceiling (2.0 at the corroboration
-	// floor), not the unreachable 5×.
-	if got := r["rarity_multiplier_max"]; got < 2.0-1e-9 || got > 2.0+1e-9 {
-		t.Fatalf("rarity_multiplier_max must be the reachable 2.0, got %v (5.0 would advertise an unearnable ceiling)", got)
+	// floor), not the unreachable 5×. PatternRates() is map[string]any now.
+	if got, _ := r["rarity_multiplier_max"].(float64); got < 2.0-1e-9 || got > 2.0+1e-9 {
+		t.Fatalf("rarity_multiplier_max must be the reachable 2.0, got %v (5.0 would advertise an unearnable ceiling)", r["rarity_multiplier_max"])
 	}
-	if got := r["base_per_pattern"]; got != PatternBaseRate {
-		t.Fatalf("base_per_pattern = %v, want %v", got, PatternBaseRate)
+	if got, _ := r["base_per_pattern_ulens"].(int64); got != PatternBaseRate {
+		t.Fatalf("base_per_pattern_ulens = %v, want %d µLENS", r["base_per_pattern_ulens"], PatternBaseRate)
 	}
 }
 
@@ -338,12 +337,12 @@ func TestPatternEarning_ReachableRange_NoBonus(t *testing.T) {
 	maxReachable := 1.0 / (1.0 + float64(EarnCorroborationFloor)) // 0.25 at floor 3
 	for _, r := range []float64{0.0, 0.05, 0.1, 1.0 / 6.0, 0.2, maxReachable} {
 		got := PatternEarning(RoutingPattern{Rarity: r})
-		want := roundTo(PatternBaseRate*(1.0+r*(RarityMultiplierMax-1.0)), 6) // base × mult, NO bonus
-		if d := got - want; d < -1e-9 || d > 1e-9 {
-			t.Errorf("rarity %v: PatternEarning=%v, want %v (base × multiplier, no bonus)", r, got, want)
+		want := MulFloor(PatternBaseRate, 1.0+r*(RarityMultiplierMax-1.0)) // µLENS, base × mult, NO bonus
+		if got != want {                                                   // integer µLENS — exact
+			t.Errorf("rarity %v: PatternEarning=%d, want %d µLENS (base × multiplier, no bonus)", r, got, want)
 		}
 	}
-	if maxEarn := PatternEarning(RoutingPattern{Rarity: maxReachable}); maxEarn > 0.002+1e-9 {
-		t.Errorf("reachable max earn must be ≤ 0.002 (2× ceiling, not the old 5×); got %v", maxEarn)
+	if maxEarn := PatternEarning(RoutingPattern{Rarity: maxReachable}); maxEarn > micro(0.002) {
+		t.Errorf("reachable max earn must be ≤ 0.002 LENS (2× ceiling, not the old 5×); got %d µLENS", maxEarn)
 	}
 }

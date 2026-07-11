@@ -26,10 +26,18 @@ func miningTypeArgs() []any {
 	}
 }
 
+// uLENS / uLXC are the µ-unit scale (SEC-2): 1 token = 1e6 µ. Test helpers
+// multiply whole-token amounts by these to get the integer µ-counts the store
+// now speaks.
+const (
+	uLENS int64 = 1_000_000
+	uLXC  int64 = 1_000_000
+)
+
 // expectSupply programmes the three supply queries ComputeFairRate
 // triggers: GetTotalSupply (direct), GetTotalSupply (inside
-// GetCirculatingSupply), and the burned query.
-func expectSupply(mock pgxmock.PgxPoolIface, totalMinted, burned float64) {
+// GetCirculatingSupply), and the burned query. Values are integer µLENS.
+func expectSupply(mock pgxmock.PgxPoolIface, totalMinted, burned int64) {
 	mock.ExpectQuery(`SELECT COALESCE\(SUM\(amount\), 0\)`).
 		WithArgs(miningTypeArgs()...).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(totalMinted))
@@ -75,6 +83,8 @@ func newDualTokenMock(t *testing.T) (*DualTokenStore, *RateEngine, pgxmock.PgxPo
 	return newDualTokenStore(ledger, mock, engine), engine, mock
 }
 
+// approxEq compares Tier-2 rate floats (still float64 under SEC-2). Conserved
+// µ-amounts are int64 and compared with ==.
 func approxEq(a, b float64) bool {
 	d := a - b
 	return d < 1e-6 && d > -1e-6
@@ -86,7 +96,7 @@ func TestComputeFairRate_DerivesFromBackingAndSupply(t *testing.T) {
 	engine, mock := newRateEngineMock(t)
 	// totalMinted=1000, burned=0 → circulating=1000.
 	// backing = 1000*0.10/1000 = 0.10; R_fair = 0.10/0.10 = 1.0.
-	expectSupply(mock, 1000, 0)
+	expectSupply(mock, 1000*uLENS, 0)
 	expectCurrentRate(mock, 0, true) // no history → prev = floor 1.0
 	comp, err := engine.ComputeFairRate(context.Background())
 	if err != nil {
@@ -106,7 +116,7 @@ func TestComputeFairRate_DerivesFromBackingAndSupply(t *testing.T) {
 func TestComputeFairRate_AppliesSpread(t *testing.T) {
 	engine, mock := newRateEngineMock(t)
 	// R_fair = 1.0; R_admin = 1.0 * 1.05 = 1.05 (within band, above floor).
-	expectSupply(mock, 1000, 0)
+	expectSupply(mock, 1000*uLENS, 0)
 	expectCurrentRate(mock, 0, true)
 	comp, err := engine.ComputeFairRate(context.Background())
 	if err != nil {
@@ -127,7 +137,7 @@ func TestComputeFairRate_ClampsToBand(t *testing.T) {
 	engine, mock := newRateEngineMock(t)
 	// prev = 2.0 (from history). R_fair = 1.0 → R_admin pre-clamp 1.05.
 	// band = [1.8, 2.2]; 1.05 < 1.8 → clamped up to 1.8.
-	expectSupply(mock, 1000, 0)
+	expectSupply(mock, 1000*uLENS, 0)
 	expectCurrentRate(mock, 2.0, false)
 	comp, err := engine.ComputeFairRate(context.Background())
 	if err != nil {
@@ -147,7 +157,7 @@ func TestComputeFairRate_AppliesFloor(t *testing.T) {
 	// R_fair = circulating/totalMinted = 0.5; R_admin pre = 0.525.
 	// prev = 0.5 → band [0.45, 0.55]; 0.525 within → not clamped.
 	// floor: 0.525 < 1.0 → floored to 1.0.
-	expectSupply(mock, 1000, 500)
+	expectSupply(mock, 1000*uLENS, 500*uLENS)
 	expectCurrentRate(mock, 0.5, false)
 	comp, err := engine.ComputeFairRate(context.Background())
 	if err != nil {
@@ -219,7 +229,7 @@ func TestCurrentRate_ReturnsLatest(t *testing.T) {
 
 func TestApproveRate_WritesHistory(t *testing.T) {
 	engine, mock := newRateEngineMock(t)
-	expectSupply(mock, 1000, 0)
+	expectSupply(mock, 1000*uLENS, 0)
 	expectCurrentRate(mock, 0, true)
 	// History insert with all intermediate values. R_admin=1.05,
 	// fair=1.0, backing=0.10, circ=1000, spread=0.05, prev=1.0.
@@ -242,22 +252,23 @@ func TestApproveRate_WritesHistory(t *testing.T) {
 
 func TestConvertLENStoLXC_AtomicDebitAndMint(t *testing.T) {
 	store, _, mock := newDualTokenMock(t)
-	// rate = 2.0; convert 50 LXC → lensCost = 100.
+	// rate = 2.0; convert 50 LXC → lensCost = 100 LENS. All balances/ledger deltas
+	// are integer µ-units (SEC-2): 50 LXC = 50e6 µLXC, 100 LENS = 100e6 µLENS.
 	expectCurrentRate(mock, 2.0, false)
 	mock.ExpectBegin()
-	// debit LENS: ensure row + FOR UPDATE read at 500 balance.
+	// debit LENS: ensure row + FOR UPDATE read at 500 LENS balance.
 	mock.ExpectExec(`INSERT INTO lens_token_balances`).
 		WithArgs("ws_c").
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 	mock.ExpectQuery(`SELECT balance, lifetime_earned, lifetime_spent`).
 		WithArgs("ws_c").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
-			AddRow(500.0, 500.0, 0.0))
+			AddRow(500*uLENS, 500*uLENS, int64(0)))
 	mock.ExpectExec(`INSERT INTO lens_token_ledger`).
-		WithArgs("ws_c", -100.0, 400.0, LENSTypeConvertToLXC, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws_c", -100*uLENS, 400*uLENS, LENSTypeConvertToLXC, pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec(`UPDATE lens_token_balances`).
-		WithArgs("ws_c", 400.0, 500.0, 100.0).
+		WithArgs("ws_c", 400*uLENS, 500*uLENS, 100*uLENS).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// credit LXC: ensure row + FOR UPDATE read at 0.
 	mock.ExpectExec(`INSERT INTO lxc_balances`).
@@ -266,23 +277,23 @@ func TestConvertLENStoLXC_AtomicDebitAndMint(t *testing.T) {
 	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
 		WithArgs("ws_c").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
-			AddRow(0.0, 0.0, 0.0))
+			AddRow(int64(0), int64(0), int64(0)))
 	mock.ExpectExec(`INSERT INTO lxc_ledger`).
-		WithArgs("ws_c", 50.0, 50.0, LXCTypeConvertFromLENS, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws_c", 50*uLXC, 50*uLXC, LXCTypeConvertFromLENS, pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec(`UPDATE lxc_balances`).
-		WithArgs("ws_c", 50.0, 50.0, 0.0).
+		WithArgs("ws_c", 50*uLXC, 50*uLXC, int64(0)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	res, err := store.ConvertLENStoLXC(context.Background(), "ws_c", 50.0)
+	res, err := store.ConvertLENStoLXC(context.Background(), "ws_c", 50*uLXC)
 	if err != nil {
 		t.Fatalf("ConvertLENStoLXC: %v", err)
 	}
-	if !approxEq(res.LXCMinted, 50.0) || !approxEq(res.LENSSpent, 100.0) {
+	if res.LXCMinted != 50*uLXC || res.LENSSpent != 100*uLENS {
 		t.Fatalf("unexpected result: %+v", res)
 	}
-	if !approxEq(res.NewLXCBalance, 50.0) || !approxEq(res.NewLENSBalance, 400.0) {
+	if res.NewLXCBalance != 50*uLXC || res.NewLENSBalance != 400*uLENS {
 		t.Fatalf("unexpected balances: %+v", res)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -305,23 +316,23 @@ func TestCreditLXC_MintsWithoutBurningLENS(t *testing.T) {
 	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
 		WithArgs("ws_buy").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
-			AddRow(20.0, 20.0, 0.0))
-	// credit 100: ledger row type=purchase + balance update to 120 (minted 120, spent 0).
+			AddRow(20*uLXC, 20*uLXC, int64(0)))
+	// credit 100 LXC: ledger row type=purchase + balance update to 120 (minted 120, spent 0).
 	mock.ExpectExec(`INSERT INTO lxc_ledger`).
-		WithArgs("ws_buy", 100.0, 120.0, LXCTypePurchase, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws_buy", 100*uLXC, 120*uLXC, LXCTypePurchase, pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec(`UPDATE lxc_balances`).
-		WithArgs("ws_buy", 120.0, 120.0, 0.0).
+		WithArgs("ws_buy", 120*uLXC, 120*uLXC, int64(0)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	newBal, err := store.CreditLXC(context.Background(), "ws_buy", 100.0, "stripe top-up",
+	newBal, err := store.CreditLXC(context.Background(), "ws_buy", 100*uLXC, "stripe top-up",
 		map[string]interface{}{"usd_cents": 1000})
 	if err != nil {
 		t.Fatalf("CreditLXC: %v", err)
 	}
-	if !approxEq(newBal, 120.0) {
-		t.Fatalf("newBal=%v want 120", newBal)
+	if newBal != 120*uLXC {
+		t.Fatalf("newBal=%v want %v", newBal, 120*uLXC)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
@@ -333,7 +344,7 @@ func TestCreditLXC_MintsWithoutBurningLENS(t *testing.T) {
 func TestCreditLXC_RejectsNonPositive(t *testing.T) {
 	store, _, mock := newDualTokenMock(t)
 	// No expectations registered → any DB call fails the test.
-	for _, amt := range []float64{0, -5} {
+	for _, amt := range []int64{0, -5} {
 		if _, err := store.CreditLXC(context.Background(), "ws_buy", amt, "bad", nil); err == nil {
 			t.Errorf("CreditLXC(%v) must error", amt)
 		}
@@ -354,9 +365,9 @@ func TestConvertLENStoLXC_InsufficientLENS(t *testing.T) {
 	mock.ExpectQuery(`SELECT balance, lifetime_earned, lifetime_spent`).
 		WithArgs("ws_p").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
-			AddRow(50.0, 50.0, 0.0))
+			AddRow(50*uLENS, 50*uLENS, int64(0)))
 	mock.ExpectRollback()
-	_, err := store.ConvertLENStoLXC(context.Background(), "ws_p", 50.0)
+	_, err := store.ConvertLENStoLXC(context.Background(), "ws_p", 50*uLXC)
 	if !errors.Is(err, ErrInsufficientLENSFor) {
 		t.Fatalf("expected ErrInsufficientLENSFor, got %v", err)
 	}
@@ -364,8 +375,9 @@ func TestConvertLENStoLXC_InsufficientLENS(t *testing.T) {
 
 func TestConvertLENStoLXC_RejectsBelowMinimum(t *testing.T) {
 	store, _, _ := newDualTokenMock(t)
-	// No DB expectations — must short-circuit before any query.
-	_, err := store.ConvertLENStoLXC(context.Background(), "ws", 0.01)
+	// No DB expectations — must short-circuit before any query. 0.01 LXC = 10_000
+	// µLXC, below MinConversionLXC (100_000 µLXC).
+	_, err := store.ConvertLENStoLXC(context.Background(), "ws", 10_000)
 	if !errors.Is(err, ErrConversionTooSmall) {
 		t.Fatalf("expected ErrConversionTooSmall, got %v", err)
 	}
@@ -413,15 +425,15 @@ func TestSpendLXC_DebitsBalance(t *testing.T) {
 	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
 		WithArgs("ws_s").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
-			AddRow(10.0, 10.0, 0.0))
+			AddRow(10*uLXC, 10*uLXC, int64(0)))
 	mock.ExpectExec(`INSERT INTO lxc_ledger`).
-		WithArgs("ws_s", -2.5, 7.5, LXCTypeSpend, "ai call", pgxmock.AnyArg()).
+		WithArgs("ws_s", -25*uLXC/10, 75*uLXC/10, LXCTypeSpend, "ai call", pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec(`UPDATE lxc_balances`).
-		WithArgs("ws_s", 7.5, 10.0, 2.5).
+		WithArgs("ws_s", 75*uLXC/10, 10*uLXC, 25*uLXC/10).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
-	if err := store.SpendLXC(context.Background(), "ws_s", 2.5, "ai call"); err != nil {
+	if err := store.SpendLXC(context.Background(), "ws_s", 25*uLXC/10, "ai call"); err != nil {
 		t.Fatalf("SpendLXC: %v", err)
 	}
 }
@@ -435,9 +447,9 @@ func TestSpendLXC_InsufficientBalance(t *testing.T) {
 	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
 		WithArgs("ws_x").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
-			AddRow(1.0, 1.0, 0.0))
+			AddRow(1*uLXC, 1*uLXC, int64(0)))
 	mock.ExpectRollback()
-	err := store.SpendLXC(context.Background(), "ws_x", 5.0, "ai call")
+	err := store.SpendLXC(context.Background(), "ws_x", 5*uLXC, "ai call")
 	if !errors.Is(err, ErrInsufficientLXC) {
 		t.Fatalf("expected ErrInsufficientLXC, got %v", err)
 	}
@@ -455,7 +467,7 @@ func TestGetLXCBalance_ZeroForNew(t *testing.T) {
 		t.Fatalf("GetLXCBalance: %v", err)
 	}
 	if bal != 0 {
-		t.Fatalf("expected 0 for new workspace, got %f", bal)
+		t.Fatalf("expected 0 for new workspace, got %d", bal)
 	}
 }
 
@@ -464,15 +476,16 @@ func TestGetLXCSnapshot_ComputesUSDValue(t *testing.T) {
 	mock.ExpectQuery(`SELECT balance, lifetime_minted, lifetime_spent`).
 		WithArgs("ws_v").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
-			AddRow(50.0, 80.0, 30.0))
+			AddRow(50*uLXC, 80*uLXC, 30*uLXC))
 	snap, err := store.GetLXCSnapshot(context.Background(), "ws_v")
 	if err != nil {
 		t.Fatalf("GetLXCSnapshot: %v", err)
 	}
 	// USD value is the balance at the fixed peg — derived from the const, never
-	// hardcoded (50 × LXCUSDValue). This is the figure the #182 fiat panel shows.
-	want := roundTo(50.0*LXCUSDValue, 6)
-	if !approxEq(snap.USDValue, want) {
-		t.Fatalf("USD value = %f, want %f (50 × LXCUSDValue)", snap.USDValue, want)
+	// hardcoded: floor(50e6 µLXC × 0.10) µUSD = 5_000_000 µUSD ($5). This is the
+	// figure the #182 fiat panel shows.
+	want := mining.MulFloor(50*uLXC, LXCUSDValue)
+	if snap.USDValue != want {
+		t.Fatalf("USD value = %d, want %d µUSD (50 × LXCUSDValue)", snap.USDValue, want)
 	}
 }

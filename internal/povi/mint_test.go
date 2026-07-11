@@ -17,11 +17,11 @@ type fakeMinter struct {
 
 type creditCall struct {
 	workspaceID string
-	amount      float64
+	amount      int64
 	txType      string
 }
 
-func (f *fakeMinter) Credit(_ context.Context, workspaceID string, amount float64, txType, _ string, _ map[string]interface{}) error {
+func (f *fakeMinter) Credit(_ context.Context, workspaceID string, amount int64, txType, _ string, _ map[string]interface{}) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, creditCall{workspaceID, amount, txType})
@@ -89,7 +89,7 @@ func TestMintFromReceipt_EnabledRecordsProvisionalMint(t *testing.T) {
 func TestProvisionalMintAmount_ScalesWithOutputTokens(t *testing.T) {
 	r := sampleReceipt()
 	r.OutputTokens = 2000
-	if got, want := ProvisionalMintAmount(r), ReceiptMineRate*2.0; got != want {
+	if got, want := ProvisionalMintAmount(r), ReceiptMineRate*2; got != want {
 		t.Errorf("amount = %v, want %v", got, want)
 	}
 }

@@ -40,9 +40,9 @@ const (
 	// lxc_purchase — ever.
 	TalyvorSeedWorkspace = "talyvor-seed"
 
-	// MinListingAmount is the floor for marketplace listings.
-	// Below this we discourage dust orders.
-	MinListingAmount = 1.0
+	// MinListingAmount is the floor for marketplace listings, in µLENS (SEC-2).
+	// Below this we discourage dust orders. 1_000_000 µLENS = 1 LENS.
+	MinListingAmount int64 = 1_000_000
 
 	// LENSPerUSD is the published peg: 1 LENS = $0.10. Caller
 	// code uses this to convert between USD intent and LENS
@@ -88,11 +88,12 @@ var (
 
 // ─── types ───────────────────────────────────────
 
-// MarketplaceListing mirrors one row of marketplace_listings.
+// MarketplaceListing mirrors one row of marketplace_listings. Amount is integer
+// µLENS (SEC-2). PriceUSD/MinBuyUSD are Tier-2/3 USD values (stay float64).
 type MarketplaceListing struct {
 	ID        string     `json:"id"`
 	SellerID  string     `json:"seller_id"`
-	Amount    float64    `json:"amount"`
+	Amount    int64      `json:"amount_ulens"`
 	PriceUSD  float64    `json:"price_usd"`
 	MinBuyUSD float64    `json:"min_buy_usd"`
 	Status    string     `json:"status"`
@@ -100,37 +101,40 @@ type MarketplaceListing struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
-// MarketplaceTrade mirrors one row of marketplace_trades.
+// MarketplaceTrade mirrors one row of marketplace_trades. Amount/TalyvorFee are
+// integer µLENS (SEC-2). PriceUSD is a Tier-3 USD value (stays float64).
 type MarketplaceTrade struct {
 	ID         string    `json:"id"`
 	ListingID  string    `json:"listing_id"`
 	BuyerID    string    `json:"buyer_id"`
 	SellerID   string    `json:"seller_id"`
-	Amount     float64   `json:"amount"`
+	Amount     int64     `json:"amount_ulens"`
 	PriceUSD   float64   `json:"price_usd"`
-	TalyvorFee float64   `json:"talyvor_fee"`
+	TalyvorFee int64     `json:"talyvor_fee_ulens"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// StakePosition mirrors one row of stake_positions, augmented
-// at read time with the live AccruedYield.
+// StakePosition mirrors one row of stake_positions, augmented at read time with
+// the live AccruedYield. Amount/AccruedYield are integer µLENS (SEC-2); APY is a
+// Tier-2 rate (stays float64).
 type StakePosition struct {
 	ID           string    `json:"id"`
 	WorkspaceID  string    `json:"workspace_id"`
-	Amount       float64   `json:"amount"`
+	Amount       int64     `json:"amount_ulens"`
 	LockDays     int       `json:"lock_days"`
 	APY          float64   `json:"apy"`
 	StartedAt    time.Time `json:"started_at"`
 	UnlocksAt    time.Time `json:"unlocks_at"`
-	AccruedYield float64   `json:"accrued_yield"`
+	AccruedYield int64     `json:"accrued_yield_ulens"`
 }
 
-// EconomyStats backs /v1/economy/stats.
+// EconomyStats backs /v1/economy/stats. Supply/burned/staked are integer µLENS
+// (SEC-2); AvgPriceUSD is a Tier-3 USD value (stays float64).
 type EconomyStats struct {
-	TotalSupply       float64 `json:"total_supply"`
-	CirculatingSupply float64 `json:"circulating_supply"`
-	TotalBurned       float64 `json:"total_burned"`
-	TotalStaked       float64 `json:"total_staked"`
+	TotalSupply       int64   `json:"total_supply_ulens"`
+	CirculatingSupply int64   `json:"circulating_supply_ulens"`
+	TotalBurned       int64   `json:"total_burned_ulens"`
+	TotalStaked       int64   `json:"total_staked_ulens"`
 	MarketListings    int     `json:"market_listings"`
 	AvgPriceUSD       float64 `json:"avg_price_usd"`
 }
@@ -178,7 +182,7 @@ func newMarketplaceStore(ledger *mining.LedgerStore, db pgxDB) *MarketplaceStore
 // listing ID in metadata for auditability.
 func (s *MarketplaceStore) CreateListing(ctx context.Context, l MarketplaceListing) (*MarketplaceListing, error) {
 	if l.Amount < MinListingAmount {
-		return nil, fmt.Errorf("economy: listing amount must be ≥ %v LENS", MinListingAmount)
+		return nil, fmt.Errorf("economy: listing amount must be ≥ %d µLENS", MinListingAmount)
 	}
 	if l.PriceUSD <= 0 {
 		return nil, errors.New("economy: price_usd must be positive")
@@ -335,13 +339,9 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 		return nil, errors.New("economy: cannot buy own listing")
 	}
 
-	// LENS the buyer is asking for. Capped at the listing amount.
-	lensAmount := amountUSD / listing.PriceUSD
-	if lensAmount > listing.Amount {
-		lensAmount = listing.Amount
-	}
-	fee := roundTo(lensAmount*TalyvorFeeRate, 6)
-	netToBuyer := roundTo(lensAmount-fee, 6)
+	// SEC-2 site #2 (marketplace trade) — see tradeSplit for the conservation
+	// argument. lensAmount = netToBuyer + fee is the LENS the buyer bought.
+	lensAmount, fee, netToBuyer, unsold := tradeSplit(listing.Amount, listing.PriceUSD, amountUSD)
 	priceActual := listing.PriceUSD
 
 	meta := map[string]interface{}{
@@ -368,8 +368,7 @@ func (s *MarketplaceStore) ExecuteTrade(ctx context.Context, listingID, buyerID 
 		}
 	}
 
-	// Refund unsold portion to seller.
-	unsold := listing.Amount - lensAmount
+	// Refund unsold portion to seller (unsold from tradeSplit).
 	if unsold > 0 {
 		if err := s.ledger.CreditTx(ctx, tx, listing.SellerID, unsold, "marketplace_unsold_refund",
 			"unsold portion of listing refunded", meta); err != nil {
@@ -501,7 +500,7 @@ func (s *MarketplaceStore) GetTrades(ctx context.Context, workspaceID string, li
 // Stake locks `amount` LENS for `lockDays`. Debits the workspace
 // balance + INSERTs a stake_position. Returns the position with
 // AccruedYield=0 (it'll grow as time passes).
-func (s *MarketplaceStore) Stake(ctx context.Context, workspaceID string, amount float64, lockDays int) (*StakePosition, error) {
+func (s *MarketplaceStore) Stake(ctx context.Context, workspaceID string, amount int64, lockDays int) (*StakePosition, error) {
 	apy, ok := apyByLock[lockDays]
 	if !ok {
 		return nil, ErrInvalidLockDays
@@ -637,26 +636,44 @@ func (s *MarketplaceStore) GetStakePositions(ctx context.Context, workspaceID st
 	return out, rows.Err()
 }
 
-// computeYield = principal × APY × (elapsedDays / 365). Capped
-// at the lock period so dormant un-claimed positions don't
-// accrue forever.
-func computeYield(principal, apy float64, elapsed time.Duration) float64 {
+// tradeSplit computes the conserved µLENS split of a marketplace trade (SEC-2
+// site #2). Given the listing amount (µLENS), the listing price (Tier-2 USD per
+// LENS) and the buyer's spend (Tier-3 USD), it returns:
+//
+//	lensAmount  — LENS the buyer bought (= netToBuyer + fee), capped at the listing
+//	fee         — the 5% platform cut
+//	netToBuyer  — LENS credited to the buyer
+//	unsold      — LENS refunded to the seller
+//
+// The USD→LENS division rounds DOWN (FloatToMicroFloor): a payout never
+// over-issues a sub-µLENS. The fee is a CHARGE out of lensAmount, so it rounds UP
+// (MulCeil): the house never under-collects a sub-µLENS, and netToBuyer takes the
+// exact integer remainder. By construction netToBuyer + fee == lensAmount and
+// (netToBuyer + fee) + unsold == listingAmount EXACTLY (integer subtraction) — so
+// a trade conserves value with ZERO drift. This is the SEC-2 conservation proof
+// (see internal/economy/sec2_float_drift_test.go).
+func tradeSplit(listingAmount int64, priceUSD, amountUSD float64) (lensAmount, fee, netToBuyer, unsold int64) {
+	lensAmount = mining.FloatToMicroFloor(amountUSD / priceUSD)
+	if lensAmount > listingAmount {
+		lensAmount = listingAmount
+	}
+	fee = mining.MulCeil(lensAmount, TalyvorFeeRate)
+	netToBuyer = lensAmount - fee
+	unsold = listingAmount - lensAmount
+	return
+}
+
+// computeYield = principal × APY × (elapsedDays / 365), in µLENS (SEC-2 site #3,
+// staking yield). principal is conserved µLENS; APY (Tier-2 rate) and days/365
+// are floats. Yield is newly-minted LENS paid to the staker, so it rounds DOWN
+// (MulFloor) — the dropped sub-µLENS is simply not minted (retained by the
+// protocol), so a rounding can never mint value from nothing.
+func computeYield(principal int64, apy float64, elapsed time.Duration) int64 {
 	days := elapsed.Hours() / 24
 	if days < 0 {
 		days = 0
 	}
-	return roundTo(principal*apy*(days/365.0), 6)
-}
-
-func roundTo(v float64, places int) float64 {
-	scale := 1.0
-	for i := 0; i < places; i++ {
-		scale *= 10
-	}
-	if v >= 0 {
-		return float64(int64(v*scale+0.5)) / scale
-	}
-	return float64(int64(v*scale-0.5)) / scale
+	return mining.MulFloor(principal, apy*(days/365.0))
 }
 
 // ─── EconomyStats ────────────────────────────────

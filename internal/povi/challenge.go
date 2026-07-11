@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/mining"
 )
 
 // Challenge-and-slash (PoVI Part 3) — the keystone that makes receipt-minting
@@ -109,9 +110,10 @@ type PathProvider interface {
 	FetchPaths(ctx context.Context, nodeID, nodeURL, requestID string, positions []int) ([]LeafProof, error)
 }
 
-// Slasher is the Part-2 slash trigger (*StakeManager satisfies it).
+// Slasher is the Part-2 slash trigger (*StakeManager satisfies it). Slash
+// returns the slashed collateral in µLENS (SEC-2).
 type Slasher interface {
-	Slash(ctx context.Context, nodeID string, fraction float64, reason string) (float64, error)
+	Slash(ctx context.Context, nodeID string, fraction float64, reason string) (int64, error)
 }
 
 // NodeURLLookup resolves a node's reachable URL (inference_nodes.url).
@@ -135,7 +137,7 @@ type Challenge struct {
 	WorkspaceID   string          `json:"workspace_id"`
 	Positions     []int           `json:"positions"`
 	Result        ChallengeResult `json:"result"`
-	SlashedAmount float64         `json:"slashed_amount"`
+	SlashedAmount int64           `json:"slashed_amount_ulens"` // µLENS (SEC-2)
 	Reason        string          `json:"reason,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
 }
@@ -153,7 +155,7 @@ type challengeStore interface {
 	// when the receipt is already claimed (UNIQUE conflict).
 	Record(ctx context.Context, c Challenge) error
 	// UpdateResult persists the final outcome after FetchPaths + optional Slash.
-	UpdateResult(ctx context.Context, id string, result ChallengeResult, slashedAmount float64, reason string) error
+	UpdateResult(ctx context.Context, id string, result ChallengeResult, slashedAmount int64, reason string) error
 	Get(ctx context.Context, id string) (*Challenge, error)
 	AlreadyChallenged(ctx context.Context, requestID string) (bool, error)
 	List(ctx context.Context, nodeID string) ([]Challenge, error)
@@ -284,7 +286,7 @@ func (c *Challenger) Challenge(ctx context.Context, rec StoredReceipt) (*Challen
 		slashed, serr := c.slasher.Slash(ctx, rec.NodeID, c.slashFraction, ch.Reason)
 		if serr == nil {
 			ch.SlashedAmount = slashed
-			metrics.POVIChallengeSlash(slashed)
+			metrics.POVIChallengeSlash(mining.MicroToFloat(slashed))
 		}
 	} else if c.repSink != nil {
 		// P1 #9: a PASSED challenge is the verified good-behavior signal — append a small positive

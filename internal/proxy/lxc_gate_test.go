@@ -15,12 +15,12 @@ import (
 // the call site (after the budget gate, before the upstream call), so
 // "upstream never called" is structural by placement.
 type fakeLXCReader struct {
-	balance float64
+	balance int64
 	err     error
 	calls   int
 }
 
-func (f *fakeLXCReader) GetLXCBalance(_ context.Context, _ string) (float64, error) {
+func (f *fakeLXCReader) GetLXCBalance(_ context.Context, _ string) (int64, error) {
 	f.calls++
 	return f.balance, f.err
 }
@@ -132,10 +132,10 @@ func TestLXCGateBlocks_InputOnlyEstimate(t *testing.T) {
 	if est <= 0 {
 		t.Skip("model not in catalog → est 0; block/allow shape covered elsewhere")
 	}
-	if gateProxy(&fakeLXCReader{balance: est + 0.000001}, true, true).lxcGateBlocks(context.Background(), "wsA", model, prompt, lp) {
+	if gateProxy(&fakeLXCReader{balance: est + 1}, true, true).lxcGateBlocks(context.Background(), "wsA", model, prompt, lp) {
 		t.Errorf("balance just above the input-only est (%v) must allow", est)
 	}
-	if !gateProxy(&fakeLXCReader{balance: est - 0.000001}, true, true).lxcGateBlocks(context.Background(), "wsA", model, prompt, lp) {
+	if !gateProxy(&fakeLXCReader{balance: est - 1}, true, true).lxcGateBlocks(context.Background(), "wsA", model, prompt, lp) {
 		t.Errorf("balance just below the input-only est (%v) must block", est)
 	}
 }

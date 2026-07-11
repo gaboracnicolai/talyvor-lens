@@ -25,7 +25,7 @@ func (r *recordingRoyaltyMinter) MintServedHit(_ context.Context, h poolroyalty.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.hits = append(r.hits, h)
-	return poolroyalty.Result{Minted: true, Amount: poolroyalty.DefaultRoyaltyShare * h.AvoidedCOGSUSD}, nil
+	return poolroyalty.Result{Minted: true, Amount: int64(poolroyalty.DefaultRoyaltyShare * h.AvoidedCOGSUSD * 1e6)}, nil
 }
 
 func (r *recordingRoyaltyMinter) recorded() []poolroyalty.ServedHit {

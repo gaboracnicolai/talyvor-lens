@@ -5,13 +5,14 @@ import (
 	"log/slog"
 
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/mining"
 )
 
 // Minter is the minimal ledger-credit surface MintFromReceipt needs. The real
 // *mining.LedgerStore satisfies this signature exactly, so PoVI stays decoupled
-// from the ledger package (and tests pass a fake minter).
+// from the ledger package (and tests pass a fake minter). amount is µLENS (SEC-2).
 type Minter interface {
-	Credit(ctx context.Context, workspaceID string, amount float64, txType, description string, metadata map[string]interface{}) error
+	Credit(ctx context.Context, workspaceID string, amount int64, txType, description string, metadata map[string]interface{}) error
 }
 
 // TypeReceiptMineProvisional tags a provisional, receipt-based LENS mint in the
@@ -19,16 +20,16 @@ type Minter interface {
 // without stake + challenge (Parts 2/3) and is gated off by default.
 const TypeReceiptMineProvisional = "receipt_mine_provisional"
 
-// ReceiptMineRate is the provisional per-1k-output-token LENS rate, mirroring
-// the existing ComputeMineBaseRate. It only matters if the unsafe minting flag
-// is enabled (default off), so it is academic in normal operation.
-const ReceiptMineRate = 0.050
+// ReceiptMineRate is the provisional per-1k-output-token rate in µLENS (SEC-2),
+// mirroring the existing ComputeMineBaseRate. It only matters if the unsafe
+// minting flag is enabled (default off), so it is academic in normal operation.
+const ReceiptMineRate int64 = 50_000 // 0.050 LENS
 
-// ProvisionalMintAmount is the LENS a receipt WOULD mint (rate × output tokens
+// ProvisionalMintAmount is the µLENS a receipt WOULD mint (rate × output tokens
 // / 1000). Exposed so the /v1/povi/status endpoint can show "would mint X"
-// without actually minting.
-func ProvisionalMintAmount(r Receipt) float64 {
-	return ReceiptMineRate * float64(r.OutputTokens) / 1000.0
+// without actually minting. A mint rounds DOWN (MulFloor) — SEC-2.
+func ProvisionalMintAmount(r Receipt) int64 {
+	return mining.MulFloor(ReceiptMineRate, float64(r.OutputTokens)/1000.0)
 }
 
 // MintFromReceipt is the GATED, provisional receipt→LENS mint.
@@ -47,7 +48,7 @@ func ProvisionalMintAmount(r Receipt) float64 {
 //
 // This function NEVER asserts the receipt proves honest computation — it is
 // attestation + tamper-evidence only.
-func MintFromReceipt(ctx context.Context, minter Minter, r Receipt, enabled bool) (minted bool, amount float64, err error) {
+func MintFromReceipt(ctx context.Context, minter Minter, r Receipt, enabled bool) (minted bool, amount int64, err error) {
 	if !enabled {
 		// Default, safe behavior: do not mint on receipt-alone.
 		return false, 0, nil
@@ -58,7 +59,7 @@ func MintFromReceipt(ctx context.Context, minter Minter, r Receipt, enabled bool
 		"NOT proof of honest computation",
 		slog.String("node_id", r.NodeID),
 		slog.String("workspace_id", r.WorkspaceID),
-		slog.Float64("amount", amount),
+		slog.Int64("amount_ulens", amount),
 		slog.String("tx_type", TypeReceiptMineProvisional))
 	metrics.POVIProvisionalMint()
 	if err := minter.Credit(ctx, r.WorkspaceID, amount, TypeReceiptMineProvisional,

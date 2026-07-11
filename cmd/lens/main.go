@@ -643,7 +643,8 @@ func run() error {
 	// U6 PR2: the per-identity mint rate cap — the universal steady-state bound on
 	// Sybil wash yield. Wired UNCONDITIONALLY (a safety restriction the economy
 	// kill must not lift, like the verifier). Default 1000 LENS/24h; 0 = off.
-	tokenLedger.SetMintRateCap(cfg.MintRateCapLENS24h, 24*time.Hour)
+	// SEC-2: the cap config is whole LENS; the ledger cap is µLENS.
+	tokenLedger.SetMintRateCap(mining.FloatToMicroFloor(cfg.MintRateCapLENS24h), 24*time.Hour)
 	// P1 #9: the reputation bond on PoVI-receipt + pool-royalty mints. The gate func reads the flag
 	// live; OFF (default) ⇒ the mint path is byte-identical (no reputation read). An ADDITIVE
 	// constraint downstream of the U6 floor/rate-cap — only ever reduces or blocks a mint.
@@ -874,7 +875,7 @@ func run() error {
 	poviStakeStore := povi.NewNodeStakeStore(pool)
 	poviStakeManager := povi.NewStakeManager(
 		poviStakeStore, tokenLedger, computeMiner.NodeWorkspace,
-		cfg.POVIMinStake, cfg.POVIUnbondPeriod, pool)
+		mining.FloatToMicroFloor(cfg.POVIMinStake), cfg.POVIUnbondPeriod, pool) // SEC-2: whole LENS → µLENS
 	stakeEligible := func(eligCtx context.Context, nodeID string) bool {
 		return poviStakeManager.IsEligible(eligCtx, nodeID)
 	}
@@ -1205,12 +1206,12 @@ func run() error {
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"cache": mining.Rates(),
-				"compute": map[string]float64{
-					"base_per_1k_tokens": mining.ComputeMineBaseRate,
-					"multiplier_cpu":     mining.GPUMultiplierCPU,
-					"multiplier_rtx4090": mining.GPUMultiplierRTX4090,
-					"multiplier_a100":    mining.GPUMultiplierA100,
-					"multiplier_h100":    mining.GPUMultiplierH100,
+				"compute": map[string]any{
+					"base_per_1k_tokens_ulens": mining.ComputeMineBaseRate, // µLENS (SEC-2)
+					"multiplier_cpu":           mining.GPUMultiplierCPU,
+					"multiplier_rtx4090":       mining.GPUMultiplierRTX4090,
+					"multiplier_a100":          mining.GPUMultiplierA100,
+					"multiplier_h100":          mining.GPUMultiplierH100,
 				},
 				"embedding":  mining.EmbeddingRates(),
 				"annotation": mining.AnnotationRates(),
@@ -2170,7 +2171,7 @@ func run() error {
 		econ.post(authed, "/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
-				LXCAmount float64 `json:"lxc_amount"`
+				LXCAmount int64 `json:"lxc_amount_ulxc"` // µLXC (SEC-2)
 			}
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -2531,7 +2532,7 @@ func run() error {
 		econ.post(authed, "/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
-				Amount float64 `json:"amount"`
+				Amount int64 `json:"amount_ulens"` // µLENS (SEC-2)
 			}
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -2546,7 +2547,7 @@ func run() error {
 				return
 			}
 			staked, _ := annotationMiner.GetStake(req.Context(), wsID)
-			writeJSONOK(w, http.StatusOK, map[string]float64{"staked": staked})
+			writeJSONOK(w, http.StatusOK, map[string]int64{"staked_ulens": staked}) // µLENS (SEC-2)
 		})
 
 		econ.del(authed, "/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
@@ -2661,9 +2662,9 @@ func run() error {
 		econ.post(authed, "/v1/workspaces/{wsID}/tokens/transfer", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
-				ToWorkspace string  `json:"to_workspace"`
-				Amount      float64 `json:"amount"`
-				Description string  `json:"description"`
+				ToWorkspace string `json:"to_workspace"`
+				Amount      int64  `json:"amount_ulens"` // µLENS (SEC-2)
+				Description string `json:"description"`
 			}
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -2774,8 +2775,8 @@ func run() error {
 		econ.post(authed, "/v1/workspaces/{wsID}/tokens/stake", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
-				Amount   float64 `json:"amount"`
-				LockDays int     `json:"lock_days"`
+				Amount   int64 `json:"amount_ulens"` // µLENS (SEC-2)
+				LockDays int   `json:"lock_days"`
 			}
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -3440,7 +3441,7 @@ func run() error {
 				return
 			}
 			var in struct {
-				Amount float64 `json:"amount"`
+				Amount int64 `json:"amount_ulens"` // µLENS (SEC-2)
 			}
 			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
