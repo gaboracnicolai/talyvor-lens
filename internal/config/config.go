@@ -336,6 +336,15 @@ type Config struct {
 	LXCAgentAllocationEnabled bool          // LENS_LXC_AGENT_ALLOCATION_ENABLED (default TRUE)
 	DetectorSweepWindow       time.Duration // LENS_DETECTOR_SWEEP_WINDOW (default 24h)
 
+	// Keel* gate the U25 cross-tenant DRIFT-ATTRIBUTION sweep — DEFAULT-OFF capability flag (mint-free,
+	// descriptive, read-only; NOT force-off because it never touches money). Thresholds are PLACEHOLDERS —
+	// calibrate at N3 turn-on; synthetic data proved only the mechanism, never these values.
+	KeelEnabled        bool          // LENS_KEEL_ENABLED (default FALSE)
+	KeelDeviationSigma float64       // LENS_KEEL_DEVIATION_SIGMA (default 3.0, placeholder)
+	KeelWindowSeconds  int64         // LENS_KEEL_WINDOW_SECONDS (default 3600, placeholder)
+	KeelInterval       time.Duration // LENS_KEEL_INTERVAL (sweep tick, default 1h)
+	KeelLookback       time.Duration // LENS_KEEL_LOOKBACK (corpus read-back, default 48h)
+
 	// PoolRoyaltyShare is s, the contributor's share of avoided_COGS
 	// (Stage 2.1). Env: LENS_POOL_ROYALTY_SHARE. Default 0.5. Must be in
 	// [0,1] so Talyvor's net (1−s) × avoided_COGS stays ≥ 0 (the
@@ -1159,6 +1168,31 @@ func Load() (*Config, error) {
 	if os.Getenv("LENS_DETECTOR_SWEEP_ENABLED") != "" {
 		c.DetectorSweepEnabled = parseBoolEnv("LENS_DETECTOR_SWEEP_ENABLED")
 	}
+
+	// Keel (U25) cross-tenant drift attribution.
+	// DEFAULT-ON — closed-test, no external tenants; runs on synthetic/internal corpus so the mechanism is
+	// observable. Recalibrate at N3 turn-on. A fresh deploy with no LENS_KEEL_ENABLED env runs the sweep;
+	// the env var can still force it OFF (LENS_KEEL_ENABLED=false).
+	c.KeelEnabled = true
+	if os.Getenv("LENS_KEEL_ENABLED") != "" {
+		c.KeelEnabled = parseBoolEnv("LENS_KEEL_ENABLED")
+	}
+	// PLACEHOLDER — chosen so the detector emits observably in closed-test; NOT a calibrated production
+	// threshold. MUST be recalibrated against real-scale distribution at N3 turn-on before any external traffic.
+	c.KeelDeviationSigma = 2.0
+	if v := os.Getenv("LENS_KEEL_DEVIATION_SIGMA"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			c.KeelDeviationSigma = f
+		}
+	}
+	c.KeelWindowSeconds = 3600
+	if v := os.Getenv("LENS_KEEL_WINDOW_SECONDS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			c.KeelWindowSeconds = n
+		}
+	}
+	c.KeelInterval = time.Hour
+	c.KeelLookback = 48 * time.Hour
 
 	// LXC agent allocation — DEFAULT-TRUE (owner's call; the capstone ships armed). Off removes a spend
 	// guard, so the safe default is on. The flag is a manual off-switch (falls back to plain SpendLXC).

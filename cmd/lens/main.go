@@ -66,6 +66,7 @@ import (
 	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/inference"
 	"github.com/talyvor/lens/internal/injection"
+	"github.com/talyvor/lens/internal/keel"
 	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
@@ -565,6 +566,22 @@ func run() error {
 	go haComps.leader.Run(ctx, "anomaly-monitor", 30*time.Second, func(lctx context.Context) {
 		anomalyDetector.StartMonitor(lctx, nc, 1*time.Hour)
 	})
+
+	// Keel (U25) cross-tenant DRIFT ATTRIBUTION — the population axis alongside the temporal anomaly
+	// monitor above. DEFAULT-OFF (cfg.KeelEnabled): the whole sweep + emission is gated here, so a fresh
+	// deployment records nothing. Read-only over the consented corpus (routing_patterns opted_in=TRUE),
+	// append-only into keel_findings, NEVER touches money (import-guarded). Leader-elected, NOT a ticker.
+	if cfg.KeelEnabled {
+		keelSweep := keel.NewSweep(
+			keel.NewReader(dbrouting.ReadPool(pool, replicaPool)),
+			keel.NewFindingsWriter(pool),
+			keel.Config{MinWorkspaces: keel.DefaultMinWorkspaces, DeviationSigma: cfg.KeelDeviationSigma},
+			cfg.KeelWindowSeconds, cfg.KeelLookback,
+		)
+		go haComps.leader.Run(ctx, "keel-drift-sweep", 30*time.Second, func(lctx context.Context) {
+			keelSweep.StartScheduler(lctx, cfg.KeelInterval)
+		})
+	}
 
 	// U14 audit-trail integrity — leader-only singleton jobs (exactly one instance).
 	// Both DEFAULT OFF: the token_events retention sweeper is inert unless
@@ -1276,6 +1293,11 @@ func run() error {
 	// server stats are not visible to unauthenticated callers (ISO 27001 A.9).
 	// Prometheus scrapers must send: Authorization: Bearer <LENS_API_KEY>.
 	r.Handle("/metrics", requireAdmin(authManager, metrics.Handler()))
+
+	// Keel (U25) drift findings — requireAdmin forensic read (a tenant must NEVER read another tenant's
+	// drift attribution). Rows name only a self workspace + cohort aggregates; no counterparty raw value.
+	r.Handle("/v1/admin/keel/findings", requireAdmin(authManager,
+		newKeelFindingsHandler(keel.NewReader(dbrouting.ReadPool(pool, replicaPool)))))
 
 	apiServer := api.NewServer(
 		pool, redisClient, nc, exactCache, l,
