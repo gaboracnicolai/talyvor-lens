@@ -23,6 +23,17 @@
 
 BEGIN;
 
+-- ── dependent views must be dropped before ALTER TYPE (Postgres refuses to
+--    alter a column a view/rule reads). The two royalty MARGIN views compute
+--    margin_usd = avoided_cogs_usd − minted_amount, i.e. they read minted_amount
+--    as a DOLLAR value (the pool-royalty design's LENS≈$ 1:1 conflation). Since
+--    minted_amount is now µLENS (× 1e6), the recreated views divide it back to
+--    whole LENS/$ so margin_usd stays a coherent Tier-3 dollar figure. (These are
+--    Tier-3 analytics views touched ONLY because the ALTER requires it — see the
+--    SEC-2 report deferral note.)
+DROP VIEW IF EXISTS pool_royalty_margin;
+DROP VIEW IF EXISTS distill_royalty_margin;
+
 -- ── canonical LENS ledger (partitioned) ─────────────────────────────────────
 ALTER TABLE lens_token_ledger
     ALTER COLUMN amount        TYPE BIGINT USING (round(amount * 1000000))::bigint,
@@ -76,5 +87,36 @@ ALTER TABLE eval_contribution_mints   ALTER COLUMN minted_amount TYPE BIGINT USI
 ALTER TABLE routing_prediction_mints  ALTER COLUMN minted_amount TYPE BIGINT USING (round(minted_amount * 1000000))::bigint;
 ALTER TABLE node_latency_mints        ALTER COLUMN minted_amount TYPE BIGINT USING (round(minted_amount * 1000000))::bigint;
 ALTER TABLE confidential_compute_mints ALTER COLUMN minted_amount TYPE BIGINT USING (round(minted_amount * 1000000))::bigint;
+
+-- ── recreate the margin views. minted_amount is µLENS now, so divide by 1e6 to
+--    keep margin_usd = avoided_cogs_usd − minted_LENS a coherent dollar identity
+--    (numeric division avoids integer truncation). Definitions otherwise
+--    byte-identical to 0044 / 0064.
+CREATE VIEW pool_royalty_margin AS
+SELECT
+    request_id,
+    requester_workspace_id,
+    contributor_workspace_id,
+    layer,
+    provider,
+    model,
+    avoided_cogs_usd,
+    minted_amount,
+    avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd,
+    created_at
+FROM pool_royalty_mints;
+
+CREATE VIEW distill_royalty_margin AS
+SELECT
+    request_id,
+    requester_workspace_id,
+    contributor_workspace_id,
+    content_hash,
+    avoided_cogs_usd,
+    minted_amount,
+    avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd,
+    status,
+    created_at
+FROM distill_royalty_mints;
 
 COMMIT;
