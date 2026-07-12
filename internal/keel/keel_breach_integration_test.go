@@ -253,3 +253,110 @@ func TestBreach_AppendOnlyDedup(t *testing.T) {
 		t.Errorf("append-only: exactly 1 row after a double-record, got %d", n)
 	}
 }
+
+// BREACH (K3) — HARDENED findings are SQL-DISTINGUISHABLE from ordinary (H5 may read ONLY mode='hardened',
+// so it can never slash on an ordinary contaminable-mean finding). Also proves hardened append-only dedup.
+func TestBreach_HardenedFindingsSQLDistinguishable(t *testing.T) {
+	ctx := context.Background()
+	pool := keelTestPool(t)
+	const provider = "keelt_hmode"
+	cleanup(t, pool, provider)
+	unit := provider + "/m"
+	w := keel.NewFindingsWriter(pool)
+	f := keel.Finding{WorkspaceID: "wsH", Unit: unit, Window: 7, DeviationSigma: -4.2, Attribution: keel.AttributionIdiosyncratic, CohortN: 12, CohortMean: 0.8, CohortStdDev: 0.05}
+	// Same (ws,unit,window) → ordinary + hardened have DIFFERENT identity_keys, so both insert.
+	if ins, err := w.Record(ctx, f, map[string]any{"cohort_mean": 0.8}); err != nil || !ins {
+		t.Fatalf("ordinary Record: ins=%v err=%v", ins, err)
+	}
+	if ins, err := w.RecordHardened(ctx, f, map[string]any{"robust_median": 0.8}); err != nil || !ins {
+		t.Fatalf("hardened Record: ins=%v err=%v", ins, err)
+	}
+	if ins, err := w.RecordHardened(ctx, f, map[string]any{"robust_median": 0.8}); err != nil || ins {
+		t.Errorf("second RecordHardened must dedup append-only; ins=%v err=%v", ins, err)
+	}
+	// SQL-level filter: exactly one row per mode.
+	var ord, hard int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM keel_findings WHERE unit=$1 AND mode='ordinary'`, unit).Scan(&ord); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM keel_findings WHERE unit=$1 AND mode='hardened'`, unit).Scan(&hard); err != nil {
+		t.Fatal(err)
+	}
+	if ord != 1 || hard != 1 {
+		t.Errorf("SQL-distinguishable: want 1 ordinary + 1 hardened, got ord=%d hard=%d", ord, hard)
+	}
+	// ListHardenedFindings returns ONLY hardened rows — an ordinary finding can never leak through it.
+	hl, err := keel.NewReader(pool).ListHardenedFindings(ctx, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenH := false
+	for _, lf := range hl {
+		if lf.Unit != unit {
+			continue
+		}
+		seenH = true
+		if lf.WorkspaceID != "wsH" {
+			t.Errorf("hardened read named a non-self workspace %q", lf.WorkspaceID)
+		}
+	}
+	if !seenH {
+		t.Error("ListHardenedFindings must return the hardened row for this unit")
+	}
+}
+
+// BREACH (K3) — end-to-end hardened SWEEP: a drifter robustly + persistently below a money-grade cohort
+// yields a mode='hardened' row; the tenancy boundary holds (self workspace_id only, aggregates only).
+func TestBreach_HardenedSweep_EndToEnd(t *testing.T) {
+	ctx := context.Background()
+	pool := keelTestPool(t)
+	const provider = "keelt_hsweep"
+	cleanup(t, pool, provider)
+	honest := []struct {
+		ws string
+		q  float64
+	}{{"o1", 0.82}, {"o2", 0.84}, {"o3", 0.85}, {"o4", 0.86}, {"o5", 0.87}, {"o6", 0.88}}
+	for _, at := range []time.Time{w1, w2} { // 2 windows (persistence)
+		seedPattern(t, pool, "D", provider, "m", 0.10, true, at) // the drifter, far below
+		for _, h := range honest {
+			seedPattern(t, pool, h.ws, provider, "m", h.q, true, at)
+		}
+	}
+	sw := keel.NewSweep(keel.NewReader(pool), keel.NewFindingsWriter(pool), keel.DefaultConfig(), 3600, 400*24*time.Hour)
+	sw.EnableHardened(keel.HardenedConfig{MoneyCohortFloor: 5, MinSamples: 1, PersistenceWindows: 2, HardenedSigma: 3.0})
+	if _, err := sw.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	unit := provider + "/m"
+	// a hardened row for the drifter exists and is SQL-filterable.
+	var dHard int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM keel_findings WHERE unit=$1 AND mode='hardened' AND workspace_id='D'`, unit).Scan(&dHard); err != nil {
+		t.Fatal(err)
+	}
+	if dHard < 1 {
+		t.Errorf("hardened sweep must record a mode='hardened' finding for drifter D; got %d", dHard)
+	}
+	// tenancy: every hardened row names only a SELF (seeded) workspace — never a raw counterparty.
+	self := map[string]bool{"D": true, "o1": true, "o2": true, "o3": true, "o4": true, "o5": true, "o6": true}
+	rows, err := pool.Query(ctx, `SELECT workspace_id, cohort_n FROM keel_findings WHERE unit=$1 AND mode='hardened'`, unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ws string
+		var cohortN int
+		if err := rows.Scan(&ws, &cohortN); err != nil {
+			t.Fatal(err)
+		}
+		if !self[ws] {
+			t.Errorf("hardened finding names non-self workspace %q — counterparty leak", ws)
+		}
+		if cohortN < 5 { // leave-one-out cohort >= MoneyCohortFloor (>= privacy floor) — no inversion
+			t.Errorf("hardened cohort_n=%d below the money floor — inversion risk", cohortN)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}

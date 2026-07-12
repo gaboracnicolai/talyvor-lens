@@ -18,6 +18,18 @@ type Sweep struct {
 	lookback      time.Duration
 	now           func() time.Time
 	log           *slog.Logger
+
+	// Hardened (K3) money-grade mode — ADDITIVE, DEFAULT-OFF. Off unless EnableHardened is called (i.e.
+	// LENS_KEEL_HARDENED_ENABLED at the wiring site). When off, RunOnce behaves EXACTLY as before.
+	hardenedEnabled bool
+	hcfg            HardenedConfig
+}
+
+// EnableHardened turns on the money-grade hardened emission for this sweep (default-off). The hardened
+// pass reuses the SAME corpus read as the ordinary pass — no extra reader, no extra replica route.
+func (s *Sweep) EnableHardened(hcfg HardenedConfig) {
+	s.hardenedEnabled = true
+	s.hcfg = hcfg
 }
 
 // NewSweep wires the read source + append-only sink + thresholds. lookback bounds how far back the corpus
@@ -66,6 +78,33 @@ func (s *Sweep) RunOnce(ctx context.Context) (int, error) {
 		}
 		if ins {
 			recorded++
+		}
+	}
+
+	// Hardened (K3) money-grade pass — DEFAULT-OFF; reuses the same `obs`. Emits mode='hardened' findings
+	// (leave-one-out median/MAD, money-grade floors, persistence, drop-only) via the append-only
+	// RecordHardened. NO MONEY MAY MOVE ON THESE THRESHOLDS UNTIL N3 CALIBRATION.
+	if s.hardenedEnabled {
+		for _, f := range DetectHardened(obs, s.hcfg) {
+			metrics := map[string]any{
+				"mode":                "hardened",
+				"robust_median":       f.CohortMean,
+				"robust_mad_scaled":   f.CohortStdDev,
+				"robust_score":        f.DeviationSigma,
+				"cohort_others":       f.CohortN,
+				"persistence_windows": s.hcfg.PersistenceWindows,
+				"window_seconds":      s.windowSeconds,
+			}
+			ins, err := s.writer.RecordHardened(ctx, f, metrics)
+			if err != nil {
+				s.log.Warn("keel: record hardened finding failed",
+					slog.String("workspace_id", f.WorkspaceID), slog.String("unit", f.Unit),
+					slog.String("err", err.Error()))
+				continue
+			}
+			if ins {
+				recorded++
+			}
 		}
 	}
 	return recorded, nil
