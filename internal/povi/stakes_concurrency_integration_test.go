@@ -42,9 +42,9 @@ import (
 	"github.com/talyvor/lens/internal/povi"
 )
 
+const concMinStake int64 = 1_000_000 // µLENS (SEC-2)
 const (
-	concMinStake int64 = 1_000_000
-	opTimeout          = 30 * time.Second
+	opTimeout = 30 * time.Second
 	// concSchema isolates this test's fixtures in a private schema (see poviConcPool).
 	concSchema = "povi_stake_conc_test"
 )
@@ -261,10 +261,10 @@ func runConcurrentSlash(t *testing.T, pool *pgxpool.Pool, node string, live bool
 // remaining invariants, all on real Postgres.
 func TestPoVIStakeSlashConcurrency_RealPG(t *testing.T) {
 	pool := poviConcPool(t)
+	const S int64 = 100 // µLENS (SEC-2)
 	const (
-		S int64 = 100
-		f       = 0.5
-		N       = 16
+		f = 0.5
+		N = 16
 	)
 
 	// GREEN — advisory lock LIVE: the povi_stakes record stays in lockstep with the
@@ -397,12 +397,14 @@ func TestPoVIStakeSlashConcurrency_RealPG(t *testing.T) {
 		node := "n-stakeslash"
 		ws := wsFor(node)
 		const (
-			seed int64 = 1_000_000
+			seed int64 = 1_000_000 // µLENS (SEC-2)
 			S    int64 = 100
 			top  int64 = 10
-			T          = 8
-			K          = 8
-			f          = 0.3
+		)
+		const (
+			T = 8
+			K = 8
+			f = 0.3
 		)
 		seedAvailable(t, pool, ws, seed)
 		mgr := newMgr(pool, true)
