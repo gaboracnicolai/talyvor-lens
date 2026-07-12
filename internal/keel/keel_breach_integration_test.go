@@ -182,7 +182,11 @@ func TestBreach_QueryOnlyAndNoRawCounterparty(t *testing.T) {
 
 	corpusCount := func() int {
 		var n int
-		pool.QueryRow(ctx, `SELECT COUNT(*) FROM routing_patterns WHERE provider_used=$1`, provider).Scan(&n)
+		// Check the Scan error: a silently-errored count returns 0, and the "corpus unchanged after RunOnce"
+		// assertion below would then pass for the WRONG reason (0 == 0). Fail loudly instead.
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM routing_patterns WHERE provider_used=$1`, provider).Scan(&n); err != nil {
+			t.Fatalf("corpusCount: %v", err)
+		}
 		return n
 	}
 	before := corpusCount()
@@ -240,7 +244,11 @@ func TestBreach_AppendOnlyDedup(t *testing.T) {
 		t.Errorf("a re-recorded finding must dedup (ON CONFLICT identity_key), got inserted=true")
 	}
 	var n int
-	pool.QueryRow(ctx, `SELECT COUNT(*) FROM keel_findings WHERE unit=$1`, provider+"/m").Scan(&n)
+	// Check the Scan error: a silently-errored count returns 0, which would fail this assert for the wrong
+	// reason (or, worse, mask a real dedup regression). Fail loudly on the query error.
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM keel_findings WHERE unit=$1`, provider+"/m").Scan(&n); err != nil {
+		t.Fatalf("count keel_findings: %v", err)
+	}
 	if n != 1 {
 		t.Errorf("append-only: exactly 1 row after a double-record, got %d", n)
 	}
