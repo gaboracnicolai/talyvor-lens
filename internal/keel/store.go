@@ -154,3 +154,69 @@ func (w *FindingsWriter) Record(ctx context.Context, f Finding, metrics map[stri
 	}
 	return tag.RowsAffected() == 1, nil
 }
+
+// insertHardenedFindingSQL writes a money-grade hardened finding with mode='hardened'. Same append-only
+// discipline (ON CONFLICT DO NOTHING); the mode column (migration 0081) is what H5 filters on.
+const insertHardenedFindingSQL = `INSERT INTO keel_findings
+    (workspace_id, unit, window_bucket, deviation_sigma, attribution, cohort_n, identity_key, metrics, mode)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'hardened')
+ON CONFLICT (identity_key) DO NOTHING`
+
+// HardenedIdentityKey dedups a hardened finding across sweeps and — via the distinct "keelh:" prefix —
+// yields a DIFFERENT digest from the ordinary IdentityKey for the same (workspace, unit, window), so an
+// ordinary and a hardened finding for the same key never collide on the UNIQUE(identity_key) constraint.
+func HardenedIdentityKey(f Finding) string {
+	sum := sha256.Sum256([]byte("keelh:" + f.WorkspaceID + ":" + f.Unit + ":" + strconv.FormatInt(f.Window, 10)))
+	return hex.EncodeToString(sum[:])
+}
+
+// RecordHardened inserts ONE hardened finding append-only (mode='hardened'); returns inserted=false on a
+// dedup conflict. Mirrors Record but tags the row hardened and keys it with HardenedIdentityKey.
+func (w *FindingsWriter) RecordHardened(ctx context.Context, f Finding, metrics map[string]any) (bool, error) {
+	if w == nil || w.db == nil {
+		return false, nil
+	}
+	mj, err := json.Marshal(metrics)
+	if err != nil {
+		return false, fmt.Errorf("keel: marshal hardened metrics: %w", err)
+	}
+	tag, err := w.db.Exec(ctx, insertHardenedFindingSQL,
+		f.WorkspaceID, f.Unit, f.Window, f.DeviationSigma, f.Attribution, f.CohortN, HardenedIdentityKey(f), string(mj))
+	if err != nil {
+		return false, fmt.Errorf("keel: record hardened finding: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// listHardenedFindingsSQL is the hardened-only read (the SQL-enforceable filter H5 uses). It can NEVER
+// return an ordinary finding.
+const listHardenedFindingsSQL = `
+SELECT workspace_id, unit, window_bucket, deviation_sigma, attribution, cohort_n, first_seen_at
+FROM keel_findings
+WHERE mode = 'hardened'
+ORDER BY first_seen_at DESC
+LIMIT $1`
+
+// ListHardenedFindings returns ONLY hardened findings (mode='hardened'), newest-first. Query-only.
+func (r *Reader) ListHardenedFindings(ctx context.Context, limit int) ([]ListedFinding, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := r.db.Query(ctx, listHardenedFindingsSQL, limit)
+	if err != nil {
+		return nil, fmt.Errorf("keel: list hardened findings: %w", err)
+	}
+	defer rows.Close()
+	var out []ListedFinding
+	for rows.Next() {
+		var f ListedFinding
+		if err := rows.Scan(&f.WorkspaceID, &f.Unit, &f.Window, &f.DeviationSigma, &f.Attribution, &f.CohortN, &f.FirstSeenAt); err != nil {
+			return nil, fmt.Errorf("keel: scan hardened finding: %w", err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}

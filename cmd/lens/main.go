@@ -578,6 +578,17 @@ func run() error {
 			keel.Config{MinWorkspaces: keel.DefaultMinWorkspaces, DeviationSigma: cfg.KeelDeviationSigma},
 			cfg.KeelWindowSeconds, cfg.KeelLookback,
 		)
+		// K3 money-grade hardened emission — DEFAULT-OFF (cfg.KeelHardenedEnabled). Reuses the same sweep's
+		// single corpus read + primary-pool writer; adds NO new replica reader. PLACEHOLDER thresholds —
+		// NO MONEY MAY MOVE ON THESE UNTIL N3 CALIBRATION.
+		if cfg.KeelHardenedEnabled {
+			keelSweep.EnableHardened(keel.HardenedConfig{
+				MoneyCohortFloor:   cfg.KeelMoneyCohortFloor,
+				MinSamples:         cfg.KeelMinSamples,
+				PersistenceWindows: cfg.KeelPersistenceWindows,
+				HardenedSigma:      cfg.KeelHardenedSigma,
+			})
+		}
 		go haComps.leader.Run(ctx, "keel-drift-sweep", 30*time.Second, func(lctx context.Context) {
 			keelSweep.StartScheduler(lctx, cfg.KeelInterval)
 		})

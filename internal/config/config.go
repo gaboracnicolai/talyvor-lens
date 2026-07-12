@@ -345,6 +345,16 @@ type Config struct {
 	KeelInterval       time.Duration // LENS_KEEL_INTERVAL (sweep tick, default 1h)
 	KeelLookback       time.Duration // LENS_KEEL_LOOKBACK (corpus read-back, default 48h)
 
+	// Keel HARDENED (K3) money-grade detection — ADDITIVE, DEFAULT-OFF. Leave-one-out + median/MAD +
+	// money-grade floors + persistence + drop-direction, so findings can LATER gate money (H5). ALL
+	// thresholds are PLACEHOLDERS — calibrate at N3 against real-scale distribution; NO MONEY MAY MOVE ON
+	// AN UNCALIBRATED THRESHOLD.
+	KeelHardenedEnabled    bool    // LENS_KEEL_HARDENED_ENABLED (default FALSE)
+	KeelMoneyCohortFloor   int     // LENS_KEEL_MONEY_COHORT_FLOOR (PLACEHOLDER 10, >> the privacy floor of 3)
+	KeelMinSamples         int     // LENS_KEEL_MIN_SAMPLES (PLACEHOLDER 30, per-workspace requests/window)
+	KeelPersistenceWindows int     // LENS_KEEL_PERSISTENCE_WINDOWS (PLACEHOLDER 3, consecutive windows)
+	KeelHardenedSigma      float64 // LENS_KEEL_HARDENED_SIGMA (PLACEHOLDER 3.5, MAD-scaled robust score)
+
 	// PoolRoyaltyShare is s, the contributor's share of avoided_COGS
 	// (Stage 2.1). Env: LENS_POOL_ROYALTY_SHARE. Default 0.5. Must be in
 	// [0,1] so Talyvor's net (1−s) × avoided_COGS stays ≥ 0 (the
@@ -1193,6 +1203,33 @@ func Load() (*Config, error) {
 	}
 	c.KeelInterval = time.Hour
 	c.KeelLookback = 48 * time.Hour
+
+	// Keel HARDENED (K3) — DEFAULT-OFF; ALL PLACEHOLDERS, calibrate at N3; NO MONEY MAY MOVE ON AN UNCALIBRATED THRESHOLD.
+	c.KeelHardenedEnabled = parseBoolEnv("LENS_KEEL_HARDENED_ENABLED") // default false
+	c.KeelMoneyCohortFloor = 10
+	if v := os.Getenv("LENS_KEEL_MONEY_COHORT_FLOOR"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.KeelMoneyCohortFloor = n
+		}
+	}
+	c.KeelMinSamples = 30
+	if v := os.Getenv("LENS_KEEL_MIN_SAMPLES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.KeelMinSamples = n
+		}
+	}
+	c.KeelPersistenceWindows = 3
+	if v := os.Getenv("LENS_KEEL_PERSISTENCE_WINDOWS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.KeelPersistenceWindows = n
+		}
+	}
+	c.KeelHardenedSigma = 3.5
+	if v := os.Getenv("LENS_KEEL_HARDENED_SIGMA"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			c.KeelHardenedSigma = f
+		}
+	}
 
 	// LXC agent allocation — DEFAULT-TRUE (owner's call; the capstone ships armed). Off removes a spend
 	// guard, so the safe default is on. The flag is a manual off-switch (falls back to plain SpendLXC).
