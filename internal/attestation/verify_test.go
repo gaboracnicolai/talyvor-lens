@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +116,42 @@ func signEAT(t *testing.T, pki *testPKI, mutate func(jwt.MapClaims)) string {
 	return s
 }
 
+// tamperSig corrupts an EAT's ES256 signature DETERMINISTICALLY and SELF-VERIFYINGLY. This is a crypto
+// NEGATIVE test: its only job is to prove a tampered signature is REJECTED, so the tamper must ALWAYS change
+// the signature the verifier actually checks — otherwise the test silently proves nothing.
+//
+// The old form `s[:len(s)-2] + "xx"` blind-replaced the last two base64url characters. That is intermittently
+// a NO-OP: on a lenient JWT decoder (golang-jwt v5's default — Verify does not use WithStrictDecoding), "xx"
+// is a non-canonical encoding of the byte 0xC7, and 0xC7's canonical final group is "xw". So whenever a fresh
+// signature's last byte was already 0xC7 (~1/256 of runs), "xw"→"xx" decoded to the SAME signature bytes,
+// verification correctly returned nil, and the negative test flaked with "tampered-sig must REJECT, got nil
+// error" (issue #285). The lucky ~1/256 was the LOUD failure; the other 255/256 silently exercised a real
+// tamper — but nothing guaranteed that, so the test could have regressed to always-no-op undetected.
+//
+// The fix: decode the signature, flip one bit of a signature byte, re-encode — a byte-level mutation is
+// guaranteed to change the decoded signature — then ASSERT the token actually changed so a future no-op fails
+// loudly instead of silently passing.
+func tamperSig(t *testing.T, rawEAT string) string {
+	t.Helper()
+	dot := strings.LastIndexByte(rawEAT, '.')
+	if dot < 0 || dot == len(rawEAT)-1 {
+		t.Fatalf("tamperSig: not a JWT (no signature segment): %q", rawEAT)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(rawEAT[dot+1:])
+	if err != nil {
+		t.Fatalf("tamperSig: decode signature segment: %v", err)
+	}
+	if len(sig) == 0 {
+		t.Fatal("tamperSig: empty signature segment")
+	}
+	sig[0] ^= 0x01 // single-bit flip ⇒ the decoded signature is ALWAYS different from the original
+	tampered := rawEAT[:dot+1] + base64.RawURLEncoding.EncodeToString(sig)
+	if tampered == rawEAT {
+		t.Fatal("tamperSig: tamper was a NO-OP (signature unchanged) — a negative test must actually tamper")
+	}
+	return tampered
+}
+
 func fixedNow() time.Time { return time.Unix(2_000_000_000, 0) } // 2033 — between iat and exp, within cert validity
 
 func nodeKeyHashHex(pub []byte) string { h := sha256.Sum256(pub); return hex.EncodeToString(h[:]) }
@@ -147,30 +185,32 @@ func TestVerify_RealCrypto_Negatives(t *testing.T) {
 	cases := []struct {
 		name  string
 		roots *x509.CertPool
-		eat   func() string
+		eat   func(t *testing.T) string
 	}{
-		{"tampered-sig", pki.rootPool, func() string { s := signEAT(t, pki, nil); return s[:len(s)-2] + "xx" }},
-		{"x5c-to-wrong-root", newTestPKI(t).rootPool, func() string { return signEAT(t, pki, nil) }}, // verifier trusts a DIFFERENT root
-		{"expired", pki.rootPool, func() string {
+		// tampered-sig: deterministically corrupt the signature (see tamperSig) — never the old blind
+		// last-two-chars replacement, which was intermittently a no-op (issue #285).
+		{"tampered-sig", pki.rootPool, func(t *testing.T) string { return tamperSig(t, signEAT(t, pki, nil)) }},
+		{"x5c-to-wrong-root", newTestPKI(t).rootPool, func(t *testing.T) string { return signEAT(t, pki, nil) }}, // verifier trusts a DIFFERENT root
+		{"expired", pki.rootPool, func(t *testing.T) string {
 			return signEAT(t, pki, func(c jwt.MapClaims) { c["exp"] = time.Unix(1_600_000_000, 0).Unix() }) // 2020 < fixedNow
 		}},
-		{"iss-not-NRAS", pki.rootPool, func() string {
+		{"iss-not-NRAS", pki.rootPool, func(t *testing.T) string {
 			return signEAT(t, pki, func(c jwt.MapClaims) { c["iss"] = "evil" })
 		}},
-		{"missing-cc-mode", pki.rootPool, func() string {
+		{"missing-cc-mode", pki.rootPool, func(t *testing.T) string {
 			return signEAT(t, pki, func(c jwt.MapClaims) { delete(c, "x-nvidia-gpu-attestation-report-cc-mode") })
 		}},
-		{"cc-mode-false", pki.rootPool, func() string {
+		{"cc-mode-false", pki.rootPool, func(t *testing.T) string {
 			return signEAT(t, pki, func(c jwt.MapClaims) { c["x-nvidia-gpu-attestation-report-cc-mode"] = false })
 		}},
-		{"measurements-absent", pki.rootPool, func() string {
+		{"measurements-absent", pki.rootPool, func(t *testing.T) string {
 			return signEAT(t, pki, func(c jwt.MapClaims) { delete(c, "measres") })
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			v := NewVerifier(tc.roots, good, fixedNow)
-			if _, err := v.Verify(context.Background(), tc.eat(), testNonce, nil); err == nil {
+			if _, err := v.Verify(context.Background(), tc.eat(t), testNonce, nil); err == nil {
 				t.Fatalf("%s must REJECT, got nil error", tc.name)
 			}
 		})
