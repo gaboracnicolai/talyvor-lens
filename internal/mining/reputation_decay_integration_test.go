@@ -165,7 +165,7 @@ func TestReputationDecay_MoneyBoundary_EarningInvariant_Integration(t *testing.T
 	}
 	mustRecord(t, store, "fresh", "agreement_outcome", "f1", 0.4) // 0.9, no annotations → never dormant
 	for _, ws := range []string{"decayed", "fresh"} {
-		if _, err := pool.Exec(ctx, `INSERT INTO annotator_stakes (workspace_id, staked) VALUES ($1, 20)`, ws); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO annotator_stakes (workspace_id, staked) VALUES ($1, 20000000)`, ws); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -180,8 +180,8 @@ func TestReputationDecay_MoneyBoundary_EarningInvariant_Integration(t *testing.T
 	}
 	submit("decayed")
 	submit("fresh")
-	earn := func(ws string) float64 {
-		var v float64
+	earn := func(ws string) int64 {
+		var v int64
 		if err := pool.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM lens_token_ledger WHERE workspace_id=$1 AND type=$2`, ws, TypeAnnotationMine).Scan(&v); err != nil {
 			t.Fatal(err)
 		}
@@ -191,7 +191,7 @@ func TestReputationDecay_MoneyBoundary_EarningInvariant_Integration(t *testing.T
 	if ed != ef {
 		t.Errorf("DECAYED vs fresh earn differently: %v vs %v — earning must be reputation-invariant", ed, ef)
 	}
-	if math.Abs(ed-0.15) > 1e-9 {
-		t.Errorf("earning %v, want 0.15 (base + bonus, decay-independent)", ed)
+	if ed != micro(0.15) {
+		t.Errorf("earning %v µLENS, want micro(0.15) (base + bonus, decay-independent)", ed)
 	}
 }

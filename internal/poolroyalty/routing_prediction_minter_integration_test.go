@@ -41,16 +41,16 @@ func routingHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 	for _, ddl := range []string{
 		`DROP SCHEMA IF EXISTS lens_routingpredmint_test CASCADE`,
 		`CREATE SCHEMA lens_routingpredmint_test`,
-		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0, lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
-			amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL,
+			amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
 		// The claim table — generic finalize columns (request_id = prediction_id, contributor_workspace_id = payee).
 		`CREATE TABLE routing_prediction_mints (request_id TEXT PRIMARY KEY, contributor_workspace_id TEXT NOT NULL,
-			skill_margin DOUBLE PRECISION NOT NULL, minted_amount DOUBLE PRECISION NOT NULL,
+			skill_margin DOUBLE PRECISION NOT NULL, minted_amount BIGINT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		// The scorer's output the minter reads (subset of 0072).
 		`CREATE TABLE routing_prediction_scores (prediction_id TEXT PRIMARY KEY, slice_size INTEGER NOT NULL DEFAULT 3,
@@ -61,7 +61,7 @@ func routingHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 			input_token_range TEXT NOT NULL DEFAULT '', complexity_bucket TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
 			provider TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount DOUBLE PRECISION NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -84,7 +84,7 @@ func routingSeedScored(t *testing.T, pool *pgxpool.Pool, predID, workspaceID str
 	}
 }
 
-func routingMintRows(t *testing.T, pool *pgxpool.Pool, ws string) (n int, amount, margin float64) {
+func routingMintRows(t *testing.T, pool *pgxpool.Pool, ws string) (n int, amount int64, margin float64) {
 	t.Helper()
 	_ = pool.QueryRow(context.Background(),
 		`SELECT count(*), COALESCE(sum(minted_amount),0), COALESCE(max(skill_margin),0)
@@ -117,12 +117,12 @@ func TestRoutingPrediction_InertThenLive_Integration(t *testing.T) {
 		t.Fatalf("rate-10 minter must mint exactly 1: n=%d err=%v", n, err)
 	}
 	rows, amount, margin := routingMintRows(t, pool, "wsAuthor")
-	if rows != 1 || margin != 0.5 || amount < 4.99 || amount > 5.01 {
-		t.Fatalf("expected one mint of 5.0 (margin 0.5 × rate 10): rows=%d amount=%.3f margin=%.3f", rows, amount, margin)
+	if rows != 1 || margin != 0.5 || amount < micro(4.99) || amount > micro(5.01) {
+		t.Fatalf("expected one mint of 5.0 (margin 0.5 × rate 10): rows=%d amount=%d margin=%.3f", rows, amount, margin)
 	}
 	// ATTRIBUTION: the credit lands on the prediction's workspace (wsAuthor), nobody else.
-	if _, held := balances(t, pool, "wsAuthor"); held < 4.99 || held > 5.01 {
-		t.Fatalf("author held_balance %.3f, want 5.0", held)
+	if _, held := balances(t, pool, "wsAuthor"); held < micro(4.99) || held > micro(5.01) {
+		t.Fatalf("author held_balance %d µLENS, want ~5 LENS", held)
 	}
 	// DEDUP: a second sweep mints nothing more (once-per-scored-prediction claim).
 	if n2, _ := live.RunOnce(ctx); n2 != 0 {

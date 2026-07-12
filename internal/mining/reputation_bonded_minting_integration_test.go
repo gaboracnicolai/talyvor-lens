@@ -43,11 +43,11 @@ func repBondHarness(t *testing.T, gateOn bool, verified ...string) (*pgxpool.Poo
 	for _, ddl := range []string{
 		`DROP SCHEMA IF EXISTS lens_repbond_test CASCADE`,
 		`CREATE SCHEMA lens_repbond_test`,
-		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0, lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
-			amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL,
+			amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
 		`CREATE TABLE reputation_events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), annotator_id TEXT NOT NULL,
@@ -80,9 +80,9 @@ func seedR(t *testing.T, pool *pgxpool.Pool, ws string, target float64) {
 	}
 }
 
-func bal(t *testing.T, pool *pgxpool.Pool, ws string) float64 {
+func bal(t *testing.T, pool *pgxpool.Pool, ws string) int64 {
 	t.Helper()
-	var b float64
+	var b int64
 	_ = pool.QueryRow(context.Background(), `SELECT COALESCE((SELECT balance FROM lens_token_balances WHERE workspace_id=$1),0)`, ws).Scan(&b)
 	return b
 }
@@ -102,15 +102,15 @@ func TestRepBond_HighFull_BelowFloorGated_Integration(t *testing.T) {
 	ctx := context.Background()
 
 	seedR(t, pool, "wsHigh", 0.7) // ≥ baseline → f=1.0
-	if err := ledger.Credit(ctx, "wsHigh", 10, rcptType, "d", map[string]interface{}{}); err != nil {
+	if err := ledger.Credit(ctx, "wsHigh", micro(10), rcptType, "d", map[string]interface{}{}); err != nil {
 		t.Fatalf("high-R mint: %v", err)
 	}
-	if b := bal(t, pool, "wsHigh"); b != 10 {
+	if b := bal(t, pool, "wsHigh"); b != micro(10) {
 		t.Errorf("high-R balance %v, want 10 (full base)", b)
 	}
 
 	seedR(t, pool, "wsLow", 0.30) // < floor 0.35 → gated
-	err := ledger.Credit(ctx, "wsLow", 10, rcptType, "d", map[string]interface{}{})
+	err := ledger.Credit(ctx, "wsLow", micro(10), rcptType, "d", map[string]interface{}{})
 	if err != ErrReputationFloor {
 		t.Fatalf("below-floor mint err = %v, want ErrReputationFloor", err)
 	}
@@ -128,19 +128,21 @@ func TestRepBond_MidRampHalf_Metadata_Integration(t *testing.T) {
 	ctx := context.Background()
 	seedR(t, pool, "wsMid", 0.425) // f = (0.425−0.35)/0.15 = 0.5
 
-	if err := ledger.Credit(ctx, "wsMid", 10, rcptType, "d", map[string]interface{}{}); err != nil {
+	if err := ledger.Credit(ctx, "wsMid", micro(10), rcptType, "d", map[string]interface{}{}); err != nil {
 		t.Fatalf("mid mint: %v", err)
 	}
-	if b := bal(t, pool, "wsMid"); b < 5-1e-9 || b > 5+1e-9 {
+	if b := bal(t, pool, "wsMid"); b != micro(5) {
 		t.Errorf("mid-ramp balance %v, want 5 (base 10 × f 0.5)", b)
 	}
-	var base, score, eff *float64
-	if err := pool.QueryRow(ctx, `SELECT (metadata->>'reputation_base')::float8, (metadata->>'reputation_score')::float8,
-		(metadata->>'reputation_effective')::float8 FROM lens_token_ledger WHERE workspace_id='wsMid'`).Scan(&base, &score, &eff); err != nil {
+	// SEC-2: reputation_base/effective are µLENS integers now (keys carry _ulens).
+	var base, eff *int64
+	var score *float64
+	if err := pool.QueryRow(ctx, `SELECT (metadata->>'reputation_base_ulens')::bigint, (metadata->>'reputation_score')::float8,
+		(metadata->>'reputation_effective_ulens')::bigint FROM lens_token_ledger WHERE workspace_id='wsMid'`).Scan(&base, &score, &eff); err != nil {
 		t.Fatalf("read metadata: %v", err)
 	}
-	if base == nil || score == nil || eff == nil || *base != 10 || *eff < 5-1e-9 || *eff > 5+1e-9 {
-		t.Errorf("metadata {base,score,eff} = {%v,%v,%v}, want base 10 / eff 5 / score≈0.425", base, score, eff)
+	if base == nil || score == nil || eff == nil || *base != micro(10) || *eff != micro(5) {
+		t.Errorf("metadata {base,score,eff} = {%v,%v,%v} µLENS, want base micro(10) / eff micro(5) / score≈0.425", base, score, eff)
 	}
 }
 
@@ -178,10 +180,10 @@ func TestRepBond_FlagOffByteIdentical_Integration(t *testing.T) {
 	ctx := context.Background()
 	seedR(t, pool, "wsOff", 0.10) // far below floor — would be gated if the flag were on
 
-	if err := ledger.Credit(ctx, "wsOff", 10, rcptType, "d", map[string]interface{}{}); err != nil {
+	if err := ledger.Credit(ctx, "wsOff", micro(10), rcptType, "d", map[string]interface{}{}); err != nil {
 		t.Fatalf("flag-off mint: %v", err)
 	}
-	if b := bal(t, pool, "wsOff"); b != 10 {
+	if b := bal(t, pool, "wsOff"); b != micro(10) {
 		t.Errorf("flag-off balance %v, want 10 (full base — reputation not consulted)", b)
 	}
 }
@@ -194,10 +196,10 @@ func TestRepBond_ComposesNotBypassesU6_Integration(t *testing.T) {
 	seedR(t, pool, "wsUnverified", 1.0) // max reputation, but NOT verified-to-earn
 	seedR(t, pool, "wsVerified", 0.30)  // verified, but below the reputation floor
 
-	if err := ledger.Credit(ctx, "wsUnverified", 10, rcptType, "d", map[string]interface{}{}); err != ErrEarnNotVerified {
+	if err := ledger.Credit(ctx, "wsUnverified", micro(10), rcptType, "d", map[string]interface{}{}); err != ErrEarnNotVerified {
 		t.Fatalf("unverified+R=1.0 err = %v, want ErrEarnNotVerified (U6 floor wins; reputation never enables)", err)
 	}
-	if err := ledger.Credit(ctx, "wsVerified", 10, rcptType, "d", map[string]interface{}{}); err != ErrReputationFloor {
+	if err := ledger.Credit(ctx, "wsVerified", micro(10), rcptType, "d", map[string]interface{}{}); err != ErrReputationFloor {
 		t.Fatalf("verified+R<floor err = %v, want ErrReputationFloor (reputation blocks a U6-allowed mint)", err)
 	}
 }

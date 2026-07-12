@@ -35,7 +35,7 @@ func TestDistillMint_PerPairCap_DeniesOverCap_Integration(t *testing.T) {
 	if c := mintRowCount(t, pool, "wsA"); c != 2 {
 		t.Fatalf("cap: %d claim rows, want 2 (the 3rd must roll back — no row)", c)
 	}
-	if _, held := balances(t, pool, "wsA"); held != 2.0 {
+	if _, held := balances(t, pool, "wsA"); held != micro(2) {
 		t.Fatalf("held=%v, want 2.0 (exactly 2 mints × 0.5 × 2.0; the capped 3rd added nothing)", held)
 	}
 }

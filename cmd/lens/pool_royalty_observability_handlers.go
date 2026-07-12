@@ -131,7 +131,7 @@ type resolveResponse struct {
 type marginSummaryDTO struct {
 	Mints          int64   `json:"mints"`
 	AvoidedCOGSUSD float64 `json:"avoided_cogs_usd"`
-	MintedLENS     float64 `json:"minted_lens"`
+	MintedLENS     int64   `json:"minted_lens_ulens"` // µLENS (SEC-2)
 	MarginUSD      float64 `json:"margin_usd"`
 }
 

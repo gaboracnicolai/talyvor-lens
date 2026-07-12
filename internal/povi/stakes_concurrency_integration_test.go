@@ -230,7 +230,7 @@ func runConcurrentSlash(t *testing.T, pool *pgxpool.Pool, node string, live bool
 	t.Helper()
 	ctx := context.Background()
 	ws := wsFor(node)
-	seedAvailable(t, pool, ws, 1_000_000)
+	seedAvailable(t, pool, ws, 1_000_000_000_000)
 	if _, err := newMgr(pool, true).Stake(ctx, node, S); err != nil {
 		t.Fatalf("seed stake: %v", err)
 	}
@@ -261,7 +261,7 @@ func runConcurrentSlash(t *testing.T, pool *pgxpool.Pool, node string, live bool
 // remaining invariants, all on real Postgres.
 func TestPoVIStakeSlashConcurrency_RealPG(t *testing.T) {
 	pool := poviConcPool(t)
-	const S int64 = 100 // µLENS (SEC-2)
+	const S int64 = 100_000_000 // 100 LENS in µLENS (SEC-2)
 	const (
 		f = 0.5
 		N = 16
@@ -332,8 +332,8 @@ func TestPoVIStakeSlashConcurrency_RealPG(t *testing.T) {
 		ctx := context.Background()
 		node := "n-antiyank"
 		ws := wsFor(node)
-		const A int64 = 100
-		seedAvailable(t, pool, ws, 1_000_000)
+		const A int64 = 100_000_000 // 100 LENS in µLENS
+		seedAvailable(t, pool, ws, 1_000_000_000_000)
 		mgr := newMgr(pool, true)
 		if _, err := mgr.Stake(ctx, node, A); err != nil {
 			t.Fatalf("stake: %v", err)
@@ -397,9 +397,9 @@ func TestPoVIStakeSlashConcurrency_RealPG(t *testing.T) {
 		node := "n-stakeslash"
 		ws := wsFor(node)
 		const (
-			seed int64 = 1_000_000 // µLENS (SEC-2)
-			S    int64 = 100
-			top  int64 = 10
+			seed int64 = 1_000_000_000_000 // 1M LENS in µLENS (SEC-2)
+			S    int64 = 100_000_000
+			top  int64 = 10_000_000
 		)
 		const (
 			T = 8
@@ -459,7 +459,7 @@ func TestPoVIStakeSlashConcurrency_RealPG(t *testing.T) {
 		ctx := context.Background()
 		node := "n-terminal"
 		ws := wsFor(node)
-		seedAvailable(t, pool, ws, 1_000_000)
+		seedAvailable(t, pool, ws, 1_000_000_000_000)
 		mgr := newMgr(pool, true)
 		if _, err := mgr.Stake(ctx, node, 100); err != nil {
 			t.Fatalf("stake: %v", err)

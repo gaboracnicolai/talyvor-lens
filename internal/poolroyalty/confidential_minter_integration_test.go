@@ -40,15 +40,15 @@ func confHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 	for _, ddl := range []string{
 		`DROP SCHEMA IF EXISTS lens_confidmint_test CASCADE`,
 		`CREATE SCHEMA lens_confidmint_test`,
-		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0, lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
-			amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL,
+			amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount DOUBLE PRECISION NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
 		`CREATE TABLE inference_nodes (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL)`,
 		`CREATE TABLE benchmark_node_scores (node_id TEXT NOT NULL, model TEXT NOT NULL, score DOUBLE PRECISION NOT NULL,
 			sample_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (node_id, model))`,
@@ -56,7 +56,7 @@ func confHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 			attested_gpu_class TEXT, cc_mode BOOLEAN, eat_digest TEXT, key_bound BOOLEAN NOT NULL DEFAULT false,
 			attested_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ)`,
 		`CREATE TABLE confidential_compute_mints (request_id TEXT PRIMARY KEY, contributor_workspace_id TEXT NOT NULL,
-			minted_amount DOUBLE PRECISION NOT NULL, node_id TEXT NOT NULL, attested_gpu_class TEXT NOT NULL, epoch BIGINT NOT NULL,
+			minted_amount BIGINT NOT NULL, node_id TEXT NOT NULL, attested_gpu_class TEXT NOT NULL, epoch BIGINT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
@@ -81,7 +81,7 @@ func seedAttestation(t *testing.T, pool *pgxpool.Pool, nodeID, class, status str
 	}
 }
 
-func confMintRows(t *testing.T, pool *pgxpool.Pool, ws string) (n int, amount float64) {
+func confMintRows(t *testing.T, pool *pgxpool.Pool, ws string) (n int, amount int64) {
 	t.Helper()
 	_ = pool.QueryRow(context.Background(),
 		`SELECT count(*), COALESCE(sum(minted_amount),0) FROM confidential_compute_mints WHERE contributor_workspace_id=$1`, ws).Scan(&n, &amount)
@@ -114,11 +114,11 @@ func TestConfidential_Correctness_ExactAmount(t *testing.T) {
 		t.Fatalf("eligible node must mint exactly 1: n=%d err=%v", n, err)
 	}
 	rows, amount := confMintRows(t, pool, "wsA")
-	if rows != 1 || amount < 9.999 || amount > 10.001 {
-		t.Fatalf("expected 1 mint of 10.0 (rate 10 × capacity 1.0): rows=%d amount=%.4f", rows, amount)
+	if rows != 1 || amount < micro(9.999) || amount > micro(10.001) {
+		t.Fatalf("expected 1 mint of 10.0 (rate 10 × capacity 1.0): rows=%d amount=%d", rows, amount)
 	}
-	if _, held := balances(t, pool, "wsA"); held < 9.999 || held > 10.001 {
-		t.Fatalf("wsA held_balance %.4f, want 10.0", held)
+	if _, held := balances(t, pool, "wsA"); held < micro(9.999) || held > micro(10.001) {
+		t.Fatalf("wsA held_balance %d µLENS, want ~10 LENS", held)
 	}
 }
 

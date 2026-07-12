@@ -66,9 +66,9 @@ func TestRevoker_SingleRevoke_Integration(t *testing.T) {
 	seedHeldMint(t, m, ctx, "rk-1", "wsA", 1.0)
 
 	// pre: held=1, spendable=0, earned=0, supply=0 (held mint not counted)
-	var bal, held, earned float64
+	var bal, held, earned int64
 	mustScan(t, pool, `SELECT balance, held_balance, lifetime_earned FROM lens_token_balances WHERE workspace_id='wsA'`, &bal, &held, &earned)
-	if bal != 0 || held != 1.0 || earned != 0 {
+	if bal != 0 || held != micro(1) || earned != 0 {
 		t.Fatalf("pre-revoke: bal=%v held=%v earned=%v, want 0/1/0", bal, held, earned)
 	}
 
@@ -155,9 +155,9 @@ func TestRevoker_FinalizedNeverRevocable_Integration(t *testing.T) {
 		t.Fatalf("a finalized mint must NEVER burn-revoke; rows=%d", revRows)
 	}
 	// it finalized → spendable=2, held=0
-	var bal, held float64
+	var bal, held int64
 	mustScan(t, pool, `SELECT balance, held_balance FROM lens_token_balances WHERE workspace_id='wsA'`, &bal, &held)
-	if bal != 2.0 || held != 0 {
+	if bal != micro(2) || held != 0 {
 		t.Fatalf("finalized: bal=%v held=%v, want 2/0", bal, held)
 	}
 }

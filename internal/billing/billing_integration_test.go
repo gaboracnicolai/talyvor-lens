@@ -313,8 +313,8 @@ func TestWebhook_Refund_MarksRefunded_BalanceUnchanged(t *testing.T) {
 	if got := post(svc, body, sig); got != http.StatusOK {
 		t.Fatalf("credit: got %d", got)
 	}
-	if b := balance(t, pool, ws); b != 500 {
-		t.Fatalf("pre-refund balance=%v, want 500", b)
+	if b := balance(t, pool, ws); b != micro(500) {
+		t.Fatalf("pre-refund balance=%v µLXC, want micro(500)", b)
 	}
 	// refund the charge (correlated by payment_intent).
 	rb, rsig := signed(testWebhookSecret, "evt_refund_chg", "charge.refunded",
@@ -322,7 +322,7 @@ func TestWebhook_Refund_MarksRefunded_BalanceUnchanged(t *testing.T) {
 	if got := post(svc, rb, rsig); got != http.StatusOK {
 		t.Fatalf("refund: got %d", got)
 	}
-	if b := balance(t, pool, ws); b != 500 {
+	if b := balance(t, pool, ws); b != micro(500) {
 		t.Errorf("v1 refund must NOT claw back; balance=%v, want 500 unchanged", b)
 	}
 	assertStatus(t, pool, sess, "refunded")
@@ -456,10 +456,10 @@ func TestWebhook_ConcurrentSameEvent_OneCredit(t *testing.T) {
 			t.Errorf("delivery %d: got %d, want 200", i, c)
 		}
 	}
-	if c, sum := sessionRows(t, pool, sess); c != 1 || sum != 1000 {
+	if c, sum := sessionRows(t, pool, sess); c != 1 || sum != micro(1000) {
 		t.Errorf("rows=%d sumLXC=%v, want exactly ONE credit of 1000 under concurrency", c, sum)
 	}
-	if b := balance(t, pool, ws); b != 1000 {
+	if b := balance(t, pool, ws); b != micro(1000) {
 		t.Errorf("balance=%v, want 1000 (credited exactly once)", b)
 	}
 }

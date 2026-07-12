@@ -32,19 +32,41 @@ func TestSEC2_RealPG_LedgerRoundTripThroughMigratedSchema(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	// Isolate into a PRIVATE schema (the economy TestMain pins search_path to
+	// lens_it_economy, which the other economy integration tests DROP/CREATE
+	// tables in — applying the FULL migration set there would collide under the
+	// shared-DB `go test ./...` run). Pinning our own schema keeps this genuinely
+	// disjoint (mirrors povi/stakes_concurrency_integration_test.go).
+	const schema = "sec2_realpg_proof"
+
 	// ── apply the REAL migration set (incl. 0081/0082) via the real runner ──
-	conn, err := pgx.Connect(ctx, url)
+	connCfg, err := pgx.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse conn config: %v", err)
+	}
+	connCfg.RuntimeParams["search_path"] = schema + ",public"
+	conn, err := pgx.ConnectConfig(ctx, connCfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
+	}
+	for _, ddl := range []string{`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`, `CREATE SCHEMA ` + schema} {
+		if _, err := conn.Exec(ctx, ddl); err != nil {
+			t.Fatalf("reset schema: %v", err)
+		}
 	}
 	applied, err := dbmigrate.Run(ctx, conn, migrations.FS)
 	if err != nil {
 		t.Fatalf("apply real migrations (0001…0082): %v", err)
 	}
-	t.Logf("applied %d migrations; last = %s", len(applied), applied[len(applied)-1])
+	t.Logf("applied %d migrations into schema %q; last = %s", len(applied), schema, applied[len(applied)-1])
 	_ = conn.Close(ctx)
 
-	pool, err := pgxpool.New(ctx, url)
+	poolCfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse pool config: %v", err)
+	}
+	poolCfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
@@ -63,8 +85,8 @@ func TestSEC2_RealPG_LedgerRoundTripThroughMigratedSchema(t *testing.T) {
 	} {
 		var typ string
 		if err := pool.QueryRow(ctx,
-			`SELECT data_type FROM information_schema.columns WHERE table_name=$1 AND column_name=$2`,
-			c.table, c.col).Scan(&typ); err != nil {
+			`SELECT data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3`,
+			schema, c.table, c.col).Scan(&typ); err != nil {
 			t.Fatalf("type of %s.%s: %v", c.table, c.col, err)
 		}
 		if typ != "bigint" {
