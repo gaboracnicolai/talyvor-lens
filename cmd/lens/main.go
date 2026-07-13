@@ -76,6 +76,7 @@ import (
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/nodelatency"
 	"github.com/talyvor/lens/internal/oracle"
+	"github.com/talyvor/lens/internal/outputverify"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/povi"
@@ -1083,6 +1084,14 @@ func run() error {
 	worktierStore := worktier.NewStore(pool)
 	p.SetWorkTier(worktierStore, func() bool { return cfg.WorkTierEnabled })
 
+	// K4 intrinsic output verifier — DEFAULT-OFF (LENS_K4_VERIFIER_ENABLED). Post-serve, off-path,
+	// mint-free (import-guarded); writes verdicts to the PRIMARY pool. Reads (admin + workspace-scoped,
+	// below) also use the PRIMARY, so this adds NO replica reader and the U8/U9 ExactlySix invariant is
+	// unchanged. Moves no money; produces a verdict, nothing else.
+	outputVerdictWriter := outputverify.NewWriter(pool)
+	p.SetOutputVerifier(outputVerdictWriter, func() bool { return cfg.K4VerifierEnabled })
+	outputVerdictReader := outputverify.NewReader(pool)
+
 	// P3 #6: the DESCRIPTIVE node-latency capture sink (default-off, mint-free — writes the aggregate the
 	// future latency mint reads; RunOnce/capture no-ops while the flag is off).
 	nodeLatencyStore := nodelatency.NewStore(pool)
@@ -1311,6 +1320,11 @@ func run() error {
 	r.Handle("/v1/admin/keel/findings", requireAdmin(authManager,
 		newKeelFindingsHandler(keel.NewReader(dbrouting.ReadPool(pool, replicaPool)))))
 
+	// K4 output verdicts — admin forensic read (all workspaces), requireAdmin-gated. Reads the PRIMARY
+	// pool (non-money read; keeps the U8/U9 ExactlySix replica-reader invariant unchanged).
+	r.Handle("/v1/admin/output-verdicts", requireAdmin(authManager,
+		newOutputVerdictsAdminHandler(outputVerdictReader)))
+
 	apiServer := api.NewServer(
 		pool, redisClient, nc, exactCache, l,
 		alertManager, branchTracker, wsManager, lr,
@@ -1437,6 +1451,9 @@ func run() error {
 		authed.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
 		authed.Post("/v1/proxy/google/*", p.HandleGoogle)
 		authed.Post("/v1/proxy/bedrock/*", p.HandleBedrock)
+		// K4 output verdicts — WORKSPACE-SCOPED read: a tenant sees ONLY its OWN verdicts (scoped to the
+		// authenticated WorkspaceID; never another's). Intra-tenant by construction.
+		authed.Get("/v1/output-verdicts", newOutputVerdictsWorkspaceHandler(authManager, outputVerdictReader))
 		authed.Post("/v1/proxy/mistral/*", p.HandleExtraProvider("mistral"))
 		authed.Post("/v1/proxy/groq/*", p.HandleExtraProvider("groq"))
 		authed.Post("/v1/proxy/vllm/*", p.HandleExtraProvider("vllm"))

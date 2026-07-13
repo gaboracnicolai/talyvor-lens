@@ -162,6 +162,11 @@ type Proxy struct {
 	nodeLatencySink    nodeLatencySink
 	nodeLatencyEnabled func() bool
 
+	// K4 intrinsic output verifier (optional, nil-safe post-serve). Shares the obsLimiter budget;
+	// default-off; mint-free (import-guarded). See output_verdict_capture.go.
+	outputVerdictSink    outputVerdictSink
+	outputVerdictEnabled func() bool
+
 	// obsLimiter bounds post-serve observational writes (pattern capture).
 	// nil = no bound. main wires the same limiter into attribution's
 	// RecordAsync so the total observational claim on the DB pool stays
@@ -1373,6 +1378,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// the router analyzed (compressedPrompt) so it equals the routing decision's.
 			p.captureWorkTier(ctx, wsID, feature, upstreamModel, cfg.ProviderName(), compressedPrompt,
 				len(compressedPrompt)/4, outT, piiDetected, guardrailFired, string(loggingPolicy))
+			// K4 intrinsic output verdict — POST-FLUSH, off-path, default-off, mint-free. Derives the
+			// gateway-bound output id + checks the response against a constraint the REQUEST declared;
+			// records a verdict (hashes only). Cannot affect the already-flushed response. See
+			// output_verdict_capture.go.
+			p.captureOutputVerdict(ctx, wsID, upstreamModel, cfg.ProviderName(), body, upstreamBody, prompt, requestStart)
 			// S1 distill attribution (MINT-FREE) — record any consented
 			// cross-tenant pooled-distill serves surfaced from MaybeDistill.
 			// Post-flush, void, detached, swallowed (mirrors capturePattern);
