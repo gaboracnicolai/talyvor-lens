@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -23,28 +24,35 @@ var errResourceKilled = errors.New("buildverify: build killed by a resource limi
 // attacker code.
 var goBuildArgv = []string{"go", "build", "-o", "/tmp/out/", "./..."}
 
+// defaultPlatforms is the set every verdict must AGREE across. compile_failed is emitted ONLY when the tree
+// fails on ALL of them (a platform-independent failure); if results differ (arch-conditional via //go:build),
+// the verdict is not_verifiable — closing the cross-arch false-slash hole. Pure-Go cross-compile (CGO=0) is cheap.
+var defaultPlatforms = []string{"linux/amd64", "linux/arm64"}
+
 // Verifier is the compile-only, sandboxed build verifier.
 type Verifier struct {
-	enabled bool
-	image   string
-	docker  string
-	limits  Limits
+	enabled   bool
+	image     string
+	docker    string
+	limits    Limits
+	platforms []string
 }
 
 // Option configures a Verifier.
 type Option func(*Verifier)
 
 // WithImage overrides the pinned toolchain image. WithDocker overrides the container-runtime binary.
-// WithLimits overrides the resource caps.
-func WithImage(img string) Option   { return func(v *Verifier) { v.image = img } }
-func WithDocker(path string) Option { return func(v *Verifier) { v.docker = path } }
-func WithLimits(l Limits) Option    { return func(v *Verifier) { v.limits = l } }
+// WithLimits overrides the resource caps. WithPlatforms overrides the GOOS/GOARCH agreement set.
+func WithImage(img string) Option      { return func(v *Verifier) { v.image = img } }
+func WithDocker(path string) Option    { return func(v *Verifier) { v.docker = path } }
+func WithLimits(l Limits) Option       { return func(v *Verifier) { v.limits = l } }
+func WithPlatforms(p ...string) Option { return func(v *Verifier) { v.platforms = p } }
 
 // NewVerifier constructs the verifier. enabled=false (the default posture, gated by LENS_H5_BUILDVERIFY_ENABLED)
 // makes Verify return not_verifiable WITHOUT running anything. The container runtime is auto-detected unless
 // overridden with WithDocker.
 func NewVerifier(enabled bool, opts ...Option) *Verifier {
-	v := &Verifier{enabled: enabled, image: DefaultImage, limits: defaultLimits()}
+	v := &Verifier{enabled: enabled, image: DefaultImage, limits: defaultLimits(), platforms: defaultPlatforms}
 	for _, o := range opts {
 		o(v)
 	}
@@ -75,16 +83,70 @@ func (v *Verifier) Verify(ctx context.Context, srcDir string) Result {
 	if reason, ok := classify(srcDir, minorOf(toolchain)); !ok {
 		return Result{Verdict: NotVerifiable, Reason: reason, Toolchain: toolchain}
 	}
-	exit, output, infraErr := v.runContained(ctx, srcDir, goBuildArgv)
-	if infraErr != nil {
-		// timeout / resource kill / docker failure — do NOT emit a verdict.
-		return Result{Verdict: NotVerifiable, Reason: "sandbox failure: " + infraErr.Error(), Toolchain: toolchain}
+	platformSet := strings.Join(v.platforms, ",")
+	// Build on EVERY target platform and require agreement. Any not_verifiable, or a disagreement between
+	// platforms (arch-conditional //go:build), yields not_verifiable — never a slashable verdict.
+	var agreed Verdict
+	var reason string
+	for i, plat := range v.platforms {
+		goos, goarch, ok := splitPlatform(plat)
+		if !ok {
+			return Result{Verdict: NotVerifiable, Reason: "bad platform spec " + plat, Toolchain: toolchain, Platform: platformSet}
+		}
+		exit, output, infraErr := v.runContained(ctx, srcDir, goBuildArgv, "GOOS="+goos, "GOARCH="+goarch)
+		if infraErr != nil {
+			return Result{Verdict: NotVerifiable, Reason: "sandbox failure: " + infraErr.Error(), Toolchain: toolchain, Platform: platformSet}
+		}
+		vd := classifyBuildResult(exit, output)
+		if vd == NotVerifiable {
+			return Result{Verdict: NotVerifiable, Reason: "toolchain crash/ICE on " + plat + " — refusing", Toolchain: toolchain, Platform: platformSet}
+		}
+		if i == 0 {
+			agreed, reason = vd, summarize(output)
+		} else if vd != agreed {
+			// e.g. compiles on amd64 but fails on arm64 → arch-conditional → refuse.
+			return Result{Verdict: NotVerifiable, Reason: "platforms disagree (arch-conditional build) — refusing", Toolchain: toolchain, Platform: platformSet}
+		}
 	}
+	if agreed == CompileFailed {
+		return Result{Verdict: CompileFailed, Reason: reason, Toolchain: toolchain, Platform: platformSet}
+	}
+	return Result{Verdict: Compiled, Toolchain: toolchain, Platform: platformSet}
+}
+
+// classifyBuildResult maps ONE build's (exit, output) to a verdict. It emits compile_failed ONLY for a CLEAN
+// diagnostic-style failure (a `file.go:line:col:` message with exit 1/2). A toolchain crash / internal
+// compiler error / panic / signal — or any non-diagnostic non-zero exit — is NOT a trustworthy compile
+// verdict and maps to NotVerifiable. Err toward refusing: a wrong compile_failed becomes a FALSE SLASH.
+func classifyBuildResult(exit int, output string) Verdict {
 	if exit == 0 {
-		return Result{Verdict: Compiled, Toolchain: toolchain}
+		return Compiled
 	}
-	// A clean non-zero exit from the toolchain is a real compile failure.
-	return Result{Verdict: CompileFailed, Reason: summarize(output), Toolchain: toolchain}
+	low := strings.ToLower(output)
+	for _, marker := range []string{
+		"internal compiler error", "compiler bug", "signal sigsegv", "signal: segmentation",
+		"panic:", "fatal error:", "goroutine ", "runtime:", "out of memory", "killed",
+	} {
+		if strings.Contains(low, marker) {
+			return NotVerifiable
+		}
+	}
+	if (exit == 1 || exit == 2) && diagnosticLine.MatchString(output) {
+		return CompileFailed
+	}
+	return NotVerifiable
+}
+
+// diagnosticLine matches a Go compiler diagnostic (path.go:line[:col]:).
+var diagnosticLine = regexp.MustCompile(`\.go:\d+(:\d+)?:`)
+
+// splitPlatform splits "linux/amd64" into ("linux","amd64",true).
+func splitPlatform(p string) (goos, goarch string, ok bool) {
+	parts := strings.SplitN(p, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // toolchainVersion runs `go version` inside the SAME hardened sandbox and returns e.g. "go1.25.11". The

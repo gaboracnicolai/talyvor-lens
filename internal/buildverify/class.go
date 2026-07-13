@@ -30,12 +30,16 @@ const (
 	NotVerifiable Verdict = "not_verifiable"
 )
 
-// Result carries the verdict + the exact toolchain that produced it. A verdict is only meaningful against a
-// NAMED compiler, so Toolchain is always populated for a real verdict (e.g. "go1.25.11").
+// Result carries the verdict + the exact toolchain AND platform set that produced it. A verdict is only
+// meaningful against a NAMED compiler on NAMED platforms — `//go:build` means the same source can compile on
+// one GOOS/GOARCH and fail on another, so a real verdict is emitted ONLY when every target platform AGREES;
+// disagreement (arch-conditional) is not_verifiable. Toolchain e.g. "go1.25.11"; Platform e.g.
+// "linux/amd64,linux/arm64" (the set the verdict holds across).
 type Result struct {
 	Verdict   Verdict
 	Reason    string // why not_verifiable, or a short compile-error summary
 	Toolchain string
+	Platform  string
 }
 
 // classify performs the STATIC deterministic-class gate — no code runs here. It returns ("",true) when the

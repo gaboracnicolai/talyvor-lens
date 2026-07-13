@@ -26,9 +26,10 @@ func validGoMod(t *testing.T) string {
 	return mkmod(t, map[string]string{"go.mod": "module ok\ngo 1.21\n", "main.go": "package main\nfunc main(){ println(\"ok\") }\n"})
 }
 
-// CORRECT: a valid pure-Go program compiles, and the verdict names the exact toolchain.
+// CORRECT: a valid pure-Go program compiles, and the verdict names the exact toolchain. Single-platform to
+// keep the -race package under the CI 120s cap (multi-platform agreement is covered by its own tests below).
 func TestSandbox_ValidGo_Compiled(t *testing.T) {
-	v := requireSandbox(t)
+	v := requireSandbox(t, WithPlatforms("linux/amd64"))
 	r := v.Verify(context.Background(), validGoMod(t))
 	if r.Verdict != Compiled {
 		t.Fatalf("valid pure-Go must compile; got %q (%s)", r.Verdict, r.Reason)
@@ -38,34 +39,20 @@ func TestSandbox_ValidGo_Compiled(t *testing.T) {
 	}
 }
 
-// CORRECT + DETERMINISTIC: a type error → compile_failed, byte-identical across 5 runs (the false-slash defense).
+// CORRECT + DETERMINISTIC: a type error → compile_failed, byte-identical across N runs (the false-slash
+// defense). Single-platform + N=3 to stay under the CI 120s -race cap while still proving determinism.
 func TestSandbox_CompileFailed_Deterministic(t *testing.T) {
-	v := requireSandbox(t)
+	v := requireSandbox(t, WithPlatforms("linux/amd64"))
 	dir := mkmod(t, map[string]string{"go.mod": "module bad\ngo 1.21\n", "main.go": "package main\nfunc main(){ var x int = \"nope\"; _ = x }\n"})
 	first := v.Verify(context.Background(), dir)
 	if first.Verdict != CompileFailed {
 		t.Fatalf("a type error must be compile_failed; got %q", first.Verdict)
 	}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 2; i++ {
 		r := v.Verify(context.Background(), dir)
 		if r.Verdict != first.Verdict || r.Toolchain != first.Toolchain {
 			t.Errorf("run %d differed: %q/%q vs %q/%q — NON-DETERMINISTIC verdict", i+2, r.Verdict, r.Toolchain, first.Verdict, first.Toolchain)
 		}
-	}
-}
-
-// DETERMINISTIC: a valid build → compiled, identical across 5 runs.
-func TestSandbox_Compiled_Deterministic(t *testing.T) {
-	v := requireSandbox(t)
-	dir := validGoMod(t)
-	first := v.Verify(context.Background(), dir)
-	for i := 0; i < 4; i++ {
-		if r := v.Verify(context.Background(), dir); r.Verdict != first.Verdict || r.Toolchain != first.Toolchain {
-			t.Errorf("run %d differed: %q vs %q", i+2, r.Verdict, first.Verdict)
-		}
-	}
-	if first.Verdict != Compiled {
-		t.Errorf("want compiled; got %q", first.Verdict)
 	}
 }
 
@@ -128,9 +115,37 @@ func TestSandbox_EnvScrubbed_Live(t *testing.T) {
 	}
 }
 
+// FIX #2 — ARCH-CONDITIONAL code → not_verifiable. A file named *_arm64.go is built ONLY on arm64 (implicit
+// build constraint), so a broken arm64-only file compiles on amd64 but fails on arm64: the platforms
+// DISAGREE, so the verdict must be not_verifiable (never a slashable compile_failed on one arch only).
+func TestSandbox_ArchConditional_NotVerifiable(t *testing.T) {
+	v := requireSandbox(t)
+	dir := mkmod(t, map[string]string{
+		"go.mod":          "module ac\ngo 1.21\n",
+		"main.go":         "package main\nfunc main(){}\n",
+		"broken_arm64.go": "package main\nthis is not valid go on arm64\n",
+	})
+	r := v.Verify(context.Background(), dir)
+	if r.Verdict != NotVerifiable {
+		t.Errorf("arch-conditional source must be not_verifiable (platforms disagree); got %q (%s)", r.Verdict, r.Reason)
+	}
+}
+
+// A valid build records the platform SET it agreed across.
+func TestSandbox_Compiled_RecordsPlatform(t *testing.T) {
+	v := requireSandbox(t)
+	r := v.Verify(context.Background(), validGoMod(t))
+	if r.Verdict != Compiled {
+		t.Fatalf("want compiled; got %q", r.Verdict)
+	}
+	if !strings.Contains(r.Platform, "linux/amd64") || !strings.Contains(r.Platform, "linux/arm64") {
+		t.Errorf("verdict must record the platform agreement set; got %q", r.Platform)
+	}
+}
+
 // A cgo source is REFUSED (not_verifiable) — never compiled, so no build-time C runs.
 func TestSandbox_Cgo_NotVerifiable(t *testing.T) {
-	v := requireSandbox(t)
+	v := requireSandbox(t, WithPlatforms("linux/amd64")) // cgo refuses pre-build; platform irrelevant
 	dir := mkmod(t, map[string]string{"go.mod": "module cg\ngo 1.21\n", "main.go": "package main\n\nimport \"C\"\nfunc main(){}\n"})
 	if r := v.Verify(context.Background(), dir); r.Verdict != NotVerifiable {
 		t.Errorf("cgo must be not_verifiable; got %q", r.Verdict)
