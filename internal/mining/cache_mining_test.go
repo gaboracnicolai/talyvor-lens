@@ -281,43 +281,12 @@ func TestCountCacheHitsBenefited_QueryUnchanged(t *testing.T) {
 
 // ─── CacheMiner rate selection ───────────────────
 
-func TestRecordCacheHit_SameWorkspaceTinyReward(t *testing.T) {
-	store, mock := newMockStore(t)
-	miner := NewCacheMiner(store, true)
-	// Same workspace → CacheHitSameWorkspace = 0.001.
-	expectCreditOnce(mock, "req-1", "ws_a", TypeCacheMine, 0, 0, 0, micro(0.001), micro(0.001), micro(0.001), 0)
-	if err := miner.RecordCacheHit(context.Background(), "ws_a", "ws_a", "exact", "req-1"); err != nil {
-		t.Fatalf("RecordCacheHit: %v", err)
-	}
-}
-
-func TestRecordCacheHit_CrossWorkspaceBigReward(t *testing.T) {
-	store, mock := newMockStore(t)
-	miner := NewCacheMiner(store, true)
-	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, micro(0.010), micro(0.010), micro(0.010), 0)
-	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "exact", "req-x"); err != nil {
-		t.Fatalf("RecordCacheHit: %v", err)
-	}
-}
-
-func TestRecordCacheHit_SemanticHit(t *testing.T) {
-	store, mock := newMockStore(t)
-	miner := NewCacheMiner(store, true)
-	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, micro(0.005), micro(0.005), micro(0.005), 0)
-	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "semantic", "req-x"); err != nil {
-		t.Fatalf("RecordCacheHit: %v", err)
-	}
-}
-
-func TestRecordCacheHit_SharingDisabledFallsBackToSame(t *testing.T) {
-	store, mock := newMockStore(t)
-	miner := NewCacheMiner(store, false) // sharing off
-	// Even though requester differs, sharing-off means tiny reward.
-	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, micro(0.001), micro(0.001), micro(0.001), 0)
-	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "exact", "req-x"); err != nil {
-		t.Fatalf("RecordCacheHit: %v", err)
-	}
-}
+// Phase-1 Item 1: cache now mints via the HELD path (CreditOnceHeld), so the
+// mock-chain rate tests (same/cross/semantic/sharing-off) moved to real-PG in
+// cache_linkage_integration_test.go — they assert the same rates through
+// held_balance (+ the held→finalize→spendable lifecycle and revoke). The pgxmock
+// expectCreditOnce helper is retained for other CreditOnce callers.
+var _ = expectCreditOnce
 
 func TestRecordCacheHit_EmptyOwnerNoOp(t *testing.T) {
 	store, _ := newMockStore(t)

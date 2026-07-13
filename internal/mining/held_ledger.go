@@ -178,10 +178,21 @@ func (s *LedgerStore) CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID s
 // counted TypePoolRoyalty ledger row — this is the moment the mint enters
 // supply.
 func (s *LedgerStore) FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, description string, metadata map[string]interface{}) error {
+	return s.FinalizeHeldTxAs(ctx, tx, workspaceID, amount, TypePoolRoyalty, description, metadata)
+}
+
+// FinalizeHeldTxAs is FinalizeHeldTx with an explicit COUNTED ledger type (Phase-1
+// Item 1). The pool-royalty finalize writes TypePoolRoyalty; the traffic-mint
+// finalize writes the mint's own counted type (cache_mine / compute_mine /
+// embedding_mine) so GetTotalSupply and the per-mint stats attribute it correctly.
+// finalType MUST be a counted, non-mint-moment type (finalize settles already-gated
+// held value — it is not a new mint, so it is NOT in mintTypeList and skips the
+// verified-earn gate + rate cap).
+func (s *LedgerStore) FinalizeHeldTxAs(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, finalType, description string, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: finalize amount must be positive")
 	}
-	return s.heldInner(ctx, tx, workspaceID, TypePoolRoyalty, description, metadata,
+	return s.heldInner(ctx, tx, workspaceID, finalType, description, metadata,
 		func(bal, held, earned int64) (int64, int64, int64, int64, int64, error) {
 			if held < amount {
 				return 0, 0, 0, 0, 0, ErrInsufficientHeld
@@ -196,10 +207,19 @@ func (s *LedgerStore) FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID
 // untouched; the held LENS never entered supply, so this must not (and does
 // not) appear in the burned list either.
 func (s *LedgerStore) RevokeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, description string, metadata map[string]interface{}) error {
+	return s.RevokeHeldTxAs(ctx, tx, workspaceID, amount, TypePoolRoyaltyRevoked, description, metadata)
+}
+
+// RevokeHeldTxAs is RevokeHeldTx with an explicit revoke ledger type (Phase-1 Item
+// 1). revokeType MUST be a non-mint, supply-neutral type (the held LENS never
+// entered supply, so a revoke must not appear in the burned list) — GetTotalSupply
+// and GetTotalBurned both exclude it. Reuse TypePoolRoyaltyRevoked for the traffic
+// mints too: it is already excluded everywhere and carries the right semantics.
+func (s *LedgerStore) RevokeHeldTxAs(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, revokeType, description string, metadata map[string]interface{}) error {
 	if amount <= 0 {
 		return errors.New("mining: revoke amount must be positive")
 	}
-	return s.heldInner(ctx, tx, workspaceID, TypePoolRoyaltyRevoked, description, metadata,
+	return s.heldInner(ctx, tx, workspaceID, revokeType, description, metadata,
 		func(bal, held, earned int64) (int64, int64, int64, int64, int64, error) {
 			if held < amount {
 				return 0, 0, 0, 0, 0, ErrInsufficientHeld

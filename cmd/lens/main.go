@@ -671,7 +671,28 @@ func run() error {
 	// constraint downstream of the U6 floor/rate-cap — only ever reduces or blocks a mint.
 	tokenLedger.SetReputationGate(func() bool { return cfg.ReputationBondedMintingEnabled })
 	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
-	_ = cacheMiner // hooks into the cache-hit path in a follow-up wire-up
+	cacheMiner.SetOwnerLinkageCheck(true) // Phase-1: self-deal guard armed (parity with the royalty minters), ready if a value-backed serve path ever calls it
+	// Phase-1 Item 3 FINDING — cacheMiner is deliberately NOT called from the
+	// serve path. Its held-routing (CreditOnceHeld), owner-linkage guard,
+	// earn-verified gate and rate cap are ALL built and RED-proven at the
+	// RecordCacheHit level (internal/mining) — the miner is ready. But every
+	// serve path reachable today would MISPRICE value:
+	//   • cross-tenant pooled hit → pool-royalty ALREADY mints s×avoided_COGS to
+	//     the contributor here (mintPooledRoyalty, proxy.go), through the SAME
+	//     held + linkage + gate + cap machinery. A cacheMiner cross-rate call at
+	//     the same serve point would DOUBLE-MINT for one served response.
+	//   • own-cache hit (owner==requester, the only non-pooled path — tryExact/
+	//     trySemantic use the workspace-PREFIXED key) → the tiny same-workspace
+	//     rate is a self-payment for reusing your own cache: no realized
+	//     cross-party value, contra the "every royalty ↔ real value received"
+	//     doctrine. Reusing your own cache already avoids your own COGS; paying
+	//     LENS on top is double-dipping inflation (bounded by the rate cap, but
+	//     still value-less).
+	// So the cross-tenant cache-serving reward this miner was designed for is
+	// already delivered — better — by pool-royalty, and there is no other
+	// value-backed path to wire. Left constructed (stats endpoint uses it) and
+	// NOT minting. Retire-or-repurpose is a Phase-4 design call; see report.
+	_ = cacheMiner
 
 	// Phase-2 Stage 2.1 Pool-B royalty mint: a SERVED cross-tenant pooled hit
 	// mints s × avoided_COGS to the contributing tenant, exactly once per
@@ -720,6 +741,22 @@ func run() error {
 	if cfg.PoolRoyaltyMintingEnabled {
 		logger.Warn("poolroyalty: Pool-B royalty minting is ENABLED — served cross-tenant pooled hits mint LENS to contributors",
 			slog.Float64("royalty_share", cfg.PoolRoyaltyShare))
+	}
+
+	// Phase-1 Item 1 (settlement half): the traffic-mint finalize sweeper settles
+	// due held CreditOnceHeld mints (cache/compute/embedding traffic mints) —
+	// held → spendable, per-row CAS on traffic_mint_holds, supply counted here via
+	// the counted final type FinalizeHeldTxAs writes. Mirrors the pool-royalty
+	// finalize sweeper: leader-elected, minute tick, registered UNCONDITIONALLY
+	// (EconomyEnabled-gated START) so any committed held row settles even if the
+	// producing mint is later disabled — otherwise held LENS strands forever. No
+	// producer is wired today (see the cacheMiner finding above), so with no held
+	// rows each sweep is a single cheap indexed SELECT.
+	trafficMintSweeper := mining.NewTrafficMintSweeper(pool, tokenLedger)
+	if cfg.EconomyEnabled {
+		go haComps.leader.Run(ctx, "traffic-mint-finalize", 30*time.Second, func(lctx context.Context) {
+			trafficMintSweeper.StartScheduler(lctx, time.Minute)
+		})
 	}
 
 	// L2/S4 PR3: the distill reuse-royalty mint. A flag-gated, leader-elected

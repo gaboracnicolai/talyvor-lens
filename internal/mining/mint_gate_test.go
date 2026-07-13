@@ -23,12 +23,18 @@ func (f fakeVerifier) MayEarn(context.Context, pgx.Tx, string) (bool, error) { r
 func TestMintTypes_GateSet(t *testing.T) {
 	// The eight mint-MOMENT types must be gated.
 	for _, ty := range []string{
-		TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine,
+		TypeCacheMineHeld, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine,
 		TypePatternMine, "receipt_mine_provisional", TypePoolRoyaltyHeld, TypeEvalContributionHeld,
 	} {
 		if !IsMintType(ty) {
 			t.Errorf("%q must be a gated mint type", ty)
 		}
+	}
+	// Phase-1 Item 1: cache mints HELD, so the mint MOMENT is cache_mine_held (gated
+	// above). The counted cache_mine row is written at finalize (settlement) — NOT a
+	// mint moment, so it must NOT be gated (else finalize would be double-gated).
+	if IsMintType(TypeCacheMine) {
+		t.Error("cache_mine is now the finalize/settlement type — must NOT be gated (cache_mine_held is the mint moment)")
 	}
 	// pool_royalty_held (the held MINT — the worst Sybil hole) MUST be gated even
 	// though supply counts it LATER as pool_royalty. Dropping it "to match

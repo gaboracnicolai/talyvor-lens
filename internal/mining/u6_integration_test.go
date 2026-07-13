@@ -261,7 +261,7 @@ func TestU6RateCap_BlocksAcrossMintTypes(t *testing.T) {
 	if _, err := store.CreditOnce(ctx, "r1", "ws_cap", micro(8.0), TypeComputeMine, "c", nil); err != nil {
 		t.Fatalf("mint 1: %v", err)
 	}
-	if _, err := store.CreditOnce(ctx, "r2", "ws_cap", micro(1.5), TypeCacheMine, "c", nil); err != nil {
+	if _, err := store.CreditOnce(ctx, "r2", "ws_cap", micro(1.5), TypeCacheMineHeld, "c", nil); err != nil { // Phase-1: cache_mine_held is the gated mint type
 		t.Fatalf("mint 2: %v", err)
 	}
 	// +micro(1.0) (embedding) = micro(10.5) > 10 → BLOCKED (sums across the three different types).
