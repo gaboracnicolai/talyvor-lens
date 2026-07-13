@@ -1815,7 +1815,8 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 	}
 	if res.Minted {
 		slog.Info("poolroyalty: royalty minted",
-			slog.String("request_id", hit.RequestID),
+			slog.String("request_id", hit.RequestID), // client X-Talyvor-Request-ID (tracing only)
+			slog.String("mint_key", res.RequestID),   // SEC-11: server-derived claim key = the pool_royalty_mints row id
 			slog.String("contributor", hit.ContributorWorkspace),
 			slog.String("requester", hit.RequesterWorkspace),
 			slog.String("layer", hit.Layer),

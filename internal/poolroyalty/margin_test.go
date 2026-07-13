@@ -124,8 +124,8 @@ func TestMarginIdentity_MatchesShareArithmetic(t *testing.T) {
 
 		pool.ExpectBegin()
 		pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-			WithArgs(h.RequestID, h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
-				h.EntryID, h.Provider, h.Model, h.Similarity, a, microFloorLENS(minted), // minted_amount is µLENS (SEC-2)
+			WithArgs(pgxmock.AnyArg(), h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
+				h.EntryID, h.Provider, h.Model, h.Similarity, a, microFloorLENS(minted), // AnyArg: derived key (SEC-11); minted_amount is µLENS (SEC-2)
 				h.AnswerSHA256, h.PromptSHA256, (72 * time.Hour).Microseconds()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 		pool.ExpectCommit()
