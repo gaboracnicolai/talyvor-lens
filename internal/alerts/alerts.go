@@ -33,6 +33,12 @@ type Alert struct {
 	SpendUSD  float64    `json:"spend_usd"`
 	Threshold float64    `json:"threshold_usd"`
 	CreatedAt time.Time  `json:"created_at"`
+	// WorkspaceID is the workspace whose request tripped the threshold (SEC-7).
+	// Carried so the Track emitter can attribute the alert to the right workspace
+	// (Track credits issues by workspace_id + feature). Additive — the NATS payload
+	// gains a field, which existing consumers ignore. Empty for a monitor-triggered
+	// alert (aggregate, no single workspace).
+	WorkspaceID string `json:"workspace_id"`
 }
 
 type CircuitState string
@@ -66,7 +72,13 @@ type AlertManager struct {
 	rules    []SpendRule
 	circuits map[string]CircuitState
 	mu       sync.RWMutex
+	emitter  *Emitter // SEC-7: outbound Track spend-alert webhook (nil = disabled no-op)
 }
+
+// SetEmitter wires the Track spend-alert webhook emitter (SEC-7). Optional — a nil
+// emitter (or one with no URL/secret) is a total no-op. The emit is async and can
+// NEVER block a serve (see Emitter's security invariant).
+func (a *AlertManager) SetEmitter(e *Emitter) { a.emitter = e }
 
 func New(pool *pgxpool.Pool, nc *nats.Conn, rules []SpendRule) *AlertManager {
 	return newAlertManager(pool, nc, rules)
@@ -195,7 +207,7 @@ func (a *AlertManager) recordSpend(ctx context.Context, workspaceID, team, sprin
 			)
 			continue
 		}
-		a.evaluateRule(ctx, rule, spend)
+		a.evaluateRule(ctx, rule, spend, workspaceID)
 	}
 	return nil
 }
@@ -218,7 +230,7 @@ WHERE team = $1 AND feature = $2
 // evaluateRule fires alerts and toggles the circuit breaker based on the
 // rule's tier thresholds. Each tier fires independently — warning is still
 // emitted when critical is also true so dashboards see the full ladder.
-func (a *AlertManager) evaluateRule(ctx context.Context, rule SpendRule, spend float64) {
+func (a *AlertManager) evaluateRule(ctx context.Context, rule SpendRule, spend float64, workspaceID string) {
 	key := circuitKey(rule.Team, rule.Feature)
 
 	if spend > rule.CircuitUSD {
@@ -238,24 +250,26 @@ func (a *AlertManager) evaluateRule(ctx context.Context, rule SpendRule, spend f
 
 	if spend > rule.CriticalUSD {
 		_ = a.fireAlert(ctx, Alert{
-			Level:     AlertCritical,
-			Team:      rule.Team,
-			Feature:   rule.Feature,
-			Message:   "Critical spend threshold exceeded",
-			SpendUSD:  spend,
-			Threshold: rule.CriticalUSD,
-			CreatedAt: time.Now().UTC(),
+			Level:       AlertCritical,
+			Team:        rule.Team,
+			Feature:     rule.Feature,
+			Message:     "Critical spend threshold exceeded",
+			SpendUSD:    spend,
+			Threshold:   rule.CriticalUSD,
+			CreatedAt:   time.Now().UTC(),
+			WorkspaceID: workspaceID,
 		})
 	}
 	if spend > rule.WarningUSD {
 		_ = a.fireAlert(ctx, Alert{
-			Level:     AlertWarning,
-			Team:      rule.Team,
-			Feature:   rule.Feature,
-			Message:   "Warning spend threshold exceeded",
-			SpendUSD:  spend,
-			Threshold: rule.WarningUSD,
-			CreatedAt: time.Now().UTC(),
+			Level:       AlertWarning,
+			Team:        rule.Team,
+			Feature:     rule.Feature,
+			Message:     "Warning spend threshold exceeded",
+			SpendUSD:    spend,
+			Threshold:   rule.WarningUSD,
+			CreatedAt:   time.Now().UTC(),
+			WorkspaceID: workspaceID,
 		})
 	}
 }
@@ -265,6 +279,11 @@ func (a *AlertManager) fireAlert(_ context.Context, alert Alert) error {
 	if err != nil {
 		return err
 	}
+	// SEC-7: emit to Track's webhook — async, fire-and-forget, NEVER blocks (see
+	// Emitter). Independent of and BEFORE the NATS publish, so a spend alert reaches
+	// Track even when NATS is down; a nil/disabled emitter is a no-op.
+	a.emitter.Emit(alert)
+
 	if a.nc == nil {
 		return errors.New("alerts: no NATS connection")
 	}

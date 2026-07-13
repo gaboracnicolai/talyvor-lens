@@ -591,6 +591,15 @@ type Config struct {
 	StripeSecretKey     string
 	StripeWebhookSecret string
 
+	// TrackWebhookURL / TrackWebhookSecret (SEC-7) configure the outbound Lens→Track
+	// spend-alert emitter. TrackWebhookURL is Track's POST /v1/lens/webhook;
+	// TrackWebhookSecret is the shared HMAC secret (must equal Track's
+	// TRACK_LENS_WEBHOOK_SECRET) — a SECRET, never logged. If EITHER is empty the
+	// emitter is DISABLED (a total no-op, no error) — this is the default posture.
+	// Envs: LENS_TRACK_WEBHOOK_URL, LENS_TRACK_WEBHOOK_SECRET.
+	TrackWebhookURL    string
+	TrackWebhookSecret string
+
 	// BillingSuccessURL / BillingCancelURL are the Stripe Checkout redirect URLs
 	// (NOT secrets). Stripe requires both; defaulted, override per deployment.
 	BillingSuccessURL string
@@ -831,6 +840,8 @@ func Load() (*Config, error) {
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
+		TrackWebhookURL:     os.Getenv("LENS_TRACK_WEBHOOK_URL"),
+		TrackWebhookSecret:  os.Getenv("LENS_TRACK_WEBHOOK_SECRET"),
 		BillingSuccessURL:   getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
 		BillingCancelURL:    getEnv("LENS_BILLING_CANCEL_URL", "https://app.talyvor.com/billing/cancel"),
 

@@ -290,6 +290,9 @@ func run() error {
 	modelRouter := router.New()
 	piiDetector := pii.New()
 	alertManager := alerts.New(pool, nc, nil) // rules loaded from DB in a future iteration
+	// SEC-7: outbound Track spend-alert emitter (async, fail-open, never blocks a
+	// serve). Disabled no-op when the URL/secret are unset (the default).
+	alertManager.SetEmitter(alerts.NewEmitter(cfg.TrackWebhookURL, cfg.TrackWebhookSecret))
 	alertManager.StartMonitor(ctx)
 	templateDetector := templates.New(pool)
 	qualityScorer := quality.New(pool)
