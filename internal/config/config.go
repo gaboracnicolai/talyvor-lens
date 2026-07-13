@@ -235,7 +235,7 @@ type Config struct {
 
 	// PoolMintCapPerPair is the Pool-B mint cap (2.3b primitive #1): the max
 	// royalty mints per (requester, contributor) pair per rolling window.
-	// 0 (default) = cap disabled. The cap is what bounds any gaming vector's
+	// Phase-0 Item D: default 50 (was 0/off); 0 (env) disables. The cap bounds any gaming vector's
 	// worst case to cap × s × avoided_COGS per pair per window — the
 	// arithmetic behind the Option-C deterrence + bounded-exposure posture.
 	// Env: LENS_POOL_MINT_CAP_PER_PAIR.
@@ -696,6 +696,14 @@ type Config struct {
 	// nodes serve plain HTTP.
 	NodeTLSSkipVerify bool
 
+	// NodePrivateCIDRAllowlist (Phase-0 Item E) opts SPECIFIC private CIDRs back into
+	// the node call-out SSRF guard, for an internal node network on a private subnet.
+	// Comma-separated CIDRs (e.g. "10.42.0.0/16,192.168.10.0/24"). EMPTY (default) =
+	// today's behavior EXACTLY — all private ranges blocked. Cloud metadata
+	// (169.254.169.254) is NEVER allowlistable (safehttp refuses it, fail-loud at
+	// boot). Env: LENS_NODE_PRIVATE_CIDR_ALLOWLIST.
+	NodePrivateCIDRAllowlist string
+
 	// DBSSLMode controls TLS for the Postgres connection.
 	// Env: LENS_DB_SSL_MODE. Default "require".
 	//
@@ -865,7 +873,8 @@ func Load() (*Config, error) {
 		NatsTLS:           parseBoolEnv("LENS_NATS_TLS"),
 		NatsTLSSkipVerify: parseBoolEnv("LENS_NATS_TLS_SKIP_VERIFY"),
 
-		NodeTLSSkipVerify: parseBoolEnv("LENS_NODE_TLS_SKIP_VERIFY"),
+		NodeTLSSkipVerify:        parseBoolEnv("LENS_NODE_TLS_SKIP_VERIFY"),
+		NodePrivateCIDRAllowlist: os.Getenv("LENS_NODE_PRIVATE_CIDR_ALLOWLIST"),
 
 		JWTPrivateKey: os.Getenv("LENS_JWT_PRIVATE_KEY"),
 		TokenTTL:      24 * time.Hour,
@@ -1068,7 +1077,7 @@ func Load() (*Config, error) {
 		}
 		c.POVIChallengeRate = f
 	}
-	c.PoolMintCapPerPair = 0
+	c.PoolMintCapPerPair = 50 // Phase-0 Item D: ON by default. Bounds A→B pool-royalty farming to 50×s×avoided_COGS/pair/24h (~$25/pair/day at s=0.5) even if the owner-linkage guard misses; 0 (env) disables.
 	if v := os.Getenv("LENS_POOL_MINT_CAP_PER_PAIR"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {

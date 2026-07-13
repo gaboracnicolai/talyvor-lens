@@ -90,6 +90,7 @@ import (
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
 	"github.com/talyvor/lens/internal/routingscore"
+	"github.com/talyvor/lens/internal/safehttp"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/status"
 	"github.com/talyvor/lens/internal/templates"
@@ -333,14 +334,27 @@ func run() error {
 		logger.Warn("workspace: default registration failed", slog.String("err", err.Error()))
 	}
 
+	// Phase-0 Item E: parse the operator's private-CIDR allowlist for the node
+	// call-out SSRF guard. Empty ⇒ nil ⇒ today's all-private-blocked behavior. A bad
+	// CIDR or one containing cloud metadata fails LOUD at boot (never a silent hole).
+	nodeCIDRAllow, err := safehttp.ParseCIDRAllowlist(cfg.NodePrivateCIDRAllowlist)
+	if err != nil {
+		slog.Error("node private CIDR allowlist invalid", slog.String("err", err.Error()))
+		os.Exit(1)
+	}
+	if len(nodeCIDRAllow) > 0 {
+		logger.Warn("safehttp: node private-CIDR allowlist ACTIVE — these private ranges are dialable",
+			slog.String("cidrs", cfg.NodePrivateCIDRAllowlist))
+	}
+
 	lr := localrouter.New(cfg.OllamaURL)
-	lr.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
+	lr.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second, nodeCIDRAllow))
 
 	// Multi-endpoint local router (additive, see internal/localrouter/multi.go).
 	// Parses LENS_LOCAL_ENDPOINTS; if empty, the registry stays empty and
 	// the admin API can register endpoints dynamically at runtime.
 	localRouterMulti := localrouter.NewRouterFromConfig(pool, cfg.LocalEndpoints)
-	localRouterMulti.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
+	localRouterMulti.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second, nodeCIDRAllow))
 	if cfg.NodeTLSSkipVerify {
 		logger.Warn("node TLS certificate verification is disabled (LENS_NODE_TLS_SKIP_VERIFY=true)" +
 			" — only appropriate for self-signed certs on controlled private networks")
@@ -839,7 +853,7 @@ func run() error {
 	// localrouter so any verified GPU node that serves a
 	// cross-workspace request gets credited automatically.
 	computeMiner := mining.NewComputeMiner(tokenLedger, pool)
-	computeMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
+	computeMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second, nodeCIDRAllow))
 	localRouterMulti.SetOnRequestServed(func(nodeID, requesterWS, requestID string, tokens int, latencyMs int64) {
 		// RETIREMENT SWITCH (PoVI Part 3): the LEGACY trust-based mint (mints LENS
 		// per served request, no receipt). U6: now DEFAULT OFF — an unprotected
@@ -898,12 +912,12 @@ func run() error {
 	// verifies + answers from its retained trace.
 	lensChallengePub, lensChallengePriv := loadOrGenChallengeKey(cfg.POVIChallengeKey, logger)
 	challengeClient := povi.NewChallengeClient(lensChallengePriv, 10*time.Second)
-	challengeClient.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 10*time.Second))
+	challengeClient.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 10*time.Second, nodeCIDRAllow))
 	challengeStore := povi.NewChallengeStore(pool)
 	// Blocker 6: gateway auto-route to registered nodes. Wired here (not at proxy.New) because it
 	// reuses the EXISTING challenge private key (lensChallengePriv, just loaded above) to sign the
 	// per-request node-auth token. enabled=cfg.NodeAutoRouteEnabled (default false) → fully inert.
-	p.SetNodeRouter(localRouterMulti, lensChallengePriv, newNodeHTTPClient(cfg.NodeTLSSkipVerify, 30*time.Second), cfg.NodeAutoRouteEnabled)
+	p.SetNodeRouter(localRouterMulti, lensChallengePriv, newNodeHTTPClient(cfg.NodeTLSSkipVerify, 30*time.Second, nodeCIDRAllow), cfg.NodeAutoRouteEnabled)
 	poviChallenger := povi.NewChallenger(
 		computeMiner.NodeURL, challengeClient, poviStakeManager, challengeStore,
 		4, cfg.POVISlashFraction)
@@ -926,7 +940,7 @@ func run() error {
 		benchSigner := func(nodeID, requestID, bodyHash string, exp int64) (string, error) {
 			return povi.SignNodeAuthToken(lensChallengePriv, nodeID, requestID, bodyHash, exp) // reuse the #242 challenge key
 		}
-		benchDelivery := benchprobe.NewHTTPDelivery(benchSigner, computeMiner.NodeURL, newNodeHTTPClient(cfg.NodeTLSSkipVerify, 30*time.Second))
+		benchDelivery := benchprobe.NewHTTPDelivery(benchSigner, computeMiner.NodeURL, newNodeHTTPClient(cfg.NodeTLSSkipVerify, 30*time.Second, nodeCIDRAllow))
 		benchScheduler := benchprobe.NewScheduler(benchStore, benchDelivery, func() bool { return cfg.ProofOfBenchmarkEnabled })
 		benchScheduler.SetNodeLister(func(lctx context.Context) ([]benchprobe.NodeTarget, error) {
 			rows, err := pool.Query(lctx, `SELECT id, COALESCE(models[1], '') FROM inference_nodes WHERE active`)
@@ -970,13 +984,17 @@ func run() error {
 	// proxy wires RecordEmbeddingsServed in the semantic-cache
 	// path in a follow-up.
 	embeddingMiner := mining.NewEmbeddingMiner(tokenLedger, pool)
-	embeddingMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second))
+	embeddingMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second, nodeCIDRAllow))
 	_ = embeddingMiner
 
 	// Annotation mining (Batch 2 Item 4). Proof-of-useful-work
 	// — annotators stake LENS, review pairs of responses, and
 	// earn per validated annotation.
 	annotationMiner := mining.NewAnnotationMiner(tokenLedger, pool)
+	// Phase-0 Item C: gate the annotation MINT on the economy master switch at the
+	// source, so EconomyEnabled=false stops it too (its submit route is unconditional,
+	// so route-gating alone previously missed it). Reads the flag live.
+	annotationMiner.SetEconomyGate(func() bool { return cfg.EconomyEnabled })
 
 	// Annotation reputation SWEEP — ONE scheduled job that per tick (a) RESOLVES TTL-expired
 	// tasks into agreement_outcome events from the FINAL consensus, and (b) DECAYS dormant
@@ -2603,7 +2621,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/annotate/task", func(w http.ResponseWriter, req *http.Request) {
+		econ.get(authed, "/v1/workspaces/{wsID}/annotate/task", func(w http.ResponseWriter, req *http.Request) { // Phase-0 Item C: economy-gate (was authed.Get)
 			wsID := chi.URLParam(req, "wsID")
 			task, err := annotationMiner.GetPendingTask(req.Context(), wsID)
 			if err != nil {
@@ -2617,7 +2635,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, task)
 		})
 
-		authed.Post("/v1/workspaces/{wsID}/annotate/task/{taskID}", func(w http.ResponseWriter, req *http.Request) {
+		econ.post(authed, "/v1/workspaces/{wsID}/annotate/task/{taskID}", func(w http.ResponseWriter, req *http.Request) { // Phase-0 Item C: economy-gate the MINT route (was authed.Post)
 			wsID := chi.URLParam(req, "wsID")
 			taskID := chi.URLParam(req, "taskID")
 			var in struct {
