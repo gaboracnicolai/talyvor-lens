@@ -431,6 +431,12 @@ type Config struct {
 	// bond endpoints, no locks, no slashes, zero behavior change. Env: LENS_H5_BONDS_ENABLED.
 	H5BondsEnabled bool
 
+	// H5BuildVerifyEnabled gates the SANDBOXED COMPILE-ONLY VERIFIER (internal/buildverify) — Talyvor's own
+	// hard-contained `go build` of untrusted code, which will produce the 'talyvor_verified' attested compile
+	// verdict. DEFAULT FALSE. NOT wired to the slash path yet (step 3 does that); today nothing calls the
+	// verifier and it emits no attested verdict. Env: LENS_H5_BUILDVERIFY_ENABLED.
+	H5BuildVerifyEnabled bool
+
 	// NodeLatencyCaptureEnabled gates the DESCRIPTIVE proof-of-latency capture (P3 #6) — a post-serve,
 	// off-path record of gateway-measured node serve latency into a per-(node,cohort) EWMA aggregate
 	// (node_cohort_latency_stats), the substrate a LATER mint reads. CAPABILITY flag, default false: off =
@@ -821,6 +827,7 @@ func Load() (*Config, error) {
 		WorkTierEnabled:              parseBoolEnv("LENS_WORKTIER_ENABLED"),
 		K4VerifierEnabled:            parseBoolEnv("LENS_K4_VERIFIER_ENABLED"),
 		H5BondsEnabled:               parseBoolEnv("LENS_H5_BONDS_ENABLED"),
+		H5BuildVerifyEnabled:         parseBoolEnv("LENS_H5_BUILDVERIFY_ENABLED"),
 		NodeLatencyCaptureEnabled:    parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
 		NodeAttestationVerifyEnabled: parseBoolEnv("LENS_NODE_ATTESTATION_VERIFY_ENABLED"),
 
