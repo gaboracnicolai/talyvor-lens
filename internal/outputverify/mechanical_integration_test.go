@@ -2,6 +2,7 @@ package outputverify_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -93,23 +94,93 @@ func TestBreach_MechanicalNoRawContent(t *testing.T) {
 
 // TRUST MODEL — the schema distinguishes self_reported source so H5 cannot confuse a pass with an attested
 // one; only a self-reported FAILURE is slash-usable.
+// The FULL IsSlashUsable truth table — the only gate that authorizes a burn.
 func TestMechanical_TrustModel_SlashUsability(t *testing.T) {
-	// self-reported failures are usable as slash evidence (credible against interest).
-	if !outputverify.IsSlashUsable(outputverify.MechCompileFailed, outputverify.SourceSelfReported) {
-		t.Error("a self-reported compile_failed must be slash-usable")
+	cases := []struct {
+		verdict, source string
+		want            bool
+	}{
+		// self_reported — credible against interest; a FAILURE is usable, a pass never is. Unchanged.
+		{outputverify.MechCompileFailed, outputverify.SourceSelfReported, true},
+		{outputverify.MechTestsFailed, outputverify.SourceSelfReported, true},
+		{outputverify.MechCompiled, outputverify.SourceSelfReported, false},
+		{outputverify.MechTestsPassed, outputverify.SourceSelfReported, false},
+		// talyvor_verified — ONLY a compile failure is attestable.
+		{outputverify.MechCompileFailed, outputverify.SourceTalyvorVerified, true},
+		// THE LOAD-BEARING RULE: an attested TEST failure must NEVER be slash-usable (not reproducible).
+		{outputverify.MechTestsFailed, outputverify.SourceTalyvorVerified, false},
+		{outputverify.MechCompiled, outputverify.SourceTalyvorVerified, false},
+		{outputverify.MechTestsPassed, outputverify.SourceTalyvorVerified, false},
+		// unknown/forged sources are never usable.
+		{outputverify.MechCompileFailed, "attested", false},
+		{outputverify.MechCompileFailed, "hacker_says_so", false},
+		{outputverify.MechTestsFailed, "", false},
 	}
-	if !outputverify.IsSlashUsable(outputverify.MechTestsFailed, outputverify.SourceSelfReported) {
-		t.Error("a self-reported tests_failed must be slash-usable")
+	for _, c := range cases {
+		if got := outputverify.IsSlashUsable(c.verdict, c.source); got != c.want {
+			t.Errorf("IsSlashUsable(%q, %q) = %v, want %v", c.verdict, c.source, got, c.want)
+		}
 	}
-	// self-reported PASSES prove nothing — NEVER slash/release evidence.
-	if outputverify.IsSlashUsable(outputverify.MechCompiled, outputverify.SourceSelfReported) {
-		t.Error("a self-reported compiled (pass) must NOT be slash-usable — a liar always claims success")
+}
+
+// DEFENSE IN DEPTH (real PG): the schema makes a talyvor_verified TEST row — most importantly the false-slash
+// row (talyvor_verified, tests_failed) — and any unknown source UNREPRESENTABLE.
+func TestAttested_CheckConstraints(t *testing.T) {
+	ctx := context.Background()
+	pool := ovTestPool(t)
+	ins := func(outputID, source, verdict string) error {
+		_, err := pool.Exec(ctx,
+			`INSERT INTO k4_mechanical_verdicts (output_id, workspace_id, verdict, exit_code, verdict_source)
+			 VALUES ($1,'ws',$2,$3,$4)`, outputID, verdict, 1, source)
+		return err
 	}
-	if outputverify.IsSlashUsable(outputverify.MechTestsPassed, outputverify.SourceSelfReported) {
-		t.Error("a self-reported tests_passed (pass) must NOT be slash-usable")
+	// ACCEPTED: attested compile verdicts + all self_reported verdicts.
+	for i, ok := range []struct{ source, verdict string }{
+		{outputverify.SourceTalyvorVerified, outputverify.MechCompileFailed},
+		{outputverify.SourceTalyvorVerified, outputverify.MechCompiled},
+		{outputverify.SourceSelfReported, outputverify.MechTestsFailed},
+		{outputverify.SourceSelfReported, outputverify.MechCompileFailed},
+	} {
+		if err := ins("oid-ok-"+strconv.Itoa(i), ok.source, ok.verdict); err != nil {
+			t.Errorf("(%s,%s) must be insertable; got %v", ok.source, ok.verdict, err)
+		}
 	}
-	// a failure from an UNKNOWN (non-self-reported) source is not usable via this rule.
-	if outputverify.IsSlashUsable(outputverify.MechCompileFailed, "attested") {
-		t.Error("only self_reported is defined today; other sources must not be treated as usable by this rule")
+	// REJECTED by CHECK: attested TEST verdicts (incl. the false-slash row) + unknown sources.
+	for i, bad := range []struct{ source, verdict, why string }{
+		{outputverify.SourceTalyvorVerified, outputverify.MechTestsFailed, "the false-slash row must be unrepresentable"},
+		{outputverify.SourceTalyvorVerified, outputverify.MechTestsPassed, "attested is compile-only"},
+		{"hacker_says_so", outputverify.MechCompileFailed, "unknown source must be rejected"},
+		{"attested", outputverify.MechCompileFailed, "only the two known sources are allowed"},
+	} {
+		if err := ins("oid-bad-"+strconv.Itoa(i), bad.source, bad.verdict); err == nil {
+			t.Errorf("(%s,%s) must be REJECTED by CHECK: %s", bad.source, bad.verdict, bad.why)
+		}
+	}
+}
+
+// The self-report endpoint's write path can ONLY produce verdict_source='self_reported' — a workspace can
+// never forge an attested source for itself (the source is hard-coded, not caller-supplied).
+func TestSelfReport_AlwaysWritesSelfReported(t *testing.T) {
+	ctx := context.Background()
+	pool := ovTestPool(t)
+	if _, err := outputverify.NewWriter(pool).Record(ctx, outputverify.VerdictRecord{
+		OutputID: "oid-selfsrc", WorkspaceID: "ws-self", Model: "m",
+		Verdict: outputverify.VerdictUnverifiable, ConstraintKind: outputverify.KindNone,
+		PromptSHA256: outputverify.Sha256Hex([]byte("p")), ResponseSHA256: outputverify.Sha256Hex([]byte("r")),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	owned, recorded, err := outputverify.NewMechanicalWriter(pool).RecordMechanicalIfOwned(ctx, outputverify.MechanicalReport{
+		OutputID: "oid-selfsrc", WorkspaceID: "ws-self", Verdict: outputverify.MechCompileFailed, ExitCode: 1,
+	})
+	if err != nil || !owned || !recorded {
+		t.Fatalf("self-report record: owned=%v recorded=%v err=%v", owned, recorded, err)
+	}
+	var src string
+	if err := pool.QueryRow(ctx, `SELECT verdict_source FROM k4_mechanical_verdicts WHERE output_id=$1`, "oid-selfsrc").Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if src != outputverify.SourceSelfReported {
+		t.Errorf("the self-report path must write self_reported; got %q — an attested source was forgeable", src)
 	}
 }

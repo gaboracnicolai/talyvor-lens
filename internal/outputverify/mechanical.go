@@ -16,15 +16,43 @@ const (
 	MechTestsFailed   = "tests_failed"
 )
 
-// SourceSelfReported is the only verdict_source today. A trusted/attested runner would be a future source.
-const SourceSelfReported = "self_reported"
+// Verdict sources.
+//   - self_reported: reported by the producing workspace itself (the self-report endpoint hard-codes this).
+//   - talyvor_verified: produced by Talyvor's OWN sandboxed re-run — the only ATTESTED source. NO PRODUCER
+//     EXISTS YET; the sandboxed compile executor is step 2. Adding the source + its slash rule here is step 1.
+const (
+	SourceSelfReported    = "self_reported"
+	SourceTalyvorVerified = "talyvor_verified"
+)
 
-// IsSlashUsable reports whether a mechanical verdict may be used as H5 SLASH evidence. TRUST MODEL: only a
-// FAILURE self-reported by the producing workspace qualifies — it is credible AGAINST INTEREST (nobody
-// falsely confesses to being slashable). A self-reported PASS proves NOTHING (a liar always claims success)
-// and is NEVER slash-or-release evidence by itself. H5 must gate on exactly this.
+// IsSlashUsable reports whether a mechanical verdict may be used as H5 SLASH evidence. It is the ONLY gate
+// that authorizes a burn, and the truth table is deliberately narrow:
+//
+//	self_reported    + (compile_failed | tests_failed)  → TRUE  — credible AGAINST INTEREST (nobody falsely
+//	                                                              confesses to being slashable). Unchanged.
+//	talyvor_verified + compile_failed                   → TRUE  — attested, deterministic, reproducible.
+//	talyvor_verified + tests_failed                     → FALSE — THE LOAD-BEARING RULE (see below).
+//	talyvor_verified + (compiled | tests_passed)        → FALSE — a pass never slashes.
+//	anything else (unknown source, pass)                → FALSE.
+//
+// WHY tests_failed can NEVER be attested: `go test` COMPILES AND RUNS the test binary, i.e. it executes
+// arbitrary code — flaky tests, t.Parallel() data races, time.Now(), RNG seeds, network, CGO/host toolchain.
+// A test verdict is therefore NOT reproducible across environments: an honest workspace's tests can fail on a
+// runner whose environment merely differed. Attesting a test failure would produce FALSE SLASHES — burning an
+// honest workspace's collateral for a difference it did not cause. A false slash is WORSE than the current
+// fail-open hole. Only `go build` (pinned toolchain, verified deps, no network, no CGO) is BOTH deterministic
+// AND free of target-code execution, so only compile_failed is attestable. Test verdicts stay self-reported
+// FOREVER — by design, not by omission. (Defense in depth: migration 0087 also makes a talyvor_verified test
+// row unrepresentable at the DB, so both the schema and this function must fail before a false slash occurs.)
 func IsSlashUsable(verdict, source string) bool {
-	return source == SourceSelfReported && (verdict == MechCompileFailed || verdict == MechTestsFailed)
+	switch source {
+	case SourceSelfReported:
+		return verdict == MechCompileFailed || verdict == MechTestsFailed
+	case SourceTalyvorVerified:
+		return verdict == MechCompileFailed // NOT tests_failed — a test verdict is never reproducible.
+	default:
+		return false
+	}
 }
 
 // mechanicalDB needs a read (ownership check against k4_output_verdicts) + the append-only write. It exposes

@@ -277,9 +277,18 @@ func TestBond_PassCannotSlash(t *testing.T) {
 	assertReleasesDespiteVerdict(t, outputverify.MechCompiled, outputverify.SourceSelfReported)
 }
 
-// A verdict from an unknown (non-self-reported) source cannot slash.
-func TestBond_NonSelfReportedCannotSlash(t *testing.T) {
-	assertReleasesDespiteVerdict(t, outputverify.MechCompileFailed, "attested")
+// An unknown/forged verdict_source can never even be RECORDED (migration 0087 CHECK), so it can never reach
+// the bond slash path — a stronger guarantee than "it doesn't slash". self_reported + talyvor_verified are
+// the ONLY sources that exist.
+func TestBond_UnknownSourceCannotBeRecorded(t *testing.T) {
+	ctx := context.Background()
+	pool := bondTestPool(t)
+	_, err := pool.Exec(ctx,
+		`INSERT INTO k4_mechanical_verdicts (output_id, workspace_id, verdict, exit_code, verdict_source)
+		 VALUES ('oid-unk-src','ws','compile_failed',1,'attested')`)
+	if err == nil {
+		t.Error("an unknown verdict_source must be rejected by the 0087 CHECK — it can never feed a slash")
+	}
 }
 
 func assertReleasesDespiteVerdict(t *testing.T, verdict, source string) {
@@ -465,5 +474,84 @@ func TestBond_CreateIdempotent(t *testing.T) {
 	}
 	if bal, lk := balanceOf(t, pool, A); bal != 4_000_000 || lk != 1_000_000 {
 		t.Errorf("exactly one lock: bal=%d locked=%d, want 4_000_000/1_000_000", bal, lk)
+	}
+}
+
+// ── ATTESTED SOURCE (step 1) ─────────────────────────────────────────────────
+
+// An ATTESTED compile failure (talyvor_verified) SLASHES the bond — end to end.
+func TestBond_AttestedCompileFailed_Slashes(t *testing.T) {
+	ctx := context.Background()
+	pool := bondTestPool(t)
+	m := newManager(pool)
+	const A, oid = "ws-att-cf", "oid-att-cf"
+	seedBalance(t, pool, A, 5_000_000)
+	seedOwnedOutput(t, pool, A, oid)
+	seedMechVerdict(t, pool, A, oid, outputverify.MechCompileFailed, outputverify.SourceTalyvorVerified)
+	bondID, _, _ := m.CreateBond(ctx, A, oid, 1_000_000)
+	pushDeadlinePast(t, pool, bondID)
+	if o, err := m.SettleBond(ctx, bondID); o != "slashed" || err != nil {
+		t.Fatalf("attested compile_failed must slash; outcome=%q err=%v", o, err)
+	}
+	if bal, lk := balanceOf(t, pool, A); bal != 4_000_000 || lk != 0 {
+		t.Errorf("after attested slash: bal=%d locked=%d, want 4_000_000/0", bal, lk)
+	}
+}
+
+// An ATTESTED PASS (talyvor_verified + compiled) does NOT slash — the bond releases.
+func TestBond_AttestedPass_Releases(t *testing.T) {
+	ctx := context.Background()
+	pool := bondTestPool(t)
+	m := newManager(pool)
+	const A, oid = "ws-att-pass", "oid-att-pass"
+	seedBalance(t, pool, A, 5_000_000)
+	seedOwnedOutput(t, pool, A, oid)
+	seedMechVerdict(t, pool, A, oid, outputverify.MechCompiled, outputverify.SourceTalyvorVerified)
+	bondID, _, _ := m.CreateBond(ctx, A, oid, 1_000_000)
+	pushDeadlinePast(t, pool, bondID)
+	if o, _ := m.SettleBond(ctx, bondID); o != "released" {
+		t.Errorf("an attested PASS must NOT slash; got %q want released", o)
+	}
+	if bal, lk := balanceOf(t, pool, A); bal != 5_000_000 || lk != 0 {
+		t.Errorf("released bond returns full collateral: bal=%d locked=%d", bal, lk)
+	}
+}
+
+// TWO SOURCES, ONE BURN — the subtle case. A self_reported AND a talyvor_verified compile_failed coexist for
+// one output (the PK allows it). The bond must still slash EXACTLY ONCE (the status CAS + slash_key
+// idempotency hold regardless of how many slash-usable verdicts exist).
+func TestBond_TwoSources_OneBurn(t *testing.T) {
+	ctx := context.Background()
+	pool := bondTestPool(t)
+	m := newManager(pool)
+	const A, oid = "ws-two-src", "oid-two-src"
+	seedBalance(t, pool, A, 5_000_000)
+	seedOwnedOutput(t, pool, A, oid)
+	// BOTH slash-usable verdicts for the same output.
+	seedMechVerdict(t, pool, A, oid, outputverify.MechCompileFailed, outputverify.SourceSelfReported)
+	seedMechVerdict(t, pool, A, oid, outputverify.MechCompileFailed, outputverify.SourceTalyvorVerified)
+	// sanity: both rows really exist.
+	var n int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM k4_mechanical_verdicts WHERE output_id=$1`, oid).Scan(&n)
+	if n != 2 {
+		t.Fatalf("expected both sources present, got %d rows", n)
+	}
+	bondID, _, _ := m.CreateBond(ctx, A, oid, 1_000_000)
+	pushDeadlinePast(t, pool, bondID)
+
+	if o, _ := m.SettleBond(ctx, bondID); o != "slashed" {
+		t.Fatalf("first settle must slash; got %q", o)
+	}
+	if o, _ := m.SettleBond(ctx, bondID); o != "settled_already" {
+		t.Errorf("second settle must be a no-op with two sources present; got %q", o)
+	}
+	// EXACTLY ONE burn, despite two slash-usable verdicts.
+	var burns int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM lens_token_ledger WHERE workspace_id=$1 AND type='povi_stake_slash'`, A).Scan(&burns)
+	if burns != 1 {
+		t.Errorf("two slash-usable sources must still burn ONCE; got %d burns", burns)
+	}
+	if bal, lk := balanceOf(t, pool, A); bal != 4_000_000 || lk != 0 {
+		t.Errorf("exactly one burn: bal=%d locked=%d, want 4_000_000/0", bal, lk)
 	}
 }

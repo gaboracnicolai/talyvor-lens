@@ -72,3 +72,24 @@ func TestMechanicalVerdict_Handler(t *testing.T) {
 		t.Error("invalid verdict: the recorder must not be reached")
 	}
 }
+
+// The self-report endpoint CANNOT forge an attested source. A hostile body carrying `verdict_source` /
+// `source` is silently dropped: the request struct has no such field, and MechanicalReport (what reaches the
+// store) has no Source field to carry it — the store hard-codes 'self_reported'. An attested source is
+// meaningless if the subject could set it; this proves it cannot.
+func TestMechanicalVerdict_Handler_CannotForgeAttestedSource(t *testing.T) {
+	r := chi.NewRouter()
+	rec := &fakeMechRecorder{owned: true, recorded: true}
+	r.Post("/v1/output-verdicts/{output_id}/mechanical", newMechanicalVerdictHandler(fakeAuthn{ctx: &auth.AuthContext{WorkspaceID: "ws-A"}}, rec))
+	w := httptest.NewRecorder()
+	hostile := `{"verdict":"compile_failed","exit_code":1,"verdict_source":"talyvor_verified","source":"talyvor_verified"}`
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/output-verdicts/oid-1/mechanical", strings.NewReader(hostile)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("hostile body should still be accepted (extra fields ignored); status=%d", w.Code)
+	}
+	// The report that reached the store carries only the known fields — there is structurally nowhere for a
+	// caller-supplied source to go (MechanicalReport has no Source field; the store writes 'self_reported').
+	if !rec.called || rec.got.Verdict != "compile_failed" || rec.got.WorkspaceID != "ws-A" {
+		t.Errorf("handler must pass only known fields to the store; got %+v", rec.got)
+	}
+}
