@@ -21,7 +21,7 @@ import (
 // The returned transport always carries an explicit TLSClientConfig so
 // that future support for LENS_NODE_TLS_CA (custom CA bundle) can be
 // wired here without touching each call site.
-func newNodeHTTPClient(skipVerify bool, timeout time.Duration) *http.Client {
+func newNodeHTTPClient(skipVerify bool, timeout time.Duration, cidrAllow []*net.IPNet) *http.Client {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -30,10 +30,10 @@ func newNodeHTTPClient(skipVerify bool, timeout time.Duration) *http.Client {
 		Transport: &http.Transport{
 			// B-SSRF-Lens: refuse to dial loopback/private/link-local/metadata (169.254.169.254) — a
 			// node URL is caller-supplied at registration, so without this it is an SSRF vector. Keeps
-			// the node TLS config. NOTE: this also blocks RFC1918 private ranges; if LAN/private-network
-			// nodes are used (the opt-in LENS_NODE_TLS_SKIP_VERIFY=true mode), that needs a per-deployment
-			// allowlist — see internal/safehttp doc + the PR.
-			DialContext:       safehttp.SafeDialContext(&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}),
+			// the node TLS config. Phase-0 Item E: cidrAllow (LENS_NODE_PRIVATE_CIDR_ALLOWLIST) opts
+			// SPECIFIC private CIDRs back in for the internal node network; nil = today's all-private-
+			// blocked behavior. Metadata/link-local stay blocked regardless (see internal/safehttp).
+			DialContext:       safehttp.SafeDialContextAllow(&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}, cidrAllow),
 			ForceAttemptHTTP2: true,
 			TLSClientConfig: &tls.Config{
 				MinVersion:         tls.VersionTLS12,

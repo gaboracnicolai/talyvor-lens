@@ -738,6 +738,7 @@ func (s *LedgerStore) GetHistory(ctx context.Context, workspaceID string, limit,
 type CacheMiner struct {
 	ledger         *LedgerStore
 	crossWorkspace bool
+	linkageEnabled bool // Phase-0: owner-linkage self-deal guard (off by default; the wire-up enables it)
 }
 
 // NewCacheMiner builds a miner. `crossWorkspaceEnabled` mirrors
@@ -751,6 +752,39 @@ func NewCacheMiner(ledger *LedgerStore, crossWorkspaceEnabled bool) *CacheMiner 
 		ledger:         ledger,
 		crossWorkspace: crossWorkspaceEnabled,
 	}
+}
+
+// SetOwnerLinkageCheck enables/disables the owner-linkage self-deal guard
+// (Phase-0). Off by default (parity with the pool-royalty minter); the cache
+// wire-up must enable it. When on, a cross-workspace cache hit between two
+// workspaces the SAME operator controls is downgraded to the same-workspace rate
+// (the 10× cross bonus is never minted to a self-deal).
+func (m *CacheMiner) SetOwnerLinkageCheck(enabled bool) { m.linkageEnabled = enabled }
+
+// ownerLinkedSQL is the owner-linkage signal used to detect cache self-dealing.
+// TRUE iff the two workspaces share ANY captured card fingerprint (the carded
+// one-operator-many-workspaces washer) OR ANY operator-declared owner_key (the
+// ONLY signal that covers VOUCHED workspaces, which have no card — see
+// migration 0088 and the Item A recon). EXISTS is false when neither signal is
+// present (default-ALLOW on missing: an inconclusive check never blocks honest
+// cross-actor reuse; the rate cap bounds yield regardless). Plain read, no lock.
+const ownerLinkedSQL = `SELECT
+    EXISTS (SELECT 1 FROM workspace_card_fingerprints a
+            JOIN workspace_card_fingerprints b ON a.fingerprint_hash = b.fingerprint_hash
+            WHERE a.workspace_id = $1 AND b.workspace_id = $2)
+ OR EXISTS (SELECT 1 FROM workspace_owner_links a
+            JOIN workspace_owner_links b ON a.owner_key = b.owner_key
+            WHERE a.workspace_id = $1 AND b.workspace_id = $2)`
+
+// areLinked reports whether owner and requester are the same operator (shared
+// card fingerprint OR declared owner_key). A query error is surfaced fail-CLOSED
+// by the caller (a linkage check we can't run must not pay the cross bonus).
+func (m *CacheMiner) areLinked(ctx context.Context, owner, requester string) (bool, error) {
+	var linked bool
+	if err := m.ledger.pool.QueryRow(ctx, ownerLinkedSQL, owner, requester).Scan(&linked); err != nil {
+		return false, fmt.Errorf("cache mining: owner-linkage check: %w", err)
+	}
+	return linked, nil
 }
 
 // RecordCacheHit credits the cache owner for serving a hit.
@@ -778,6 +812,22 @@ func (m *CacheMiner) RecordCacheHit(
 	earning := m.earnFor(cacheOwnerWorkspace, requestWorkspace, hitType)
 	if earning <= 0 {
 		return nil
+	}
+	// Phase-0 owner-linkage self-deal guard: a cross-workspace rate paid between two
+	// workspaces the SAME operator controls is self-dealing (the cache track had no
+	// such guard while pool-royalty did). Downgrade a linked pair to the
+	// same-workspace rate so the 10× cross bonus is never minted to a self-deal.
+	// Covers CARDED (shared fingerprint) AND VOUCHED (declared owner_key) workspaces
+	// — see areLinked / migration 0088. Fail-CLOSED: a linkage check we cannot run
+	// must not pay the cross bonus.
+	if m.linkageEnabled && earning > CacheHitSameWorkspace && cacheOwnerWorkspace != requestWorkspace {
+		linked, err := m.areLinked(ctx, cacheOwnerWorkspace, requestWorkspace)
+		if err != nil {
+			return err
+		}
+		if linked {
+			earning = CacheHitSameWorkspace
+		}
 	}
 
 	meta := map[string]interface{}{

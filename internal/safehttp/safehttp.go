@@ -15,21 +15,75 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // ErrBlockedAddress is returned when a fetch targets a non-public (SSRF-sensitive) address.
 var ErrBlockedAddress = errors.New("safehttp: refusing to connect to a non-public address")
 
-// blocked reports whether ip is in an SSRF-sensitive range that must never be dialed.
-func blocked(ip net.IP) bool {
-	return ip.IsLoopback() || // 127.0.0.0/8, ::1
-		ip.IsPrivate() || // 10/8, 172.16/12, 192.168/16, fc00::/7 (ULA)
+// metadataIP is the cloud metadata endpoint — NEVER allowlistable (see blocked).
+var metadataIP = net.ParseIP("169.254.169.254")
+
+// blocked reports whether ip must never be dialed. An operator-supplied CIDR
+// allowlist (Phase-0 Item E) may un-block PRIVATE (RFC1918 / ULA) ranges ONLY —
+// for the internal node network on a private subnet. It can NEVER un-block
+// loopback, link-local (incl. the cloud metadata endpoint 169.254.169.254 and
+// fe80::/10), multicast, or unspecified addresses: those are checked FIRST and
+// are never a legitimate node target.
+//
+// SECURITY INVARIANT: cloud metadata stays blocked regardless of the allowlist —
+// 169.254.169.254 is LINK-LOCAL, not private, so it never reaches the allowlist
+// branch. ParseCIDRAllowlist additionally refuses at config time to accept any
+// CIDR containing it (defense in depth + fail-loud).
+func blocked(ip net.IP, allow []*net.IPNet) bool {
+	// Never-allowlistable ranges, checked first.
+	if ip.IsLoopback() || // 127.0.0.0/8, ::1
 		ip.IsLinkLocalUnicast() || // 169.254.0.0/16 (incl. metadata 169.254.169.254), fe80::/10
 		ip.IsLinkLocalMulticast() ||
 		ip.IsInterfaceLocalMulticast() ||
 		ip.IsUnspecified() || // 0.0.0.0, ::
-		ip.IsMulticast()
+		ip.IsMulticast() {
+		return true
+	}
+	// Private (RFC1918 / ULA) is blocked UNLESS the operator explicitly allowlisted
+	// a CIDR that contains it (the internal node network on a private subnet).
+	if ip.IsPrivate() { // 10/8, 172.16/12, 192.168/16, fc00::/7 (ULA)
+		for _, n := range allow {
+			if n.Contains(ip) {
+				return false // operator opted this private CIDR in
+			}
+		}
+		return true
+	}
+	return false // public — the normal case
+}
+
+// ParseCIDRAllowlist parses a comma-separated list of CIDRs into networks (Phase-0
+// Item E). Empty ⇒ nil (no allowlist; today's all-private-blocked behavior EXACTLY,
+// zero change). It REFUSES any CIDR containing the cloud metadata endpoint
+// 169.254.169.254 — that range is never allowlistable, fail-loud at boot.
+func ParseCIDRAllowlist(csv string) ([]*net.IPNet, error) {
+	csv = strings.TrimSpace(csv)
+	if csv == "" {
+		return nil, nil
+	}
+	var out []*net.IPNet
+	for _, part := range strings.Split(csv, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, fmt.Errorf("safehttp: invalid CIDR %q in allowlist: %w", part, err)
+		}
+		if n.Contains(metadataIP) {
+			return nil, fmt.Errorf("safehttp: CIDR %q contains the cloud metadata endpoint 169.254.169.254 — never allowlistable", part)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // SafeDialContext resolves the host, rejects any resolved address in a blocked range, and dials the
@@ -37,6 +91,14 @@ func blocked(ip net.IP) bool {
 // Exported so callers that need their own Transport (e.g. one carrying a node TLS config) can install
 // the SSRF guard without losing that config.
 func SafeDialContext(base *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return SafeDialContextAllow(base, nil)
+}
+
+// SafeDialContextAllow is SafeDialContext with an operator CIDR allowlist (Phase-0
+// Item E). A nil/empty allowlist is byte-identical to SafeDialContext (all private
+// ranges blocked). Only allowlisted PRIVATE CIDRs are dialable; metadata/link-local
+// stay blocked regardless (see blocked).
+func SafeDialContextAllow(base *net.Dialer, allow []*net.IPNet) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if base == nil {
 		base = &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	}
@@ -53,7 +115,7 @@ func SafeDialContext(base *net.Dialer) func(ctx context.Context, network, addr s
 			return nil, fmt.Errorf("safehttp: no addresses for %q", host)
 		}
 		for _, ip := range ips {
-			if blocked(ip) {
+			if blocked(ip, allow) {
 				return nil, fmt.Errorf("%w: %s resolves to %s", ErrBlockedAddress, host, ip)
 			}
 		}
@@ -71,13 +133,17 @@ func CheckRedirect(_ *http.Request, via []*http.Request) error {
 }
 
 // Client returns an *http.Client with the SSRF dial guard on the initial request and every redirect hop.
-func Client(timeout time.Duration) *http.Client {
+func Client(timeout time.Duration) *http.Client { return ClientAllow(timeout, nil) }
+
+// ClientAllow is Client with an operator CIDR allowlist (Phase-0 Item E). nil/empty
+// ⇒ byte-identical to Client (today's behavior, zero change).
+func ClientAllow(timeout time.Duration, allow []*net.IPNet) *http.Client {
 	base := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           SafeDialContext(base),
+			DialContext:           SafeDialContextAllow(base, allow),
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          10,
 			IdleConnTimeout:       90 * time.Second,

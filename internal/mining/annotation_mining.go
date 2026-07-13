@@ -138,6 +138,11 @@ var (
 	ErrInvalidDecision     = errors.New("annotation: invalid decision (must be a_better, b_better, tie, both_bad)")
 	ErrResponseContainsPII = errors.New("annotation: response contains PII patterns (email / phone / credit card)")
 	ErrPendingAnnotations  = errors.New("annotation: cannot unstake while pending annotations are in flight")
+	// ErrEconomyDisabled — Phase-0 Item C: the annotation submit/mint is refused
+	// when the economy master switch is off. Closes the kill-switch gap where the
+	// submit route (authed.Post) and applyTx never checked EconomyEnabled, so
+	// EconomyEnabled=false force-off'd every OTHER mint but MISSED annotation.
+	ErrEconomyDisabled = errors.New("annotation: economy disabled — minting is off (kill switch)")
 )
 
 // ─── AnnotationMiner ─────────────────────────────
@@ -145,13 +150,20 @@ var (
 // AnnotationMiner is the persistence + earning engine for the
 // annotation track.
 type AnnotationMiner struct {
-	ledger *LedgerStore
-	pool   pgxDB
+	ledger      *LedgerStore
+	pool        pgxDB
+	economyGate func() bool // Phase-0 Item C: EconomyEnabled kill switch; nil = allow (existing tests)
 }
 
 func NewAnnotationMiner(ledger *LedgerStore, pool pgxDB) *AnnotationMiner {
 	return &AnnotationMiner{ledger: ledger, pool: pool}
 }
+
+// SetEconomyGate wires the economy master switch onto the annotation MINT path
+// (Phase-0 Item C). The submit route was economy-UNGATED (authed.Post), so the
+// kill switch missed the one live mint; this gates it at the source. nil ⇒ allow
+// (byte-identical for existing tests). Production wires cfg.EconomyEnabled.
+func (m *AnnotationMiner) SetEconomyGate(gate func() bool) { m.economyGate = gate }
 
 // ─── CreateTask ──────────────────────────────────
 
@@ -261,6 +273,14 @@ func (m *AnnotationMiner) GetPendingTask(ctx context.Context, annotatorWorkspace
 // rolls back — whichever wins the lock wins the race.  The UNIQUE
 // constraint on (task_id, annotator_id) still handles duplicates.
 func (m *AnnotationMiner) SubmitAnnotation(ctx context.Context, a Annotation) error {
+	// Phase-0 Item C: the economy kill switch, at the SOURCE of the mint. When the
+	// economy master switch is off the submit is refused BEFORE any DB write — so
+	// EconomyEnabled=false stops annotation minting (it previously did not: the
+	// submit route is authed.Post/unconditional and applyTx never checked it, so the
+	// kill switch missed the one live mint). nil gate ⇒ allow (byte-identical for tests).
+	if m.economyGate != nil && !m.economyGate() {
+		return ErrEconomyDisabled
+	}
 	// Fast-path input validation — no DB touch.
 	if !validDecisions[a.Decision] {
 		return ErrInvalidDecision

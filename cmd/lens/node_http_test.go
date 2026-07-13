@@ -10,21 +10,21 @@ import (
 )
 
 func TestNewNodeHTTPClient_DefaultTimeout(t *testing.T) {
-	c := newNodeHTTPClient(false, 0)
+	c := newNodeHTTPClient(false, 0, nil)
 	if c.Timeout != 5*time.Second {
 		t.Fatalf("expected 5s default timeout, got %v", c.Timeout)
 	}
 }
 
 func TestNewNodeHTTPClient_CustomTimeout(t *testing.T) {
-	c := newNodeHTTPClient(false, 10*time.Second)
+	c := newNodeHTTPClient(false, 10*time.Second, nil)
 	if c.Timeout != 10*time.Second {
 		t.Fatalf("expected 10s timeout, got %v", c.Timeout)
 	}
 }
 
 func TestNewNodeHTTPClient_SkipVerifyFalse(t *testing.T) {
-	c := newNodeHTTPClient(false, 5*time.Second)
+	c := newNodeHTTPClient(false, 5*time.Second, nil)
 	tr, ok := c.Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("expected *http.Transport")
@@ -38,7 +38,7 @@ func TestNewNodeHTTPClient_SkipVerifyFalse(t *testing.T) {
 }
 
 func TestNewNodeHTTPClient_SkipVerifyTrue(t *testing.T) {
-	c := newNodeHTTPClient(true, 5*time.Second)
+	c := newNodeHTTPClient(true, 5*time.Second, nil)
 	tr, ok := c.Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("expected *http.Transport")
@@ -52,7 +52,7 @@ func TestNewNodeHTTPClient_SkipVerifyTrue(t *testing.T) {
 }
 
 func TestNewNodeHTTPClient_MinTLSVersion(t *testing.T) {
-	c := newNodeHTTPClient(false, 5*time.Second)
+	c := newNodeHTTPClient(false, 5*time.Second, nil)
 	tr := c.Transport.(*http.Transport)
 	if tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
 		t.Fatalf("expected TLS 1.2 minimum, got %v", tr.TLSClientConfig.MinVersion)
@@ -71,7 +71,7 @@ func TestNewNodeHTTPClient_SSRF_RefusesInternal(t *testing.T) {
 	}))
 	defer internal.Close()
 
-	client := newNodeHTTPClient(false, 3*time.Second)
+	client := newNodeHTTPClient(false, 3*time.Second, nil)
 	resp, err := client.Get(internal.URL) // internal.URL is http://127.0.0.1:PORT — a loopback address
 	if resp != nil {
 		_ = resp.Body.Close()

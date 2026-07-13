@@ -183,15 +183,20 @@ const insertClaimSQL = `INSERT INTO pool_royalty_mints
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'held', now() + ($13::bigint * interval '1 microsecond'))
 ON CONFLICT (request_id) DO NOTHING`
 
-// sharedFingerprintSQL is the U6 PR2 owner-linkage check: do the contributor and
-// requester workspaces share ANY captured card fingerprint (the lazy one-card
-// operator funding both)? EXISTS is false when EITHER side has no captured
-// fingerprint (default-ALLOW on missing — inconclusive never blocks honest
-// cross-actor reuse). A plain read; no row lock.
-const sharedFingerprintSQL = `SELECT EXISTS (
-    SELECT 1 FROM workspace_card_fingerprints a
-    JOIN workspace_card_fingerprints b ON a.fingerprint_hash = b.fingerprint_hash
-    WHERE a.workspace_id = $1 AND b.workspace_id = $2)`
+// sharedFingerprintSQL is the U6 PR2 owner-linkage check: are the contributor and
+// requester the SAME operator? TRUE iff they share ANY captured card fingerprint
+// (the lazy one-card operator funding both) OR ANY operator-declared owner_key
+// (Phase-0, migration 0088 — the ONLY signal that covers VOUCHED workspaces, which
+// have no card and were previously BLIND to this guard). EXISTS is false when
+// neither signal is present (default-ALLOW on missing — inconclusive never blocks
+// honest cross-actor reuse; the rate cap bounds yield regardless). Plain read, no lock.
+const sharedFingerprintSQL = `SELECT
+    EXISTS (SELECT 1 FROM workspace_card_fingerprints a
+            JOIN workspace_card_fingerprints b ON a.fingerprint_hash = b.fingerprint_hash
+            WHERE a.workspace_id = $1 AND b.workspace_id = $2)
+ OR EXISTS (SELECT 1 FROM workspace_owner_links a
+            JOIN workspace_owner_links b ON a.owner_key = b.owner_key
+            WHERE a.workspace_id = $1 AND b.workspace_id = $2)`
 
 // capCountSQL is the 2.3b per-pair cap count, run INSIDE the mint tx AFTER
 // CreditTx. The ordering is the whole trick: every mint for a given

@@ -578,8 +578,8 @@ func TestLoad_PoolMintCapDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.PoolMintCapPerPair != 0 {
-		t.Errorf("PoolMintCapPerPair = %d, want 0 (cap disabled by default — opt-in)", c.PoolMintCapPerPair)
+	if c.PoolMintCapPerPair != 50 {
+		t.Errorf("PoolMintCapPerPair = %d, want 50 (Phase-0 Item D: per-pair cap ON by default)", c.PoolMintCapPerPair)
 	}
 	if c.PoolMintCapWindow != 24*time.Hour {
 		t.Errorf("PoolMintCapWindow = %v, want 24h default", c.PoolMintCapWindow)

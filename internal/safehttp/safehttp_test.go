@@ -30,7 +30,7 @@ func TestBlockedClassifier(t *testing.T) {
 		if ip == nil {
 			t.Fatalf("bad test IP %q", c.ip)
 		}
-		if got := blocked(ip); got != c.want {
+		if got := blocked(ip, nil); got != c.want {
 			t.Errorf("blocked(%s) = %v, want %v", c.ip, got, c.want)
 		}
 	}

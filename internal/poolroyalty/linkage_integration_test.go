@@ -46,6 +46,9 @@ func linkageTestPool(t *testing.T) *pgxpool.Pool {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE workspace_card_fingerprints (workspace_id TEXT NOT NULL, fingerprint_hash TEXT NOT NULL,
 			PRIMARY KEY (workspace_id, fingerprint_hash))`,
+		`DROP TABLE IF EXISTS workspace_owner_links`,
+		`CREATE TABLE workspace_owner_links (workspace_id TEXT NOT NULL, owner_key TEXT NOT NULL,
+			PRIMARY KEY (workspace_id, owner_key))`, // Phase-0 (0087): vouch-side linkage
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -103,6 +106,31 @@ func TestLinkage_SharedFingerprint_Denied(t *testing.T) {
 	_ = pool.QueryRow(ctx, `SELECT COALESCE(held_balance,0) FROM lens_token_balances WHERE workspace_id='wsA'`).Scan(&held)
 	if held != 0 {
 		t.Errorf("a denied wash must mint NO held royalty, got %v", held)
+	}
+}
+
+// TestLinkage_DeclaredOwnerKey_VouchedDenied — Phase-0 vouch fix. A and B have NO
+// cards (the vouch scenario, where the card-fingerprint signal is BLIND) but are
+// declared the same operator via workspace_owner_links → the wash mint is DENIED.
+// Before the sharedFingerprintSQL extension this minted (owner_links unchecked).
+func TestLinkage_DeclaredOwnerKey_VouchedDenied(t *testing.T) {
+	pool := linkageTestPool(t)
+	ctx := context.Background()
+	m := linkageMinter(pool)
+	linkExec(t, pool, `INSERT INTO workspace_owner_links (workspace_id, owner_key)
+		VALUES ('wsA','human-1'), ('wsB','human-1')`) // same operator, no cards (vouched)
+
+	res, err := m.MintServedHit(ctx, washHit("req-vouchwash", "wsA", "wsB"))
+	if err != nil {
+		t.Fatalf("MintServedHit: %v", err)
+	}
+	if res.Minted {
+		t.Fatal("a same-owner wash between VOUCHED workspaces (declared owner_key) must be DENIED, but it minted")
+	}
+	var held int64
+	_ = pool.QueryRow(ctx, `SELECT COALESCE(held_balance,0) FROM lens_token_balances WHERE workspace_id='wsA'`).Scan(&held)
+	if held != 0 {
+		t.Errorf("a denied vouched wash must mint NO held royalty, got %v", held)
 	}
 }
 
