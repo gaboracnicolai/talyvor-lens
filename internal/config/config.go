@@ -418,6 +418,13 @@ type Config struct {
 	// LENS_WORKTIER_ENABLED.
 	WorkTierEnabled bool
 
+	// K4VerifierEnabled gates the K4 INTRINSIC output verifier — a POST-SERVE, off-path check of whether the
+	// served output violates a machine-checkable constraint the REQUEST ITSELF declared (json_object /
+	// json_schema / tool-call args), keyed by a server-derived gateway-bound output identity. CAPABILITY
+	// flag, DEFAULT FALSE: off = no verification, no rows, zero behavior change. It moves NO money (mint-free,
+	// import-guarded), never blocks/alters the response, and is intra-tenant only. Env: LENS_K4_VERIFIER_ENABLED.
+	K4VerifierEnabled bool
+
 	// NodeLatencyCaptureEnabled gates the DESCRIPTIVE proof-of-latency capture (P3 #6) — a post-serve,
 	// off-path record of gateway-measured node serve latency into a per-(node,cohort) EWMA aggregate
 	// (node_cohort_latency_stats), the substrate a LATER mint reads. CAPABILITY flag, default false: off =
@@ -797,6 +804,7 @@ func Load() (*Config, error) {
 
 		GuardrailsEnabled:            parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
 		WorkTierEnabled:              parseBoolEnv("LENS_WORKTIER_ENABLED"),
+		K4VerifierEnabled:            parseBoolEnv("LENS_K4_VERIFIER_ENABLED"),
 		NodeLatencyCaptureEnabled:    parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
 		NodeAttestationVerifyEnabled: parseBoolEnv("LENS_NODE_ATTESTATION_VERIFY_ENABLED"),
 
