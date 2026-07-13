@@ -81,6 +81,7 @@ import (
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/prompts"
+	"github.com/talyvor/lens/internal/provenance"
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/ratelimit"
@@ -1090,6 +1091,11 @@ func run() error {
 	// unchanged. Moves no money; produces a verdict, nothing else.
 	outputVerdictWriter := outputverify.NewWriter(pool)
 	p.SetOutputVerifier(outputVerdictWriter, func() bool { return cfg.K4VerifierEnabled })
+	// H5.β PROVENANCE BONDS — THE MONEY PATH. Constructed on the PRIMARY pool + the integer-µLENS ledger
+	// (provenance.NewBondManager is on the moneyAuthzTx list in readrouting_invariant_test.go, so a future
+	// edit can never route it to a replica). Endpoints are registered ONLY when LENS_H5_BONDS_ENABLED — off =
+	// no bond surface, no locks, no slashes, zero behavior change. 0/0 → default 72h appeal window, 100% slash.
+	bondManager := provenance.NewBondManager(pool, tokenLedger, 0, 0)
 	outputVerdictReader := outputverify.NewReader(pool)
 	// K4 CODE LOOP — the ownership-bound mechanical report-back writer (reads k4_output_verdicts to verify the
 	// caller produced the output_id, writes k4_mechanical_verdicts). PRIMARY pool — no replica reader.
@@ -1328,6 +1334,13 @@ func run() error {
 	r.Handle("/v1/admin/output-verdicts", requireAdmin(authManager,
 		newOutputVerdictsAdminHandler(outputVerdictReader)))
 
+	// H5.β — settle a provenance bond (slash-or-release; deadline-guarded + CAS-safe + idempotent).
+	// requireAdmin as defense-in-depth; registered ONLY when the flag is on.
+	if cfg.H5BondsEnabled {
+		r.Handle("/v1/admin/bonds/{bond_id}/settle", requireAdmin(authManager,
+			newBondSettleHandler(bondManager)))
+	}
+
 	apiServer := api.NewServer(
 		pool, redisClient, nc, exactCache, l,
 		alertManager, branchTracker, wsManager, lr,
@@ -1460,6 +1473,11 @@ func run() error {
 		// K4 CODE LOOP — the producing workspace self-reports a MECHANICAL verdict (compiled/tests) for an
 		// output it produced. Ownership-bound (only the producer, per k4_output_verdicts) + append-only.
 		authed.Post("/v1/output-verdicts/{output_id}/mechanical", newMechanicalVerdictHandler(authManager, mechanicalVerdictWriter))
+		// H5.β — the workspace stakes a provenance bond on an output it produced (locks µLENS collateral).
+		// Scoped to the caller's workspace; registered ONLY when LENS_H5_BONDS_ENABLED.
+		if cfg.H5BondsEnabled {
+			authed.Post("/v1/bonds", newBondCreateHandler(authManager, bondManager))
+		}
 		authed.Post("/v1/proxy/mistral/*", p.HandleExtraProvider("mistral"))
 		authed.Post("/v1/proxy/groq/*", p.HandleExtraProvider("groq"))
 		authed.Post("/v1/proxy/vllm/*", p.HandleExtraProvider("vllm"))
