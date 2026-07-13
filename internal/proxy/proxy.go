@@ -1230,6 +1230,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if attempts > 1 {
 		w.Header().Set("X-Talyvor-Attempts", strconv.Itoa(attempts))
 	}
+	// K4 CODE LOOP — return the gateway-bound output identity to the caller (a HASH, no raw content, safe to
+	// expose to the workspace that produced it). Same (ws, model, prompt, response, served_at) as the
+	// post-flush capture, so the header EQUALS the stored output_id. Pre-flush here (upstreamBody is the full
+	// response, incl. buffered streams) → no added latency; TRUE incremental streaming (stream.go) is OUT for
+	// now. DEFAULT-OFF (same flag as the verifier).
+	if p.outputVerdictOn() && statusCode == http.StatusOK && len(upstreamBody) > 0 {
+		oid, _, _ := deriveOutputID(wsID, upstreamModel, prompt, upstreamBody, requestStart)
+		w.Header().Set("X-Talyvor-Output-Id", oid)
+	}
 	// Record session turn here (BEFORE WriteHeader) so the headers we set
 	// next reflect the post-turn totals. Cost is computed against the
 	// actually-billed upstream model so it matches the alerts pipeline.

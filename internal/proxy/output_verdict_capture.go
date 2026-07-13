@@ -22,6 +22,23 @@ func (p *Proxy) SetOutputVerifier(sink outputVerdictSink, enabled func() bool) {
 	p.outputVerdictEnabled = enabled
 }
 
+// deriveOutputID returns the gateway-bound output id + the prompt/response hashes. The SAME inputs used at
+// the header seam (X-Talyvor-Output-Id, pre-flush) and at the post-flush capture produce the SAME id — so
+// the header the caller receives EQUALS the stored verdict row's output_id, and (via the identity's
+// workspace binding) the ownership check on the mechanical report-back holds.
+func deriveOutputID(workspaceID, model, prompt string, response []byte, servedAt time.Time) (id, promptHash, responseHash string) {
+	promptHash = outputverify.Sha256Hex([]byte(prompt))
+	responseHash = outputverify.Sha256Hex(response)
+	id = outputverify.DeriveOutputID(workspaceID, model, promptHash, responseHash, servedAt.Unix())
+	return id, promptHash, responseHash
+}
+
+// outputVerdictOn reports whether the K4 verifier is wired + enabled (used to gate the X-Talyvor-Output-Id
+// header at the pre-flush seam).
+func (p *Proxy) outputVerdictOn() bool {
+	return p != nil && p.outputVerdictSink != nil && p.outputVerdictEnabled != nil && p.outputVerdictEnabled()
+}
+
 // captureOutputVerdict derives the gateway-bound output identity, runs the INTRINSIC verifier over the
 // constraint the REQUEST declared + the served response, and records exactly ONE verdict — POST-FLUSH (off
 // the hot path), best-effort, void. It shares captureWorkTier's obsLimiter budget + detached-write
@@ -48,9 +65,7 @@ func (p *Proxy) captureOutputVerdict(ctx context.Context, workspaceID, model, pr
 		defer p.obsLimiter.Release()
 	}
 
-	promptHash := outputverify.Sha256Hex([]byte(prompt))
-	responseHash := outputverify.Sha256Hex(responseBody)
-	outputID := outputverify.DeriveOutputID(workspaceID, model, promptHash, responseHash, servedAt.Unix())
+	outputID, promptHash, responseHash := deriveOutputID(workspaceID, model, prompt, responseBody, servedAt)
 	res := outputverify.Verify(requestBody, responseBody)
 
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), captureWriteTimeout)
