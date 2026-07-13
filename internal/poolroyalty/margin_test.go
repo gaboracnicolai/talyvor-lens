@@ -21,13 +21,13 @@ func TestMarginSummary_ReadsDerivedMargin(t *testing.T) {
 	pool.ExpectQuery(`FROM pool_royalty_margin`).
 		WithArgs(since).
 		WillReturnRows(pgxmock.NewRows([]string{"mints", "avoided", "minted", "margin"}).
-			AddRow(int64(3), 6.0, 3.0, 3.0))
+			AddRow(int64(3), 6.0, int64(3), 3.0))
 
 	s, err := r.MarginSummary(context.Background(), since)
 	if err != nil {
 		t.Fatalf("MarginSummary: %v", err)
 	}
-	if s.Mints != 3 || s.AvoidedCOGSUSD != 6.0 || s.MintedLENS != 3.0 || s.MarginUSD != 3.0 {
+	if s.Mints != 3 || s.AvoidedCOGSUSD != 6.0 || s.MintedLENS != 3 || s.MarginUSD != 3.0 {
 		t.Errorf("summary = %+v, want mints=3 avoided=6 minted=3 margin=3", s)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -125,7 +125,7 @@ func TestMarginIdentity_MatchesShareArithmetic(t *testing.T) {
 		pool.ExpectBegin()
 		pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
 			WithArgs(h.RequestID, h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
-				h.EntryID, h.Provider, h.Model, h.Similarity, a, minted,
+				h.EntryID, h.Provider, h.Model, h.Similarity, a, microFloorLENS(minted), // minted_amount is µLENS (SEC-2)
 				h.AnswerSHA256, h.PromptSHA256, (72 * time.Hour).Microseconds()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 		pool.ExpectCommit()

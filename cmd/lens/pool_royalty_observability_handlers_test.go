@@ -44,8 +44,8 @@ func obsHarness(t *testing.T) *pgxpool.Pool {
 	for _, ddl := range []string{
 		`DROP VIEW IF EXISTS pool_royalty_margin`,
 		`DROP TABLE IF EXISTS pool_royalty_mints`,
-		`CREATE TABLE pool_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, requester_workspace_id TEXT NOT NULL, contributor_workspace_id TEXT NOT NULL, layer TEXT NOT NULL, entry_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', similarity DOUBLE PRECISION NOT NULL DEFAULT 0, avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount DOUBLE PRECISION NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '', prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'final', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE VIEW pool_royalty_margin AS SELECT request_id, requester_workspace_id, contributor_workspace_id, layer, provider, model, avoided_cogs_usd, minted_amount, avoided_cogs_usd - minted_amount AS margin_usd, status, created_at FROM pool_royalty_mints`,
+		`CREATE TABLE pool_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, requester_workspace_id TEXT NOT NULL, contributor_workspace_id TEXT NOT NULL, layer TEXT NOT NULL, entry_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', similarity DOUBLE PRECISION NOT NULL DEFAULT 0, avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount BIGINT NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '', prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'final', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE VIEW pool_royalty_margin AS SELECT request_id, requester_workspace_id, contributor_workspace_id, layer, provider, model, avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd, status, created_at FROM pool_royalty_mints`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -56,7 +56,8 @@ func obsHarness(t *testing.T) *pgxpool.Pool {
 
 type mintSeed struct {
 	req, contrib, requester, entry, layer, status, prompt string
-	sim, avoided, minted                                  float64
+	sim, avoided                                          float64
+	minted                                                int64
 	finalizeAfter                                         *time.Time
 }
 
@@ -213,21 +214,21 @@ func TestPoolRoyaltyMargin_Integration(t *testing.T) {
 	pool := obsHarness(t)
 	h := newPoolRoyaltyMarginHandler(poolroyalty.NewMarginReader(pool))
 
-	mintSeed{req: "f1", contrib: "wsA", requester: "wsB", entry: "E1", status: "final", avoided: 10, minted: 5}.insert(t, pool)
-	mintSeed{req: "f2", contrib: "wsC", requester: "wsD", entry: "E2", status: "final", avoided: 6, minted: 3}.insert(t, pool)
+	mintSeed{req: "f1", contrib: "wsA", requester: "wsB", entry: "E1", status: "final", avoided: 10, minted: 5_000_000}.insert(t, pool)
+	mintSeed{req: "f2", contrib: "wsC", requester: "wsD", entry: "E2", status: "final", avoided: 6, minted: 3_000_000}.insert(t, pool)
 	// EXCLUDED from realized margin:
-	mintSeed{req: "hX", contrib: "wsA", requester: "wsB", entry: "E3", status: "held", avoided: 100, minted: 50}.insert(t, pool)
-	mintSeed{req: "rX", contrib: "wsA", requester: "wsB", entry: "E4", status: "revoked", avoided: 100, minted: 50}.insert(t, pool)
+	mintSeed{req: "hX", contrib: "wsA", requester: "wsB", entry: "E3", status: "held", avoided: 100, minted: 50_000_000}.insert(t, pool)
+	mintSeed{req: "rX", contrib: "wsA", requester: "wsB", entry: "E4", status: "revoked", avoided: 100, minted: 50_000_000}.insert(t, pool)
 
 	var resp marginResponse
 	if code := callJSON(t, h, "/v1/admin/pool-royalty/margin", &resp); code != http.StatusOK {
 		t.Fatalf("margin: code %d", code)
 	}
-	if resp.Summary.Mints != 2 || resp.Summary.AvoidedCOGSUSD != 16 || resp.Summary.MintedLENS != 8 || resp.Summary.MarginUSD != 8 {
+	if resp.Summary.Mints != 2 || resp.Summary.AvoidedCOGSUSD != 16 || resp.Summary.MintedLENS != 8_000_000 || resp.Summary.MarginUSD != 8 {
 		t.Errorf("summary mints=%d avoided=%v minted=%v margin=%v want 2/16/8/8 (final only)",
 			resp.Summary.Mints, resp.Summary.AvoidedCOGSUSD, resp.Summary.MintedLENS, resp.Summary.MarginUSD)
 	}
-	if resp.Summary.MarginUSD != resp.Summary.AvoidedCOGSUSD-resp.Summary.MintedLENS {
+	if resp.Summary.MarginUSD != resp.Summary.AvoidedCOGSUSD-float64(resp.Summary.MintedLENS)/1e6 {
 		t.Errorf("margin identity broken: %v != %v − %v", resp.Summary.MarginUSD, resp.Summary.AvoidedCOGSUSD, resp.Summary.MintedLENS)
 	}
 
@@ -247,7 +248,7 @@ func TestPoolRoyaltyMargin_Integration(t *testing.T) {
 func TestPoolRoyaltyObs_AdminGate(t *testing.T) {
 	pool := obsHarness(t)
 	// Seed a row so the data path WOULD return content if the gate ever let it through.
-	mintSeed{req: "g1", contrib: "wsA", requester: "wsB", entry: "E1", status: "final", avoided: 10, minted: 5}.insert(t, pool)
+	mintSeed{req: "g1", contrib: "wsA", requester: "wsB", entry: "E1", status: "final", avoided: 10, minted: 5_000_000}.insert(t, pool)
 
 	endpoints := []struct {
 		name, target string
@@ -257,7 +258,7 @@ func TestPoolRoyaltyObs_AdminGate(t *testing.T) {
 		{"resolve", "/v1/admin/pool-royalty/resolve?type=volume", newPoolRoyaltyResolveHandler(poolroyalty.NewResolver(pool))},
 		{"margin", "/v1/admin/pool-royalty/margin", newPoolRoyaltyMarginHandler(poolroyalty.NewMarginReader(pool))},
 	}
-	dataKeys := []string{"volume", "bilateral", "similarity", "candidates", "summary", "margin_usd", "avoided_cogs_usd", "minted_lens"}
+	dataKeys := []string{"volume", "bilateral", "similarity", "candidates", "summary", "margin_usd", "avoided_cogs_usd", "minted_lens_ulens"}
 	rejecters := []struct {
 		name string
 		a    fakeAuthenticator

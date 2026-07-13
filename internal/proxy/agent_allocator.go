@@ -29,7 +29,7 @@ import (
 // agentSpender is the minimal debit surface (economy.DualTokenStore.SpendLXCForAgent satisfies it). An
 // interface so the proxy doesn't hard-depend on economy internals.
 type agentSpender interface {
-	SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount float64, description string) error
+	SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string) error
 }
 
 // SetAgentSpender wires the agent-allocation debit + its enable flag, and mints the process-start salt used

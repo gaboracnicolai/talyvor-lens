@@ -13,7 +13,7 @@ func TestNodeStakeStore_PutUpserts(t *testing.T) {
 	pool := newStorePool(t)
 	now := time.Now()
 	pool.ExpectExec(`INSERT INTO povi_stakes`).
-		WithArgs("node-1", "ws-1", 100.0, "active", 0.0, now, pgxmock.AnyArg(), now).
+		WithArgs("node-1", "ws-1", int64(100), "active", int64(0), now, pgxmock.AnyArg(), now).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	s := newNodeStakeStore(pool)
@@ -34,7 +34,7 @@ func TestNodeStakeStore_GetScansRow(t *testing.T) {
 	now := time.Now()
 	rows := pgxmock.NewRows([]string{
 		"node_id", "workspace_id", "amount", "status", "slashed_amount", "locked_at", "unbond_at", "updated_at",
-	}).AddRow("node-1", "ws-1", 60.0, "active", 40.0, now, nil, now)
+	}).AddRow("node-1", "ws-1", int64(60), "active", int64(40), now, nil, now)
 	pool.ExpectQuery(`FROM povi_stakes WHERE node_id`).WithArgs("node-1").WillReturnRows(rows)
 
 	s := newNodeStakeStore(pool)
@@ -70,8 +70,8 @@ func TestNodeStakeStore_List(t *testing.T) {
 	now := time.Now()
 	rows := pgxmock.NewRows([]string{
 		"node_id", "workspace_id", "amount", "status", "slashed_amount", "locked_at", "unbond_at", "updated_at",
-	}).AddRow("n1", "ws", 100.0, "active", 0.0, now, nil, now).
-		AddRow("n2", "ws", 0.0, "released", 0.0, now, &now, now)
+	}).AddRow("n1", "ws", int64(100), "active", int64(0), now, nil, now).
+		AddRow("n2", "ws", int64(0), "released", int64(0), now, &now, now)
 	pool.ExpectQuery(`FROM povi_stakes`).WillReturnRows(rows)
 
 	s := newNodeStakeStore(pool)

@@ -31,9 +31,9 @@ import (
 // ─── constants ───────────────────────────────────
 
 const (
-	// PatternBaseRate is the LENS floor for one shared pattern.
-	// Rarity multiplier stacks on top of this.
-	PatternBaseRate = 0.001
+	// PatternBaseRate is the µLENS floor for one shared pattern (SEC-2).
+	// Rarity multiplier stacks on top of this. 1_000 µLENS = 0.001 LENS.
+	PatternBaseRate int64 = 1_000
 
 	// RarityMultiplierMax is the rarity-multiplier coefficient in the earning
 	// formula: earned = PatternBaseRate × (1 + rarity×(RarityMultiplierMax−1)).
@@ -99,7 +99,7 @@ type RoutingPattern struct {
 type PatternContribution struct {
 	WorkspaceID    string    `json:"workspace_id"`
 	PatternsShared int       `json:"patterns_shared"`
-	TotalEarned    float64   `json:"total_earned"`
+	TotalEarned    int64     `json:"total_earned_ulens"`
 	LastSharedAt   time.Time `json:"last_shared_at,omitempty"`
 }
 
@@ -179,12 +179,14 @@ func ExtractPattern(
 
 // ─── earning calculator ──────────────────────────
 
-// PatternEarning computes the LENS payout for a pattern.
+// PatternEarning computes the µLENS payout for a pattern (SEC-2).
 //
-//	base × (1 + rarity × (max - 1)) [+ bonus if rare]
+//	base × (1 + rarity × (max - 1))
 //
-// Rounded to 6 decimals like the other mining tracks.
-func PatternEarning(p RoutingPattern) float64 {
+// The Tier-2 rarity multiplier scales the integer base rate; the result is
+// floored (MulFloor) — a mint rounds DOWN, the sub-µLENS remainder retained by
+// the protocol. Integers make this exact; the old roundTo(_,6) band-aid is gone.
+func PatternEarning(p RoutingPattern) int64 {
 	if p.Rarity < 0 {
 		p.Rarity = 0
 	}
@@ -192,8 +194,7 @@ func PatternEarning(p RoutingPattern) float64 {
 		p.Rarity = 1
 	}
 	mult := 1.0 + p.Rarity*(RarityMultiplierMax-1.0)
-	earning := PatternBaseRate * mult
-	return roundTo(earning, 6)
+	return MulFloor(PatternBaseRate, mult)
 }
 
 // ─── PatternMiner ────────────────────────────────
@@ -389,7 +390,7 @@ ON CONFLICT (request_id, workspace_id) DO NOTHING`
 func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p RoutingPattern, optedIn bool, requestID string) error {
 	p.WorkspaceID = workspaceID
 
-	earned := 0.0
+	var earned int64 // µLENS
 	if optedIn {
 		rarity, err := m.ScoreRarity(ctx, p)
 		if err != nil {
@@ -501,7 +502,7 @@ func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p 
 	}
 	// MintedTokens AFTER commit only — fires on a durable credit, never on a
 	// capped/rolled-back one (CreditTx, unlike Credit, doesn't emit it).
-	metrics.MintedTokens(earned)
+	metrics.MintedTokens(MicroToFloat(earned))
 	return nil
 }
 
@@ -745,11 +746,11 @@ func (m *PatternMiner) AggregateCohortsTiered(ctx context.Context) ([]CohortStat
 // so rarity_multiplier_max = 1 + thatRarity×(RarityMultiplierMax−1) (= 2.0),
 // NOT the formula's unreachable 5× at rarity 1.0. The former unique-pattern
 // bonus (rarity > 0.7, structurally unearnable) is no longer advertised.
-func PatternRates() map[string]float64 {
+func PatternRates() map[string]any {
 	maxReachableRarity := 1.0 / (1.0 + float64(EarnCorroborationFloor))
-	return map[string]float64{
-		"base_per_pattern":      PatternBaseRate,
-		"rarity_multiplier_max": 1.0 + maxReachableRarity*(RarityMultiplierMax-1.0),
+	return map[string]any{
+		"base_per_pattern_ulens": PatternBaseRate, // µLENS (SEC-2)
+		"rarity_multiplier_max":  1.0 + maxReachableRarity*(RarityMultiplierMax-1.0),
 	}
 }
 

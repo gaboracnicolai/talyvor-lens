@@ -52,14 +52,14 @@ func distillMintHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 		`DROP TABLE IF EXISTS workspaces`,
 		`DROP TABLE IF EXISTS lxc_purchases`,
 		`CREATE TABLE lens_token_balances (
-			workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0,
+			workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0,
+			lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_ledger (
 			id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
-			amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL,
+			amount BIGINT NOT NULL, balance_after BIGINT NOT NULL,
 			type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
 			metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
@@ -73,10 +73,10 @@ func distillMintHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE,
 			contributor_workspace_id TEXT NOT NULL, requester_workspace_id TEXT NOT NULL,
 			content_hash TEXT NOT NULL, avoided_cogs_usd DOUBLE PRECISION NOT NULL,
-			minted_amount DOUBLE PRECISION NOT NULL, status TEXT NOT NULL DEFAULT 'held',
+			minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held',
 			finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount DOUBLE PRECISION NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -108,7 +108,7 @@ func verifyWorkspace(t *testing.T, pool *pgxpool.Pool, ws string) {
 	}
 }
 
-func balances(t *testing.T, pool *pgxpool.Pool, ws string) (bal, held float64) {
+func balances(t *testing.T, pool *pgxpool.Pool, ws string) (bal, held int64) {
 	t.Helper()
 	// No row yet ⇒ zero balances (the ledger lazily creates the row on first credit).
 	_ = pool.QueryRow(context.Background(),
@@ -168,7 +168,8 @@ func TestDistillMint_VerifiedOwner_ExactAmount_HeldNotSupply_Integration(t *test
 
 	// minted_amount EXACTLY = s × pinned basis (0.5 × 2.0 = 1.0), traced to the
 	// stored basis snapshot — assert minted == 0.5 × basis.avoided_cogs_usd.
-	var minted, basisCogs float64
+	var minted int64
+	var basisCogs float64
 	var status, reqID string
 	if err := pool.QueryRow(ctx,
 		`SELECT m.minted_amount, m.status, m.request_id, b.avoided_cogs_usd
@@ -177,10 +178,10 @@ func TestDistillMint_VerifiedOwner_ExactAmount_HeldNotSupply_Integration(t *test
 		 WHERE m.contributor_workspace_id='wsA'`).Scan(&minted, &status, &reqID, &basisCogs); err != nil {
 		t.Fatal(err)
 	}
-	if minted != 0.5*basisCogs {
+	if minted != microFloorLENS(0.5*basisCogs) {
 		t.Fatalf("minted_amount = %v, want exactly 0.5 × pinned basis %v = %v", minted, basisCogs, 0.5*basisCogs)
 	}
-	if minted != 1.0 {
+	if minted != micro(1) {
 		t.Fatalf("minted_amount = %v, want 1.0", minted)
 	}
 	if status != "held" {
@@ -191,7 +192,7 @@ func TestDistillMint_VerifiedOwner_ExactAmount_HeldNotSupply_Integration(t *test
 	}
 	// Credit is HELD, not spendable.
 	bal, held := balances(t, pool, "wsA")
-	if bal != 0 || held != 1.0 {
+	if bal != 0 || held != micro(1) {
 		t.Fatalf("after mint: bal=%v held=%v, want 0/1.0 (held, not spendable)", bal, held)
 	}
 	// Supply UNCHANGED while held (counts only at finalize).
@@ -223,7 +224,7 @@ func TestDistillMint_ExactlyOnce_Integration(t *testing.T) {
 	if c := mintRowCount(t, pool, "wsA"); c != 1 {
 		t.Fatalf("exactly-once: %d claim rows, want 1", c)
 	}
-	if _, held := balances(t, pool, "wsA"); held != 1.0 {
+	if _, held := balances(t, pool, "wsA"); held != micro(1) {
 		t.Fatalf("exactly-once: held=%v, want 1.0 (a conflict must NOT credit a second time)", held)
 	}
 }
@@ -258,7 +259,7 @@ func TestDistillMint_UnverifiedOwner_ZeroThenReeligible_Integration(t *testing.T
 	if c := mintRowCount(t, pool, "wsA"); c != 1 {
 		t.Fatalf("after verify: %d claim rows, want 1", c)
 	}
-	if _, held := balances(t, pool, "wsA"); held != 1.0 {
+	if _, held := balances(t, pool, "wsA"); held != micro(1) {
 		t.Fatalf("after verify: held=%v, want 1.0 (floor delayed, did not forfeit)", held)
 	}
 }
@@ -316,7 +317,7 @@ func TestDistillMint_FinalizeCountsSupplyAtFinalize_Integration(t *testing.T) {
 	}
 	// held→spendable, status final.
 	bal, held := balances(t, pool, "wsA")
-	if bal != 1.0 || held != 0 {
+	if bal != micro(1) || held != 0 {
 		t.Fatalf("after finalize: bal=%v held=%v, want 1.0/0 (spendable)", bal, held)
 	}
 	var status string
@@ -327,7 +328,7 @@ func TestDistillMint_FinalizeCountsSupplyAtFinalize_Integration(t *testing.T) {
 		t.Fatalf("status = %q, want final", status)
 	}
 	// Supply INCREASES at finalize (the counted TypePoolRoyalty row).
-	if supply, _ := ledger.GetTotalSupply(ctx); supply != supplyBefore+1.0 {
-		t.Fatalf("supply must increase by 1.0 at FINALIZE: before=%v after=%v", supplyBefore, supply)
+	if supply, _ := ledger.GetTotalSupply(ctx); supply != supplyBefore+micro(1) {
+		t.Fatalf("supply must increase by micro(1) at FINALIZE: before=%v after=%v", supplyBefore, supply)
 	}
 }

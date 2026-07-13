@@ -92,6 +92,17 @@ type ServedHit struct {
 	PromptSHA256 string // hex(sha256(raw requester prompt bytes))
 }
 
+// microFloorLENS converts a float LENS mint valuation (Tier-2 rate × Tier-3/score)
+// to an integer µLENS count, rounding DOWN (SEC-2 site #4 — a mint never over-
+// issues a sub-µLENS; the remainder is retained by the protocol). A sub-µLENS
+// valuation floors to 0 (mint nothing). Package-local so the sibling minters
+// convert at their CreditHeldTx boundary without each importing mining.
+func microFloorLENS(v float64) int64 { return mining.FloatToMicroFloor(v) }
+
+// microToFloatLENS converts an integer µLENS count back to a whole-LENS float —
+// FOR METRICS / LOGS ONLY (never a conserved value). Package-local (see above).
+func microToFloatLENS(micro int64) float64 { return mining.MicroToFloat(micro) }
+
 // SHA256Hex is the house content hash: hex(sha256(b)), UNSALTED — no
 // provider:model prefix (the salted identities already live on the claim row
 // via entry_id). Used for both Stage-2.3.0 evidence hashes.
@@ -102,11 +113,11 @@ func SHA256Hex(b []byte) string {
 
 // Result is the outcome of one mint attempt.
 type Result struct {
-	Minted        bool    // a claim was taken and the contributor credited
-	AlreadyMinted bool    // the request_id was already claimed — exactly-once suppression
-	Capped        bool    // a window cap was reached — claim+credit rolled back (2.3b)
-	CapReason     string  // when Capped: "per_pair" | "per_entry" (which cap fired)
-	Amount        float64 // LENS credited (s × avoided_COGS) when Minted
+	Minted        bool   // a claim was taken and the contributor credited
+	AlreadyMinted bool   // the request_id was already claimed — exactly-once suppression
+	Capped        bool   // a window cap was reached — claim+credit rolled back (2.3b)
+	CapReason     string // when Capped: "per_pair" | "per_entry" (which cap fired)
+	Amount        int64  // µLENS credited (s × avoided_COGS) when Minted (SEC-2)
 }
 
 // txBeginner matches *pgxpool.Pool.Begin (the povi/stakes.go seam) so tests
@@ -120,7 +131,7 @@ type txBeginner interface {
 // balance; the finalize sweeper does, after the holdback window).
 // *mining.LedgerStore satisfies it exactly.
 type ledgerCreditTx interface {
-	CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, txType, description string, metadata map[string]interface{}) error
+	CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, txType, description string, metadata map[string]interface{}) error
 }
 
 // insertClaimSQL claims the serving request: ON CONFLICT (request_id) DO
@@ -299,11 +310,19 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	if h.AnswerSHA256 == "" || h.PromptSHA256 == "" {
 		return Result{}, nil
 	}
-	amount := m.anchor.Value(GainInput{AvoidedCOGSUSD: h.AvoidedCOGSUSD}) // default CostAnchor ⇒ share × avoided_COGS (byte-identical)
+	valuation := m.anchor.Value(GainInput{AvoidedCOGSUSD: h.AvoidedCOGSUSD}) // default CostAnchor ⇒ share × avoided_COGS (Tier-2/3 float LENS)
 	// Non-finite amounts must NEVER reach the ledger: a NaN or ±Inf written
 	// to lens_token_balances poisons the balance permanently (every later
 	// bal+delta stays non-finite). amount <= 0 alone does NOT catch NaN.
-	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
+	if math.IsNaN(valuation) || math.IsInf(valuation, 0) || valuation <= 0 {
+		return Result{}, nil
+	}
+	// SEC-2 site #4 (mint valuation → conserved µLENS). The anchor's float LENS
+	// valuation is a MINT amount, so it rounds DOWN (FloatToMicroFloor) — a
+	// sub-µLENS valuation floors to 0 and mints nothing (deflationary, like every
+	// other defensive no-op here). The dropped remainder is retained by the protocol.
+	amount := mining.FloatToMicroFloor(valuation) // µLENS
+	if amount <= 0 {
 		return Result{}, nil
 	}
 

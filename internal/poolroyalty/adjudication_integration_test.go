@@ -99,11 +99,11 @@ func TestAdjudicate_SubsetHonored_Integration(t *testing.T) {
 		}
 	}
 	// held burned for exactly the 2 chosen (wsA had 4 held = 2.0; minus 2 revoked = 1.0 left)
-	var held float64
+	var held int64
 	mustScan(t, pool, `SELECT held_balance FROM lens_token_balances WHERE workspace_id='wsA'`, &held)
 	// Each mint credits 0.5 × avoided(2.0) = 1.0 to held; 4 mints = 4.0 held;
 	// revoking 2 burns 2.0 → 2.0 left.
-	if held != 2.0 {
+	if held != micro(2) {
 		t.Fatalf("held=%v, want 2.0 (4 held minus 2 revoked, each 1.0)", held)
 	}
 

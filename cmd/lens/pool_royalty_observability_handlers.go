@@ -116,7 +116,7 @@ type detectResponse struct {
 type candidateDTO struct {
 	RequestID            string  `json:"request_id"`
 	ContributorWorkspace string  `json:"contributor_workspace"`
-	MintedAmount         float64 `json:"minted_amount"`
+	MintedAmount         int64   `json:"minted_amount_ulens"` // µLENS (SEC-2)
 	Status               string  `json:"status"`
 	Similarity           float64 `json:"similarity"`
 	TimeLeftSeconds      float64 `json:"time_left_seconds"`
@@ -131,7 +131,7 @@ type resolveResponse struct {
 type marginSummaryDTO struct {
 	Mints          int64   `json:"mints"`
 	AvoidedCOGSUSD float64 `json:"avoided_cogs_usd"`
-	MintedLENS     float64 `json:"minted_lens"`
+	MintedLENS     int64   `json:"minted_lens_ulens"` // µLENS (SEC-2)
 	MarginUSD      float64 `json:"margin_usd"`
 }
 

@@ -159,9 +159,13 @@ func (m *RoutingPredictionMinter) mintOne(ctx context.Context, predictionID, wor
 
 	// amount = rate × clamp01(skill_margin). skill_margin is already clamp01'd by the scorer; the anchor
 	// clamps again, so a non-positive or out-of-range value yields nothing to mint.
-	amount := m.anchor.Value(GainInput{HeldScore: skillMargin})
-	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
+	valuation := m.anchor.Value(GainInput{HeldScore: skillMargin}) // Tier-2 float LENS
+	if math.IsNaN(valuation) || math.IsInf(valuation, 0) || valuation <= 0 {
 		return false, nil // skill_margin ≤ 0 (M did not beat the baseline) or rate-0 ⇒ no claim, no mint
+	}
+	amount := microFloorLENS(valuation) // SEC-2 site #4: mint valuation → µLENS, rounded DOWN
+	if amount <= 0 {
+		return false, nil // sub-µLENS valuation ⇒ no claim, no mint
 	}
 
 	tx, err := m.db.Begin(ctx)

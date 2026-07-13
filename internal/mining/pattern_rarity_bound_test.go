@@ -70,8 +70,8 @@ func TestScoreRarity_NilPool_FailsClosed(t *testing.T) {
 // The floored case earns BASE only (no bonus): PatternEarning(rarity=0)=0.001.
 func TestPatternEarning_FlooredRarity_BaseNoBonus(t *testing.T) {
 	got := PatternEarning(RoutingPattern{Rarity: 0.0})
-	if d := got - PatternBaseRate; d < -1e-9 || d > 1e-9 {
-		t.Fatalf("floored rarity must earn base %v (no bonus); got %v", PatternBaseRate, got)
+	if got != PatternBaseRate { // integer µLENS — exact
+		t.Fatalf("floored rarity must earn base %d µLENS (no bonus); got %d", PatternBaseRate, got)
 	}
 }
 

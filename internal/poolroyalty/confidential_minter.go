@@ -171,9 +171,13 @@ func (m *ConfidentialMinter) mintOne(ctx context.Context, epoch int64, r confide
 	if r.nodeID == "" || r.workspaceID == "" || r.gpuClass == "" {
 		return false, nil
 	}
-	amount := m.anchor.Value(GainInput{HeldScore: confidentialCapacityValue})
-	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
+	valuation := m.anchor.Value(GainInput{HeldScore: confidentialCapacityValue}) // Tier-2 float LENS
+	if math.IsNaN(valuation) || math.IsInf(valuation, 0) || valuation <= 0 {
 		return false, nil // rate-0 ⇒ no claim, no mint
+	}
+	amount := microFloorLENS(valuation) // SEC-2 site #4: mint valuation → µLENS, rounded DOWN
+	if amount <= 0 {
+		return false, nil // sub-µLENS valuation ⇒ no claim, no mint
 	}
 	requestID := confidentialRequestID(r.nodeID, r.gpuClass, epoch)
 

@@ -38,8 +38,8 @@ func distillObsHarness(t *testing.T) *pgxpool.Pool {
 		// leftover view from a reused DB depends on distill_royalty_mints.
 		`DROP VIEW IF EXISTS distill_royalty_margin`,
 		`DROP TABLE IF EXISTS distill_royalty_mints`,
-		`CREATE TABLE distill_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, contributor_workspace_id TEXT NOT NULL, requester_workspace_id TEXT NOT NULL, content_hash TEXT NOT NULL, avoided_cogs_usd DOUBLE PRECISION NOT NULL, minted_amount DOUBLE PRECISION NOT NULL, status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE VIEW distill_royalty_margin AS SELECT request_id, requester_workspace_id, contributor_workspace_id, content_hash, avoided_cogs_usd, minted_amount, avoided_cogs_usd - minted_amount AS margin_usd, status, created_at FROM distill_royalty_mints`,
+		`CREATE TABLE distill_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, contributor_workspace_id TEXT NOT NULL, requester_workspace_id TEXT NOT NULL, content_hash TEXT NOT NULL, avoided_cogs_usd DOUBLE PRECISION NOT NULL, minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE VIEW distill_royalty_margin AS SELECT request_id, requester_workspace_id, contributor_workspace_id, content_hash, avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd, status, created_at FROM distill_royalty_mints`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -50,7 +50,8 @@ func distillObsHarness(t *testing.T) *pgxpool.Pool {
 
 type distillMintSeed struct {
 	req, contrib, requester, content, status string
-	avoided, minted                          float64
+	avoided                                  float64
+	minted                                   int64
 	finalizeAfter                            *time.Time // resolver requires finalize_after IS NOT NULL on held rows
 }
 
@@ -144,21 +145,21 @@ func TestDistillRoyaltyMargin_Integration(t *testing.T) {
 	pool := distillObsHarness(t)
 	h := newDistillRoyaltyMarginHandler(poolroyalty.NewDistillMarginReader(pool))
 
-	distillMintSeed{req: "f1", contrib: "wsA", requester: "wsB", content: "d1", status: "final", avoided: 8, minted: 4}.insert(t, pool)
-	distillMintSeed{req: "f2", contrib: "wsC", requester: "wsD", content: "d2", status: "final", avoided: 4, minted: 2}.insert(t, pool)
+	distillMintSeed{req: "f1", contrib: "wsA", requester: "wsB", content: "d1", status: "final", avoided: 8, minted: 4_000_000}.insert(t, pool)
+	distillMintSeed{req: "f2", contrib: "wsC", requester: "wsD", content: "d2", status: "final", avoided: 4, minted: 2_000_000}.insert(t, pool)
 	// EXCLUDED:
-	distillMintSeed{req: "hX", contrib: "wsA", requester: "wsB", content: "d3", status: "held", avoided: 100, minted: 50}.insert(t, pool)
-	distillMintSeed{req: "rX", contrib: "wsA", requester: "wsB", content: "d4", status: "revoked", avoided: 100, minted: 50}.insert(t, pool)
+	distillMintSeed{req: "hX", contrib: "wsA", requester: "wsB", content: "d3", status: "held", avoided: 100, minted: 50_000_000}.insert(t, pool)
+	distillMintSeed{req: "rX", contrib: "wsA", requester: "wsB", content: "d4", status: "revoked", avoided: 100, minted: 50_000_000}.insert(t, pool)
 
 	var resp marginResponse
 	if code := callJSON(t, h, "/v1/admin/distill-royalty/margin", &resp); code != http.StatusOK {
 		t.Fatalf("margin: code %d", code)
 	}
-	if resp.Summary.Mints != 2 || resp.Summary.AvoidedCOGSUSD != 12 || resp.Summary.MintedLENS != 6 || resp.Summary.MarginUSD != 6 {
+	if resp.Summary.Mints != 2 || resp.Summary.AvoidedCOGSUSD != 12 || resp.Summary.MintedLENS != 6_000_000 || resp.Summary.MarginUSD != 6 {
 		t.Errorf("summary mints=%d avoided=%v minted=%v margin=%v want 2/12/6/6 (final only)",
 			resp.Summary.Mints, resp.Summary.AvoidedCOGSUSD, resp.Summary.MintedLENS, resp.Summary.MarginUSD)
 	}
-	if resp.Summary.MarginUSD != resp.Summary.AvoidedCOGSUSD-resp.Summary.MintedLENS {
+	if resp.Summary.MarginUSD != resp.Summary.AvoidedCOGSUSD-float64(resp.Summary.MintedLENS)/1e6 {
 		t.Error("margin identity broken")
 	}
 
@@ -226,7 +227,7 @@ func TestDistillRoyaltyResolve_Integration(t *testing.T) {
 // with NO data leaked.
 func TestDistillRoyaltyObs_AdminGate(t *testing.T) {
 	pool := distillObsHarness(t)
-	distillMintSeed{req: "g1", contrib: "wsA", requester: "wsB", content: "d1", status: "final", avoided: 8, minted: 4}.insert(t, pool)
+	distillMintSeed{req: "g1", contrib: "wsA", requester: "wsB", content: "d1", status: "final", avoided: 8, minted: 4_000_000}.insert(t, pool)
 
 	endpoints := []struct {
 		name, target string
@@ -236,7 +237,7 @@ func TestDistillRoyaltyObs_AdminGate(t *testing.T) {
 		{"resolve", "/v1/admin/distill-royalty/resolve?type=volume", newDistillRoyaltyResolveHandler(poolroyalty.NewDistillResolver(pool))},
 		{"margin", "/v1/admin/distill-royalty/margin", newDistillRoyaltyMarginHandler(poolroyalty.NewDistillMarginReader(pool))},
 	}
-	dataKeys := []string{"volume", "bilateral", "summary", "margin_usd", "avoided_cogs_usd", "minted_lens", "content_hash", "candidates", "request_id", "minted_amount"}
+	dataKeys := []string{"volume", "bilateral", "summary", "margin_usd", "avoided_cogs_usd", "minted_lens_ulens", "content_hash", "candidates", "request_id", "minted_amount"}
 	rejecters := []struct {
 		name string
 		a    fakeAuthenticator

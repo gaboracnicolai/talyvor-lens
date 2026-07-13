@@ -14,7 +14,7 @@ import (
 // fires exactly when — and only when — the CAS transitioned a row.
 type revokeCall struct {
 	workspaceID string
-	amount      float64
+	amount      int64
 }
 
 type fakeRevokeLedger struct {
@@ -22,7 +22,7 @@ type fakeRevokeLedger struct {
 	err   error
 }
 
-func (f *fakeRevokeLedger) RevokeHeldTx(_ context.Context, _ pgx.Tx, ws string, amount float64, _ string, _ map[string]interface{}) error {
+func (f *fakeRevokeLedger) RevokeHeldTx(_ context.Context, _ pgx.Tx, ws string, amount int64, _ string, _ map[string]interface{}) error {
 	f.calls = append(f.calls, revokeCall{workspaceID: ws, amount: amount})
 	return f.err
 }
@@ -47,7 +47,7 @@ func TestRevokeHeldMints_SingleRevoked(t *testing.T) {
 	pool.ExpectBegin()
 	pool.ExpectQuery(`UPDATE pool_royalty_mints SET status = 'revoked'`).
 		WithArgs("req-1").
-		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsA", 1.5))
+		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsA", micro(1.5)))
 	pool.ExpectCommit()
 
 	rep, err := r.RevokeHeldMints(context.Background(), []string{"req-1"})
@@ -60,7 +60,7 @@ func TestRevokeHeldMints_SingleRevoked(t *testing.T) {
 	if rep.Totals[OutcomeRevoked] != 1 {
 		t.Errorf("totals[revoked] = %d, want 1", rep.Totals[OutcomeRevoked])
 	}
-	if len(led.calls) != 1 || led.calls[0].workspaceID != "wsA" || led.calls[0].amount != 1.5 {
+	if len(led.calls) != 1 || led.calls[0].workspaceID != "wsA" || led.calls[0].amount != micro(1.5) {
 		t.Errorf("RevokeHeldTx calls = %+v, want one wsA/1.5", led.calls)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -200,7 +200,7 @@ func TestRevokeHeldMints_MixedSet(t *testing.T) {
 	// held → revoked
 	pool.ExpectBegin()
 	pool.ExpectQuery(`UPDATE pool_royalty_mints SET status = 'revoked'`).WithArgs("held-1").
-		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsA", 2.0))
+		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsA", micro(2.0)))
 	pool.ExpectCommit()
 	// final → skipped_not_held
 	pool.ExpectBegin()
@@ -255,7 +255,7 @@ func TestRevokeHeldMints_BurnFailureRollsBackFlip(t *testing.T) {
 
 	pool.ExpectBegin()
 	pool.ExpectQuery(`UPDATE pool_royalty_mints SET status = 'revoked'`).WithArgs("req-x").
-		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsA", 1.0))
+		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsA", micro(1.0)))
 	pool.ExpectRollback() // burn failed → flip discarded with it
 
 	rep, err := r.RevokeHeldMints(context.Background(), []string{"req-x"})
@@ -296,7 +296,7 @@ func TestRevokeHeldMints_DuplicateInBatchProcessedOnce(t *testing.T) {
 	pool.ExpectBegin()
 	pool.ExpectQuery(`UPDATE pool_royalty_mints SET status = 'revoked'`).
 		WithArgs("dup").
-		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsA", 1.0))
+		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsA", micro(1.0)))
 	pool.ExpectCommit()
 
 	rep, err := r.RevokeHeldMints(context.Background(), []string{"dup", "dup", "dup"})

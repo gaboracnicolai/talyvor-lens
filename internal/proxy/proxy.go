@@ -1819,7 +1819,7 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 			slog.String("contributor", hit.ContributorWorkspace),
 			slog.String("requester", hit.RequesterWorkspace),
 			slog.String("layer", hit.Layer),
-			slog.Float64("amount", res.Amount),
+			slog.Int64("amount_ulens", res.Amount),
 		)
 	}
 }

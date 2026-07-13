@@ -44,7 +44,7 @@ import (
 // a no-lock balance read. *economy.DualTokenStore.GetLXCBalance satisfies it.
 // Deliberately separate from lxcSpendSink so the shadow path stays untouched.
 type lxcBalanceReader interface {
-	GetLXCBalance(ctx context.Context, workspaceID string) (float64, error)
+	GetLXCBalance(ctx context.Context, workspaceID string) (int64, error)
 }
 
 // SetLXCGate wires the LXC gating reader + its enable flag (read per-call). The
@@ -56,10 +56,11 @@ func (p *Proxy) SetLXCGate(reader lxcBalanceReader, enabled func() bool) {
 }
 
 // lxcEstimate is the input-only pre-serve LXC cost estimate (output=0),
-// converted at the fixed peg, 6-dp — mirrors the budget gate's estCost.
-func lxcEstimate(model, prompt string) float64 {
+// converted at the fixed peg — in µLXC (SEC-2). It gates a CHARGE, so it rounds
+// UP (ceil): a conservative estimate never under-reserves a sub-µLXC.
+func lxcEstimate(model, prompt string) int64 {
 	estUSD := alerts.CostUSD(model, len(prompt)/4, 0)
-	return math.Round(estUSD/economy.LXCUSDValue*1e6) / 1e6
+	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
 }
 
 // lxcGateBlocks reports whether the request should be BLOCKED (true) for

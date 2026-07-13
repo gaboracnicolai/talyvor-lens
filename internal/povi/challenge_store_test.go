@@ -11,7 +11,7 @@ import (
 func TestChallengeStore_Record(t *testing.T) {
 	pool := newStorePool(t)
 	pool.ExpectExec(`INSERT INTO povi_challenges`).
-		WithArgs("chal_1", "req-1", "node-1", "ws-op", "3,7,11", "fail", 50.0, "challenge_fail:req-1", pgxmock.AnyArg()).
+		WithArgs("chal_1", "req-1", "node-1", "ws-op", "3,7,11", "fail", int64(50), "challenge_fail:req-1", pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	s := newChallengeStore(pool)
@@ -44,7 +44,7 @@ func TestChallengeStore_GetParsesPositions(t *testing.T) {
 	pool := newStorePool(t)
 	rows := pgxmock.NewRows([]string{
 		"id", "request_id", "node_id", "workspace_id", "positions", "result", "slashed_amount", "reason", "created_at",
-	}).AddRow("chal_1", "req-1", "node-1", "ws-op", "3,7,11", "fail", 50.0, "r", time.Now())
+	}).AddRow("chal_1", "req-1", "node-1", "ws-op", "3,7,11", "fail", int64(50), "r", time.Now())
 	pool.ExpectQuery(`FROM povi_challenges WHERE id`).WithArgs("chal_1").WillReturnRows(rows)
 
 	s := newChallengeStore(pool)

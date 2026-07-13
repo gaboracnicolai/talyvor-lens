@@ -49,12 +49,12 @@ func TestRewardLoopSeam_MintFinalizeRedeem_Integration(t *testing.T) {
 	// Seed a locked (staking collateral) balance so we can prove convert never
 	// touches it. (Direct write — collateral isn't part of this seam.)
 	if _, err := pool.Exec(ctx, `INSERT INTO lens_token_balances (workspace_id, balance, held_balance, locked_balance, lifetime_earned, lifetime_spent)
-		VALUES ($1, 0, 0, 2.0, 0, 0)`, ws); err != nil {
+		VALUES ($1, 0, 0, 2000000, 0, 0)`, ws); err != nil {
 		t.Fatal(err)
 	}
 
 	// ── STEP 1: mint a pooled cross-tenant hit as HELD (the real held credit) ──
-	mintHeld := func(amount float64) {
+	mintHeld := func(amount int64) {
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -67,21 +67,21 @@ func TestRewardLoopSeam_MintFinalizeRedeem_Integration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mintHeld(8.0)
+	mintHeld(8 * uLENS)
 
 	bal, held, _, earned := readBalances(t, pool, ctx, ws)
-	if bal != 0 || held != 8.0 || earned != 0 {
+	if bal != 0 || held != 8*uLENS || earned != 0 {
 		t.Fatalf("after mint: balance=%v held=%v earned=%v, want 0/8.0/0 (held, not spendable)", bal, held, earned)
 	}
 
 	// ── STEP 2: HELD IS NOT REDEEMABLE (the key money-safety assertion) ──
 	// balance is 0; converting 3 LXC needs 3 LENS spendable → must fail, because
 	// the 8 LENS sits in held_balance, which convert cannot reach.
-	if _, err := dt.ConvertLENStoLXC(ctx, ws, 3.0); !errors.Is(err, ErrInsufficientLENSFor) {
+	if _, err := dt.ConvertLENStoLXC(ctx, ws, 3*uLXC); !errors.Is(err, ErrInsufficientLENSFor) {
 		t.Fatalf("held LENS must NOT be redeemable: ConvertLENStoLXC = %v, want ErrInsufficientLENSFor", err)
 	}
 	bal, held, _, _ = readBalances(t, pool, ctx, ws)
-	if bal != 0 || held != 8.0 {
+	if bal != 0 || held != 8*uLENS {
 		t.Fatalf("a failed conversion must move nothing: balance=%v held=%v, want 0/8.0", bal, held)
 	}
 
@@ -90,7 +90,7 @@ func TestRewardLoopSeam_MintFinalizeRedeem_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ledger.FinalizeHeldTx(ctx, tx, ws, 5.0, "holdback window elapsed", nil); err != nil {
+	if err := ledger.FinalizeHeldTx(ctx, tx, ws, 5*uLENS, "holdback window elapsed", nil); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("FinalizeHeldTx: %v", err)
 	}
@@ -98,49 +98,49 @@ func TestRewardLoopSeam_MintFinalizeRedeem_Integration(t *testing.T) {
 		t.Fatal(err)
 	}
 	bal, held, _, earned = readBalances(t, pool, ctx, ws)
-	if bal != 5.0 || held != 3.0 || earned != 5.0 {
+	if bal != 5*uLENS || held != 3*uLENS || earned != 5*uLENS {
 		t.Fatalf("after finalize(5): balance=%v held=%v earned=%v, want 5.0/3.0/5.0", bal, held, earned)
 	}
 
 	// ── STEP 4: NOW redeem 3 LXC — succeeds against the finalized spendable LENS ──
-	res, err := dt.ConvertLENStoLXC(ctx, ws, 3.0)
+	res, err := dt.ConvertLENStoLXC(ctx, ws, 3*uLXC)
 	if err != nil {
 		t.Fatalf("after finalize the same conversion must succeed: %v", err)
 	}
 	if res.Rate != 1.0 {
 		t.Errorf("rate = %v, want 1.0 (Phase1FloorRate; no approved rate seeded)", res.Rate)
 	}
-	if res.LENSSpent != 3.0 || res.LXCMinted != 3.0 || res.NewLENSBalance != 2.0 || res.NewLXCBalance != 3.0 {
+	if res.LENSSpent != 3*uLENS || res.LXCMinted != 3*uLXC || res.NewLENSBalance != 2*uLENS || res.NewLXCBalance != 3*uLXC {
 		t.Errorf("convert result = %+v, want LENSSpent=3 LXCMinted=3 NewLENS=2 NewLXC=3 (3 LXC × rate 1.0)", res)
 	}
 
 	// ── STEP 5: full accounting in the DB ──
 	bal, held, locked, _ := readBalances(t, pool, ctx, ws)
-	if bal != 2.0 {
+	if bal != 2*uLENS {
 		t.Errorf("spendable balance after redeem = %v, want 2.0 (5 − 3)", bal)
 	}
 	// HELD and LOCKED untouched by the convert: still-held LENS and collateral
 	// are exactly what the finalize/seed left them.
-	if held != 3.0 {
+	if held != 3*uLENS {
 		t.Errorf("held_balance = %v, want 3.0 — convert must NOT touch still-held LENS", held)
 	}
-	if locked != 2.0 {
+	if locked != 2*uLENS {
 		t.Errorf("locked_balance = %v, want 2.0 — convert must NOT touch staking collateral", locked)
 	}
-	var lxcBal float64
+	var lxcBal int64
 	if err := pool.QueryRow(ctx, `SELECT balance FROM lxc_balances WHERE workspace_id=$1`, ws).Scan(&lxcBal); err != nil {
 		t.Fatal(err)
 	}
-	if lxcBal != 3.0 {
+	if lxcBal != 3*uLXC {
 		t.Errorf("lxc_balances = %v, want 3.0", lxcBal)
 	}
 	// Both ledger rows written: the LENS-side convert_to_lxc debit and the
 	// LXC-side convert_from_lens credit.
 	var lensDebit, lxcCredit int64
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM lens_token_ledger WHERE workspace_id=$1 AND type='convert_to_lxc' AND amount=-3.0`, ws).Scan(&lensDebit); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM lens_token_ledger WHERE workspace_id=$1 AND type='convert_to_lxc' AND amount=-3000000`, ws).Scan(&lensDebit); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM lxc_ledger WHERE workspace_id=$1 AND type='convert_from_lens' AND amount=3.0`, ws).Scan(&lxcCredit); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM lxc_ledger WHERE workspace_id=$1 AND type='convert_from_lens' AND amount=3000000`, ws).Scan(&lxcCredit); err != nil {
 		t.Fatal(err)
 	}
 	if lensDebit != 1 || lxcCredit != 1 {
@@ -152,7 +152,7 @@ func TestRewardLoopSeam_MintFinalizeRedeem_Integration(t *testing.T) {
 	// it must FAIL even though balance+held+locked = 7 ≥ 4 — proving held and
 	// locked are NOT counted as spendable. This is the money-safety seam: only
 	// finalized, spendable LENS is redeemable.
-	if _, err := dt.ConvertLENStoLXC(ctx, ws, 4.0); !errors.Is(err, ErrInsufficientLENSFor) {
+	if _, err := dt.ConvertLENStoLXC(ctx, ws, 4*uLXC); !errors.Is(err, ErrInsufficientLENSFor) {
 		t.Fatalf("only spendable balance (2) is redeemable; 4 LXC must fail despite held+locked present: got %v", err)
 	}
 }
@@ -170,18 +170,18 @@ func rewardLoopSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
 		`DROP TABLE IF EXISTS conversion_rate_history`,
 		`CREATE TABLE lens_token_balances (
 			workspace_id    TEXT PRIMARY KEY,
-			balance         DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance    DOUBLE PRECISION NOT NULL DEFAULT 0,
-			locked_balance  DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent  DOUBLE PRECISION NOT NULL DEFAULT 0,
+			balance         BIGINT NOT NULL DEFAULT 0,
+			held_balance    BIGINT NOT NULL DEFAULT 0,
+			locked_balance  BIGINT NOT NULL DEFAULT 0,
+			lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent  BIGINT NOT NULL DEFAULT 0,
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE TABLE lens_token_ledger (
 			id            UUID NOT NULL DEFAULT gen_random_uuid(),
 			workspace_id  TEXT NOT NULL,
-			amount        DOUBLE PRECISION NOT NULL,
-			balance_after DOUBLE PRECISION NOT NULL,
+			amount        BIGINT NOT NULL,
+			balance_after BIGINT NOT NULL,
 			type          TEXT NOT NULL,
 			description   TEXT NOT NULL DEFAULT '',
 			metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -190,16 +190,16 @@ func rewardLoopSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
 		)`,
 		`CREATE TABLE lxc_balances (
 			workspace_id    TEXT PRIMARY KEY,
-			balance         DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_minted DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent  DOUBLE PRECISION NOT NULL DEFAULT 0,
+			balance         BIGINT NOT NULL DEFAULT 0,
+			lifetime_minted BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent  BIGINT NOT NULL DEFAULT 0,
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE TABLE lxc_ledger (
 			id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			workspace_id  TEXT NOT NULL,
-			amount        DOUBLE PRECISION NOT NULL,
-			balance_after DOUBLE PRECISION NOT NULL,
+			amount        BIGINT NOT NULL,
+			balance_after BIGINT NOT NULL,
 			type          TEXT NOT NULL,
 			description   TEXT NOT NULL DEFAULT '',
 			metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -223,7 +223,7 @@ func rewardLoopSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
 	}
 }
 
-func readBalances(t *testing.T, pool *pgxpool.Pool, ctx context.Context, ws string) (bal, held, locked, earned float64) {
+func readBalances(t *testing.T, pool *pgxpool.Pool, ctx context.Context, ws string) (bal, held, locked, earned int64) {
 	t.Helper()
 	if err := pool.QueryRow(ctx,
 		`SELECT balance, held_balance, locked_balance, lifetime_earned FROM lens_token_balances WHERE workspace_id=$1`, ws).

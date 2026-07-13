@@ -233,9 +233,13 @@ func (m *LatencyMinter) mintOne(ctx context.Context, epoch int64, r latencyMintR
 	costFactor := clamp01(r.cohortCost / latencyMintMaxComplexityCost)
 	latencySkill := margin * costFactor
 
-	amount := m.anchor.Value(GainInput{HeldScore: latencySkill})
-	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
+	valuation := m.anchor.Value(GainInput{HeldScore: latencySkill}) // Tier-2 float LENS
+	if math.IsNaN(valuation) || math.IsInf(valuation, 0) || valuation <= 0 {
 		return false, nil // not faster-than-baseline, trivial cohort, or rate-0 ⇒ no claim, no mint
+	}
+	amount := microFloorLENS(valuation) // SEC-2 site #4: mint valuation → µLENS, rounded DOWN
+	if amount <= 0 {
+		return false, nil // sub-µLENS valuation ⇒ no claim, no mint
 	}
 
 	requestID := latencyRequestID(r.nodeID, r.feature, r.inputTokenRange, r.complexityBucket, r.model, epoch)

@@ -46,7 +46,7 @@ func detectorTestPool(t *testing.T) *pgxpool.Pool {
 			model                    TEXT NOT NULL DEFAULT '',
 			similarity               DOUBLE PRECISION NOT NULL DEFAULT 0,
 			avoided_cogs_usd         DOUBLE PRECISION NOT NULL DEFAULT 0,
-			minted_amount            DOUBLE PRECISION NOT NULL DEFAULT 0,
+			minted_amount BIGINT NOT NULL DEFAULT 0,
 			answer_sha256            TEXT NOT NULL DEFAULT '',
 			prompt_sha256            TEXT NOT NULL DEFAULT '',
 			status                   TEXT NOT NULL DEFAULT 'final',

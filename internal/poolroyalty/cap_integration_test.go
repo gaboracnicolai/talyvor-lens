@@ -57,17 +57,17 @@ func TestCapExactness_ConcurrentSamePair_Integration(t *testing.T) {
 		`DROP TABLE IF EXISTS lens_token_balances`,
 		`CREATE TABLE lens_token_balances (
 			workspace_id    TEXT PRIMARY KEY,
-			balance         DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance    DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent  DOUBLE PRECISION NOT NULL DEFAULT 0,
+			balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0,
+			lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent BIGINT NOT NULL DEFAULT 0,
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE TABLE lens_token_ledger (
 			id            UUID             NOT NULL DEFAULT gen_random_uuid(),
 			workspace_id  TEXT             NOT NULL,
-			amount        DOUBLE PRECISION NOT NULL,
-			balance_after DOUBLE PRECISION NOT NULL,
+			amount BIGINT NOT NULL,
+			balance_after BIGINT NOT NULL,
 			type          TEXT             NOT NULL,
 			description   TEXT             NOT NULL DEFAULT '',
 			metadata      JSONB            NOT NULL DEFAULT '{}'::jsonb,
@@ -85,7 +85,7 @@ func TestCapExactness_ConcurrentSamePair_Integration(t *testing.T) {
 			model                    TEXT NOT NULL DEFAULT '',
 			similarity               DOUBLE PRECISION NOT NULL DEFAULT 0,
 			avoided_cogs_usd         DOUBLE PRECISION NOT NULL DEFAULT 0,
-			minted_amount            DOUBLE PRECISION NOT NULL DEFAULT 0,
+			minted_amount BIGINT NOT NULL DEFAULT 0,
 			answer_sha256            TEXT NOT NULL DEFAULT '',
 			prompt_sha256            TEXT NOT NULL DEFAULT '',
 			status                   TEXT NOT NULL DEFAULT 'final',
@@ -156,11 +156,11 @@ func TestCapExactness_ConcurrentSamePair_Integration(t *testing.T) {
 	if rows != capK {
 		t.Fatalf("claim rows=%d, want exactly %d (capped attempts must leave NO rows)", rows, capK)
 	}
-	var bal, held float64
+	var bal, held int64
 	if err := pool.QueryRow(ctx, `SELECT balance, held_balance FROM lens_token_balances WHERE workspace_id='wsA'`).Scan(&bal, &held); err != nil {
 		t.Fatal(err)
 	}
-	if want := float64(capK) * 0.5 * 2.0; held != want || bal != 0 {
+	if want := int64(capK) * micro(1); held != want || bal != 0 {
 		t.Fatalf("contributor held=%v balance=%v, want held=%v balance=0 (2.3a: exactly K HELD credits, nothing spendable until finalize)", held, bal, want)
 	}
 }
@@ -192,17 +192,17 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 		`DROP TABLE IF EXISTS lens_token_balances`,
 		`CREATE TABLE lens_token_balances (
 			workspace_id    TEXT PRIMARY KEY,
-			balance         DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance    DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent  DOUBLE PRECISION NOT NULL DEFAULT 0,
+			balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0,
+			lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent BIGINT NOT NULL DEFAULT 0,
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE TABLE lens_token_ledger (
 			id            UUID             NOT NULL DEFAULT gen_random_uuid(),
 			workspace_id  TEXT             NOT NULL,
-			amount        DOUBLE PRECISION NOT NULL,
-			balance_after DOUBLE PRECISION NOT NULL,
+			amount BIGINT NOT NULL,
+			balance_after BIGINT NOT NULL,
 			type          TEXT             NOT NULL,
 			description   TEXT             NOT NULL DEFAULT '',
 			metadata      JSONB            NOT NULL DEFAULT '{}'::jsonb,
@@ -220,7 +220,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 			model                    TEXT NOT NULL DEFAULT '',
 			similarity               DOUBLE PRECISION NOT NULL DEFAULT 0,
 			avoided_cogs_usd         DOUBLE PRECISION NOT NULL DEFAULT 0,
-			minted_amount            DOUBLE PRECISION NOT NULL DEFAULT 0,
+			minted_amount BIGINT NOT NULL DEFAULT 0,
 			answer_sha256            TEXT NOT NULL DEFAULT '',
 			prompt_sha256            TEXT NOT NULL DEFAULT '',
 			status                   TEXT NOT NULL DEFAULT 'final',
@@ -230,7 +230,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 		`CREATE OR REPLACE VIEW pool_royalty_margin AS
 		SELECT request_id, requester_workspace_id, contributor_workspace_id, layer,
 		       provider, model, avoided_cogs_usd, minted_amount,
-		       avoided_cogs_usd - minted_amount AS margin_usd, created_at, status
+		       avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd, created_at, status
 		FROM pool_royalty_mints`,
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
@@ -254,7 +254,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	if err != nil || !res.Minted {
 		t.Fatalf("mint: res=%+v err=%v", res, err)
 	}
-	var bal, held float64
+	var bal, held int64
 	var status string
 	var hasWindow bool
 	if err := pool.QueryRow(ctx, `SELECT balance, held_balance FROM lens_token_balances WHERE workspace_id='wsA'`).Scan(&bal, &held); err != nil {
@@ -263,7 +263,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT status, finalize_after IS NOT NULL FROM pool_royalty_mints WHERE request_id='req-hold-1'`).Scan(&status, &hasWindow); err != nil {
 		t.Fatal(err)
 	}
-	if bal != 0 || held != 1.0 || status != "held" || !hasWindow {
+	if bal != 0 || held != micro(1) || status != "held" || !hasWindow {
 		t.Fatalf("after mint: bal=%v held=%v status=%q window=%v — want 0/1.0/held/true", bal, held, status, hasWindow)
 	}
 	supply, err := ledger.GetTotalSupply(ctx)
@@ -296,12 +296,12 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT balance, held_balance FROM lens_token_balances WHERE workspace_id='wsA'`).Scan(&bal, &held); err != nil {
 		t.Fatal(err)
 	}
-	if bal != 1.0 || held != 0 {
+	if bal != micro(1) || held != 0 {
 		t.Fatalf("after finalize: bal=%v held=%v, want 1.0/0 (held → spendable, conserved)", bal, held)
 	}
 	supply, _ = ledger.GetTotalSupply(ctx)
-	if supply != 1.0 {
-		t.Fatalf("finalized mint must count toward supply; got %v want 1.0", supply)
+	if supply != micro(1) {
+		t.Fatalf("finalized mint must count toward supply; got %v want micro(1) µLENS", supply)
 	}
 
 	// 4. SWEEPER NOT FLAG-GATED: a committed held row finalizes even with
@@ -338,7 +338,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	if _, err := tx.Exec(ctx, `UPDATE pool_royalty_mints SET status='revoked' WHERE request_id='req-hold-3' AND status='held'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := ledger.RevokeHeldTx(ctx, tx, "wsA", 1.0, "revoked: test", nil); err != nil {
+	if err := ledger.RevokeHeldTx(ctx, tx, "wsA", micro(1), "revoked: test", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -518,9 +518,9 @@ func entryCapResetSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) 
 		`DROP TABLE IF EXISTS pool_royalty_mints`,
 		`DROP TABLE IF EXISTS lens_token_ledger`,
 		`DROP TABLE IF EXISTS lens_token_balances`,
-		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0, held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
-		`CREATE TABLE pool_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, requester_workspace_id TEXT NOT NULL, contributor_workspace_id TEXT NOT NULL, layer TEXT NOT NULL, entry_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', similarity DOUBLE PRECISION NOT NULL DEFAULT 0, avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount DOUBLE PRECISION NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '', prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'final', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0, held_balance BIGINT NOT NULL DEFAULT 0, lifetime_earned BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
+		`CREATE TABLE pool_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, requester_workspace_id TEXT NOT NULL, contributor_workspace_id TEXT NOT NULL, layer TEXT NOT NULL, entry_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', similarity DOUBLE PRECISION NOT NULL DEFAULT 0, avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount BIGINT NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '', prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'final', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE INDEX IF NOT EXISTS idx_pool_royalty_mints_entry ON pool_royalty_mints (entry_id, created_at)`,
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {

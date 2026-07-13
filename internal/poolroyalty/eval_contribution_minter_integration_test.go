@@ -40,15 +40,15 @@ func evalHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 	for _, ddl := range []string{
 		`DROP SCHEMA IF EXISTS lens_evalcontrib_test CASCADE`,
 		`CREATE SCHEMA lens_evalcontrib_test`,
-		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0, lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
-			amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL,
+			amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
 		`CREATE TABLE eval_contribution_mints (request_id TEXT PRIMARY KEY, contributor_workspace_id TEXT NOT NULL,
-			discrimination DOUBLE PRECISION NOT NULL, distinct_graders INTEGER NOT NULL, minted_amount DOUBLE PRECISION NOT NULL,
+			discrimination DOUBLE PRECISION NOT NULL, distinct_graders INTEGER NOT NULL, minted_amount BIGINT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE benchmark_eval_items (id TEXT PRIMARY KEY, input TEXT NOT NULL, expected_output TEXT NOT NULL,
 			eval_method TEXT NOT NULL DEFAULT 'exact', pass_threshold DOUBLE PRECISION NOT NULL DEFAULT 1.0,
@@ -62,7 +62,7 @@ func evalHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 		`CREATE TABLE workspace_card_fingerprints (workspace_id TEXT NOT NULL, fingerprint_hash TEXT NOT NULL,
 			PRIMARY KEY (workspace_id, fingerprint_hash))`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount DOUBLE PRECISION NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -96,7 +96,7 @@ func evalGrade(t *testing.T, pool *pgxpool.Pool, itemID, graderWS string, score 
 	}
 }
 
-func evalMintRows(t *testing.T, pool *pgxpool.Pool, author string) (n int, amount, discrimination float64) {
+func evalMintRows(t *testing.T, pool *pgxpool.Pool, author string) (n int, amount int64, discrimination float64) {
 	t.Helper()
 	_ = pool.QueryRow(context.Background(),
 		`SELECT count(*), COALESCE(sum(minted_amount),0), COALESCE(max(discrimination),0)
@@ -133,11 +133,11 @@ func TestEvalContribution_InertThenLive_Integration(t *testing.T) {
 		t.Fatalf("rate-10 minter must mint exactly 1: n=%d err=%v", n, err)
 	}
 	rows, amount, disc := evalMintRows(t, pool, "authorA")
-	if rows != 1 || disc < 0.85 || disc > 0.92 || amount < 8.5 || amount > 9.2 {
-		t.Fatalf("expected one mint ~8.89 (disc ~0.889): rows=%d amount=%.3f disc=%.3f", rows, amount, disc)
+	if rows != 1 || disc < 0.85 || disc > 0.92 || amount < micro(8.5) || amount > micro(9.2) {
+		t.Fatalf("expected one mint ~8.89 (disc ~0.889): rows=%d amount=%d disc=%.3f", rows, amount, disc)
 	}
-	if _, held := balances(t, pool, "authorA"); held < 8.5 || held > 9.2 {
-		t.Fatalf("author held_balance %.3f, want ~8.89", held)
+	if _, held := balances(t, pool, "authorA"); held < micro(8.5) || held > micro(9.2) {
+		t.Fatalf("author held_balance %d µLENS, want ~8.89 LENS", held)
 	}
 	// Idempotent: a second sweep mints nothing more (once-per-item claim).
 	if n2, _ := live.RunOnce(ctx); n2 != 0 {

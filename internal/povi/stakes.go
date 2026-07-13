@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/mining"
 )
 
 // Node-registration staking (PoVI Part 2 / Upgrade 6). A node must lock LENS
@@ -35,9 +36,9 @@ const (
 type Stake struct {
 	NodeID        string      `json:"node_id"`
 	WorkspaceID   string      `json:"workspace_id"`
-	Amount        float64     `json:"amount"` // current locked collateral
+	Amount        int64       `json:"amount_ulens"` // current locked collateral, µLENS (SEC-2)
 	Status        StakeStatus `json:"status"`
-	SlashedAmount float64     `json:"slashed_amount"` // cumulative slashed (audit)
+	SlashedAmount int64       `json:"slashed_amount_ulens"` // cumulative slashed (audit), µLENS
 	LockedAt      time.Time   `json:"locked_at"`
 	UnbondAt      *time.Time  `json:"unbond_at,omitempty"`
 	UpdatedAt     time.Time   `json:"updated_at"`
@@ -61,12 +62,12 @@ type txBeginner interface {
 // it). Each operation has a self-contained variant (its own tx) and a Tx variant
 // (runs inside a caller-supplied transaction for cross-table atomicity).
 type StakeLedger interface {
-	LockStake(ctx context.Context, workspaceID string, amount float64, metadata map[string]interface{}) error
-	ReleaseStake(ctx context.Context, workspaceID string, amount float64, metadata map[string]interface{}) error
-	SlashStake(ctx context.Context, workspaceID string, amount float64, metadata map[string]interface{}) error
-	LockStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error
-	ReleaseStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error
-	SlashStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount float64, metadata map[string]interface{}) error
+	LockStake(ctx context.Context, workspaceID string, amount int64, metadata map[string]interface{}) error
+	ReleaseStake(ctx context.Context, workspaceID string, amount int64, metadata map[string]interface{}) error
+	SlashStake(ctx context.Context, workspaceID string, amount int64, metadata map[string]interface{}) error
+	LockStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, metadata map[string]interface{}) error
+	ReleaseStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, metadata map[string]interface{}) error
+	SlashStakeTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, metadata map[string]interface{}) error
 }
 
 // stakeStore persists Stake rows. Get/Put are the non-transactional variants
@@ -96,7 +97,7 @@ type StakeManager struct {
 	store        stakeStore
 	ledger       StakeLedger
 	nodeWS       NodeWorkspaceLookup
-	minStake     float64
+	minStake     int64
 	unbondPeriod time.Duration
 	now          func() time.Time
 	db           txBeginner // nil in tests → non-transactional path
@@ -123,7 +124,7 @@ func (m *StakeManager) SetReputationSink(sink SlashReputationSink) { m.repSink =
 // NewStakeManager wires the store, the ledger lock primitive, the node→workspace
 // lookup, the minimum stake, the unbonding delay, and the DB pool used to open
 // a single transaction per stake operation (pass nil in tests).
-func NewStakeManager(store stakeStore, ledger StakeLedger, nodeWS NodeWorkspaceLookup, minStake float64, unbondPeriod time.Duration, db txBeginner) *StakeManager {
+func NewStakeManager(store stakeStore, ledger StakeLedger, nodeWS NodeWorkspaceLookup, minStake int64, unbondPeriod time.Duration, db txBeginner) *StakeManager {
 	return &StakeManager{
 		store:        store,
 		ledger:       ledger,
@@ -174,19 +175,19 @@ func (m *StakeManager) storePut(ctx context.Context, tx pgx.Tx, st Stake) error 
 
 // ledgerLock/Release/Slash dispatch to the Tx variants when inside a
 // transaction, the non-Tx variants otherwise.
-func (m *StakeManager) ledgerLockStake(ctx context.Context, tx pgx.Tx, ws string, amount float64, meta map[string]interface{}) error {
+func (m *StakeManager) ledgerLockStake(ctx context.Context, tx pgx.Tx, ws string, amount int64, meta map[string]interface{}) error {
 	if tx == nil {
 		return m.ledger.LockStake(ctx, ws, amount, meta)
 	}
 	return m.ledger.LockStakeTx(ctx, tx, ws, amount, meta)
 }
-func (m *StakeManager) ledgerReleaseStake(ctx context.Context, tx pgx.Tx, ws string, amount float64, meta map[string]interface{}) error {
+func (m *StakeManager) ledgerReleaseStake(ctx context.Context, tx pgx.Tx, ws string, amount int64, meta map[string]interface{}) error {
 	if tx == nil {
 		return m.ledger.ReleaseStake(ctx, ws, amount, meta)
 	}
 	return m.ledger.ReleaseStakeTx(ctx, tx, ws, amount, meta)
 }
-func (m *StakeManager) ledgerSlashStake(ctx context.Context, tx pgx.Tx, ws string, amount float64, meta map[string]interface{}) error {
+func (m *StakeManager) ledgerSlashStake(ctx context.Context, tx pgx.Tx, ws string, amount int64, meta map[string]interface{}) error {
 	if tx == nil {
 		return m.ledger.SlashStake(ctx, ws, amount, meta)
 	}
@@ -194,7 +195,7 @@ func (m *StakeManager) ledgerSlashStake(ctx context.Context, tx pgx.Tx, ws strin
 }
 
 // MinStake / UnbondPeriod expose config for the status endpoint.
-func (m *StakeManager) MinStake() float64           { return m.minStake }
+func (m *StakeManager) MinStake() int64             { return m.minStake }
 func (m *StakeManager) UnbondPeriod() time.Duration { return m.unbondPeriod }
 
 // WorkspaceForNode resolves a node's operator workspace (the same lookup the
@@ -208,7 +209,7 @@ func (m *StakeManager) WorkspaceForNode(ctx context.Context, nodeID string) (str
 // Stake locks `amount` LENS as collateral for a node (topping up an existing
 // active stake, or starting fresh). All reads and writes run in a single
 // transaction so concurrent stakes for the same node serialize correctly.
-func (m *StakeManager) Stake(ctx context.Context, nodeID string, amount float64) (*Stake, error) {
+func (m *StakeManager) Stake(ctx context.Context, nodeID string, amount int64) (*Stake, error) {
 	if amount <= 0 {
 		return nil, errors.New("povi: stake amount must be positive")
 	}
@@ -318,11 +319,11 @@ func (m *StakeManager) Release(ctx context.Context, nodeID string) error {
 // when a challenge fails). Slashable while active OR unbonding. The ledger op
 // and the stake-record update run in one transaction so concurrent slashes
 // can't double-burn or leave the record inconsistent. Returns the amount slashed.
-func (m *StakeManager) Slash(ctx context.Context, nodeID string, fraction float64, reason string) (float64, error) {
+func (m *StakeManager) Slash(ctx context.Context, nodeID string, fraction float64, reason string) (int64, error) {
 	if fraction <= 0 || fraction > 1 {
 		return 0, errors.New("povi: slash fraction must be in (0,1]")
 	}
-	var slashed float64
+	var slashed int64 // µLENS
 	opErr := m.runStakeOp(ctx, nodeID, func(ctx context.Context, tx pgx.Tx) error {
 		st, err := m.storeGet(ctx, tx, nodeID)
 		if err != nil {
@@ -334,15 +335,21 @@ func (m *StakeManager) Slash(ctx context.Context, nodeID string, fraction float6
 		if !st.Slashable() {
 			return ErrNotSlashable
 		}
-		slashAmt := st.Amount * fraction
+		// SEC-2 site #5 (slash). st.Amount is conserved µLENS collateral; fraction
+		// is a Tier-2 float in (0,1]. A slash is a BURN/DEBIT against a misbehaving
+		// node, so it rounds UP (MulCeil) — the protocol never under-burns a
+		// sub-µLENS; the extra sub-unit is destroyed (removed from supply). For
+		// fraction≤1, ceil(amount×fraction) ≤ amount, so this never over-burns the
+		// locked balance. The burned remainder is fully accounted (it leaves supply).
+		slashAmt := mining.MulCeil(st.Amount, fraction)
 		if err := m.ledgerSlashStake(ctx, tx, st.WorkspaceID, slashAmt, map[string]interface{}{"node_id": nodeID, "reason": reason}); err != nil {
 			return err
 		}
 		st.Amount -= slashAmt
 		st.SlashedAmount += slashAmt
 		st.UpdatedAt = m.now().UTC()
-		if st.Amount <= 1e-9 {
-			st.Amount = 0
+		// SEC-2: exact integer zero check (replaces the float-epsilon `<= 1e-9`).
+		if st.Amount == 0 {
 			st.Status = StakeSlashed
 		}
 		if err := m.storePut(ctx, tx, *st); err != nil {
@@ -363,7 +370,7 @@ func (m *StakeManager) Slash(ctx context.Context, nodeID string, fraction float6
 	if opErr != nil {
 		return 0, opErr
 	}
-	metrics.POVISlash(slashed)
+	metrics.POVISlash(mining.MicroToFloat(slashed))
 	m.refreshGauges(ctx)
 	return slashed, nil
 }
@@ -388,11 +395,11 @@ func (m *StakeManager) List(ctx context.Context) ([]Stake, error) { return m.sto
 
 // StakingStatus aggregates totals for the /v1/povi/staking/status endpoint.
 type StakingStatus struct {
-	TotalLocked    float64 `json:"total_locked"`
+	TotalLocked    int64   `json:"total_locked_ulens"` // µLENS (SEC-2)
 	EligibleNodes  int     `json:"eligible_nodes"`
 	ActiveNodes    int     `json:"active_nodes"`
 	UnbondingNodes int     `json:"unbonding_nodes"`
-	MinStake       float64 `json:"min_stake"`
+	MinStake       int64   `json:"min_stake_ulens"` // µLENS (SEC-2)
 	UnbondSeconds  float64 `json:"unbond_period_seconds"`
 }
 
@@ -427,6 +434,6 @@ func (m *StakeManager) refreshGauges(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	metrics.SetPOVIStakeLocked(status.TotalLocked)
+	metrics.SetPOVIStakeLocked(mining.MicroToFloat(status.TotalLocked))
 	metrics.SetPOVINodesStaked(float64(status.EligibleNodes))
 }

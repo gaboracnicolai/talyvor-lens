@@ -170,7 +170,7 @@ func (s *LedgerStore) SetReputationGate(gate func() bool) { s.reputationGate = g
 // fold (idx_reputation_events_annotator, migration 0066) over THIS workspace's events — bounded per
 // read, but O(events-per-workspace) and unbounded over time. A materialized current-R is the
 // follow-up if a hot-minting workspace accumulates many events.
-func (s *LedgerStore) reputationBondedAmount(ctx context.Context, tx pgx.Tx, workspaceID, txType string, base float64, metadata map[string]interface{}) (float64, error) {
+func (s *LedgerStore) reputationBondedAmount(ctx context.Context, tx pgx.Tx, workspaceID, txType string, base int64, metadata map[string]interface{}) (int64, error) {
 	if s.reputationGate == nil || !s.reputationGate() || !isReputationBondedType(txType) {
 		return base, nil
 	}
@@ -184,11 +184,14 @@ func (s *LedgerStore) reputationBondedAmount(ctx context.Context, tx pgx.Tx, wor
 	if f <= 0 {
 		return 0, ErrReputationFloor
 	}
-	eff := base * f
+	// SEC-2 site: reputation scales a MINT down by f(R)∈(0,1]. A mint rounds DOWN
+	// (MulFloor) so the haircut never mints a sub-µLENS the workspace didn't earn;
+	// the dropped remainder is simply not minted (retained by the protocol).
+	eff := MulFloor(base, f)
 	if metadata != nil {
-		metadata["reputation_base"] = base
+		metadata["reputation_base_ulens"] = base
 		metadata["reputation_score"] = r
-		metadata["reputation_effective"] = eff
+		metadata["reputation_effective_ulens"] = eff
 	}
 	return eff, nil
 }
@@ -204,7 +207,7 @@ var ErrMintRateCapExceeded = errors.New("mining: workspace mint rate cap exceede
 // minted per window). capLENS <= 0 disables it (no cap). window <= 0 falls back
 // to 24h. Call once at startup, UNCONDITIONALLY — a safety restriction the
 // economy toggle must not lift (mirrors SetMintVerifier).
-func (s *LedgerStore) SetMintRateCap(capLENS float64, window time.Duration) {
+func (s *LedgerStore) SetMintRateCap(capLENS int64, window time.Duration) {
 	s.mintRateCap = capLENS
 	if window <= 0 {
 		window = 24 * time.Hour
@@ -230,7 +233,7 @@ WHERE workspace_id = $1
 // FOR UPDATE the credit takes, so concurrent same-workspace mints serialize and
 // the SUM sees prior committed mints (exact, no race). No-op when the cap is
 // disabled or txType is not a mint type (conservation / finalize / burn pass).
-func (s *LedgerStore) checkMintRateCap(ctx context.Context, tx pgx.Tx, workspaceID, txType string, amount float64) error {
+func (s *LedgerStore) checkMintRateCap(ctx context.Context, tx pgx.Tx, workspaceID, txType string, amount int64) error {
 	if s.mintRateCap <= 0 || !IsMintType(txType) {
 		return nil
 	}
@@ -238,7 +241,7 @@ func (s *LedgerStore) checkMintRateCap(ctx context.Context, tx pgx.Tx, workspace
 	if window <= 0 {
 		window = 24 * time.Hour
 	}
-	var minted float64
+	var minted int64
 	if err := tx.QueryRow(ctx, mintRateSumSQL, workspaceID, window.Microseconds(), mintTypeList).Scan(&minted); err != nil {
 		return fmt.Errorf("mining: mint rate-cap sum for %q: %w", workspaceID, err)
 	}
@@ -263,7 +266,7 @@ const insertMintClaimSQL = `
 //
 // Used by the compute / cache / embedding tracks, whose request_id MUST be
 // server-derived by the (future) live wire-up — see each RecordServed* caller.
-func (s *LedgerStore) CreditOnce(ctx context.Context, requestID, workspaceID string, amount float64, txType, description string, metadata map[string]interface{}) (alreadyMinted bool, err error) {
+func (s *LedgerStore) CreditOnce(ctx context.Context, requestID, workspaceID string, amount int64, txType, description string, metadata map[string]interface{}) (alreadyMinted bool, err error) {
 	if amount <= 0 {
 		return false, errors.New("mining: credit amount must be positive")
 	}
@@ -294,6 +297,6 @@ func (s *LedgerStore) CreditOnce(ctx context.Context, requestID, workspaceID str
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("mining: commit credit-once: %w", err)
 	}
-	metrics.MintedTokens(amount)
+	metrics.MintedTokens(MicroToFloat(amount))
 	return false, nil
 }

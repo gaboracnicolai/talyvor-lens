@@ -41,15 +41,15 @@ func latencyHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 	for _, ddl := range []string{
 		`DROP SCHEMA IF EXISTS lens_latencymint_test CASCADE`,
 		`CREATE SCHEMA lens_latencymint_test`,
-		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-			held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0, lifetime_earned BIGINT NOT NULL DEFAULT 0,
+			lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
-			amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL,
+			amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount DOUBLE PRECISION NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
 		`CREATE TABLE inference_nodes (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL)`,
 		`CREATE TABLE node_cohort_latency_stats (node_id TEXT NOT NULL, feature_category TEXT NOT NULL,
 			input_token_range TEXT NOT NULL, complexity_bucket TEXT NOT NULL, model TEXT NOT NULL,
@@ -61,7 +61,7 @@ func latencyHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 		`CREATE TABLE workspace_card_fingerprints (workspace_id TEXT NOT NULL, fingerprint_hash TEXT NOT NULL,
 			PRIMARY KEY (workspace_id, fingerprint_hash))`,
 		`CREATE TABLE node_latency_mints (request_id TEXT PRIMARY KEY, contributor_workspace_id TEXT NOT NULL,
-			latency_skill DOUBLE PRECISION NOT NULL, minted_amount DOUBLE PRECISION NOT NULL, node_id TEXT NOT NULL,
+			latency_skill DOUBLE PRECISION NOT NULL, minted_amount BIGINT NOT NULL, node_id TEXT NOT NULL,
 			feature_category TEXT NOT NULL, input_token_range TEXT NOT NULL, complexity_bucket TEXT NOT NULL,
 			model TEXT NOT NULL, epoch BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held',
 			finalize_after TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
@@ -112,7 +112,7 @@ func linkWorkspaces(t *testing.T, pool *pgxpool.Pool, fpHash string, wss ...stri
 	}
 }
 
-func latencyMintRows(t *testing.T, pool *pgxpool.Pool, ws string) (n int, amount, skill float64) {
+func latencyMintRows(t *testing.T, pool *pgxpool.Pool, ws string) (n int, amount int64, skill float64) {
 	t.Helper()
 	_ = pool.QueryRow(context.Background(),
 		`SELECT count(*), COALESCE(sum(minted_amount),0), COALESCE(max(latency_skill),0)
@@ -151,12 +151,12 @@ func TestLatencyMint_Correctness_ExactAmount(t *testing.T) {
 		t.Fatalf("expected exactly ONE mint (only nodeA beats its baseline): n=%d err=%v", n, err)
 	}
 	rows, amount, skill := latencyMintRows(t, pool, "wsA")
-	if rows != 1 || skill < 0.3999 || skill > 0.4001 || amount < 3.999 || amount > 4.001 {
-		t.Fatalf("nodeA expected latency_skill 0.40, amount 4.00: rows=%d skill=%.4f amount=%.4f", rows, skill, amount)
+	if rows != 1 || skill < 0.3999 || skill > 0.4001 || amount < micro(3.999) || amount > micro(4.001) {
+		t.Fatalf("nodeA expected latency_skill 0.40, amount 4.00: rows=%d skill=%.4f amount=%d", rows, skill, amount)
 	}
 	// ATTRIBUTION: the credit lands on the SERVING NODE's workspace (wsA), and nowhere else.
-	if _, held := balances(t, pool, "wsA"); held < 3.999 || held > 4.001 {
-		t.Fatalf("wsA held_balance %.4f, want 4.00", held)
+	if _, held := balances(t, pool, "wsA"); held < micro(3.999) || held > micro(4.001) {
+		t.Fatalf("wsA held_balance %d µLENS, want ~4 LENS", held)
 	}
 	for _, ws := range []string{"wsB", "wsC", "wsD"} {
 		if n, _, _ := latencyMintRows(t, pool, ws); n != 0 {
@@ -207,12 +207,12 @@ func TestLatencyMint_FinalEWMASnapshot(t *testing.T) {
 		t.Fatalf("next epoch: want 1, got %d", n)
 	}
 	// The MOST RECENT mint must reflect the UPDATED ewma (5.00), not the stale 4.00.
-	var latest float64
+	var latest int64
 	if err := pool.QueryRow(ctx, `SELECT minted_amount FROM node_latency_mints WHERE contributor_workspace_id='wsA' ORDER BY created_at DESC, epoch DESC LIMIT 1`).Scan(&latest); err != nil {
 		t.Fatal(err)
 	}
-	if latest < 4.999 || latest > 5.001 {
-		t.Fatalf("final-EWMA snapshot: latest mint %.4f, want 5.00 (tracks current ewma 50, not stale 100)", latest)
+	if latest < micro(4.999) || latest > micro(5.001) {
+		t.Fatalf("final-EWMA snapshot: latest mint %d µLENS, want ~5 LENS (tracks current ewma 50, not stale 100)", latest)
 	}
 }
 

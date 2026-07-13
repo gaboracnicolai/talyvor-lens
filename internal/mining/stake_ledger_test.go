@@ -10,7 +10,7 @@ import (
 
 // expectStakeOp mocks the two-step FOR-UPDATE balance read used by the
 // lock/release/slash txs: INSERT DO NOTHING (ensure row) + SELECT FOR UPDATE.
-func expectStakeRead(mock pgxmock.PgxPoolIface, ws string, bal, locked float64) {
+func expectStakeRead(mock pgxmock.PgxPoolIface, ws string, bal, locked int64) {
 	mock.ExpectExec("INSERT INTO lens_token_balances").
 		WithArgs(ws).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
@@ -24,16 +24,16 @@ func expectStakeRead(mock pgxmock.PgxPoolIface, ws string, bal, locked float64) 
 func TestLockStake_MovesAvailableToLocked(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectStakeRead(mock, "ws", 10.0, 2.0)
+	expectStakeRead(mock, "ws", micro(10.0), micro(2.0))
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws", -5.0, 5.0, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws", -micro(5.0), micro(5.0), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs("ws", 5.0, 7.0). // balance 10-5=5, locked 2+5=7
+		WithArgs("ws", micro(5.0), micro(7.0)). // balance 10-5=5, locked 2+5=7
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	if err := store.LockStake(context.Background(), "ws", 5.0, nil); err != nil {
+	if err := store.LockStake(context.Background(), "ws", micro(5.0), nil); err != nil {
 		t.Fatalf("LockStake: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -45,9 +45,9 @@ func TestLockStake_MovesAvailableToLocked(t *testing.T) {
 func TestLockStake_InsufficientBalance(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectStakeRead(mock, "ws", 3.0, 0.0)
+	expectStakeRead(mock, "ws", micro(3.0), micro(0.0))
 	mock.ExpectRollback()
-	if err := store.LockStake(context.Background(), "ws", 5.0, nil); !errors.Is(err, ErrInsufficientBalance) {
+	if err := store.LockStake(context.Background(), "ws", micro(5.0), nil); !errors.Is(err, ErrInsufficientBalance) {
 		t.Fatalf("want ErrInsufficientBalance, got %v", err)
 	}
 }
@@ -56,16 +56,16 @@ func TestLockStake_InsufficientBalance(t *testing.T) {
 func TestReleaseStake_MovesLockedToAvailable(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectStakeRead(mock, "ws", 5.0, 7.0)
+	expectStakeRead(mock, "ws", micro(5.0), micro(7.0))
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws", 7.0, 12.0, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws", micro(7.0), micro(12.0), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs("ws", 12.0, 0.0). // balance 5+7=12, locked 7-7=0
+		WithArgs("ws", micro(12.0), micro(0.0)). // balance 5+7=12, locked 7-7=0
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	if err := store.ReleaseStake(context.Background(), "ws", 7.0, nil); err != nil {
+	if err := store.ReleaseStake(context.Background(), "ws", micro(7.0), nil); err != nil {
 		t.Fatalf("ReleaseStake: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -76,9 +76,9 @@ func TestReleaseStake_MovesLockedToAvailable(t *testing.T) {
 func TestReleaseStake_InsufficientLocked(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectStakeRead(mock, "ws", 5.0, 2.0)
+	expectStakeRead(mock, "ws", micro(5.0), micro(2.0))
 	mock.ExpectRollback()
-	if err := store.ReleaseStake(context.Background(), "ws", 5.0, nil); !errors.Is(err, ErrInsufficientLocked) {
+	if err := store.ReleaseStake(context.Background(), "ws", micro(5.0), nil); !errors.Is(err, ErrInsufficientLocked) {
 		t.Fatalf("want ErrInsufficientLocked, got %v", err)
 	}
 }
@@ -88,16 +88,16 @@ func TestReleaseStake_InsufficientLocked(t *testing.T) {
 func TestSlashStake_BurnsLocked(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectStakeRead(mock, "ws", 5.0, 7.0)
+	expectStakeRead(mock, "ws", micro(5.0), micro(7.0))
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws", -3.0, 5.0, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()). // balance_after unchanged = 5
+		WithArgs("ws", -micro(3.0), micro(5.0), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()). // balance_after unchanged = 5
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs("ws", 5.0, 4.0). // balance unchanged 5, locked 7-3=4
+		WithArgs("ws", micro(5.0), micro(4.0)). // balance unchanged 5, locked 7-3=4
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	if err := store.SlashStake(context.Background(), "ws", 3.0, nil); err != nil {
+	if err := store.SlashStake(context.Background(), "ws", micro(3.0), nil); err != nil {
 		t.Fatalf("SlashStake: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -108,9 +108,9 @@ func TestSlashStake_BurnsLocked(t *testing.T) {
 func TestSlashStake_InsufficientLocked(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectStakeRead(mock, "ws", 5.0, 2.0)
+	expectStakeRead(mock, "ws", micro(5.0), micro(2.0))
 	mock.ExpectRollback()
-	if err := store.SlashStake(context.Background(), "ws", 5.0, nil); !errors.Is(err, ErrInsufficientLocked) {
+	if err := store.SlashStake(context.Background(), "ws", micro(5.0), nil); !errors.Is(err, ErrInsufficientLocked) {
 		t.Fatalf("want ErrInsufficientLocked, got %v", err)
 	}
 }
@@ -120,20 +120,20 @@ func TestSlashStake_InsufficientLocked(t *testing.T) {
 // query must count povi_stake_slash rows, not just plain burns.
 func TestGetCirculatingSupply_CountsSlashBurns(t *testing.T) {
 	store, mock := newMockStore(t)
-	// total minted (incl. pool_royalty since Stage 2.2)
+	// total minted (incl. pool_royalty since Stage micro(2.2))
 	mock.ExpectQuery(`amount > 0 AND type IN`).
 		WithArgs(TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine, TypePoolRoyalty).
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(1000.0))
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(1000.0)))
 	// burned: MUST include both plain burns AND stake slashes.
 	mock.ExpectQuery(`SUM\(-amount\)`).
 		WithArgs(TypeBurn, TypeStakeSlash).
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(30.0)) // 10 burn + 20 slash
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(30.0))) // 10 burn + 20 slash
 
 	got, err := store.GetCirculatingSupply(context.Background())
 	if err != nil {
 		t.Fatalf("GetCirculatingSupply: %v", err)
 	}
-	if got != 970.0 {
+	if got != micro(970.0) {
 		t.Errorf("circulating = %v, want 970 (1000 minted − 30 burned incl. slash)", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -148,12 +148,12 @@ func TestGetTotalBurned_CountsSlashBurns(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectQuery(`SUM\(-amount\)`).
 		WithArgs(TypeBurn, TypeStakeSlash).
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(42.0))
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(42.0)))
 	got, err := store.GetTotalBurned(context.Background())
 	if err != nil {
 		t.Fatalf("GetTotalBurned: %v", err)
 	}
-	if got != 42.0 {
+	if got != micro(42.0) {
 		t.Errorf("burned = %v, want 42 (burn + slash)", got)
 	}
 }

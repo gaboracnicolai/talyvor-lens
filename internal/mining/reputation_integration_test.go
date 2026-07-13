@@ -38,9 +38,9 @@ func repHarness(t *testing.T) (*pgxpool.Pool, *LedgerStore) {
 		`DROP TABLE IF EXISTS lens_token_ledger`,
 		`CREATE TABLE annotation_tasks (id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text, source_workspace TEXT NOT NULL, prompt_hash TEXT NOT NULL DEFAULT '', response_a TEXT NOT NULL DEFAULT '', response_b TEXT NOT NULL DEFAULT '', task_type TEXT NOT NULL DEFAULT 'pairwise', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), expires_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE TABLE annotations (id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text, task_id TEXT NOT NULL REFERENCES annotation_tasks(id) ON DELETE CASCADE, annotator_id TEXT NOT NULL, decision TEXT NOT NULL, confidence INTEGER NOT NULL DEFAULT 3, time_spent_ms INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (task_id, annotator_id))`,
-		`CREATE TABLE annotator_stakes (workspace_id TEXT PRIMARY KEY, staked DOUBLE PRECISION NOT NULL DEFAULT 0, staked_at TIMESTAMPTZ)`,
-		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0, held_balance DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE TABLE lens_token_ledger (id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL, description TEXT, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE annotator_stakes (workspace_id TEXT PRIMARY KEY, staked BIGINT NOT NULL DEFAULT 0, staked_at TIMESTAMPTZ)`,
+		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0, held_balance BIGINT NOT NULL DEFAULT 0, lifetime_earned BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE lens_token_ledger (id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE reputation_events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), annotator_id TEXT NOT NULL, kind TEXT NOT NULL, idem_key TEXT NOT NULL, delta DOUBLE PRECISION NOT NULL, reason JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (annotator_id, kind, idem_key))`,
 		// The append-only trigger (migration 0066), inline.
 		`CREATE OR REPLACE FUNCTION reputation_events_block_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'reputation_events is append-only: % is blocked', TG_OP; END; $$`,
@@ -266,7 +266,7 @@ func TestReputation_MoneyBoundary_EarningInvariant_Integration(t *testing.T) {
 	}
 	// stake both above the requirement.
 	for _, ws := range []string{"wsHigh", "wsLow"} {
-		if _, err := pool.Exec(ctx, `INSERT INTO annotator_stakes (workspace_id, staked) VALUES ($1, 20)`, ws); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO annotator_stakes (workspace_id, staked) VALUES ($1, 20000000)`, ws); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -283,8 +283,8 @@ func TestReputation_MoneyBoundary_EarningInvariant_Integration(t *testing.T) {
 	}
 	submit("wsHigh")
 	submit("wsLow")
-	earn := func(ws string) float64 {
-		var v float64
+	earn := func(ws string) int64 {
+		var v int64
 		if err := pool.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM lens_token_ledger WHERE workspace_id=$1 AND type=$2`, ws, TypeAnnotationMine).Scan(&v); err != nil {
 			t.Fatal(err)
 		}
@@ -294,8 +294,8 @@ func TestReputation_MoneyBoundary_EarningInvariant_Integration(t *testing.T) {
 	if eh != el {
 		t.Errorf("EARNING DEPENDS ON REPUTATION: high=%v low=%v — must be byte-identical", eh, el)
 	}
-	if math.Abs(eh-0.15) > 1e-9 {
-		t.Errorf("earning %v, want 0.15 (base 0.1 + bonus 0.05, reputation-free)", eh)
+	if eh != micro(0.15) {
+		t.Errorf("earning %v µLENS, want micro(0.15) (base 0.1 + bonus 0.05, reputation-free)", eh)
 	}
 }
 

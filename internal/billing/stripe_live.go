@@ -59,7 +59,7 @@ func (l *LiveStripe) CreateCheckoutSession(ctx context.Context, p CheckoutParams
 	}
 	params.Context = ctx
 	params.AddMetadata("workspace_id", p.WorkspaceID)
-	params.AddMetadata("lxc_amount", strconv.FormatFloat(p.LXCAmount, 'f', -1, 64))
+	params.AddMetadata("lxc_amount", strconv.FormatInt(p.LXCAmount, 10)) // µLXC (SEC-2)
 	params.AddMetadata("usd_cents", strconv.FormatInt(p.USDCents, 10))
 
 	sess, err := session.New(params)

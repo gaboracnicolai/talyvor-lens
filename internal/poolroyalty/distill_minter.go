@@ -245,9 +245,13 @@ func (m *DistillMinter) mintOne(ctx context.Context, r distillRelationship) (boo
 	if r.owner == "" || r.requester == "" || r.owner == r.requester {
 		return false, nil
 	}
-	amount := m.anchor.Value(GainInput{AvoidedCOGSUSD: r.avoidedCOGSUSD}) // default CostAnchor ⇒ share × avoided_COGS (byte-identical)
-	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
+	valuation := m.anchor.Value(GainInput{AvoidedCOGSUSD: r.avoidedCOGSUSD}) // default CostAnchor ⇒ share × avoided_COGS (Tier-2/3 float LENS)
+	if math.IsNaN(valuation) || math.IsInf(valuation, 0) || valuation <= 0 {
 		return false, nil
+	}
+	amount := microFloorLENS(valuation) // SEC-2 site #4: mint valuation → µLENS, rounded DOWN
+	if amount <= 0 {
+		return false, nil // sub-µLENS valuation ⇒ nothing to mint, no claim
 	}
 	requestID := SHA256Hex([]byte(r.owner + ":" + r.requester + ":" + r.contentHash))
 

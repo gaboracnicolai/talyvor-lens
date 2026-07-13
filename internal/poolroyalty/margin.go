@@ -23,9 +23,9 @@ import (
 // contributors (the s side), and Talyvor's realized USD margin (the 1−s side).
 type MarginSummaryRow struct {
 	Mints          int64
-	AvoidedCOGSUSD float64
-	MintedLENS     float64
-	MarginUSD      float64
+	AvoidedCOGSUSD float64 // Tier-3 USD (DOUBLE)
+	MintedLENS     int64   // µLENS (SEC-2): SUM(minted_amount), now a BIGINT column
+	MarginUSD      float64 // Tier-3 USD dollars (view: avoided_cogs_usd − minted_amount/1e6)
 }
 
 // MarginByRow is one breakdown bucket (a contributor, a requester, or a layer).

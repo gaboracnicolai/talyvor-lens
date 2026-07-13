@@ -69,11 +69,11 @@ func (p *Processor) MintingEnabled() bool { return p.mintingEnabled }
 
 // ProcessResult is the outcome of handling one receipt.
 type ProcessResult struct {
-	Verified      bool    `json:"verified"`
-	StakeEligible bool    `json:"stake_eligible"`
-	Minted        bool    `json:"minted"`
-	Amount        float64 `json:"amount"`
-	Reason        string  `json:"reason,omitempty"` // why unverified/ineligible, when applicable
+	Verified      bool   `json:"verified"`
+	StakeEligible bool   `json:"stake_eligible"`
+	Minted        bool   `json:"minted"`
+	Amount        int64  `json:"amount_ulens"`     // µLENS (SEC-2)
+	Reason        string `json:"reason,omitempty"` // why unverified/ineligible, when applicable
 }
 
 // Process verifies a receipt against the node's registered pubkey, records it

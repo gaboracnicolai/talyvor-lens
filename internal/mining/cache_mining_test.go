@@ -11,14 +11,19 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
+// micro converts a whole-LENS test value to its integer µLENS count (SEC-2:
+// 1 LENS = 1e6 µLENS). Ledger balances/amounts are int64 µLENS now.
+func micro(lens float64) int64 { return int64(lens * 1e6) }
+
 // expectCreditOrDebit programmes the mock with one full Begin → ensure balance
 // row (INSERT DO NOTHING) → FOR UPDATE read → INSERT ledger → UPDATE balance →
-// Commit cycle. startingBalance is what the FOR UPDATE SELECT returns.
+// Commit cycle. startingBalance is what the FOR UPDATE SELECT returns. All
+// amounts are integer µLENS.
 func expectCreditOrDebit(
 	mock pgxmock.PgxPoolIface,
 	workspaceID string,
-	startingBalance, startingEarned, startingSpent float64,
-	delta, expectedBalance, expectedEarned, expectedSpent float64,
+	startingBalance, startingEarned, startingSpent int64,
+	delta, expectedBalance, expectedEarned, expectedSpent int64,
 ) {
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO lens_token_balances").
@@ -44,8 +49,8 @@ func expectCreditOrDebit(
 func expectCreditOnce(
 	mock pgxmock.PgxPoolIface,
 	requestID, workspaceID, mintType string,
-	startingBalance, startingEarned, startingSpent float64,
-	delta, expectedBalance, expectedEarned, expectedSpent float64,
+	startingBalance, startingEarned, startingSpent int64,
+	delta, expectedBalance, expectedEarned, expectedSpent int64,
 ) {
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO mint_idempotency").
@@ -81,9 +86,9 @@ func newMockStore(t *testing.T) (*LedgerStore, pgxmock.PgxPoolIface) {
 
 func TestCredit_IncreasesBalance(t *testing.T) {
 	store, mock := newMockStore(t)
-	// Starting at 0, credit 0.010 → balance 0.010, lifetime_earned 0.010.
-	expectCreditOrDebit(mock, "ws_c", 0, 0, 0, 0.010, 0.010, 0.010, 0)
-	err := store.Credit(context.Background(), "ws_c", 0.010, TypeCacheMine, "", nil)
+	// Starting at 0, credit micro(0.010) → balance micro(0.010), lifetime_earned 0.010.
+	expectCreditOrDebit(mock, "ws_c", 0, 0, 0, micro(0.010), micro(0.010), micro(0.010), 0)
+	err := store.Credit(context.Background(), "ws_c", micro(0.010), TypeCacheMine, "", nil)
 	if err != nil {
 		t.Fatalf("Credit: %v", err)
 	}
@@ -94,9 +99,9 @@ func TestCredit_IncreasesBalance(t *testing.T) {
 
 func TestDebit_DecreasesBalance(t *testing.T) {
 	store, mock := newMockStore(t)
-	// Starting at 1.0, debit 0.25 → balance 0.75, lifetime_spent 0.25.
-	expectCreditOrDebit(mock, "ws_d", 1.0, 1.0, 0, -0.25, 0.75, 1.0, 0.25)
-	err := store.Debit(context.Background(), "ws_d", 0.25, TypeSpend, "", nil)
+	// Starting at micro(1.0), debit micro(0.25) → balance micro(0.75), lifetime_spent 0.25.
+	expectCreditOrDebit(mock, "ws_d", micro(1.0), micro(1.0), 0, -micro(0.25), micro(0.75), micro(1.0), micro(0.25))
+	err := store.Debit(context.Background(), "ws_d", micro(0.25), TypeSpend, "", nil)
 	if err != nil {
 		t.Fatalf("Debit: %v", err)
 	}
@@ -111,9 +116,9 @@ func TestDebit_InsufficientBalance(t *testing.T) {
 	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
 		WithArgs("ws_e").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
-			AddRow(0.05, 0.05, 0.0))
+			AddRow(micro(0.05), micro(0.05), micro(0.0)))
 	mock.ExpectRollback()
-	err := store.Debit(context.Background(), "ws_e", 0.50, TypeSpend, "", nil)
+	err := store.Debit(context.Background(), "ws_e", micro(0.50), TypeSpend, "", nil)
 	if !errors.Is(err, ErrInsufficientBalance) {
 		t.Fatalf("expected ErrInsufficientBalance, got %v", err)
 	}
@@ -141,7 +146,7 @@ func TestGetBalance_ReturnsZeroForNew(t *testing.T) {
 		t.Fatalf("GetBalance: %v", err)
 	}
 	if b != 0 {
-		t.Fatalf("expected 0.0 for new workspace, got %f", b)
+		t.Fatalf("expected micro(0.0) for new workspace, got %d", b)
 	}
 }
 
@@ -170,8 +175,8 @@ func TestGetHistory_PaginatedResults(t *testing.T) {
 			"id", "workspace_id", "amount", "balance_after",
 			"type", "description", "metadata", "created_at",
 		}).
-			AddRow("e1", "ws_h", 0.010, 0.010, TypeCacheMine, "hit", []byte(`{"hit_type":"exact"}`), now).
-			AddRow("e2", "ws_h", 0.001, 0.011, TypeCacheMine, "hit", []byte(`{}`), now))
+			AddRow("e1", "ws_h", micro(0.010), micro(0.010), TypeCacheMine, "hit", []byte(`{"hit_type":"exact"}`), now).
+			AddRow("e2", "ws_h", micro(0.001), micro(0.011), TypeCacheMine, "hit", []byte(`{}`), now))
 	entries, err := store.GetHistory(context.Background(), "ws_h", 10, 20)
 	if err != nil {
 		t.Fatalf("GetHistory: %v", err)
@@ -179,7 +184,7 @@ func TestGetHistory_PaginatedResults(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
-	if entries[0].ID != "e1" || entries[0].Amount != 0.010 {
+	if entries[0].ID != "e1" || entries[0].Amount != micro(0.010) {
 		t.Fatalf("unexpected entry[0]: %+v", entries[0])
 	}
 	if entries[0].Metadata["hit_type"] != "exact" {
@@ -200,7 +205,7 @@ func TestGetHistory_MasksRequesterIdentity(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "workspace_id", "amount", "balance_after",
 			"type", "description", "metadata", "created_at",
-		}).AddRow("e1", "ws_owner", 0.010, 0.010, TypeCacheMine,
+		}).AddRow("e1", "ws_owner", micro(0.010), micro(0.010), TypeCacheMine,
 			"cache hit (exact) served to wsB",
 			[]byte(`{"hit_type":"exact","request_workspace_id":"wsB"}`), now))
 
@@ -219,7 +224,7 @@ func TestGetHistory_MasksRequesterIdentity(t *testing.T) {
 	if entries[0].Metadata["hit_type"] != "exact" {
 		t.Errorf("hit_type masked away (must survive): %+v", entries[0].Metadata)
 	}
-	if entries[0].Amount != 0.010 || entries[0].Type != TypeCacheMine || entries[0].BalanceAfter != 0.010 {
+	if entries[0].Amount != micro(0.010) || entries[0].Type != TypeCacheMine || entries[0].BalanceAfter != micro(0.010) {
 		t.Errorf("non-sensitive fields altered: %+v", entries[0])
 	}
 	if !strings.Contains(entries[0].Description, "served to another workspace") {
@@ -238,7 +243,7 @@ func TestGetHistory_MaskIsGeneric(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "workspace_id", "amount", "balance_after",
 			"type", "description", "metadata", "created_at",
-		}).AddRow("e1", "ws_owner", 1.0, 1.0, "some_future_type",
+		}).AddRow("e1", "ws_owner", micro(1.0), micro(1.0), "some_future_type",
 			"a future credit", []byte(`{"request_workspace_id":"wsB","other":"keep"}`), now))
 
 	entries, err := store.GetHistory(context.Background(), "ws_owner", 0, 0)
@@ -280,7 +285,7 @@ func TestRecordCacheHit_SameWorkspaceTinyReward(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, true)
 	// Same workspace → CacheHitSameWorkspace = 0.001.
-	expectCreditOnce(mock, "req-1", "ws_a", TypeCacheMine, 0, 0, 0, 0.001, 0.001, 0.001, 0)
+	expectCreditOnce(mock, "req-1", "ws_a", TypeCacheMine, 0, 0, 0, micro(0.001), micro(0.001), micro(0.001), 0)
 	if err := miner.RecordCacheHit(context.Background(), "ws_a", "ws_a", "exact", "req-1"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
@@ -289,7 +294,7 @@ func TestRecordCacheHit_SameWorkspaceTinyReward(t *testing.T) {
 func TestRecordCacheHit_CrossWorkspaceBigReward(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, true)
-	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, 0.010, 0.010, 0.010, 0)
+	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, micro(0.010), micro(0.010), micro(0.010), 0)
 	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "exact", "req-x"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
@@ -298,7 +303,7 @@ func TestRecordCacheHit_CrossWorkspaceBigReward(t *testing.T) {
 func TestRecordCacheHit_SemanticHit(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, true)
-	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, 0.005, 0.005, 0.005, 0)
+	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, micro(0.005), micro(0.005), micro(0.005), 0)
 	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "semantic", "req-x"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
@@ -308,7 +313,7 @@ func TestRecordCacheHit_SharingDisabledFallsBackToSame(t *testing.T) {
 	store, mock := newMockStore(t)
 	miner := NewCacheMiner(store, false) // sharing off
 	// Even though requester differs, sharing-off means tiny reward.
-	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, 0.001, 0.001, 0.001, 0)
+	expectCreditOnce(mock, "req-x", "ws_owner", TypeCacheMine, 0, 0, 0, micro(0.001), micro(0.001), micro(0.001), 0)
 	if err := miner.RecordCacheHit(context.Background(), "ws_owner", "ws_other", "exact", "req-x"); err != nil {
 		t.Fatalf("RecordCacheHit: %v", err)
 	}
@@ -333,7 +338,7 @@ func TestGetMiningStats_ReadsSnapshot(t *testing.T) {
 		WithArgs("ws_stats").
 		WillReturnRows(pgxmock.NewRows([]string{
 			"workspace_id", "balance", "lifetime_earned", "lifetime_spent", "updated_at",
-		}).AddRow("ws_stats", 1.23, 2.50, 1.27, time.Now()))
+		}).AddRow("ws_stats", micro(1.23), micro(2.50), micro(1.27), time.Now()))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs("ws_stats").
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(7))
@@ -344,7 +349,7 @@ func TestGetMiningStats_ReadsSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMiningStats: %v", err)
 	}
-	if stats.CurrentBalance != 1.23 || stats.LifetimeEarned != 2.50 {
+	if stats.CurrentBalance != micro(1.23) || stats.LifetimeEarned != micro(2.50) {
 		t.Fatalf("unexpected totals: %+v", stats)
 	}
 	if stats.CacheHitsServed != 7 || stats.CacheHitsBenefited != 3 {
@@ -381,7 +386,7 @@ func errNoRows() error { return errPgxNoRows }
 func expectReadBalance(
 	mock pgxmock.PgxPoolIface,
 	workspaceID string,
-	bal, earned, spent float64,
+	bal, earned, spent int64,
 ) {
 	mock.ExpectExec("INSERT INTO lens_token_balances").
 		WithArgs(workspaceID).
@@ -396,31 +401,31 @@ func expectReadBalance(
 // sender and credits the recipient atomically (normal alphabetical order —
 // from < to, so no swap needed).
 func TestTransfer_HappyPath(t *testing.T) {
-	// Transfer("ws_a", "ws_b", 0.5, "test")
+	// Transfer("ws_a", "ws_b", micro(0.5), "test")
 	// Lex order: ws_a < ws_b → ws_a locked first (no swap), ws_b second.
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectReadBalance(mock, "ws_a", 1.0, 1.0, 0) // first lock: ws_a (from)
-	expectReadBalance(mock, "ws_b", 0.2, 0.2, 0) // second lock: ws_b (to)
+	expectReadBalance(mock, "ws_a", micro(1.0), micro(1.0), 0) // first lock: ws_a (from)
+	expectReadBalance(mock, "ws_b", micro(0.2), micro(0.2), 0) // second lock: ws_b (to)
 
-	// debit ws_a: amount -0.5, newBal 0.5, spent 0→0.5
+	// debit ws_a: amount -micro(0.5), newBal micro(0.5), spent 0→micro(0.5)
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws_a", -0.5, 0.5, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws_a", -micro(0.5), micro(0.5), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs("ws_a", 0.5, 1.0, 0.5).
+		WithArgs("ws_a", micro(0.5), micro(1.0), micro(0.5)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// credit ws_b: amount +0.5, newBal 0.7, earned 0.2→0.7
+	// credit ws_b: amount +micro(0.5), newBal micro(0.7), earned micro(0.2)→micro(0.7)
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws_b", 0.5, 0.7, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws_b", micro(0.5), micro(0.7), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs("ws_b", 0.7, 0.7, 0.0).
+		WithArgs("ws_b", micro(0.7), micro(0.7), micro(0.0)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	if err := store.Transfer(context.Background(), "ws_a", "ws_b", 0.5, "test"); err != nil {
+	if err := store.Transfer(context.Background(), "ws_a", "ws_b", micro(0.5), "test"); err != nil {
 		t.Fatalf("Transfer: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -438,31 +443,31 @@ func TestTransfer_HappyPath(t *testing.T) {
 // unexpected query (ws_b before ws_a) and the test fails immediately — no need
 // to construct actual concurrent transactions.
 func TestTransfer_LockOrderIsLexicographic(t *testing.T) {
-	// Transfer("ws_b" → "ws_a", 0.5)  —  from > to alphabetically.
+	// Transfer("ws_b" → "ws_a", micro(0.5))  —  from > to alphabetically.
 	// Correct: lock ws_a first, then ws_b (lex order), regardless of flow.
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectReadBalance(mock, "ws_a", 0.2, 0.2, 0) // MUST be ws_a first
-	expectReadBalance(mock, "ws_b", 1.0, 1.0, 0) // ws_b second
+	expectReadBalance(mock, "ws_a", micro(0.2), micro(0.2), 0) // MUST be ws_a first
+	expectReadBalance(mock, "ws_b", micro(1.0), micro(1.0), 0) // ws_b second
 
-	// debit ws_b (from): amount -0.5, newBal 0.5, spent 0→0.5
+	// debit ws_b (from): amount -micro(0.5), newBal micro(0.5), spent 0→micro(0.5)
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws_b", -0.5, 0.5, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws_b", -micro(0.5), micro(0.5), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs("ws_b", 0.5, 1.0, 0.5).
+		WithArgs("ws_b", micro(0.5), micro(1.0), micro(0.5)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// credit ws_a (to): amount +0.5, newBal 0.7, earned 0.2→0.7
+	// credit ws_a (to): amount +micro(0.5), newBal micro(0.7), earned micro(0.2)→micro(0.7)
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws_a", 0.5, 0.7, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws_a", micro(0.5), micro(0.7), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE lens_token_balances").
-		WithArgs("ws_a", 0.7, 0.7, 0.0).
+		WithArgs("ws_a", micro(0.7), micro(0.7), micro(0.0)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	if err := store.Transfer(context.Background(), "ws_b", "ws_a", 0.5, "test"); err != nil {
+	if err := store.Transfer(context.Background(), "ws_b", "ws_a", micro(0.5), "test"); err != nil {
 		t.Fatalf("Transfer: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -477,11 +482,11 @@ func TestTransfer_LockOrderIsLexicographic(t *testing.T) {
 func TestTransfer_InsufficientBalance(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectBegin()
-	expectReadBalance(mock, "ws_a", 0.1, 0.1, 0) // from=ws_a, only 0.1 available
-	expectReadBalance(mock, "ws_b", 1.0, 1.0, 0)
+	expectReadBalance(mock, "ws_a", micro(0.1), micro(0.1), 0) // from=ws_a, only micro(0.1) available
+	expectReadBalance(mock, "ws_b", micro(1.0), micro(1.0), 0)
 	mock.ExpectRollback()
 
-	err := store.Transfer(context.Background(), "ws_a", "ws_b", 0.5, "test")
+	err := store.Transfer(context.Background(), "ws_a", "ws_b", micro(0.5), "test")
 	if !errors.Is(err, ErrInsufficientBalance) {
 		t.Fatalf("expected ErrInsufficientBalance, got %v", err)
 	}
@@ -496,21 +501,21 @@ func TestTransfer_Validation(t *testing.T) {
 	store, _ := newMockStore(t)
 	ctx := context.Background()
 
-	if err := store.Transfer(ctx, "ws_a", "ws_b", 0.0001, ""); err == nil {
+	if err := store.Transfer(ctx, "ws_a", "ws_b", micro(0.0001), ""); err == nil {
 		t.Fatal("expected error: amount below minimum")
 	}
-	if err := store.Transfer(ctx, "", "ws_b", 1.0, ""); err == nil {
+	if err := store.Transfer(ctx, "", "ws_b", micro(1.0), ""); err == nil {
 		t.Fatal("expected error: empty from workspace")
 	}
-	if err := store.Transfer(ctx, "ws_a", "", 1.0, ""); err == nil {
+	if err := store.Transfer(ctx, "ws_a", "", micro(1.0), ""); err == nil {
 		t.Fatal("expected error: empty to workspace")
 	}
-	if err := store.Transfer(ctx, "ws_a", "ws_a", 1.0, ""); err == nil {
+	if err := store.Transfer(ctx, "ws_a", "ws_a", micro(1.0), ""); err == nil {
 		t.Fatal("expected error: self-transfer")
 	}
 }
 
-// STAGE 2.2(b) SUPPLY COUNTING: pool_royalty joins the minted-supply
+// STAGE micro(2.2)(b) SUPPLY COUNTING: pool_royalty joins the minted-supply
 // allow-list — a royalty mint is LENS entering circulation and must be
 // counted honestly. The list stays an explicit allow-list: marketplace_fee
 // (moves existing LENS, doesn't mint) and receipt_mine_provisional (povi's
@@ -521,14 +526,14 @@ func TestGetTotalSupply_CountsPoolRoyalty_ExcludesNonMints(t *testing.T) {
 	mock.ExpectQuery(`SELECT COALESCE\(SUM\(amount\), 0\)`).
 		WithArgs(TypeCacheMine, TypeComputeMine, TypeEmbeddingMine,
 			TypeAnnotationMine, TypePatternMine, TypePoolRoyalty).
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(42.5))
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(42.5)))
 
 	got, err := s.GetTotalSupply(context.Background())
 	if err != nil {
 		t.Fatalf("GetTotalSupply: %v", err)
 	}
-	if got != 42.5 {
-		t.Errorf("supply = %v, want 42.5", got)
+	if got != micro(42.5) {
+		t.Errorf("supply = %v, want micro(42.5)", got)
 	}
 
 	// The allow-list itself is the assertion above (WithArgs pins all six

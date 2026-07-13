@@ -20,7 +20,7 @@ func TestRecordPattern_DuplicateRequest_Suppressed(t *testing.T) {
 	mock.ExpectBegin()
 	// claim conflicts → 0 rows affected → suppressed before any INSERT.
 	mock.ExpectExec("INSERT INTO pattern_mine_credits").
-		WithArgs("req-dup", "ws_e", 0.001).
+		WithArgs("req-dup", "ws_e", micro(0.001)).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 	mock.ExpectRollback()
 
@@ -42,7 +42,7 @@ func TestRecordPattern_EmptyRequestID_NoCreditPersistsObservation(t *testing.T) 
 	// NO claim ExpectExec. INSERT persists with earned=0, rarity=0, opted_in=true.
 	mock.ExpectQuery("INSERT INTO routing_patterns").
 		WithArgs("ws_e", "code", "claude", "anthropic", InputBucketMedium,
-			0.85, LatencyFast, 0.0, 1.0, 1, 0.0 /*rarity*/, "" /*complexity_bucket*/, true /*opted_in*/, 0.0 /*earned*/).
+			0.85, LatencyFast, 0.0, 1.0, 1, 0.0 /*rarity*/, "" /*complexity_bucket*/, true /*opted_in*/, int64(0) /*earned*/).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow("p1", time.Now()))
 	mock.ExpectCommit()
 
@@ -123,12 +123,12 @@ func TestRecordPattern_ConcurrentDuplicate_ExactlyOne_Integration(t *testing.T) 
 	if claims != 1 {
 		t.Fatalf("concurrent duplicate must claim EXACTLY once; got %d", claims)
 	}
-	var bal float64
+	var bal int64
 	if err := pool.QueryRow(ctx, `SELECT balance FROM lens_token_balances WHERE workspace_id='ws_dup'`).Scan(&bal); err != nil {
 		t.Fatal(err)
 	}
-	if d := bal - PatternBaseRate; d < -1e-9 || d > 1e-9 {
-		t.Fatalf("exactly one credit of base (%v) must land; balance=%v", PatternBaseRate, bal)
+	if bal != PatternBaseRate {
+		t.Fatalf("exactly one credit of base (%d µLENS) must land; balance=%d", PatternBaseRate, bal)
 	}
 }
 
@@ -162,12 +162,12 @@ func TestRecordPattern_OverCap_RollsBackClaim_RetryReEarns_Integration(t *testin
 	if bClaims != 0 {
 		t.Fatalf("a capped earn must leave NO orphan claim for req-B; got %d", bClaims)
 	}
-	var bal float64
+	var bal int64
 	if err := pool.QueryRow(ctx, `SELECT balance FROM lens_token_balances WHERE workspace_id='ws_c'`).Scan(&bal); err != nil {
 		t.Fatal(err)
 	}
-	if d := bal - PatternBaseRate; d < -1e-9 || d > 1e-9 {
-		t.Fatalf("only req-A credited (req-B capped+rolled-back); balance=%v want %v", bal, PatternBaseRate)
+	if bal != PatternBaseRate {
+		t.Fatalf("only req-A credited (req-B capped+rolled-back); balance=%d want %d", bal, PatternBaseRate)
 	}
 
 	// Cap room opens (raise to 2) → req-B RETRIES: no orphan claim suppresses it,
@@ -179,7 +179,7 @@ func TestRecordPattern_OverCap_RollsBackClaim_RetryReEarns_Integration(t *testin
 	if err := pool.QueryRow(ctx, `SELECT balance FROM lens_token_balances WHERE workspace_id='ws_c'`).Scan(&bal); err != nil {
 		t.Fatal(err)
 	}
-	if d := bal - 2*PatternBaseRate; d < -1e-9 || d > 1e-9 {
-		t.Fatalf("req-B retry must re-earn (capped claim was rolled back, not orphaned); balance=%v want %v", bal, 2*PatternBaseRate)
+	if bal != 2*PatternBaseRate {
+		t.Fatalf("req-B retry must re-earn (capped claim was rolled back, not orphaned); balance=%d want %d", bal, 2*PatternBaseRate)
 	}
 }

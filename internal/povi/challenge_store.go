@@ -88,7 +88,7 @@ func (s *ChallengeStore) Record(ctx context.Context, c Challenge) error {
 
 // UpdateResult writes the final outcome (pass/fail/timeout) and slash
 // amount to the previously-claimed pending challenge row.
-func (s *ChallengeStore) UpdateResult(ctx context.Context, id string, result ChallengeResult, slashedAmount float64, reason string) error {
+func (s *ChallengeStore) UpdateResult(ctx context.Context, id string, result ChallengeResult, slashedAmount int64, reason string) error {
 	if s.pool == nil {
 		return nil
 	}

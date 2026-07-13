@@ -24,13 +24,14 @@ import (
 
 // ─── constants ───────────────────────────────────
 
-// Token rates (LENS). Tuned so cross-workspace contributions
-// pay ~10× the trivial own-cache case — encourages anonymised
-// sharing without giving teams a way to farm themselves.
+// Token rates in µLENS (SEC-2: integer smallest-unit). Tuned so
+// cross-workspace contributions pay ~10× the trivial own-cache case
+// — encourages anonymised sharing without giving teams a way to farm
+// themselves. 1_000 µLENS = 0.001 LENS.
 const (
-	CacheHitSameWorkspace  = 0.001
-	CacheHitCrossWorkspace = 0.010
-	SemanticCacheHit       = 0.005
+	CacheHitSameWorkspace  int64 = 1_000  // 0.001 LENS
+	CacheHitCrossWorkspace int64 = 10_000 // 0.010 LENS
+	SemanticCacheHit       int64 = 5_000  // 0.005 LENS
 )
 
 // Ledger transaction types — keep in sync with the type column
@@ -45,36 +46,40 @@ const (
 
 // ─── types ───────────────────────────────────────
 
-// LedgerEntry mirrors one row of lens_token_ledger.
+// LedgerEntry mirrors one row of lens_token_ledger. Amount/BalanceAfter are
+// integer µLENS (SEC-2); the JSON keys carry the explicit _ulens unit suffix so
+// no consumer mistakes the 1e6-scaled integer for a float LENS value.
 type LedgerEntry struct {
 	ID           string                 `json:"id"`
 	WorkspaceID  string                 `json:"workspace_id"`
-	Amount       float64                `json:"amount"`
-	BalanceAfter float64                `json:"balance_after"`
+	Amount       int64                  `json:"amount_ulens"`
+	BalanceAfter int64                  `json:"balance_after_ulens"`
 	Type         string                 `json:"type"`
 	Description  string                 `json:"description"`
 	Metadata     map[string]interface{} `json:"metadata"`
 	CreatedAt    time.Time              `json:"created_at"`
 }
 
-// BalanceSnapshot mirrors one row of lens_token_balances.
+// BalanceSnapshot mirrors one row of lens_token_balances. Balances are integer
+// µLENS (SEC-2); JSON keys carry the explicit _ulens unit suffix.
 type BalanceSnapshot struct {
 	WorkspaceID    string    `json:"workspace_id"`
-	Balance        float64   `json:"balance"`
-	LifetimeEarned float64   `json:"lifetime_earned"`
-	LifetimeSpent  float64   `json:"lifetime_spent"`
+	Balance        int64     `json:"balance_ulens"`
+	LifetimeEarned int64     `json:"lifetime_earned_ulens"`
+	LifetimeSpent  int64     `json:"lifetime_spent_ulens"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // CacheMiningStats is the response shape for the
-// /v1/workspaces/:wsID/tokens/mining/cache endpoint.
+// /v1/workspaces/:wsID/tokens/mining/cache endpoint. LENS amounts are integer
+// µLENS (SEC-2); JSON keys carry the explicit _ulens unit suffix.
 type CacheMiningStats struct {
-	WorkspaceID        string  `json:"workspace_id"`
-	CurrentBalance     float64 `json:"current_balance"`
-	LifetimeEarned     float64 `json:"lifetime_earned"`
-	CacheHitsServed    int     `json:"cache_hits_served"`
-	CacheHitsBenefited int     `json:"cache_hits_benefited"`
-	EstimatedMonthly   float64 `json:"estimated_monthly"`
+	WorkspaceID        string `json:"workspace_id"`
+	CurrentBalance     int64  `json:"current_balance_ulens"`
+	LifetimeEarned     int64  `json:"lifetime_earned_ulens"`
+	CacheHitsServed    int    `json:"cache_hits_served"`
+	CacheHitsBenefited int    `json:"cache_hits_benefited"`
+	EstimatedMonthly   int64  `json:"estimated_monthly_ulens"`
 }
 
 // ─── errors ──────────────────────────────────────
@@ -108,9 +113,9 @@ type LedgerStore struct {
 	// credits only — see mint_gate.go.
 	verifier MintVerifier
 	// mintRateCap is the U6 PR2 per-workspace rolling-window minted-LENS ceiling
-	// (<=0 ⇒ off); mintRateWindow is the window (default 24h). Enforced inside
-	// applyTx/heldInner AFTER the balance FOR UPDATE — see checkMintRateCap.
-	mintRateCap    float64
+	// in µLENS (<=0 ⇒ off); mintRateWindow is the window (default 24h). Enforced
+	// inside applyTx/heldInner AFTER the balance FOR UPDATE — see checkMintRateCap.
+	mintRateCap    int64
 	mintRateWindow time.Duration
 	// reputationGate is the P1 #9 reputation-bonded-minting flag. nil/false ⇒ no-op (mint path
 	// byte-identical). When on, applyTx/CreditHeldTx scale a bonded mint by f(R) and gate it to 0
@@ -153,7 +158,7 @@ func NewLedgerStoreForTesting(db PgxDB) *LedgerStore {
 func (s *LedgerStore) Credit(
 	ctx context.Context,
 	workspaceID string,
-	amount float64,
+	amount int64, // µLENS
 	txType, description string,
 	metadata map[string]interface{},
 ) error {
@@ -165,7 +170,7 @@ func (s *LedgerStore) Credit(
 	}
 	// A credit is LENS entering circulation (mining rewards). Transfers move
 	// between workspaces via Transfer (not Credit), so this doesn't double-count.
-	metrics.MintedTokens(amount)
+	metrics.MintedTokens(MicroToFloat(amount))
 	return nil
 }
 
@@ -175,7 +180,7 @@ func (s *LedgerStore) Credit(
 func (s *LedgerStore) Debit(
 	ctx context.Context,
 	workspaceID string,
-	amount float64,
+	amount int64, // µLENS
 	txType, description string,
 	metadata map[string]interface{},
 ) error {
@@ -196,7 +201,7 @@ func (s *LedgerStore) applyTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	workspaceID string,
-	amount float64,
+	amount int64, // µLENS
 	txType, description string,
 	metadata map[string]interface{},
 	add bool,
@@ -235,12 +240,12 @@ func (s *LedgerStore) applyTx(
 	row := tx.QueryRow(ctx, `
 		SELECT balance, lifetime_earned, lifetime_spent
 		FROM lens_token_balances WHERE workspace_id = $1 FOR UPDATE`, workspaceID)
-	var bal, earned, spent float64
+	var bal, earned, spent int64
 	if err := row.Scan(&bal, &earned, &spent); err != nil {
 		return fmt.Errorf("mining: read balance: %w", err)
 	}
 
-	var delta float64
+	var delta int64
 	if add {
 		delta = amount
 		earned += amount
@@ -297,7 +302,7 @@ func (s *LedgerStore) applyTx(
 func (s *LedgerStore) apply(
 	ctx context.Context,
 	workspaceID string,
-	amount float64,
+	amount int64, // µLENS
 	txType, description string,
 	metadata map[string]interface{},
 	add bool,
@@ -325,7 +330,7 @@ func (s *LedgerStore) CreditTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	workspaceID string,
-	amount float64,
+	amount int64, // µLENS
 	txType, description string,
 	metadata map[string]interface{},
 ) error {
@@ -342,7 +347,7 @@ func (s *LedgerStore) DebitTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	workspaceID string,
-	amount float64,
+	amount int64, // µLENS
 	txType, description string,
 	metadata map[string]interface{},
 ) error {
@@ -355,14 +360,14 @@ func (s *LedgerStore) DebitTx(
 // GetBalance returns 0.0 (not an error) for a workspace with no
 // ledger history. That matches the spec — new workspaces are a
 // supported case, not an exceptional one.
-func (s *LedgerStore) GetBalance(ctx context.Context, workspaceID string) (float64, error) {
+func (s *LedgerStore) GetBalance(ctx context.Context, workspaceID string) (int64, error) {
 	if s.pool == nil {
 		return 0, nil
 	}
 	row := s.pool.QueryRow(ctx, `
 		SELECT balance FROM lens_token_balances WHERE workspace_id = $1
 	`, workspaceID)
-	var b float64
+	var b int64
 	if err := row.Scan(&b); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, nil
@@ -395,9 +400,9 @@ func (s *LedgerStore) GetSnapshot(ctx context.Context, workspaceID string) (Bala
 
 // ─── Transfer / Burn (Batch 3) ──────────────────
 
-// MinTransferAmount is the floor for Transfer. Spec-mandated —
-// below this we risk dust attacks polluting the ledger.
-const MinTransferAmount = 0.001
+// MinTransferAmount is the floor for Transfer, in µLENS (SEC-2). Spec-mandated
+// — below this we risk dust attacks polluting the ledger.
+const MinTransferAmount int64 = 1_000 // 0.001 LENS
 
 // TypeTransfer / TypeBurn are the ledger row types for the
 // Batch-3 economy primitives.
@@ -420,7 +425,7 @@ const TypePoolRoyalty = "pool_royalty"
 func (s *LedgerStore) Transfer(
 	ctx context.Context,
 	fromWorkspace, toWorkspace string,
-	amount float64,
+	amount int64, // µLENS
 	description string,
 ) error {
 	if amount < MinTransferAmount {
@@ -467,8 +472,8 @@ func (s *LedgerStore) Transfer(
 	}
 
 	// Map locked balances back to from/to semantics.
-	var fromBal, fromEarned, fromSpent float64
-	var toBal, toEarned, toSpent float64
+	var fromBal, fromEarned, fromSpent int64
+	var toBal, toEarned, toSpent int64
 	if fromWorkspace == firstWS {
 		fromBal, fromEarned, fromSpent = firstBal, firstEarned, firstSpent
 		toBal, toEarned, toSpent = secondBal, secondEarned, secondSpent
@@ -510,7 +515,7 @@ func (s *LedgerStore) Transfer(
 // Burn removes LENS from a workspace's balance and from
 // circulating supply. Used when a workspace spends LENS on
 // upstream AI calls (LENS-paid mode). Burns are irreversible.
-func (s *LedgerStore) Burn(ctx context.Context, workspaceID string, amount float64, description string) error {
+func (s *LedgerStore) Burn(ctx context.Context, workspaceID string, amount int64, description string) error {
 	if amount <= 0 {
 		return errors.New("mining: burn amount must be positive")
 	}
@@ -546,7 +551,7 @@ func (s *LedgerStore) Burn(ctx context.Context, workspaceID string, amount float
 // in supply). Explicit allow-list: transfers and marketplace_fee move
 // existing LENS (not mints) and stay excluded; receipt_mine_provisional
 // stays excluded per its own go-live treatment (PoVI preconditions).
-func (s *LedgerStore) GetTotalSupply(ctx context.Context) (float64, error) {
+func (s *LedgerStore) GetTotalSupply(ctx context.Context) (int64, error) {
 	if s.pool == nil {
 		return 0, nil
 	}
@@ -556,7 +561,7 @@ func (s *LedgerStore) GetTotalSupply(ctx context.Context) (float64, error) {
 		WHERE amount > 0 AND type IN ($1, $2, $3, $4, $5, $6)`,
 		TypeCacheMine, TypeComputeMine, TypeEmbeddingMine,
 		TypeAnnotationMine, TypePatternMine, TypePoolRoyalty)
-	var n float64
+	var n int64
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("mining: total supply: %w", err)
 	}
@@ -570,7 +575,7 @@ func (s *LedgerStore) GetTotalSupply(ctx context.Context) (float64, error) {
 // (TypeStakeSlash) — a slash destroys collateral, reducing supply
 // (PoVI Part 3). Without counting slashes, supply would be overstated
 // after a slash, and supply feeds the LXC conversion math.
-func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (float64, error) {
+func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (int64, error) {
 	total, err := s.GetTotalSupply(ctx)
 	if err != nil {
 		return 0, err
@@ -581,7 +586,7 @@ func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (float64, error)
 	row := s.pool.QueryRow(ctx,
 		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type IN ($1, $2)`,
 		TypeBurn, TypeStakeSlash)
-	var burned float64
+	var burned int64
 	if err := row.Scan(&burned); err != nil {
 		return 0, fmt.Errorf("mining: burned: %w", err)
 	}
@@ -592,14 +597,14 @@ func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (float64, error)
 // burns (TypeBurn) AND slashed stake (TypeStakeSlash). Counting slashes keeps
 // the economy-stats display (GetEconomyStats = total − burned) consistent with
 // the slash-aware GetCirculatingSupply.
-func (s *LedgerStore) GetTotalBurned(ctx context.Context) (float64, error) {
+func (s *LedgerStore) GetTotalBurned(ctx context.Context) (int64, error) {
 	if s.pool == nil {
 		return 0, nil
 	}
 	row := s.pool.QueryRow(ctx,
 		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type IN ($1, $2)`,
 		TypeBurn, TypeStakeSlash)
-	var n float64
+	var n int64
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("mining: total burned: %w", err)
 	}
@@ -612,7 +617,7 @@ func (s *LedgerStore) GetTotalBurned(ctx context.Context) (float64, error) {
 // the Transfer / Burn flows share. They take a pgx.Tx so the
 // caller controls transactional semantics.
 
-func readBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, earned, spent float64, err error) {
+func readBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, earned, spent int64, err error) {
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO lens_token_balances (workspace_id, balance, lifetime_earned, lifetime_spent)
 		VALUES ($1, 0, 0, 0) ON CONFLICT (workspace_id) DO NOTHING`, workspaceID); err != nil {
@@ -627,7 +632,7 @@ func readBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, earne
 	return
 }
 
-func writeBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, earned, spent float64) error {
+func writeBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, earned, spent int64) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE lens_token_balances
 		SET balance = $2, lifetime_earned = $3, lifetime_spent = $4, updated_at = NOW()
@@ -638,7 +643,7 @@ func writeBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, earne
 	return nil
 }
 
-func insertLedgerRow(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter float64,
+func insertLedgerRow(ctx context.Context, tx pgx.Tx, workspaceID string, delta, balanceAfter int64,
 	txType, description string, metadata map[string]interface{}) error {
 	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
 	if err != nil {
@@ -788,7 +793,7 @@ func (m *CacheMiner) RecordCacheHit(
 // gets the tiny reward; cross-workspace gets the bigger reward
 // when sharing is enabled; semantic hits get the middle rate
 // even cross-workspace.
-func (m *CacheMiner) earnFor(owner, requester, hitType string) float64 {
+func (m *CacheMiner) earnFor(owner, requester, hitType string) int64 {
 	if owner == requester || requester == "" || !m.crossWorkspace {
 		return CacheHitSameWorkspace
 	}
@@ -820,13 +825,15 @@ func (m *CacheMiner) GetMiningStats(ctx context.Context, workspaceID string) (*C
 	// project from "rough average across the workspace lifetime",
 	// floored at 30 days so a brand-new workspace doesn't
 	// extrapolate one big hit into a giant projection.
-	monthly := 0.0
+	// EstimatedMonthly is a projection (display-only) — compute in float from the
+	// integer µLENS lifetime, then floor back to an integer µLENS count.
+	var monthly int64
 	if !snap.UpdatedAt.IsZero() {
 		days := time.Since(snap.UpdatedAt).Hours()/24 + 1
 		if days < 30 {
 			days = 30
 		}
-		monthly = snap.LifetimeEarned / days * 30
+		monthly = int64(float64(snap.LifetimeEarned) / days * 30)
 	}
 
 	return &CacheMiningStats{
@@ -871,10 +878,10 @@ func (s *LedgerStore) CountCacheHitsBenefited(ctx context.Context, workspaceID s
 	return n, nil
 }
 
-// Rates returns the public rate table — backs the
-// /v1/tokens/rates endpoint.
-func Rates() map[string]float64 {
-	return map[string]float64{
+// Rates returns the public rate table in µLENS (SEC-2) — backs the
+// /v1/tokens/rates endpoint. Values are integer µLENS per hit.
+func Rates() map[string]int64 {
+	return map[string]int64{
 		"cache_hit_same":  CacheHitSameWorkspace,
 		"cache_hit_cross": CacheHitCrossWorkspace,
 		"semantic_hit":    SemanticCacheHit,

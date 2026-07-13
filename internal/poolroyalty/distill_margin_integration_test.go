@@ -16,7 +16,7 @@ func createDistillMarginView(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), `CREATE OR REPLACE VIEW distill_royalty_margin AS
 SELECT request_id, requester_workspace_id, contributor_workspace_id, content_hash,
-       avoided_cogs_usd, minted_amount, avoided_cogs_usd - minted_amount AS margin_usd,
+       avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd,
        status, created_at FROM distill_royalty_mints`); err != nil {
 		t.Fatalf("create distill_royalty_margin view: %v", err)
 	}
@@ -59,13 +59,14 @@ func TestDistillMargin_RealizedMargin_FinalOnly_Integration(t *testing.T) {
 		t.Fatalf("margin summary: %v", err)
 	}
 	// 2 FINAL mints: avoided 8.0, minted 4.0 (2 × 0.5 × 4.0), margin 4.0. h3 (held) excluded.
-	if s.Mints != 2 || s.AvoidedCOGSUSD != 8.0 || s.MintedLENS != 4.0 || s.MarginUSD != 4.0 {
+	if s.Mints != 2 || s.AvoidedCOGSUSD != 8.0 || s.MintedLENS != micro(4) || s.MarginUSD != 4.0 {
 		t.Fatalf("summary mints=%d avoided=%v minted=%v margin=%v; want 2/8/4/4 (final only)",
 			s.Mints, s.AvoidedCOGSUSD, s.MintedLENS, s.MarginUSD)
 	}
-	// The margin identity: margin == avoided − minted.
-	if s.MarginUSD != s.AvoidedCOGSUSD-s.MintedLENS {
-		t.Fatalf("margin identity broken: %v != %v − %v", s.MarginUSD, s.AvoidedCOGSUSD, s.MintedLENS)
+	// The margin identity (SEC-2): margin_usd == avoided_cogs_usd − minted_LENS,
+	// where minted is µLENS so it converts to dollars via /1e6.
+	if wantMargin := s.AvoidedCOGSUSD - float64(s.MintedLENS)/1e6; s.MarginUSD != wantMargin {
+		t.Fatalf("margin identity broken: %v != %v − %v/1e6 = %v", s.MarginUSD, s.AvoidedCOGSUSD, s.MintedLENS, wantMargin)
 	}
 
 	// Breakdown by content_hash → 2 buckets (h1, h2).

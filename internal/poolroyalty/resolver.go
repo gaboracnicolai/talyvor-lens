@@ -55,7 +55,7 @@ const (
 type Candidate struct {
 	RequestID            string
 	ContributorWorkspace string
-	MintedAmount         float64
+	MintedAmount         int64 // µLENS (SEC-2: minted_amount is BIGINT)
 	CreatedAt            time.Time
 	FinalizeAfter        time.Time
 	Status               string  // always "held" (the resolver only surfaces held rows)
