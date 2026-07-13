@@ -40,18 +40,23 @@ func revokerTestPool(t *testing.T) *pgxpool.Pool {
 }
 
 // seed one HELD mint via the real minter so balances/held + the claim row are
-// all consistent, and return its request_id.
-func seedHeldMint(t *testing.T, m *Minter, ctx context.Context, reqID, contributor string, amount float64) {
+// all consistent, and return its SERVER-DERIVED request_id (SEC-11 — no longer
+// the client header; reqID/contributor vary the key so seeds don't collide).
+func seedHeldMint(t *testing.T, m *Minter, ctx context.Context, reqID, contributor string, amount float64) string {
 	t.Helper()
 	h := ServedHit{
 		RequestID: reqID, RequesterWorkspace: "wsB", ContributorWorkspace: contributor,
 		Layer: "exact", EntryID: "e", Provider: "openai", Model: "gpt-4o",
 		AvoidedCOGSUSD: amount * 2, // s=0.5 ⇒ minted = amount
-		AnswerSHA256:   SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
+		// The answer hash is a KEY input now, so vary it by (reqID, contributor)
+		// to give each seed a distinct server-derived key.
+		AnswerSHA256: SHA256Hex([]byte("a:" + reqID + ":" + contributor)), PromptSHA256: SHA256Hex([]byte("p")),
 	}
-	if res, err := m.MintServedHit(ctx, h); err != nil || !res.Minted {
+	res, err := m.MintServedHit(ctx, h)
+	if err != nil || !res.Minted {
 		t.Fatalf("seed held mint %s: res=%+v err=%v", reqID, res, err)
 	}
+	return res.RequestID
 }
 
 // SINGLE REVOKE — money correctness: status flips held→revoked, held_balance
@@ -63,7 +68,7 @@ func TestRevoker_SingleRevoke_Integration(t *testing.T) {
 	ledger := mining.NewLedgerStore(pool)
 	m := NewMinter(pool, ledger, 0.5, func() bool { return true })
 	m.SetHoldbackWindow(time.Hour) // stays held; sweeper won't touch it
-	seedHeldMint(t, m, ctx, "rk-1", "wsA", 1.0)
+	rk := seedHeldMint(t, m, ctx, "rk-1", "wsA", 1.0)
 
 	// pre: held=1, spendable=0, earned=0, supply=0 (held mint not counted)
 	var bal, held, earned int64
@@ -73,8 +78,8 @@ func TestRevoker_SingleRevoke_Integration(t *testing.T) {
 	}
 
 	r := NewRevoker(pool, ledger)
-	rep, err := r.RevokeHeldMints(ctx, []string{"rk-1"})
-	if err != nil || rep.Outcomes["rk-1"] != OutcomeRevoked {
+	rep, err := r.RevokeHeldMints(ctx, []string{rk})
+	if err != nil || rep.Outcomes[rk] != OutcomeRevoked {
 		t.Fatalf("revoke: rep=%+v err=%v", rep, err)
 	}
 
@@ -85,7 +90,9 @@ func TestRevoker_SingleRevoke_Integration(t *testing.T) {
 	}
 	// claim row revoked
 	var status string
-	mustScan(t, pool, `SELECT status FROM pool_royalty_mints WHERE request_id='rk-1'`, &status)
+	if err := pool.QueryRow(ctx, `SELECT status FROM pool_royalty_mints WHERE request_id=$1`, rk).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
 	if status != "revoked" {
 		t.Fatalf("status=%q, want revoked", status)
 	}
@@ -110,16 +117,16 @@ func TestRevoker_Idempotent_Integration(t *testing.T) {
 	ledger := mining.NewLedgerStore(pool)
 	m := NewMinter(pool, ledger, 0.5, func() bool { return true })
 	m.SetHoldbackWindow(time.Hour)
-	seedHeldMint(t, m, ctx, "rk-idem", "wsA", 3.0)
+	rk := seedHeldMint(t, m, ctx, "rk-idem", "wsA", 3.0)
 
 	r := NewRevoker(pool, ledger)
-	rep1, _ := r.RevokeHeldMints(ctx, []string{"rk-idem"})
-	rep2, _ := r.RevokeHeldMints(ctx, []string{"rk-idem"})
-	if rep1.Outcomes["rk-idem"] != OutcomeRevoked {
-		t.Fatalf("first call: %q, want revoked", rep1.Outcomes["rk-idem"])
+	rep1, _ := r.RevokeHeldMints(ctx, []string{rk})
+	rep2, _ := r.RevokeHeldMints(ctx, []string{rk})
+	if rep1.Outcomes[rk] != OutcomeRevoked {
+		t.Fatalf("first call: %q, want revoked", rep1.Outcomes[rk])
 	}
-	if rep2.Outcomes["rk-idem"] != OutcomeSkippedAlreadyRevoked {
-		t.Fatalf("second call: %q, want skipped_already_revoked", rep2.Outcomes["rk-idem"])
+	if rep2.Outcomes[rk] != OutcomeSkippedAlreadyRevoked {
+		t.Fatalf("second call: %q, want skipped_already_revoked", rep2.Outcomes[rk])
 	}
 	var revRows int64
 	mustScan(t, pool, `SELECT COUNT(*) FROM lens_token_ledger WHERE type='pool_royalty_revoked'`, &revRows)
@@ -136,7 +143,7 @@ func TestRevoker_FinalizedNeverRevocable_Integration(t *testing.T) {
 	ledger := mining.NewLedgerStore(pool)
 	m := NewMinter(pool, ledger, 0.5, func() bool { return true })
 	m.SetHoldbackWindow(time.Millisecond)
-	seedHeldMint(t, m, ctx, "rk-fin", "wsA", 2.0)
+	rk := seedHeldMint(t, m, ctx, "rk-fin", "wsA", 2.0)
 	time.Sleep(5 * time.Millisecond)
 	// finalize it
 	sw := NewFinalizeSweeper(pool, ledger, "pool_royalty_mints")
@@ -145,9 +152,9 @@ func TestRevoker_FinalizedNeverRevocable_Integration(t *testing.T) {
 	}
 	// now revoke must skip
 	r := NewRevoker(pool, ledger)
-	rep, _ := r.RevokeHeldMints(ctx, []string{"rk-fin"})
-	if rep.Outcomes["rk-fin"] != OutcomeSkippedNotHeld {
-		t.Fatalf("finalized mint outcome = %q, want skipped_not_held (NEVER revocable)", rep.Outcomes["rk-fin"])
+	rep, _ := r.RevokeHeldMints(ctx, []string{rk})
+	if rep.Outcomes[rk] != OutcomeSkippedNotHeld {
+		t.Fatalf("finalized mint outcome = %q, want skipped_not_held (NEVER revocable)", rep.Outcomes[rk])
 	}
 	var revRows int64
 	mustScan(t, pool, `SELECT COUNT(*) FROM lens_token_ledger WHERE type='pool_royalty_revoked'`, &revRows)
@@ -179,8 +186,8 @@ func TestRevoker_ConcurrentRevokeVsFinalize_Integration(t *testing.T) {
 		req := fmt.Sprintf("race-%02d", i)
 		m := NewMinter(pool, ledger, 0.5, func() bool { return true })
 		m.SetHoldbackWindow(time.Millisecond)
-		seedHeldMint(t, m, ctx, req, fmt.Sprintf("ws-%02d", i), 1.0)
-		time.Sleep(2 * time.Millisecond) // finalize_after passed → both ops are eligible
+		key := seedHeldMint(t, m, ctx, req, fmt.Sprintf("ws-%02d", i), 1.0) // server-derived key
+		time.Sleep(2 * time.Millisecond)                                    // finalize_after passed → both ops are eligible
 
 		sw := NewFinalizeSweeper(pool, ledger, "pool_royalty_mints")
 		var wg sync.WaitGroup
@@ -190,14 +197,14 @@ func TestRevoker_ConcurrentRevokeVsFinalize_Integration(t *testing.T) {
 		go func() { defer wg.Done(); finN, _ = sw.RunOnce(ctx) }()
 		go func() {
 			defer wg.Done()
-			rep, _ := r.RevokeHeldMints(ctx, []string{req})
-			revOut = rep.Outcomes[req]
+			rep, _ := r.RevokeHeldMints(ctx, []string{key})
+			revOut = rep.Outcomes[key]
 		}()
 		wg.Wait()
 
 		// EXACTLY ONE terminal state on the claim row.
 		var status string
-		if err := pool.QueryRow(ctx, `SELECT status FROM pool_royalty_mints WHERE request_id=$1`, req).Scan(&status); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT status FROM pool_royalty_mints WHERE request_id=$1`, key).Scan(&status); err != nil {
 			t.Fatalf("scan status for %s: %v", req, err)
 		}
 		switch status {
@@ -247,16 +254,19 @@ func TestRevoker_RevokedStillCountsTowardCap_Integration(t *testing.T) {
 
 	ids := make([]string, 0, capK)
 	for i := 0; i < capK; i++ {
-		id := fmt.Sprintf("cap-rk-%d", i)
+		// Distinct requesters served the SAME entry → capK distinct server-derived
+		// keys on one entry_id (SEC-11: reusing one header no longer distinguishes
+		// mints — the key does). The per-entry cap counts across requesters.
 		h := ServedHit{
-			RequestID: id, RequesterWorkspace: "wsB", ContributorWorkspace: "wsA",
+			RequestID: fmt.Sprintf("cap-rk-%d", i), RequesterWorkspace: fmt.Sprintf("wsB-%d", i), ContributorWorkspace: "wsA",
 			Layer: "exact", EntryID: "capped-entry", Provider: "openai", Model: "gpt-4o",
 			AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
 		}
-		if res, err := m.MintServedHit(ctx, h); err != nil || !res.Minted {
+		res, err := m.MintServedHit(ctx, h)
+		if err != nil || !res.Minted {
 			t.Fatalf("seed %d: res=%+v err=%v", i, res, err)
 		}
-		ids = append(ids, id)
+		ids = append(ids, res.RequestID)
 	}
 	// revoke 3 of them via the orchestrator
 	r := NewRevoker(pool, ledger)
@@ -266,7 +276,7 @@ func TestRevoker_RevokedStillCountsTowardCap_Integration(t *testing.T) {
 	}
 	// a further mint of the entry must STILL be capped (revoked rows remain, consuming budget)
 	res, err := m.MintServedHit(ctx, ServedHit{
-		RequestID: "cap-rk-after", RequesterWorkspace: "wsB", ContributorWorkspace: "wsA",
+		RequestID: "cap-rk-after", RequesterWorkspace: "wsB-after", ContributorWorkspace: "wsA",
 		Layer: "exact", EntryID: "capped-entry", Provider: "openai", Model: "gpt-4o",
 		AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
 	})

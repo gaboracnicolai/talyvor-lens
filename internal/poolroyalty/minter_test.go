@@ -79,7 +79,7 @@ func TestMintServedHit_ExactlyOncePerRequestID(t *testing.T) {
 	// First serve: claim row inserted → credit → commit.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
+		WithArgs(pgxmock.AnyArg(), "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectCommit()
 
@@ -104,7 +104,7 @@ func TestMintServedHit_ExactlyOncePerRequestID(t *testing.T) {
 	// any ledger write. The claim insert wrote nothing, so the tx just ends.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
+		WithArgs(pgxmock.AnyArg(), "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 	pool.ExpectRollback()
 
@@ -138,7 +138,7 @@ func TestMintServedHit_LedgerRowOmitsRequester(t *testing.T) {
 	// copy is untouched; only the contributor-facing ledger row is scrubbed.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
+		WithArgs(pgxmock.AnyArg(), "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectCommit()
 
@@ -179,27 +179,25 @@ func TestMintServedHit_LedgerRowOmitsRequester(t *testing.T) {
 	}
 }
 
-// DEFLATIONARY FAILURE DIRECTION: a reused request_id — even from a DIFFERENT
-// hit (different contributor/entry) — suppresses the later mint. Collisions
-// can only under-mint, never inflate supply.
-func TestMintServedHit_ReusedRequestID_SuppressesNeverInflates(t *testing.T) {
+// CLAIM-CONFLICT PATH (deflationary): when the claim INSERT reports a conflict
+// (RowsAffected 0) — a legitimate identical repeat now that the key is
+// server-derived from contributor+requester+content+window — the mint reports
+// AlreadyMinted and credits NOBODY. The RowsAffected==0 guard can only under-mint,
+// never inflate. (Real cross-tenant suppression is separately DISPROVEN by
+// TestMintKey_TwoContributorSuppression_Integration: a different contributor
+// derives a different key and no longer collides.)
+func TestMintServedHit_ClaimConflict_SuppressesNeverInflates(t *testing.T) {
 	pool := newMockPool(t)
 	ledger := &fakeLedger{}
 	m := NewMinter(pool, ledger, 0.5, enabledOn)
 
-	hit := sampleHit()
-	hit.ContributorWorkspace = "wsC" // different contributor, same request_id
-	hit.Layer = "semantic"
-	hit.EntryID = "emb-row-9"
-	hit.Similarity = 0.97
-
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsC", "semantic", "emb-row-9", "openai", "gpt-4o", 0.97, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 0)) // claim already taken
+		WithArgs(pgxmock.AnyArg(), "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0)) // the derived key was already claimed
 	pool.ExpectRollback()
 
-	res, err := m.MintServedHit(context.Background(), hit)
+	res, err := m.MintServedHit(context.Background(), sampleHit())
 	if err != nil {
 		t.Fatalf("MintServedHit: %v", err)
 	}
@@ -224,7 +222,7 @@ func TestMintServedHit_CreditFailureRollsBackClaim(t *testing.T) {
 
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
+		WithArgs(pgxmock.AnyArg(), "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectRollback() // claim + credit roll back together
 
@@ -273,17 +271,19 @@ func TestMintServedHit_SelfHitDoesNotMint(t *testing.T) {
 	}
 }
 
-// Defensive no-ops: empty request_id (no idempotency key → no mint), empty
-// contributor (pre-feature entry), zero avoided_COGS, nil minter.
+// Defensive no-ops: empty contributor OR requester (both are mint-KEY inputs
+// now — SEC-11), zero avoided_COGS, nil minter. NOTE the deliberate ABSENCE of
+// an empty-client-header case: h.RequestID no longer gates a mint (see
+// TestMintKey_EmptyClientHeaderStillMints_Integration).
 func TestMintServedHit_DefensiveNoOps(t *testing.T) {
 	pool := newMockPool(t) // NO expectations
 	ledger := &fakeLedger{}
 	m := NewMinter(pool, ledger, 0.5, enabledOn)
 
-	noKey := sampleHit()
-	noKey.RequestID = ""
-	if res, err := m.MintServedHit(context.Background(), noKey); err != nil || res.Minted {
-		t.Errorf("empty request_id must not mint; res=%+v err=%v", res, err)
+	noRequester := sampleHit()
+	noRequester.RequesterWorkspace = ""
+	if res, err := m.MintServedHit(context.Background(), noRequester); err != nil || res.Minted {
+		t.Errorf("empty requester (a key input) must not mint; res=%+v err=%v", res, err)
 	}
 
 	noOwner := sampleHit()
@@ -444,7 +444,7 @@ func TestAnswerHash_TamperEvidence_OverwriteDetectable(t *testing.T) {
 // the 2.3.0 evidence hashes) — shared by the cap tests below.
 func capExpectClaim(pool pgxmock.PgxPoolIface) {
 	pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
-		WithArgs("req-1", "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
+		WithArgs(pgxmock.AnyArg(), "wsB", "wsA", "exact", "lens:exact:deadbeef", "openai", "gpt-4o", 0.0, 2.0, micro(1.0), tAnswerHash, tPromptHash, (72 * time.Hour).Microseconds()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 

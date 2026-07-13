@@ -6,11 +6,21 @@
 // double-slash guard): INSERT a claim row into pool_royalty_mints ON CONFLICT
 // (request_id) DO NOTHING, and proceed to the ledger credit ONLY when the
 // insert claimed the row (RowsAffected == 1) — claim and credit join ONE
-// transaction so they commit or roll back together. request_id ALONE is the
-// unique key: a retried request can legitimately re-match a DIFFERENT
-// semantic entry, so keying on the match (entry/contributor) would
-// reintroduce the double-mint. A colliding request_id can only SUPPRESS a
-// later mint (deflationary, safe) — never inflate supply.
+// transaction so they commit or roll back together.
+//
+// SEC-11: the request_id column is a SERVER-DERIVED key (mintClaimKey) —
+// hex(sha256(contributor : requester : answer_sha256 : hold-window bucket)),
+// NEVER the client X-Talyvor-Request-ID. The original design keyed on the raw
+// client header so a retry that re-matched a different entry would still dedup;
+// but a client-chosen key under a bare global UNIQUE let a requester SUPPRESS
+// the royalty owed to ANOTHER contributor by reusing one request_id across
+// serves of different tenants' content — cross-tenant economic griefing, not
+// "deflationary and safe". Binding the contributor + served-content hash into
+// the key removes that: two different contributors (or two different served
+// answers) derive different keys, so no cross-tenant collision is reachable,
+// while a genuine identical repeat within one window still dedups. A re-serve in
+// a LATER window earns again — a rate-capped, avoided-COGS-backed second mint,
+// the accepted retry tradeoff. Mirrors distill_royalty_mints (0062).
 //
 // The package extends the existing ledger primitives (CreditTx → applyTx's
 // two-step FOR UPDATE balance lock — seam #1's one locking discipline); it
@@ -73,9 +83,9 @@ const DefaultRoyaltyShare = 0.5
 // must only construct it at the serve point (after the cached body actually
 // went out), never at lookup: a found-but-not-served hit must not mint.
 type ServedHit struct {
-	RequestID            string // the serving request's X-Talyvor-Request-ID (the idempotency key)
-	RequesterWorkspace   string // who was served
-	ContributorWorkspace string // who contributed the entry (owner stamp)
+	RequestID            string // the serving request's X-Talyvor-Request-ID — retained for tracing ONLY; SEC-11: NOT the mint key (the key is server-derived, see mintClaimKey)
+	RequesterWorkspace   string // who was served (server-authenticated) — a KEY input
+	ContributorWorkspace string // who contributed the entry (owner stamp) — a KEY input
 	Layer                string // "exact" | "semantic"
 	EntryID              string // exact: pooled cache key; semantic: prompt_embeddings.id — attribution DATA, not key
 	Provider             string
@@ -111,13 +121,43 @@ func SHA256Hex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// mintClaimKey derives the SERVER-SIDE idempotency key for a Pool-B royalty
+// mint (SEC-11). It is hex(sha256(contributor : requester : answer_sha256 :
+// window-bucket)) — NEVER the client X-Talyvor-Request-ID. Binding the
+// contributor AND the served-content hash into the key is what makes
+// cross-tenant suppression impossible: an attacker cannot occupy another
+// contributor's claim slot without actually being served that contributor's
+// exact bytes (which itself mints to them), because both fields are
+// server-stamped (contributor = cache-entry owner; answer_sha256 = hash of the
+// bytes that went out). The window bucket lets a GENUINE re-serve in a later
+// hold window earn again (the accepted retry tradeoff — a second mint is
+// rate-capped and still backed by a distinct avoided-COGS), while an identical
+// repeat WITHIN one window derives the SAME key and dedups (exactly-once).
+// Mirrors distill_royalty_mints' proven SHA256(owner:requester:content_hash).
+func mintClaimKey(contributor, requester, answerSHA256, windowBucket string) string {
+	return SHA256Hex([]byte(contributor + ":" + requester + ":" + answerSHA256 + ":" + windowBucket))
+}
+
+// windowBucketFor buckets a serve instant to the hold window — the truncated
+// UTC instant as RFC3339. Two serves within one window share a bucket (→ same
+// key → dedup); a serve a window later gets a fresh bucket (→ earns again). A
+// non-positive window falls back to the 72h default so the key is never
+// bucketed on a zero interval.
+func windowBucketFor(t time.Time, window time.Duration) string {
+	if window <= 0 {
+		window = 72 * time.Hour
+	}
+	return t.UTC().Truncate(window).Format(time.RFC3339)
+}
+
 // Result is the outcome of one mint attempt.
 type Result struct {
 	Minted        bool   // a claim was taken and the contributor credited
-	AlreadyMinted bool   // the request_id was already claimed — exactly-once suppression
+	AlreadyMinted bool   // the server-derived key was already claimed — exactly-once suppression
 	Capped        bool   // a window cap was reached — claim+credit rolled back (2.3b)
 	CapReason     string // when Capped: "per_pair" | "per_entry" (which cap fired)
 	Amount        int64  // µLENS credited (s × avoided_COGS) when Minted (SEC-2)
+	RequestID     string // SEC-11: the server-derived claim key actually used (mintClaimKey); set on Minted and AlreadyMinted
 }
 
 // txBeginner matches *pgxpool.Pool.Begin (the povi/stakes.go seam) so tests
@@ -134,9 +174,10 @@ type ledgerCreditTx interface {
 	CreditHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, txType, description string, metadata map[string]interface{}) error
 }
 
-// insertClaimSQL claims the serving request: ON CONFLICT (request_id) DO
-// NOTHING + a RowsAffected check is the exactly-once guard (povi_challenges
-// pattern). id and created_at take their column defaults.
+// insertClaimSQL claims the serve under the SERVER-DERIVED key (SEC-11): ON
+// CONFLICT (request_id) DO NOTHING + a RowsAffected check is the exactly-once
+// guard (povi_challenges pattern). $1 is mintClaimKey's output, never the client
+// header. id and created_at take their column defaults.
 const insertClaimSQL = `INSERT INTO pool_royalty_mints
     (request_id, requester_workspace_id, contributor_workspace_id, layer, entry_id, provider, model, similarity, avoided_cogs_usd, minted_amount, answer_sha256, prompt_sha256, status, finalize_after)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'held', now() + ($13::bigint * interval '1 microsecond'))
@@ -288,17 +329,23 @@ func (m *Minter) Share() float64 {
 	return m.share
 }
 
-// MintServedHit claims the serving request and credits the contributor in ONE
-// transaction (Andrew constraint #1). Exactly-once: a request_id that was
-// already claimed returns AlreadyMinted with NO ledger write. No-ops (never
-// errors) when: disabled, nil receiver/deps, empty request_id or contributor,
-// a self-serve (requester == contributor), or a non-positive mint amount —
-// every defensive direction is deflationary.
+// MintServedHit claims the serve under a server-derived key and credits the
+// contributor in ONE transaction (Andrew constraint #1). Exactly-once: a key
+// (contributor:requester:answer:window) that was already claimed returns
+// AlreadyMinted with NO ledger write. No-ops (never errors) when: disabled, nil
+// receiver/deps, empty contributor or requester, a self-serve
+// (requester == contributor), missing evidence hashes, or a non-positive mint
+// amount — every defensive direction is deflationary. SEC-11: the client
+// X-Talyvor-Request-ID (h.RequestID) is never consulted for the key.
 func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error) {
 	if m == nil || m.enabled == nil || !m.enabled() || m.db == nil || m.ledger == nil {
 		return Result{}, nil
 	}
-	if h.RequestID == "" || h.ContributorWorkspace == "" || h.ContributorWorkspace == h.RequesterWorkspace {
+	// SEC-11: the mint key is derived from the contributor + requester + served
+	// content, so the client X-Talyvor-Request-ID is NO LONGER required or
+	// consulted here — both workspaces must be present (they feed the key) and a
+	// self-serve is refused. Every direction is deflationary.
+	if h.ContributorWorkspace == "" || h.RequesterWorkspace == "" || h.ContributorWorkspace == h.RequesterWorkspace {
 		return Result{}, nil
 	}
 	// NO HASH -> NO MINT (Stage 2.3.0, the privacy-coherence gate): a serve
@@ -326,6 +373,14 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 		return Result{}, nil
 	}
 
+	// SEC-11: derive the exactly-once claim key SERVER-SIDE. The value-then-claim
+	// ORDER is load-bearing — a sub-mint (amount<=0) serve returns above WITHOUT
+	// deriving or claiming a key, so a dust serve never occupies a slot. All key
+	// inputs are already server-stamped and present on the hit (the answer/prompt
+	// hashes are required just above); the client X-Talyvor-Request-ID is never
+	// consulted.
+	claimKey := mintClaimKey(h.ContributorWorkspace, h.RequesterWorkspace, h.AnswerSHA256, windowBucketFor(time.Now(), m.holdWindow))
+
 	tx, err := m.db.Begin(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("poolroyalty: begin mint tx: %w", err)
@@ -351,17 +406,17 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	}
 
 	tag, err := tx.Exec(ctx, insertClaimSQL,
-		h.RequestID, h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
+		claimKey, h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
 		h.EntryID, h.Provider, h.Model, h.Similarity, h.AvoidedCOGSUSD, amount,
 		h.AnswerSHA256, h.PromptSHA256, m.holdWindow.Microseconds())
 	if err != nil {
 		return Result{}, fmt.Errorf("poolroyalty: insert mint claim: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Another serve (or a retry) already claimed this request_id — the
-		// exactly-once suppression. Nothing was written; the deferred
-		// rollback just ends the transaction.
-		return Result{AlreadyMinted: true}, nil
+		// This exact (contributor, requester, served content, window) was already
+		// claimed — the exactly-once suppression for a legitimate identical repeat.
+		// Nothing was written; the deferred rollback just ends the transaction.
+		return Result{AlreadyMinted: true, RequestID: claimKey}, nil
 	}
 
 	// #145: the requester workspace id is DELIBERATELY omitted from the
@@ -371,8 +426,14 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	// pool_royalty_mints claim row (inserted above), which is where the detector,
 	// resolver, and per-pair cap read it. The contributor learns it was served,
 	// never by whom.
+	// SEC-11: the ledger row records the SERVER-DERIVED claim key, not the client
+	// header. The key is a one-way hash, so it reveals nothing about the requester
+	// (the #145 no-counterparty-leak posture holds) while still uniquely naming the
+	// mint. The client X-Talyvor-Request-ID is deliberately NOT stored on the
+	// contributor's row — it is a requester-chosen, requester-linkable value; the
+	// proxy still logs it independently for its own request tracing.
 	meta := map[string]interface{}{
-		"request_id":       h.RequestID,
+		"request_id":       claimKey,
 		"layer":            h.Layer,
 		"entry_id":         h.EntryID,
 		"avoided_cogs_usd": h.AvoidedCOGSUSD,
@@ -432,5 +493,5 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	// held mint hasn't entered circulation yet; the counter must agree with
 	// the SQL supply stat, which counts the TypePoolRoyalty row written at
 	// finalize.
-	return Result{Minted: true, Amount: amount}, nil
+	return Result{Minted: true, Amount: amount, RequestID: claimKey}, nil
 }

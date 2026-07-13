@@ -41,16 +41,21 @@ func adjTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func seedHeld(t *testing.T, m *Minter, ctx context.Context, reqID, contributor string) {
+// seedHeld mints one HELD row and returns its SERVER-DERIVED request_id (SEC-11).
+// Content is varied by reqID so each seed gets a distinct key (the client header
+// no longer distinguishes mints); callers adjudicate/look up by the returned key.
+func seedHeld(t *testing.T, m *Minter, ctx context.Context, reqID, contributor string) string {
 	t.Helper()
 	h := ServedHit{
 		RequestID: reqID, RequesterWorkspace: "wsB", ContributorWorkspace: contributor,
 		Layer: "exact", EntryID: "e", Provider: "openai", Model: "gpt-4o",
-		AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
+		AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a:" + reqID)), PromptSHA256: SHA256Hex([]byte("p")),
 	}
-	if res, err := m.MintServedHit(ctx, h); err != nil || !res.Minted {
+	res, err := m.MintServedHit(ctx, h)
+	if err != nil || !res.Minted {
 		t.Fatalf("seed %s: res=%+v err=%v", reqID, res, err)
 	}
+	return res.RequestID
 }
 
 // OPERATOR SUBSET EXACTLY HONORED — NO OVER-REVOCATION (the headline property).
@@ -65,15 +70,18 @@ func TestAdjudicate_SubsetHonored_Integration(t *testing.T) {
 	ledger := mining.NewLedgerStore(pool)
 	m := NewMinter(pool, ledger, 0.5, func() bool { return true })
 	m.SetHoldbackWindow(time.Hour) // stay held
+	// SEC-11: map each logical seed label to its server-derived key; adjudicate by
+	// those keys (what the observability API surfaces and an operator would use).
+	keyOf := map[string]string{}
 	for _, id := range []string{"a1", "a2", "a3", "a4"} {
-		seedHeld(t, m, ctx, id, "wsA")
+		keyOf[id] = seedHeld(t, m, ctx, id, "wsA")
 	}
 
 	w := NewAdjudicationWriter(pool, NewRevoker(pool, ledger))
 	id, report, err := w.Adjudicate(ctx, AdjudicationDecision{
 		FlagType: "volume", ResolutionLabel: string(LabelTuplePinned),
-		CandidateRequestIDs: []string{"a1", "a2", "a3", "a4"}, // reviewed all 4
-		RevokeRequestIDs:    []string{"a1", "a3"},             // chose only 2
+		CandidateRequestIDs: []string{keyOf["a1"], keyOf["a2"], keyOf["a3"], keyOf["a4"]}, // reviewed all 4
+		RevokeRequestIDs:    []string{keyOf["a1"], keyOf["a3"]},                           // chose only 2
 		DecidedBy:           "global_key",
 	})
 	if err != nil {
@@ -86,14 +94,18 @@ func TestAdjudicate_SubsetHonored_Integration(t *testing.T) {
 	// The chosen two are revoked; the other two UNTOUCHED.
 	for _, id := range []string{"a1", "a3"} {
 		var status string
-		mustScan(t, pool, `SELECT status FROM pool_royalty_mints WHERE request_id='`+id+`'`, &status)
+		if err := pool.QueryRow(ctx, `SELECT status FROM pool_royalty_mints WHERE request_id=$1`, keyOf[id]).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
 		if status != "revoked" {
 			t.Errorf("chosen %s status=%q, want revoked", id, status)
 		}
 	}
 	for _, id := range []string{"a2", "a4"} {
 		var status string
-		mustScan(t, pool, `SELECT status FROM pool_royalty_mints WHERE request_id='`+id+`'`, &status)
+		if err := pool.QueryRow(ctx, `SELECT status FROM pool_royalty_mints WHERE request_id=$1`, keyOf[id]).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
 		if status != "held" {
 			t.Errorf("NON-chosen %s status=%q, want held (must NOT be over-revoked)", id, status)
 		}

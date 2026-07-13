@@ -122,8 +122,12 @@ func TestCapExactness_ConcurrentSamePair_Integration(t *testing.T) {
 				Provider:             "openai",
 				Model:                "gpt-4o",
 				AvoidedCOGSUSD:       2.0,
-				AnswerSHA256:         SHA256Hex([]byte("answer")),
-				PromptSHA256:         SHA256Hex([]byte("prompt")),
+				// SEC-11: distinct served content per serve → distinct derived key, so
+				// all 25 serves of the SAME (requester,contributor) pair genuinely
+				// contend on the per-pair cap (the key no longer distinguishes them by
+				// the client header).
+				AnswerSHA256: SHA256Hex([]byte(fmt.Sprintf("answer-%02d", i))),
+				PromptSHA256: SHA256Hex([]byte("prompt")),
 			}
 			results[i], errs[i] = m.MintServedHit(ctx, h)
 		}(i)
@@ -254,13 +258,14 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	if err != nil || !res.Minted {
 		t.Fatalf("mint: res=%+v err=%v", res, err)
 	}
-	var bal, held int64
+	key1 := res.RequestID // SEC-11: the server-derived claim key (not "req-hold-1")
+	var bal, held int64   // SEC-2: µLENS
 	var status string
 	var hasWindow bool
 	if err := pool.QueryRow(ctx, `SELECT balance, held_balance FROM lens_token_balances WHERE workspace_id='wsA'`).Scan(&bal, &held); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT status, finalize_after IS NOT NULL FROM pool_royalty_mints WHERE request_id='req-hold-1'`).Scan(&status, &hasWindow); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status, finalize_after IS NOT NULL FROM pool_royalty_mints WHERE request_id=$1`, key1).Scan(&status, &hasWindow); err != nil {
 		t.Fatal(err)
 	}
 	if bal != 0 || held != micro(1) || status != "held" || !hasWindow {
@@ -310,6 +315,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	//    flag at all, which is the design: only the MINT is gated).
 	h2 := h
 	h2.RequestID = "req-hold-2"
+	h2.AnswerSHA256 = SHA256Hex([]byte("a2")) // SEC-11: distinct content → distinct key (else it collides with h1)
 	if _, err := m.MintServedHit(ctx, h2); err != nil {
 		t.Fatal(err)
 	}
@@ -327,15 +333,18 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	//    held LENS never entered it). Mint a third held row, revoke it.
 	h3 := h
 	h3.RequestID = "req-hold-3"
-	if _, err := m.MintServedHit(ctx, h3); err != nil {
+	h3.AnswerSHA256 = SHA256Hex([]byte("a3")) // SEC-11: distinct content → distinct key
+	r3, err := m.MintServedHit(ctx, h3)
+	if err != nil {
 		t.Fatal(err)
 	}
+	key3 := r3.RequestID
 	circBefore, _ := ledger.GetCirculatingSupply(ctx)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE pool_royalty_mints SET status='revoked' WHERE request_id='req-hold-3' AND status='held'`); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE pool_royalty_mints SET status='revoked' WHERE request_id=$1 AND status='held'`, key3); err != nil {
 		t.Fatal(err)
 	}
 	if err := ledger.RevokeHeldTx(ctx, tx, "wsA", micro(1), "revoked: test", nil); err != nil {
@@ -414,7 +423,10 @@ func TestEntryCapExactness_ConcurrentSameContributor_Integration(t *testing.T) {
 				RequestID:          fmt.Sprintf("entry-race-%02d", i),
 				RequesterWorkspace: "wsB", ContributorWorkspace: "wsA",
 				Layer: "exact", EntryID: "the-one-entry", Provider: "openai", Model: "gpt-4o",
-				AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
+				AvoidedCOGSUSD: 2.0,
+				// SEC-11: distinct served content per serve → distinct derived key on
+				// the SAME entry, so all 25 contend on the per-entry cap.
+				AnswerSHA256: SHA256Hex([]byte(fmt.Sprintf("a-%02d", i))), PromptSHA256: SHA256Hex([]byte("p")),
 			}
 			results[i], _ = m.MintServedHit(ctx, h)
 		}(i)
@@ -467,6 +479,9 @@ func TestEntryCap_RevokedStillCounts_Integration(t *testing.T) {
 	m.SetEntryCap(capK, time.Hour)
 
 	// Mint exactly capK on the entry (across two contributors, simulating churn).
+	// SEC-11: distinct served content per serve → distinct derived key; capture the
+	// keys to revoke by.
+	keys := make([]string, 0, capK)
 	for i := 0; i < capK; i++ {
 		contrib := "wsA"
 		if i >= 2 {
@@ -475,16 +490,18 @@ func TestEntryCap_RevokedStillCounts_Integration(t *testing.T) {
 		h := ServedHit{
 			RequestID: fmt.Sprintf("rev-%d", i), RequesterWorkspace: "wsB", ContributorWorkspace: contrib,
 			Layer: "semantic", EntryID: "e-rev", Provider: "openai", Model: "gpt-4o",
-			AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
+			AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte(fmt.Sprintf("a-%d", i))), PromptSHA256: SHA256Hex([]byte("p")),
 		}
-		if res, err := m.MintServedHit(ctx, h); err != nil || !res.Minted {
+		res, err := m.MintServedHit(ctx, h)
+		if err != nil || !res.Minted {
 			t.Fatalf("seed mint %d: res=%+v err=%v", i, res, err)
 		}
+		keys = append(keys, res.RequestID)
 	}
-	// Revoke 3 of them (status='revoked' + burn from held).
+	// Revoke 3 of them (status='revoked').
 	for i := 0; i < 3; i++ {
 		tx, _ := pool.Begin(ctx)
-		if _, err := tx.Exec(ctx, `UPDATE pool_royalty_mints SET status='revoked' WHERE request_id=$1`, fmt.Sprintf("rev-%d", i)); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE pool_royalty_mints SET status='revoked' WHERE request_id=$1`, keys[i]); err != nil {
 			t.Fatal(err)
 		}
 		_ = tx.Commit(ctx)
@@ -493,7 +510,7 @@ func TestEntryCap_RevokedStillCounts_Integration(t *testing.T) {
 	h := ServedHit{
 		RequestID: "rev-after", RequesterWorkspace: "wsB", ContributorWorkspace: "wsA",
 		Layer: "semantic", EntryID: "e-rev", Provider: "openai", Model: "gpt-4o",
-		AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a")), PromptSHA256: SHA256Hex([]byte("p")),
+		AvoidedCOGSUSD: 2.0, AnswerSHA256: SHA256Hex([]byte("a-after")), PromptSHA256: SHA256Hex([]byte("p")),
 	}
 	res, err := m.MintServedHit(ctx, h)
 	if err != nil {
