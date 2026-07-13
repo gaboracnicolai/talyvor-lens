@@ -738,7 +738,17 @@ func (s *LedgerStore) GetHistory(ctx context.Context, workspaceID string, limit,
 type CacheMiner struct {
 	ledger         *LedgerStore
 	crossWorkspace bool
-	linkageEnabled bool // Phase-0: owner-linkage self-deal guard (off by default; the wire-up enables it)
+	linkageEnabled bool          // Phase-0: owner-linkage self-deal guard (off by default; the wire-up enables it)
+	holdbackWindow time.Duration // Phase-1 Item 1: the mint lands HELD, finalizes after this (default 72h)
+}
+
+// SetHoldbackWindow sets the held→spendable delay for cache mints (Phase-1 Item 1).
+// Non-positive keeps the 72h default. The mint lands HELD and the finalize sweeper
+// settles it after this window (revocable before then).
+func (m *CacheMiner) SetHoldbackWindow(d time.Duration) {
+	if d > 0 {
+		m.holdbackWindow = d
+	}
 }
 
 // NewCacheMiner builds a miner. `crossWorkspaceEnabled` mirrors
@@ -751,6 +761,7 @@ func NewCacheMiner(ledger *LedgerStore, crossWorkspaceEnabled bool) *CacheMiner 
 	return &CacheMiner{
 		ledger:         ledger,
 		crossWorkspace: crossWorkspaceEnabled,
+		holdbackWindow: 72 * time.Hour, // Phase-1 Item 1: default held window (mirrors pool-royalty)
 	}
 }
 
@@ -835,7 +846,11 @@ func (m *CacheMiner) RecordCacheHit(
 		"request_workspace_id": requestWorkspace,
 	}
 	desc := fmt.Sprintf("cache hit (%s) served to %s", hitType, requestWorkspace)
-	_, err := m.ledger.CreditOnce(ctx, requestID, cacheOwnerWorkspace, earning, TypeCacheMine, desc, meta)
+	// Phase-1 Item 1: mint HELD (not spendable). CreditOnceHeld writes the uncounted
+	// cache_mine_held row + a traffic_mint_holds claim; the finalize sweeper settles it
+	// to the counted cache_mine after the window, and RevokeHeldTxAs can reverse it
+	// before then (the clawback surface). Exactly-once on (requestID, owner, cache_mine).
+	_, err := m.ledger.CreditOnceHeld(ctx, requestID, cacheOwnerWorkspace, earning, TypeCacheMine, desc, m.holdbackWindow, meta)
 	return err
 }
 

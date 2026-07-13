@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,6 +56,9 @@ func cacheLinkHarness(t *testing.T, verified ...string) (*pgxpool.Pool, *CacheMi
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (workspace_id, fingerprint_hash))`,
 		`CREATE TABLE workspace_owner_links (workspace_id TEXT NOT NULL, owner_key TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (workspace_id, owner_key))`,
+		`CREATE TABLE traffic_mint_holds (request_id TEXT NOT NULL, workspace_id TEXT NOT NULL, mint_type TEXT NOT NULL,
+			minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (request_id, workspace_id, mint_type))`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -71,7 +75,18 @@ func cacheLinkHarness(t *testing.T, verified ...string) (*pgxpool.Pool, *CacheMi
 	return pool, miner
 }
 
+// cacheBal reads the HELD balance — Phase-1 Item 1: cache mints land HELD, not
+// spendable, so the earned rate accrues to held_balance until the finalize sweeper.
 func cacheBal(t *testing.T, pool *pgxpool.Pool, ws string) int64 {
+	t.Helper()
+	var b int64
+	_ = pool.QueryRow(context.Background(),
+		`SELECT COALESCE((SELECT held_balance FROM lens_token_balances WHERE workspace_id=$1),0)`, ws).Scan(&b)
+	return b
+}
+
+// cacheSpendable reads the SPENDABLE balance (0 until finalize).
+func cacheSpendable(t *testing.T, pool *pgxpool.Pool, ws string) int64 {
 	t.Helper()
 	var b int64
 	_ = pool.QueryRow(context.Background(),
@@ -125,5 +140,78 @@ func TestCacheHit_UnlinkedWorkspaces_StillGetCrossRate_Integration(t *testing.T)
 	if got := cacheBal(t, pool, "wsA"); got != CacheHitCrossWorkspace {
 		t.Fatalf("wsA credited %d, want %d — an HONEST cross-workspace hit (unlinked) must still get the cross rate (no over-block)",
 			got, CacheHitCrossWorkspace)
+	}
+}
+
+// Phase-1 Item 1 + Item 3 RED PROOF: a cache mint lands HELD (not spendable) and
+// becomes spendable ONLY after the window + finalize. Before the fix it landed
+// SPENDABLE immediately (cacheSpendable would be the rate, not 0). Also proves the
+// finalize sweeper settles it and GetTotalSupply counts the finalized cache_mine.
+func TestCacheHit_MintsHeld_FinalizesAfterWindow_Integration(t *testing.T) {
+	pool, miner := cacheLinkHarness(t, "wsA")
+	ctx := context.Background()
+	miner.SetHoldbackWindow(time.Millisecond) // due almost immediately for the sweep
+
+	if err := miner.RecordCacheHit(ctx, "wsA", "wsB", "exact", "req-held-1"); err != nil {
+		t.Fatalf("RecordCacheHit: %v", err)
+	}
+	if held := cacheBal(t, pool, "wsA"); held != CacheHitCrossWorkspace {
+		t.Fatalf("wsA held=%d, want %d (mint must land HELD)", held, CacheHitCrossWorkspace)
+	}
+	if sp := cacheSpendable(t, pool, "wsA"); sp != 0 {
+		t.Fatalf("wsA spendable=%d, want 0 — a held mint is NOT spendable before finalize (was: minted spendable immediately)", sp)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM traffic_mint_holds WHERE request_id='req-held-1'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "held" {
+		t.Fatalf("hold status=%q, want held", status)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	sw := NewTrafficMintSweeper(pool, miner.ledger)
+	if n, err := sw.RunOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("sweep finalized n=%d err=%v, want 1", n, err)
+	}
+	if sp := cacheSpendable(t, pool, "wsA"); sp != CacheHitCrossWorkspace {
+		t.Fatalf("wsA spendable after finalize=%d, want %d", sp, CacheHitCrossWorkspace)
+	}
+	if held := cacheBal(t, pool, "wsA"); held != 0 {
+		t.Fatalf("wsA held after finalize=%d, want 0", held)
+	}
+	if supply, _ := miner.ledger.GetTotalSupply(ctx); supply != CacheHitCrossWorkspace {
+		t.Fatalf("supply=%d, want %d (finalized mint counted as cache_mine)", supply, CacheHitCrossWorkspace)
+	}
+}
+
+// The CLAWBACK surface Phase 2 needs: RevokeHeldTxAs reverses a held mint before finalize.
+func TestCacheHit_HeldMint_RevocableBeforeFinalize_Integration(t *testing.T) {
+	pool, miner := cacheLinkHarness(t, "wsA")
+	ctx := context.Background()
+	miner.SetHoldbackWindow(time.Hour) // stays held
+
+	if err := miner.RecordCacheHit(ctx, "wsA", "wsB", "exact", "req-revoke-1"); err != nil {
+		t.Fatal(err)
+	}
+	if held := cacheBal(t, pool, "wsA"); held != CacheHitCrossWorkspace {
+		t.Fatalf("pre-revoke held=%d, want %d", held, CacheHitCrossWorkspace)
+	}
+	tx, _ := pool.Begin(ctx)
+	if _, err := tx.Exec(ctx, `UPDATE traffic_mint_holds SET status='revoked' WHERE request_id='req-revoke-1' AND status='held'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := miner.ledger.RevokeHeldTxAs(ctx, tx, "wsA", CacheHitCrossWorkspace, TypePoolRoyaltyRevoked, "revoked: gamed", nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = tx.Commit(ctx)
+	if held := cacheBal(t, pool, "wsA"); held != 0 {
+		t.Fatalf("post-revoke held=%d, want 0 (burned)", held)
+	}
+	if sp := cacheSpendable(t, pool, "wsA"); sp != 0 {
+		t.Fatalf("post-revoke spendable=%d, want 0", sp)
+	}
+	if supply, _ := miner.ledger.GetTotalSupply(ctx); supply != 0 {
+		t.Fatalf("post-revoke supply=%d, want 0 (a revoked held mint never entered supply)", supply)
 	}
 }

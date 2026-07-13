@@ -74,7 +74,9 @@ func (s *LedgerStore) SetMintVerifier(v MintVerifier) { s.verifier = v }
 // cap (the SUM's `type = ANY($mintTypeList)`) read it — never a second copy, so
 // they cannot diverge (TestMintTypeList_IsSingleSource pins this).
 var mintTypeList = []string{
-	TypeCacheMine,
+	TypeCacheMineHeld, // Phase-1 Item 1: cache mints HELD; the mint MOMENT is cache_mine_held
+	// (gated + rate-capped here). The counted cache_mine row is written at finalize
+	// (settlement, NOT a mint moment) so it stays OUT of this list — mirrors pool_royalty.
 	TypeComputeMine,
 	TypeEmbeddingMine,
 	TypeAnnotationMine,
