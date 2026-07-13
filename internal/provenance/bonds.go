@@ -220,22 +220,38 @@ func (m *BondManager) SettleBond(ctx context.Context, bondID string) (outcome st
 // slashUsableVerdict returns a slash-usable verdict for outputID that was reported by the bonder (bondWS).
 // The bonder-match is defense-in-depth: combined with 0085 ownership (only the owner can report a verdict on
 // an output) and CreateBond's ownership check (a bond is only on the bonder's own output), the ONLY thing
-// that can authorize a burn is the bonder's OWN self-reported failure. Workspace B can neither report a
-// verdict on A's output nor slash A's bond.
+// that can authorize a burn is the bonder's OWN self-reported failure OR Talyvor's OWN attested failure.
+// Workspace B can neither report a verdict on A's output nor slash A's bond.
+//
+// ATTESTED-COMPILED BLOCK: if Talyvor's OWN sandbox attested that the output COMPILES (talyvor_verified +
+// compiled), NO slash may occur — Talyvor's reproduced fact beats a self-reported failure, in the workspace's
+// FAVOUR (the safe direction: never burn when our own build says the code is fine). Only the attestor writes
+// talyvor_verified, so this cannot be forged.
 func slashUsableVerdict(ctx context.Context, tx pgx.Tx, outputID, bondWS string) (verdict, source string, ok bool) {
 	rows, err := tx.Query(ctx, `SELECT verdict, verdict_source, workspace_id FROM k4_mechanical_verdicts WHERE output_id=$1`, outputID)
 	if err != nil {
 		return "", "", false
 	}
 	defer rows.Close()
+	var sV, sS string
+	var haveSlash, attestedCompiled bool
 	for rows.Next() {
 		var v, s, vws string
 		if err := rows.Scan(&v, &s, &vws); err != nil {
 			return "", "", false
 		}
-		if vws == bondWS && outputverify.IsSlashUsable(v, s) {
-			return v, s, true
+		if vws != bondWS {
+			continue
+		}
+		if s == outputverify.SourceTalyvorVerified && v == outputverify.MechCompiled {
+			attestedCompiled = true
+		}
+		if !haveSlash && outputverify.IsSlashUsable(v, s) {
+			sV, sS, haveSlash = v, s, true
 		}
 	}
-	return "", "", false
+	if attestedCompiled {
+		return "", "", false // Talyvor reproduced a successful compile → block the slash.
+	}
+	return sV, sS, haveSlash
 }

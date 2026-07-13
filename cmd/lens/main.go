@@ -34,6 +34,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/api"
+	"github.com/talyvor/lens/internal/attest"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/audit"
 	"github.com/talyvor/lens/internal/auth"
@@ -43,6 +44,7 @@ import (
 	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
+	"github.com/talyvor/lens/internal/buildverify"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
@@ -1117,6 +1119,11 @@ func run() error {
 	// edit can never route it to a replica). Endpoints are registered ONLY when LENS_H5_BONDS_ENABLED — off =
 	// no bond surface, no locks, no slashes, zero behavior change. 0/0 → default 72h appeal window, 100% slash.
 	bondManager := provenance.NewBondManager(pool, tokenLedger, 0, 0)
+	// STEP 3 — the attested-slash PRODUCER. Talyvor's OWN sandboxed compile (buildverify) reproduces a bonded
+	// output's build; attest records ONLY a trustworthy compile verdict as talyvor_verified (admin-only,
+	// PRIMARY pool). Default-off (LENS_H5_ATTEST_ENABLED). See attest.NewAttestor in the moneyAuthzTx list.
+	buildVerifier := buildverify.NewVerifier(cfg.H5AttestEnabled)
+	attestor := attest.NewAttestor(pool, buildVerifier, cfg.H5AttestEnabled)
 	outputVerdictReader := outputverify.NewReader(pool)
 	// K4 CODE LOOP — the ownership-bound mechanical report-back writer (reads k4_output_verdicts to verify the
 	// caller produced the output_id, writes k4_mechanical_verdicts). PRIMARY pool — no replica reader.
@@ -1360,6 +1367,11 @@ func run() error {
 	if cfg.H5BondsEnabled {
 		r.Handle("/v1/admin/bonds/{bond_id}/settle", requireAdmin(authManager,
 			newBondSettleHandler(bondManager)))
+	}
+	// STEP 3 — reproduce-before-burn: Talyvor's own sandboxed compile of a bonded output. ADMIN-ONLY; a
+	// workspace can never reach it. Registered only when LENS_H5_ATTEST_ENABLED.
+	if cfg.H5AttestEnabled {
+		r.Handle("/v1/admin/attest/{output_id}", requireAdmin(authManager, newAttestHandler(attestor)))
 	}
 
 	apiServer := api.NewServer(

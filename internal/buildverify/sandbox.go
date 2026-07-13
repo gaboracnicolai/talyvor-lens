@@ -46,7 +46,7 @@ var containerEnv = []string{
 
 // dockerRunArgs builds the FULL hardened `docker run` argument vector for one contained command. Every
 // containment control lives here; there is no code path that runs the command without these.
-func dockerRunArgs(srcDir, image string, lim Limits, argv []string) []string {
+func dockerRunArgs(srcDir, image string, lim Limits, argv []string, extraEnv ...string) []string {
 	args := []string{
 		"run", "--rm",
 		"--network=none",        // NO network egress
@@ -63,6 +63,9 @@ func dockerRunArgs(srcDir, image string, lim Limits, argv []string) []string {
 		"-w", "/src",
 	}
 	for _, e := range containerEnv { // explicit allow-list ONLY
+		args = append(args, "-e", e)
+	}
+	for _, e := range extraEnv { // GOOS/GOARCH for cross-platform agreement — also hermeticity controls
 		args = append(args, "-e", e)
 	}
 	args = append(args, image)
@@ -86,16 +89,16 @@ func hostCLIEnv() []string {
 // combined output, and a non-nil err ONLY for a sandbox/infra failure (couldn't start, timed out, or was
 // killed by a resource limit) — as opposed to the inner command merely exiting non-zero, which is reported
 // via exit. The distinction lets Verify avoid emitting a verdict when the SANDBOX (not the compiler) failed.
-func (v *Verifier) runContained(ctx context.Context, srcDir string, argv []string) (exit int, output string, infraErr error) {
+func (v *Verifier) runContained(ctx context.Context, srcDir string, argv []string, extraEnv ...string) (exit int, output string, infraErr error) {
 	cctx, cancel := context.WithTimeout(ctx, v.limits.Timeout)
 	defer cancel()
 
 	// v.docker is a trusted binary path (LookPath/config); the args are STATIC hardened flags + a
-	// Talyvor-created temp srcDir path + a hard-coded argv. The UNTRUSTED source tree never enters argv — it
-	// is mounted read-only at /src and built INSIDE the container — so no untrusted input can alter the
-	// command. Running a container runtime is the entire purpose of this package.
+	// Talyvor-created temp srcDir path + a hard-coded argv + KEY=VALUE GOOS/GOARCH. The UNTRUSTED source tree
+	// never enters argv — it is mounted read-only at /src and built INSIDE the container — so no untrusted
+	// input can alter the command. Running a container runtime is the entire purpose of this package.
 	//nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd := exec.CommandContext(cctx, v.docker, dockerRunArgs(srcDir, v.image, v.limits, argv)...)
+	cmd := exec.CommandContext(cctx, v.docker, dockerRunArgs(srcDir, v.image, v.limits, argv, extraEnv...)...)
 	cmd.Env = hostCLIEnv() // host CLI env is a minimal allow-list, never os.Environ
 
 	out, err := cmd.CombinedOutput()

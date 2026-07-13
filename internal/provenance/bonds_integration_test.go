@@ -517,6 +517,53 @@ func TestBond_AttestedPass_Releases(t *testing.T) {
 	}
 }
 
+// ATTESTED COMPILED BLOCKS the self-reported slash — Talyvor's own build says it compiles, so a
+// self-reported failure must NOT burn (in the workspace's favour). The bond RELEASES with full collateral.
+func TestBond_AttestedCompiledBlocksSelfReportedSlash(t *testing.T) {
+	ctx := context.Background()
+	pool := bondTestPool(t)
+	m := newManager(pool)
+	const A, oid = "ws-block", "oid-block"
+	seedBalance(t, pool, A, 5_000_000)
+	seedOwnedOutput(t, pool, A, oid)
+	// the workspace self-reported a failure...
+	seedMechVerdict(t, pool, A, oid, outputverify.MechCompileFailed, outputverify.SourceSelfReported)
+	// ...but Talyvor's OWN sandbox reproduced a successful COMPILE.
+	seedMechVerdict(t, pool, A, oid, outputverify.MechCompiled, outputverify.SourceTalyvorVerified)
+	bondID, _, _ := m.CreateBond(ctx, A, oid, 1_000_000)
+	pushDeadlinePast(t, pool, bondID)
+	if o, _ := m.SettleBond(ctx, bondID); o != "released" {
+		t.Errorf("an attested COMPILED must block the self-reported slash; got %q want released", o)
+	}
+	if bal, lk := balanceOf(t, pool, A); bal != 5_000_000 || lk != 0 {
+		t.Errorf("blocked bond returns full collateral: bal=%d locked=%d", bal, lk)
+	}
+	var burns int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM lens_token_ledger WHERE workspace_id=$1 AND type='povi_stake_slash'`, A).Scan(&burns)
+	if burns != 0 {
+		t.Errorf("no burn may occur when Talyvor attests compiled; got %d", burns)
+	}
+}
+
+// An attested compile_failed (talyvor_verified) SLASHES — Talyvor's own build reproduced the failure.
+func TestBond_AttestedCompileFailed_Burns(t *testing.T) {
+	ctx := context.Background()
+	pool := bondTestPool(t)
+	m := newManager(pool)
+	const A, oid = "ws-att-burn", "oid-att-burn"
+	seedBalance(t, pool, A, 5_000_000)
+	seedOwnedOutput(t, pool, A, oid)
+	seedMechVerdict(t, pool, A, oid, outputverify.MechCompileFailed, outputverify.SourceTalyvorVerified)
+	bondID, _, _ := m.CreateBond(ctx, A, oid, 1_000_000)
+	pushDeadlinePast(t, pool, bondID)
+	if o, _ := m.SettleBond(ctx, bondID); o != "slashed" {
+		t.Errorf("an attested compile_failed must burn; got %q", o)
+	}
+	if bal, lk := balanceOf(t, pool, A); bal != 4_000_000 || lk != 0 {
+		t.Errorf("attested slash: bal=%d locked=%d, want 4_000_000/0", bal, lk)
+	}
+}
+
 // TWO SOURCES, ONE BURN — the subtle case. A self_reported AND a talyvor_verified compile_failed coexist for
 // one output (the PK allows it). The bond must still slash EXACTLY ONCE (the status CAS + slash_key
 // idempotency hold regardless of how many slash-usable verdicts exist).

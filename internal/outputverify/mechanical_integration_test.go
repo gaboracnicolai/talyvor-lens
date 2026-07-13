@@ -72,7 +72,8 @@ func TestBreach_MechanicalNoRawContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rows.Close()
-	allowed := map[string]bool{"output_id": true, "workspace_id": true, "verdict": true, "exit_code": true, "tool": true, "reason": true, "verdict_source": true, "created_at": true}
+	// platform (0089) records the toolchain+GOOS/GOARCH of an attested verdict — metadata, not raw content.
+	allowed := map[string]bool{"output_id": true, "workspace_id": true, "verdict": true, "exit_code": true, "tool": true, "reason": true, "verdict_source": true, "created_at": true, "platform": true}
 	for rows.Next() {
 		var col string
 		if err := rows.Scan(&col); err != nil {
