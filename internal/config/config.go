@@ -425,6 +425,12 @@ type Config struct {
 	// import-guarded), never blocks/alters the response, and is intra-tenant only. Env: LENS_K4_VERIFIER_ENABLED.
 	K4VerifierEnabled bool
 
+	// H5BondsEnabled gates H5.β PROVENANCE BONDS — THE MONEY PATH. A workspace stakes collateral on a
+	// gateway-bound output_id; a self-reported mechanical FAILURE (the only slash-usable signal) BURNS a
+	// fraction of the bond (supply reduced, paid to nobody), else time RELEASES it. DEFAULT FALSE: off = no
+	// bond endpoints, no locks, no slashes, zero behavior change. Env: LENS_H5_BONDS_ENABLED.
+	H5BondsEnabled bool
+
 	// NodeLatencyCaptureEnabled gates the DESCRIPTIVE proof-of-latency capture (P3 #6) — a post-serve,
 	// off-path record of gateway-measured node serve latency into a per-(node,cohort) EWMA aggregate
 	// (node_cohort_latency_stats), the substrate a LATER mint reads. CAPABILITY flag, default false: off =
@@ -805,6 +811,7 @@ func Load() (*Config, error) {
 		GuardrailsEnabled:            parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
 		WorkTierEnabled:              parseBoolEnv("LENS_WORKTIER_ENABLED"),
 		K4VerifierEnabled:            parseBoolEnv("LENS_K4_VERIFIER_ENABLED"),
+		H5BondsEnabled:               parseBoolEnv("LENS_H5_BONDS_ENABLED"),
 		NodeLatencyCaptureEnabled:    parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
 		NodeAttestationVerifyEnabled: parseBoolEnv("LENS_NODE_ATTESTATION_VERIFY_ENABLED"),
 

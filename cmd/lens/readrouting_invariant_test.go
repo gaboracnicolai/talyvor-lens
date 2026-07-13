@@ -84,6 +84,7 @@ func TestReadReplicaWiring_MoneyAuthzNeverReceiveReplica(t *testing.T) {
 		"poolroyalty.NewAdjudicationWriter",
 		"poolroyalty.NewFinalizeSweeper",
 		"oracle.New",
+		"provenance.NewBondManager", // H5.β — provenance bonds; slash BURNS collateral (the money path)
 	}
 	for _, line := range strings.Split(src, "\n") {
 		if !strings.Contains(line, "replicaPool") && !strings.Contains(line, "dbrouting.ReadPool") {
