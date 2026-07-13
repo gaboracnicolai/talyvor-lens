@@ -1,11 +1,11 @@
--- 0082_sec2_lxc_integer_ulxc.sql
+-- 0083_sec2_lxc_integer_ulxc.sql
 --
 -- SEC-2, LXC side. LXC is a USD-pegged one-way compute credit; the code has
 -- always rounded LXC to 6 decimals (roundTo(_,6)), so its operative smallest unit
 -- is 1e-6 LXC — the micro-LXC (µLXC): 1 LXC = 1_000_000 µLXC (BIGINT). Same 1e6
 -- scale as µLENS. Converting the LXC ledger + balances + purchase/agent-budget
 -- columns to BIGINT µLXC makes LXC accounting exact and conserving, matching the
--- LENS side (0081).
+-- LENS side (0082).
 --
 -- Tier-3 USD stays integer cents where it already is (lxc_purchases.usd_cents is
 -- already BIGINT; the LXC peg LXCUSDValue = $0.10 is a Tier-2 constant in code).

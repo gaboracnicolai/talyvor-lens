@@ -1,4 +1,4 @@
--- 0081_sec2_lens_integer_ulens.sql
+-- 0082_sec2_lens_integer_ulens.sql
 --
 -- SEC-2 (WATCHED money-path change): convert every CONSERVED LENS amount from
 -- DOUBLE PRECISION to BIGINT counting the token's SMALLEST UNIT — the micro-LENS
