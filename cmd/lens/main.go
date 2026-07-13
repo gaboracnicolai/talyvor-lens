@@ -1091,6 +1091,9 @@ func run() error {
 	outputVerdictWriter := outputverify.NewWriter(pool)
 	p.SetOutputVerifier(outputVerdictWriter, func() bool { return cfg.K4VerifierEnabled })
 	outputVerdictReader := outputverify.NewReader(pool)
+	// K4 CODE LOOP — the ownership-bound mechanical report-back writer (reads k4_output_verdicts to verify the
+	// caller produced the output_id, writes k4_mechanical_verdicts). PRIMARY pool — no replica reader.
+	mechanicalVerdictWriter := outputverify.NewMechanicalWriter(pool)
 
 	// P3 #6: the DESCRIPTIVE node-latency capture sink (default-off, mint-free — writes the aggregate the
 	// future latency mint reads; RunOnce/capture no-ops while the flag is off).
@@ -1454,6 +1457,9 @@ func run() error {
 		// K4 output verdicts — WORKSPACE-SCOPED read: a tenant sees ONLY its OWN verdicts (scoped to the
 		// authenticated WorkspaceID; never another's). Intra-tenant by construction.
 		authed.Get("/v1/output-verdicts", newOutputVerdictsWorkspaceHandler(authManager, outputVerdictReader))
+		// K4 CODE LOOP — the producing workspace self-reports a MECHANICAL verdict (compiled/tests) for an
+		// output it produced. Ownership-bound (only the producer, per k4_output_verdicts) + append-only.
+		authed.Post("/v1/output-verdicts/{output_id}/mechanical", newMechanicalVerdictHandler(authManager, mechanicalVerdictWriter))
 		authed.Post("/v1/proxy/mistral/*", p.HandleExtraProvider("mistral"))
 		authed.Post("/v1/proxy/groq/*", p.HandleExtraProvider("groq"))
 		authed.Post("/v1/proxy/vllm/*", p.HandleExtraProvider("vllm"))

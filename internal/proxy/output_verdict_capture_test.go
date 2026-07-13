@@ -56,4 +56,10 @@ func TestOutputVerdict_OffPath_ZeroCost_And_Records(t *testing.T) {
 	if len(on.rec.OutputID) != 64 {
 		t.Errorf("output_id must be a bound sha256 hex; got %q", on.rec.OutputID)
 	}
+	// HEADER == STORED: the X-Talyvor-Output-Id header the caller receives is derived by the SAME helper
+	// with the SAME inputs, so it EQUALS the stored verdict row's output_id (the id the report-back keys on).
+	wantID, _, _ := deriveOutputID("ws", "m", "prompt", badResp, time.Unix(1_700_000, 0))
+	if on.rec.OutputID != wantID {
+		t.Errorf("stored output_id must equal the header-derived id; stored=%q header=%q", on.rec.OutputID, wantID)
+	}
 }
