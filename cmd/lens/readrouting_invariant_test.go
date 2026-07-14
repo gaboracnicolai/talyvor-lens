@@ -71,6 +71,7 @@ func TestReadReplicaWiring_MoneyAuthzNeverReceiveReplica(t *testing.T) {
 		"billing.New",               // T2 — Stripe credit / wsExists / ensureCustomer
 		"workspace.New",             // config feeds cache-pooling privacy (authz-adjacent)
 		"attribution.NewStore",      // writer (INSERT request_attribution)
+		"routedecision.NewWriter",   // KEEL econ — descriptive WRITER (INSERT routing_decisions); must stay on primary, never the replica
 		"economy.NewDualTokenStore", // T3 GetLXCBalance + mint/convert
 		"economy.NewRateEngine",
 		"economy.NewMarketplaceStore",

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -162,6 +163,21 @@ func reputationFactor(r float64) float64 {
 // at startup. A constraint that only ever REDUCES a mint, so wiring it is harmless.
 func (s *LedgerStore) SetReputationGate(gate func() bool) { s.reputationGate = gate }
 
+// HaircutFloor is the hard lower bound on the KE-2 drift haircut: a drifting contributor earns at least this
+// fraction of its bonded royalty — NEVER nothing, NEVER negative. PLACEHOLDER — calibrate at N3. The money
+// path enforces this bound regardless of what the injected haircut func returns, so a buggy oracle can never
+// zero a contributor out.
+const HaircutFloor = 0.5
+
+// SetDriftHaircut wires KE-2: a REDUCE-ONLY haircut on bonded reuse royalties, keyed to a workspace's
+// sustained HARDENED idiosyncratic Keel drift. nil ⇒ total no-op (byte-identical mint). The func reads on the
+// caller's tx (so mining imports no keel) and returns a factor; the money path CLAMPS it to [HaircutFloor,
+// 1.0] and FAILS OPEN (no haircut) on any error — it can only ever LOWER a mint, never increase it, never
+// burn or slash. Default-off until N3 (it changes money).
+func (s *LedgerStore) SetDriftHaircut(f func(ctx context.Context, tx pgx.Tx, workspaceID string) (float64, error)) {
+	s.driftHaircut = f
+}
+
 // reputationBondedAmount returns the EFFECTIVE (≤ base) mint amount for a bonded mint type, reading R
 // on the caller's tx (consistent within the mint). Returns base unchanged with NO db read when the
 // gate is off or txType is non-bonded (byte-identical-off). Returns ErrReputationFloor when R<floor
@@ -190,6 +206,29 @@ func (s *LedgerStore) reputationBondedAmount(ctx context.Context, tx pgx.Tx, wor
 	// (MulFloor) so the haircut never mints a sub-µLENS the workspace didn't earn;
 	// the dropped remainder is simply not minted (retained by the protocol).
 	eff := MulFloor(base, f)
+	// KE-2 (REDUCE-ONLY): apply Keel's hardened idiosyncratic drift haircut AFTER the reputation factor. It
+	// can only LOWER eff, never below HaircutFloor, never increase it, and never burn/slash. FAIL-OPEN: any
+	// read error → NO haircut (hf=1.0), logged. The clamp guarantees the bound regardless of the oracle.
+	if s.driftHaircut != nil {
+		hf, herr := s.driftHaircut(ctx, tx, workspaceID)
+		if herr != nil {
+			slog.Warn("mining: drift haircut read failed (fail-open; no haircut applied)",
+				slog.String("workspace", workspaceID), slog.String("err", herr.Error()))
+			hf = 1.0
+		}
+		if hf > 1.0 {
+			hf = 1.0 // NEVER increase a mint
+		}
+		if hf < HaircutFloor {
+			hf = HaircutFloor // NEVER below the floor
+		}
+		if hf < 1.0 {
+			eff = MulFloor(eff, hf)
+			if metadata != nil {
+				metadata["drift_haircut_factor"] = hf
+			}
+		}
+	}
 	if metadata != nil {
 		metadata["reputation_base_ulens"] = base
 		metadata["reputation_score"] = r
