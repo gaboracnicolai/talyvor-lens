@@ -80,18 +80,30 @@ func (r *Reader) CohortObservations(ctx context.Context, windowSeconds int64, si
 // ListFindings reads recorded findings newest-first (the requireAdmin read surface). Query-only. Every row
 // names only a SELF workspace + aggregates, so an admin forensic read exposes no counterparty raw value.
 const listFindingsSQL = `
-SELECT workspace_id, unit, window_bucket, deviation_sigma, attribution, cohort_n, first_seen_at
+SELECT workspace_id, unit, window_bucket, deviation_sigma, attribution, mode, cohort_n, first_seen_at
 FROM keel_findings
 ORDER BY first_seen_at DESC
 LIMIT $1`
 
-// ListedFinding is the admin read projection.
+// listFindingsForWorkspaceSQL is the TENANT read: ONLY the caller's own rows (WHERE workspace_id = $1), hitting
+// the (workspace_id, first_seen_at DESC) index from migration 0080. Same projection as the admin read.
+const listFindingsForWorkspaceSQL = `
+SELECT workspace_id, unit, window_bucket, deviation_sigma, attribution, mode, cohort_n, first_seen_at
+FROM keel_findings
+WHERE workspace_id = $1
+ORDER BY first_seen_at DESC
+LIMIT $2`
+
+// ListedFinding is the read projection (admin + tenant). mode ('ordinary'|'hardened') and attribution
+// ('idiosyncratic'|'common_mode') are both surfaced so a reader can tell a money-grade hardened finding from
+// an ordinary one, and an idiosyncratic drift from a shared regression.
 type ListedFinding struct {
 	WorkspaceID    string    `json:"workspace_id"`
 	Unit           string    `json:"unit"`
 	Window         int64     `json:"window"`
 	DeviationSigma float64   `json:"deviation_sigma"`
 	Attribution    string    `json:"attribution"`
+	Mode           string    `json:"mode"`
 	CohortN        int       `json:"cohort_n"`
 	FirstSeenAt    time.Time `json:"first_seen_at"`
 }
@@ -111,7 +123,32 @@ func (r *Reader) ListFindings(ctx context.Context, limit int) ([]ListedFinding, 
 	var out []ListedFinding
 	for rows.Next() {
 		var f ListedFinding
-		if err := rows.Scan(&f.WorkspaceID, &f.Unit, &f.Window, &f.DeviationSigma, &f.Attribution, &f.CohortN, &f.FirstSeenAt); err != nil {
+		if err := rows.Scan(&f.WorkspaceID, &f.Unit, &f.Window, &f.DeviationSigma, &f.Attribution, &f.Mode, &f.CohortN, &f.FirstSeenAt); err != nil {
+			return nil, fmt.Errorf("keel: scan finding: %w", err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// ListFindingsForWorkspace reads ONLY workspaceID's own findings, newest-first. The scope is the caller's
+// authenticated workspace — never a request param. Query-only.
+func (r *Reader) ListFindingsForWorkspace(ctx context.Context, workspaceID string, limit int) ([]ListedFinding, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := r.db.Query(ctx, listFindingsForWorkspaceSQL, workspaceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("keel: list findings for workspace: %w", err)
+	}
+	defer rows.Close()
+	var out []ListedFinding
+	for rows.Next() {
+		var f ListedFinding
+		if err := rows.Scan(&f.WorkspaceID, &f.Unit, &f.Window, &f.DeviationSigma, &f.Attribution, &f.Mode, &f.CohortN, &f.FirstSeenAt); err != nil {
 			return nil, fmt.Errorf("keel: scan finding: %w", err)
 		}
 		out = append(out, f)
