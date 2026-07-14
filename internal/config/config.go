@@ -336,6 +336,17 @@ type Config struct {
 	LXCAgentAllocationEnabled bool          // LENS_LXC_AGENT_ALLOCATION_ENABLED (default TRUE)
 	DetectorSweepWindow       time.Duration // LENS_DETECTOR_SWEEP_WINDOW (default 24h)
 
+	// AntiGaming* gate the Phase-2 AUTO clawback: the leader-elected sweep that detects
+	// self-dealing RINGS (transitive identity closure over held cross-tenant royalty mints)
+	// and REVOKES them before settlement, via the durable Adjudicate path. Unlike the
+	// read-only smoke detector, this one ACTS — so it is DEFAULT-OFF (a detector that wrongly
+	// revokes is worse than none; turning it on is a Phase-4 decision, after calibration). The
+	// scheduler starts iff EconomyEnabled; RunOnce is a total no-op unless AntiGamingAutoRevokeEnabled.
+	// FAIL-CLOSED: a detector error aborts the tick with no clawback (never a partial revoke).
+	AntiGamingAutoRevokeEnabled bool          // LENS_ANTIGAMING_AUTO_REVOKE_ENABLED (default FALSE)
+	AntiGamingScanWindow        time.Duration // LENS_ANTIGAMING_SCAN_WINDOW (default 168h — must exceed the 72h holdback so every held row is scanned)
+	AntiGamingInterval          time.Duration // LENS_ANTIGAMING_INTERVAL (default 1m — frequent, to catch rings well before finalize)
+
 	// Keel* gate the U25 cross-tenant DRIFT-ATTRIBUTION sweep — DEFAULT-OFF capability flag (mint-free,
 	// descriptive, read-only; NOT force-off because it never touches money). Thresholds are PLACEHOLDERS —
 	// calibrate at N3 turn-on; synthetic data proved only the mechanism, never these values.
@@ -1303,6 +1314,32 @@ func Load() (*Config, error) {
 		}
 		c.DetectorSweepWindow = d
 	}
+
+	// Anti-gaming AUTO clawback (Phase 2) — DEFAULT-OFF. Unlike the read-only smoke detector,
+	// this one revokes; it ships inert and is turned on deliberately after calibration (Phase 4).
+	c.AntiGamingAutoRevokeEnabled = false
+	if os.Getenv("LENS_ANTIGAMING_AUTO_REVOKE_ENABLED") != "" {
+		c.AntiGamingAutoRevokeEnabled = parseBoolEnv("LENS_ANTIGAMING_AUTO_REVOKE_ENABLED")
+	}
+	// Scan window default 168h — MUST exceed the 72h holdback so every currently-held row is
+	// scanned (a shorter window would let an old held ring slip past the detector to finalize).
+	c.AntiGamingScanWindow = 168 * time.Hour
+	if v := os.Getenv("LENS_ANTIGAMING_SCAN_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_ANTIGAMING_SCAN_WINDOW (Go duration > 0, e.g. 168h): %s", v)
+		}
+		c.AntiGamingScanWindow = d
+	}
+	c.AntiGamingInterval = time.Minute
+	if v := os.Getenv("LENS_ANTIGAMING_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_ANTIGAMING_INTERVAL (Go duration > 0, e.g. 1m): %s", v)
+		}
+		c.AntiGamingInterval = d
+	}
+
 	c.PoolRoyaltyShare = 0.5
 	if v := os.Getenv("LENS_POOL_ROYALTY_SHARE"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)

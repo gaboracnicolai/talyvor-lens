@@ -886,6 +886,46 @@ func run() error {
 				detectorSweep.StartScheduler(lctx, cfg.DetectorSweepInterval)
 			}
 		})
+
+		// Phase-2 anti-gaming AUTO clawback — the leader-elected sweep that detects
+		// self-dealing RINGS (transitive identity closure over held cross-tenant royalty
+		// mints — the case the pairwise mint-time guard misses) and REVOKES them before
+		// settlement, through the SAME durable Adjudicate path the admin endpoint uses
+		// (record-before-revoke + the exactly-once Revoker). Unlike the read-only smoke
+		// detector above, this one ACTS — so it is DEFAULT-OFF: this EconomyEnabled block
+		// only starts the loop; RunOnce is a total no-op until AntiGamingAutoRevokeEnabled
+		// is set (a Phase-4 decision, after threshold calibration). FAIL-CLOSED: a detector
+		// error aborts the tick with no clawback (never a partial revoke).
+		antiGamingAdjudicator := poolroyalty.NewAutoAdjudicator(
+			poolroyalty.NewRingDetector(pool, "pool_royalty_mints"),
+			poolroyalty.NewAdjudicationWriter(pool, poolroyalty.NewRevoker(pool, tokenLedger)),
+			func() bool { return cfg.AntiGamingAutoRevokeEnabled },
+			cfg.AntiGamingScanWindow,
+		)
+		go haComps.leader.Run(ctx, "antigaming-auto-adjudicate", 30*time.Second, func(lctx context.Context) {
+			antiGamingAdjudicator.StartScheduler(lctx, cfg.AntiGamingInterval)
+		})
+
+		// The SAME auto clawback over distill_royalty_mints — the other cross-tenant reuse
+		// faucet where a self-dealing ring can form (contributor↔requester). Reuses the
+		// identical parameterized detector (both tables expose contributor_workspace_id +
+		// requester_workspace_id + status + finalize_after) and the already-tested distill
+		// Revoker/AdjudicationWriter (distill_royalty_adjudications). Same default-OFF gate,
+		// same fail-closed. The single-party P-o-I tables (eval/routing/latency/confidential)
+		// and traffic_mint_holds have no contributor↔requester edge — no ring shape — so they
+		// are out of the ring detector's scope (see report: Sybil-cluster detection is the
+		// follow-on for those, and they are inert today).
+		distillAntiGaming := poolroyalty.NewAutoAdjudicator(
+			poolroyalty.NewRingDetector(pool, "distill_royalty_mints"),
+			poolroyalty.NewAdjudicationWriterForTable(pool,
+				poolroyalty.NewRevokerForTable(pool, tokenLedger, "distill_royalty_mints"),
+				"distill_royalty_adjudications"),
+			func() bool { return cfg.AntiGamingAutoRevokeEnabled },
+			cfg.AntiGamingScanWindow,
+		)
+		go haComps.leader.Run(ctx, "antigaming-auto-adjudicate-distill", 30*time.Second, func(lctx context.Context) {
+			distillAntiGaming.StartScheduler(lctx, cfg.AntiGamingInterval)
+		})
 	}
 
 	// Compute mining (Batch 2 Item 2). Wires its hook into the
