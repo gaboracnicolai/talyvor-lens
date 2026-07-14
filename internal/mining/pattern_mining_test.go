@@ -163,7 +163,17 @@ func TestRecordPattern_CreditsOptedInWorkspace(t *testing.T) {
 			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", true, micro(0.001)).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).
 			AddRow("p1", time.Now()))
-	expectApplyTx(mock, "ws_opt", 0, 0, 0, micro(0.001), micro(0.001), micro(0.001), 0) // credit 0.001 (unchanged effect)
+	// Phase-4a Item 1: credit is HELD (pattern_mine_held) + a traffic_mint_holds row.
+	expectHeldRead(mock, "ws_opt", 0, 0, 0)
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_opt", micro(0.001), int64(0), TypePatternMineHeld, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_opt", int64(0), micro(0.001), int64(0)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("INSERT INTO traffic_mint_holds").
+		WithArgs("req1", "ws_opt", TypePatternMine, micro(0.001), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM routing_patterns").
 		WithArgs("ws_opt", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1))) // 1 ≤ default cap 50000

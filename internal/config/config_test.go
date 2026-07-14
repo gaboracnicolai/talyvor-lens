@@ -526,8 +526,8 @@ func TestLoad_PoolRoyaltyDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.PoolRoyaltyMintingEnabled {
-		t.Error("PoolRoyaltyMintingEnabled should default to false (Stage 2.1 is inert by default)")
+	if !c.PoolRoyaltyMintingEnabled {
+		t.Error("Phase-4a: PoolRoyaltyMintingEnabled DEFAULTS TRUE for the closed test (force-off'd when EconomyEnabled=false)")
 	}
 	if c.PoolRoyaltyShare != 0.5 {
 		t.Errorf("PoolRoyaltyShare = %v, want 0.5 (DefaultRoyaltyShare)", c.PoolRoyaltyShare)
@@ -849,21 +849,22 @@ func TestLoad_PatternEarnCapDefaultsAndParses(t *testing.T) {
 	}
 }
 
-func TestLoad_PatternEarningEnabledDefaultsOffAndParses(t *testing.T) {
+func TestLoad_PatternEarningEnabledDefaultsOnAndParses(t *testing.T) {
 	setRequiredEnv(t)
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.PatternEarningEnabled {
-		t.Error("PatternEarningEnabled must DEFAULT FALSE (earning is the live-path flip — inert until enabled)")
+	if !c.PatternEarningEnabled {
+		t.Error("Phase-4a: PatternEarningEnabled DEFAULTS TRUE for the closed test (force-off'd when EconomyEnabled=false)")
 	}
-	t.Setenv("LENS_PATTERN_EARNING_ENABLED", "true")
+	// Env can still turn it OFF (ops override).
+	t.Setenv("LENS_PATTERN_EARNING_ENABLED", "false")
 	c2, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !c2.PatternEarningEnabled {
-		t.Error("LENS_PATTERN_EARNING_ENABLED=true must enable the flag")
+	if c2.PatternEarningEnabled {
+		t.Error("LENS_PATTERN_EARNING_ENABLED=false must disable the flag")
 	}
 }

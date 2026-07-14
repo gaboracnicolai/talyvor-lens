@@ -689,29 +689,14 @@ func run() error {
 			return royaltyhaircut.Factor(ctx, tx, workspaceID, minBucket)
 		})
 	}
-	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
-	cacheMiner.SetOwnerLinkageCheck(true) // Phase-1: self-deal guard armed (parity with the royalty minters), ready if a value-backed serve path ever calls it
-	// Phase-1 Item 3 FINDING — cacheMiner is deliberately NOT called from the
-	// serve path. Its held-routing (CreditOnceHeld), owner-linkage guard,
-	// earn-verified gate and rate cap are ALL built and RED-proven at the
-	// RecordCacheHit level (internal/mining) — the miner is ready. But every
-	// serve path reachable today would MISPRICE value:
-	//   • cross-tenant pooled hit → pool-royalty ALREADY mints s×avoided_COGS to
-	//     the contributor here (mintPooledRoyalty, proxy.go), through the SAME
-	//     held + linkage + gate + cap machinery. A cacheMiner cross-rate call at
-	//     the same serve point would DOUBLE-MINT for one served response.
-	//   • own-cache hit (owner==requester, the only non-pooled path — tryExact/
-	//     trySemantic use the workspace-PREFIXED key) → the tiny same-workspace
-	//     rate is a self-payment for reusing your own cache: no realized
-	//     cross-party value, contra the "every royalty ↔ real value received"
-	//     doctrine. Reusing your own cache already avoids your own COGS; paying
-	//     LENS on top is double-dipping inflation (bounded by the rate cap, but
-	//     still value-less).
-	// So the cross-tenant cache-serving reward this miner was designed for is
-	// already delivered — better — by pool-royalty, and there is no other
-	// value-backed path to wire. Left constructed (stats endpoint uses it) and
-	// NOT minting. Retire-or-repurpose is a Phase-4 design call; see report.
-	_ = cacheMiner
+	// Phase-4a Item 0: the CacheMiner is RETIRED (removed, not left constructed).
+	// The cache moat — a contributor earning when their cached work is reused
+	// cross-tenant — is DELIVERED by pool-royalty (mintPooledRoyalty at the pooled
+	// serve points, s×avoided_COGS, held+examined+clawback-guarded). CacheMiner's
+	// cross-tenant rates duplicated that (and would double-mint if wired at the same
+	// serve point); its only unique path — own-cache minting (owner==requester) — is
+	// self-inflation (no second party, no value RECEIVED) and trivially farmable in a
+	// single-workspace loop no linkage guard can see. So it is superseded, not needed.
 
 	// Phase-2 Stage 2.1 Pool-B royalty mint: a SERVED cross-tenant pooled hit
 	// mints s × avoided_COGS to the contributing tenant, exactly once per
@@ -775,16 +760,53 @@ func run() error {
 	// the pool-royalty finalize sweeper: leader-elected, minute tick, registered
 	// UNCONDITIONALLY (EconomyEnabled-gated START) so any committed held row settles
 	// even if the producing mint is later disabled — otherwise held LENS strands
-	// forever. No producer is LIVE today: cache is deliberately unwired (the
-	// cacheMiner finding above), and the compute/embedding node mints route to held
-	// (Phase-3) but their producers stay dormant until the node network lands
-	// (compute's NotifyServed hook has no caller; embeddingMiner is unwired). So with
-	// no held rows each sweep is a single cheap indexed SELECT.
+	// forever. Producers of traffic_mint_holds rows: cache is RETIRED (Phase-4a
+	// Item 0 — superseded by pool-royalty); the pattern mint routes here HELD
+	// (Phase-4a Item 1, mint_type=pattern_mine); the compute/embedding node mints
+	// route to held (Phase-3) but stay dormant until the node network lands
+	// (compute's NotifyServed hook has no caller; embeddingMiner is unwired).
 	trafficMintSweeper := mining.NewTrafficMintSweeper(pool, tokenLedger)
+	// Phase-4a Items 3+4: the fail-closed layer for the single-party traffic mints
+	// (the pattern held mint). When SettlementFailClosedEnabled, the sweeper settles
+	// ONLY 'cleared' rows, and the TrafficSettlementClearer promotes examined-clean-
+	// due held→cleared using the single-party concentration detector (velocity spike
+	// ⇒ flagged ⇒ never cleared ⇒ withheld from settlement). An un-examined held row
+	// is never cleared → never settles (fail-closed). DEFAULT-ON for the closed test;
+	// byte-identical (settle 'held') when off. Over pattern_mine (the live single-party
+	// mint); the dormant compute/embedding node mints share the same table + guard.
+	if cfg.SettlementFailClosedEnabled {
+		trafficMintSweeper.SetSettleStatus("cleared")
+	}
+	patternConcentrationDetector := mining.NewSinglePartyConcentrationDetector(
+		pool, mining.TypePatternMine, cfg.PatternConcentrationVelocityMax, time.Hour)
+	trafficClearer := mining.NewTrafficSettlementClearer(
+		patternConcentrationDetector, pool,
+		func() bool { return cfg.SettlementFailClosedEnabled }, cfg.AntiGamingScanWindow)
+	// Phase-4a Item 4: detector health. maxStale = 15× the sweep interval — a stall
+	// past that flips unhealthy (fail-closed strands mints; the stall must not be
+	// silent). Exposed on the gauge lens_detector_last_run_age_seconds + the health
+	// endpoint below; PublishAge ticks it between runs so a stall keeps rising.
+	patternDetectorHealth := mining.NewDetectorHealth("traffic-pattern-clearer", 15*cfg.AntiGamingInterval)
+	trafficClearer.SetHealth(patternDetectorHealth)
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "traffic-mint-finalize", 30*time.Second, func(lctx context.Context) {
 			trafficMintSweeper.StartScheduler(lctx, time.Minute)
 		})
+		go haComps.leader.Run(ctx, "traffic-settlement-clearer", 30*time.Second, func(lctx context.Context) {
+			trafficClearer.StartScheduler(lctx, cfg.AntiGamingInterval)
+		})
+		go func() { // publish detector staleness on a tick so a stall is visible between runs
+			t := time.NewTicker(cfg.AntiGamingInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					patternDetectorHealth.PublishAge()
+				}
+			}
+		}()
 	}
 
 	// L2/S4 PR3: the distill reuse-royalty mint. A flag-gated, leader-elected
@@ -1153,10 +1175,12 @@ func run() error {
 	// PatternMiningEnabled flag ANDs with the per-workspace
 	// opt-in before earnings fire (RecordPattern's optedIn arg).
 	patternMiner := mining.NewPatternMiner(tokenLedger, pool)
-	// S2 routing-pattern earn cap — overrides the miner's real default from
-	// config. INERT this stage: RecordPattern (the earn path the cap guards) has
-	// no production caller until S4, so the cap never runs live yet.
+	// S2 routing-pattern earn cap — overrides the miner's real default from config.
 	patternMiner.SetEarnCap(cfg.PatternEarnCapPerWorkspace, cfg.PatternEarnCapWindow)
+	// Phase-4a Item 1: pattern mint lands HELD (traffic_mint_holds, mint_type=pattern_mine)
+	// and finalizes after the holdback window — the same held+examined+settle path as
+	// pool/distill, so the single-party concentration guard can examine it before settle.
+	patternMiner.SetHoldbackWindow(cfg.PoolHoldbackWindow)
 
 	// Routing intelligence (Upgrade 22). Consumes the opted-in pattern
 	// aggregate to recommend best quality-per-dollar models. OFF by default;
@@ -1388,7 +1412,7 @@ func run() error {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"cache": mining.Rates(),
+				// "cache" retired (Phase-4a Item 0 — superseded by pool-royalty).
 				"compute": map[string]any{
 					"base_per_1k_tokens_ulens": mining.ComputeMineBaseRate, // µLENS (SEC-2)
 					"multiplier_cpu":           mining.GPUMultiplierCPU,
@@ -2436,15 +2460,8 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, res)
 		})
 
-		econ.get(authed, "/v1/workspaces/{wsID}/tokens/mining/cache", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			stats, err := cacheMiner.GetMiningStats(req.Context(), wsID)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, stats)
-		})
+		// Phase-4a Item 0: the /tokens/mining/cache stats endpoint was RETIRED with the
+		// CacheMiner (it summarized a never-produced cache_mine track — always zero).
 
 		econ.get(authed, "/v1/workspaces/{wsID}/tokens/mining/compute", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")

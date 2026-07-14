@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/talyvor/lens/internal/metrics"
 )
 
 // Phase-1 / Phase-3 Item 1 — the holdback window for the CreditOnce traffic mints.
@@ -30,6 +32,11 @@ const (
 	TypeCacheMineHeld     = "cache_mine_held"
 	TypeComputeMineHeld   = "compute_mine_held"
 	TypeEmbeddingMineHeld = "embedding_mine_held"
+	// TypePatternMineHeld is the held mint moment for the pattern mint (Phase-4a
+	// Item 1: pattern was rerouted CreditTx→CreditHeldTx into traffic_mint_holds).
+	// heldTypeFor(TypePatternMine) == this; the counted TypePatternMine is written
+	// at finalize.
+	TypePatternMineHeld = "pattern_mine_held"
 )
 
 const insertTrafficHoldSQL = `
@@ -86,26 +93,47 @@ func (s *LedgerStore) CreditOnceHeld(ctx context.Context, requestID, workspaceID
 
 // ─── finalize sweeper over traffic_mint_holds ─────────────────────────────────
 
-const trafficSweepSelectSQL = `SELECT request_id, workspace_id, mint_type, minted_amount
+// settleStatus is the status the sweeper settles FROM: 'held' by default (today's
+// behavior, byte-identical) or 'cleared' when the Phase-4a fail-closed layer is
+// armed (SetSettleStatus) — then an un-examined 'held' traffic row never settles.
+// Both `status` literals are trusted internal constants, so the fmt.Sprintf is
+// injection-safe (mirrors poolroyalty.sweeper).
+func trafficSweepSelectSQLFor(settleStatus string) string {
+	return fmt.Sprintf(`SELECT request_id, workspace_id, mint_type, minted_amount
 FROM traffic_mint_holds
-WHERE status = 'held' AND finalize_after < now()
+WHERE status = '%s' AND finalize_after < now()
 ORDER BY finalize_after
-LIMIT 500`
+LIMIT 500`, settleStatus)
+}
 
-const trafficSweepCASSQL = `UPDATE traffic_mint_holds SET status = 'final'
-WHERE request_id = $1 AND workspace_id = $2 AND mint_type = $3 AND status = 'held'`
+func trafficSweepCASSQLFor(settleStatus string) string {
+	return fmt.Sprintf(`UPDATE traffic_mint_holds SET status = 'final'
+WHERE request_id = $1 AND workspace_id = $2 AND mint_type = $3 AND status = '%s'`, settleStatus)
+}
 
 // TrafficMintSweeper settles due held traffic mints (held → spendable), finalizing
 // each to its OWN counted mint_type via FinalizeHeldTxAs. The CAS held→final makes
 // concurrent sweeps settle each row exactly once — the same shape as the
 // pool-royalty FinalizeSweeper, over traffic_mint_holds. A nil pool is a no-op.
 type TrafficMintSweeper struct {
-	pool   pgxDB
-	ledger *LedgerStore
+	pool         pgxDB
+	ledger       *LedgerStore
+	settleStatus string // 'held' (default) or 'cleared' (Phase-4a fail-closed)
 }
 
 func NewTrafficMintSweeper(pool pgxDB, ledger *LedgerStore) *TrafficMintSweeper {
-	return &TrafficMintSweeper{pool: pool, ledger: ledger}
+	return &TrafficMintSweeper{pool: pool, ledger: ledger, settleStatus: "held"}
+}
+
+// SetSettleStatus arms the Phase-4a fail-closed layer for traffic mints: status
+// 'cleared' makes the sweeper settle ONLY rows the single-party clearer examined
+// and promoted; an un-examined held row never finalizes. 'held' (default) is
+// byte-identical to pre-Phase-4a. Any other value is ignored (defense in depth).
+func (s *TrafficMintSweeper) SetSettleStatus(status string) {
+	if s == nil || (status != "held" && status != "cleared") {
+		return
+	}
+	s.settleStatus = status
 }
 
 // RunOnce settles every currently-due held row and returns the count finalized.
@@ -113,7 +141,7 @@ func (s *TrafficMintSweeper) RunOnce(ctx context.Context) (int, error) {
 	if s == nil || s.pool == nil {
 		return 0, nil
 	}
-	rows, err := s.pool.Query(ctx, trafficSweepSelectSQL)
+	rows, err := s.pool.Query(ctx, trafficSweepSelectSQLFor(s.settleStatus))
 	if err != nil {
 		return 0, fmt.Errorf("mining: traffic sweep select: %w", err)
 	}
@@ -141,7 +169,7 @@ func (s *TrafficMintSweeper) RunOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return n, fmt.Errorf("mining: traffic finalize begin: %w", err)
 		}
-		tag, err := tx.Exec(ctx, trafficSweepCASSQL, d.requestID, d.workspaceID, d.mintType)
+		tag, err := tx.Exec(ctx, trafficSweepCASSQLFor(s.settleStatus), d.requestID, d.workspaceID, d.mintType)
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return n, fmt.Errorf("mining: traffic finalize CAS: %w", err)
@@ -161,6 +189,9 @@ func (s *TrafficMintSweeper) RunOnce(ctx context.Context) (int, error) {
 		if err := tx.Commit(ctx); err != nil {
 			return n, fmt.Errorf("mining: traffic finalize commit: %w", err)
 		}
+		// The mint enters circulation NOW (the counted mint_type row was committed) —
+		// emit MintedTokens here, not at the held mint moment (Phase-4a Item 1).
+		metrics.MintedTokens(MicroToFloat(d.amount))
 		slog.Info("mining: traffic mint finalized (held → spendable)",
 			slog.String("workspace", d.workspaceID), slog.String("type", d.mintType), slog.Int64("amount_ulens", d.amount))
 		n++

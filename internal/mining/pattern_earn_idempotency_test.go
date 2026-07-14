@@ -82,7 +82,7 @@ func TestRecordPattern_CrossWorkspace_BothCredit_Integration(t *testing.T) {
 			t.Fatalf("workspace %s must hold its own claim for the shared request_id; got %d", ws, claims)
 		}
 		var bal float64
-		if err := pool.QueryRow(ctx, `SELECT balance FROM lens_token_balances WHERE workspace_id=$1`, ws).Scan(&bal); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT held_balance FROM lens_token_balances WHERE workspace_id=$1`, ws).Scan(&bal); err != nil {
 			t.Fatal(err)
 		}
 		if bal <= 0 {
@@ -124,7 +124,7 @@ func TestRecordPattern_ConcurrentDuplicate_ExactlyOne_Integration(t *testing.T) 
 		t.Fatalf("concurrent duplicate must claim EXACTLY once; got %d", claims)
 	}
 	var bal int64
-	if err := pool.QueryRow(ctx, `SELECT balance FROM lens_token_balances WHERE workspace_id='ws_dup'`).Scan(&bal); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT held_balance FROM lens_token_balances WHERE workspace_id='ws_dup'`).Scan(&bal); err != nil {
 		t.Fatal(err)
 	}
 	if bal != PatternBaseRate {
@@ -163,7 +163,7 @@ func TestRecordPattern_OverCap_RollsBackClaim_RetryReEarns_Integration(t *testin
 		t.Fatalf("a capped earn must leave NO orphan claim for req-B; got %d", bClaims)
 	}
 	var bal int64
-	if err := pool.QueryRow(ctx, `SELECT balance FROM lens_token_balances WHERE workspace_id='ws_c'`).Scan(&bal); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT held_balance FROM lens_token_balances WHERE workspace_id='ws_c'`).Scan(&bal); err != nil {
 		t.Fatal(err)
 	}
 	if bal != PatternBaseRate {
@@ -176,7 +176,7 @@ func TestRecordPattern_OverCap_RollsBackClaim_RetryReEarns_Integration(t *testin
 	if err := miner.RecordPattern(ctx, "ws_c", earnPattern(), true, "req-B"); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT balance FROM lens_token_balances WHERE workspace_id='ws_c'`).Scan(&bal); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT held_balance FROM lens_token_balances WHERE workspace_id='ws_c'`).Scan(&bal); err != nil {
 		t.Fatal(err)
 	}
 	if bal != 2*PatternBaseRate {

@@ -165,6 +165,14 @@ var (
 		[]string{"economy", "detector"},
 	)
 
+	// DetectorLastRunAgeSeconds is the seconds since a detector/settlement-clearer last
+	// ran (Phase-4a Item 4). Under settlement fail-closed a stalled detector strands
+	// mints, so a rising age must be alertable (e.g. alert if > 15m). 0 on a fresh run.
+	DetectorLastRunAgeSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "lens_detector_last_run_age_seconds", Help: "Seconds since the named detector/clearer last ran — a stall signal for the fail-closed settlement layer."},
+		[]string{"detector"},
+	)
+
 	// AnnotationReputationEvents counts reputation_events appended, by kind
 	// (agreement_outcome|decay|admin_reset) — so reputation movement is observable
 	// (collusion-visibility). Reputation is money-decoupled; this is observe-only.
@@ -345,7 +353,7 @@ func init() {
 		BudgetSpentUSD, BudgetUtilizationRatio,
 		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
 		ForecastProjectedUSD, ForecastWillExceedTotal,
-		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged, AnnotationReputationEvents,
+		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged, DetectorLastRunAgeSeconds, AnnotationReputationEvents,
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal, RoutingTierGatedTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
@@ -446,6 +454,11 @@ func SetAnomalyMaxFactor(scope string, v float64) {
 // after a sweep — including 0, so the gauge reflects the current picture.
 func SetRoyaltyDetectorFlagged(economy, detector string, n float64) {
 	RoyaltyDetectorFlagged.WithLabelValues(economy, detector).Set(n)
+}
+
+// SetDetectorLastRunAgeSeconds publishes the staleness of a named detector/clearer.
+func SetDetectorLastRunAgeSeconds(detector string, ageSeconds float64) {
+	DetectorLastRunAgeSeconds.WithLabelValues(detector).Set(ageSeconds)
 }
 
 // IncAnnotationReputationEvent counts one appended reputation event of the given kind.

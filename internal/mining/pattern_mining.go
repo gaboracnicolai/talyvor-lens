@@ -24,8 +24,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/talyvor/lens/internal/metrics"
 )
 
 // ─── constants ───────────────────────────────────
@@ -214,6 +212,11 @@ type PatternMiner struct {
 	// RecordPattern has no production caller yet, so the cap never runs live.
 	earnCapPerWorkspace int
 	earnCapWindow       time.Duration
+
+	// Phase-4a Item 1: the mint lands HELD (traffic_mint_holds, mint_type=pattern_mine)
+	// and finalizes after this window — the same held+examined+settle path as
+	// pool/distill. Default 72h (mirrors PoolHoldbackWindow); main wires the config.
+	holdbackWindow time.Duration
 }
 
 // DefaultPatternEarnCapPerWorkspace bounds manufactured-volume abuse of the
@@ -232,6 +235,17 @@ func NewPatternMiner(ledger *LedgerStore, pool pgxDB) *PatternMiner {
 		pool:                pool,
 		earnCapPerWorkspace: DefaultPatternEarnCapPerWorkspace,
 		earnCapWindow:       24 * time.Hour,
+		holdbackWindow:      72 * time.Hour, // Phase-4a Item 1: pattern mint lands HELD, finalizes after this
+	}
+}
+
+// SetHoldbackWindow sets the held→spendable delay for the pattern mint (Phase-4a
+// Item 1). Non-positive keeps the 72h default. The mint lands HELD in
+// traffic_mint_holds and the traffic finalize sweeper settles it after this
+// window (examinable + revocable before then), exactly like pool/distill.
+func (m *PatternMiner) SetHoldbackWindow(d time.Duration) {
+	if d > 0 {
+		m.holdbackWindow = d
 	}
 }
 
@@ -475,11 +489,25 @@ func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p 
 		"latency_bucket":    p.LatencyBucket,
 		"rarity":            p.Rarity,
 	}
-	// Credit IN-TX (CreditTx, not Credit) — identical balance effect, but it
-	// takes the lens_token_balances FOR UPDATE that the cap COUNT below rides.
-	if err := m.ledger.CreditTx(ctx, tx, workspaceID, earned, TypePatternMine,
-		"pattern shared", meta); err != nil {
-		return fmt.Errorf("pattern mining: credit: %w", err)
+	// Phase-4a Item 1: credit HELD IN-TX (CreditHeldTx → pattern_mine_held, the
+	// gated + rate-capped mint moment) instead of spendable, and claim a
+	// traffic_mint_holds row (mint_type=pattern_mine) so the finalize sweeper settles
+	// it after the holdback window and the single-party concentration guard can
+	// EXAMINE it before settle — the same held+examined guarantee as pool/distill.
+	// Both writes ride THIS tx, so an over-cap rollback below discards the held
+	// credit AND the hold row atomically (the earn-cap exactness is unchanged — it
+	// counts routing_patterns rows, not the ledger type). CreditHeldTx still takes
+	// the balance FOR UPDATE the cap COUNT rides.
+	if err := m.ledger.CreditHeldTx(ctx, tx, workspaceID, earned, TypePatternMineHeld,
+		"pattern shared (held)", meta); err != nil {
+		return fmt.Errorf("pattern mining: held credit: %w", err)
+	}
+	window := m.holdbackWindow
+	if window <= 0 {
+		window = 72 * time.Hour
+	}
+	if _, err := tx.Exec(ctx, insertTrafficHoldSQL, requestID, workspaceID, TypePatternMine, earned, window.Microseconds()); err != nil {
+		return fmt.Errorf("pattern mining: insert traffic hold: %w", err)
 	}
 
 	// Per-window earn cap. Over cap → return nil WITHOUT commit: the deferred
@@ -500,9 +528,9 @@ func (m *PatternMiner) RecordPattern(ctx context.Context, workspaceID string, p 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("pattern mining: commit: %w", err)
 	}
-	// MintedTokens AFTER commit only — fires on a durable credit, never on a
-	// capped/rolled-back one (CreditTx, unlike Credit, doesn't emit it).
-	metrics.MintedTokens(MicroToFloat(earned))
+	// Phase-4a Item 1: NO MintedTokens here — the credit is HELD, not yet in
+	// circulation. The traffic finalize sweeper emits MintedTokens when it settles
+	// this pattern_mine_held → pattern_mine (held → spendable).
 	return nil
 }
 

@@ -26,16 +26,16 @@ func TestMintTypes_GateSet(t *testing.T) {
 	// counted base rows are written at finalize (asserted NOT gated below).
 	for _, ty := range []string{
 		TypeCacheMineHeld, TypeComputeMineHeld, TypeEmbeddingMineHeld, TypeAnnotationMine,
-		TypePatternMine, "receipt_mine_provisional", TypePoolRoyaltyHeld, TypeEvalContributionHeld,
+		TypePatternMineHeld, "receipt_mine_provisional", TypePoolRoyaltyHeld, TypeEvalContributionHeld,
 	} {
 		if !IsMintType(ty) {
 			t.Errorf("%q must be a gated mint type", ty)
 		}
 	}
-	// The counted cache/compute/embedding rows are written at finalize (settlement)
-	// — NOT a mint moment, so they must NOT be gated (else finalize double-gates the
-	// already-gated held mint).
-	for _, ty := range []string{TypeCacheMine, TypeComputeMine, TypeEmbeddingMine} {
+	// The counted cache/compute/embedding/pattern rows are written at finalize
+	// (settlement) — NOT a mint moment, so they must NOT be gated (else finalize
+	// double-gates the already-gated held mint). Phase-4a: pattern joined this set.
+	for _, ty := range []string{TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypePatternMine} {
 		if IsMintType(ty) {
 			t.Errorf("%q is the finalize/settlement type — must NOT be gated (its _held type is the mint moment)", ty)
 		}
