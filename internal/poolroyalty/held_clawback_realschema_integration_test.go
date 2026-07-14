@@ -11,13 +11,15 @@ import (
 )
 
 // Phase-3 Item 2 — a revoker for EVERY held table, proven against the REAL
-// production column types (migrations use minted_amount DOUBLE PRECISION for the
-// six family tables and BIGINT for traffic_mint_holds — the existing poolroyalty
-// test schemas all use BIGINT, so the real-type revoke/finalize path is unproven).
-// These harnesses use the migration types so a green here means green in prod.
+// production column types. Prod minted_amount is BIGINT µLENS for ALL the mint
+// tables: migration 0082 (SEC-2) ALTERed the six family tables from their
+// pre-0082 DOUBLE CREATE to BIGINT (0082:84-89), and traffic_mint_holds was born
+// BIGINT (0090). (Phase-4-PRE fix: this harness previously declared DOUBLE on the
+// stale belief that prod was DOUBLE — it passed only via pgx int64↔double
+// coercion, masking that it exercised a type prod does not use. Now it matches.)
 
 // familyRevokeHarness builds a dedicated-schema pool with the ledger tables and
-// ONE family mint table whose minted_amount is DOUBLE PRECISION (as in prod).
+// ONE family mint table whose minted_amount is BIGINT µLENS (as in prod, post-0082).
 func familyRevokeHarness(t *testing.T, mintTable string) (*pgxpool.Pool, *mining.LedgerStore) {
 	t.Helper()
 	url := os.Getenv("LENS_TEST_DATABASE_URL")
@@ -44,9 +46,9 @@ func familyRevokeHarness(t *testing.T, mintTable string) (*pgxpool.Pool, *mining
 			amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
-		// The mint table — minted_amount DOUBLE PRECISION, matching the real migration.
+		// The mint table — minted_amount BIGINT µLENS, matching the real migration (0082).
 		`CREATE TABLE ` + mintTable + ` (request_id TEXT PRIMARY KEY, contributor_workspace_id TEXT NOT NULL,
-			minted_amount DOUBLE PRECISION NOT NULL, status TEXT NOT NULL DEFAULT 'held',
+			minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held',
 			finalize_after TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	}
 	for _, ddl := range ddls {
@@ -66,7 +68,7 @@ func heldClawbackBal(t *testing.T, pool *pgxpool.Pool, ws string) int64 {
 }
 
 // seedFamilyHeldMint credits held balance (the mint effect) AND writes the claim
-// row with the real DOUBLE minted_amount, so a revoke exercises the real path.
+// row with the real BIGINT µLENS minted_amount, so a revoke exercises the real path.
 func seedFamilyHeldMint(t *testing.T, pool *pgxpool.Pool, ledger *mining.LedgerStore, mintTable, reqID, contributor, heldType string, amount int64) {
 	t.Helper()
 	ctx := context.Background()
@@ -108,6 +110,21 @@ func TestHeldClawback_FamilyTables_RevocableBeforeFinalize_RealSchema(t *testing
 		t.Run(c.table, func(t *testing.T) {
 			pool, ledger := familyRevokeHarness(t, c.table)
 			ctx := context.Background()
+			// The harness schema must exercise the REAL production type. Prod
+			// minted_amount is BIGINT µLENS (migration 0082 converted the six family
+			// tables from their pre-0082 DOUBLE CREATE). Assert it here so the test
+			// CATCHES a type divergence instead of coercing an int64 through a DOUBLE
+			// column and passing regardless.
+			var mintedType string
+			if err := pool.QueryRow(ctx,
+				`SELECT data_type FROM information_schema.columns
+				 WHERE table_schema='lens_heldclawback_test' AND table_name=$1 AND column_name='minted_amount'`,
+				c.table).Scan(&mintedType); err != nil {
+				t.Fatalf("read minted_amount type: %v", err)
+			}
+			if mintedType != "bigint" {
+				t.Fatalf("%s.minted_amount is %q, want bigint — the harness must match prod (0082 µLENS), not the stale pre-0082 DOUBLE", c.table, mintedType)
+			}
 			seedFamilyHeldMint(t, pool, ledger, c.table, "rid-1", "wsN", c.heldType, 50_000)
 			if held := heldClawbackBal(t, pool, "wsN"); held != 50_000 {
 				t.Fatalf("pre-revoke held=%d, want 50000", held)

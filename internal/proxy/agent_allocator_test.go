@@ -28,17 +28,17 @@ func agentAllocHarness(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.
 	}
 	t.Cleanup(pool.Close)
 	for _, ddl := range []string{
-		`CREATE TABLE IF NOT EXISTS lxc_balances (workspace_id TEXT PRIMARY KEY, balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-			lifetime_minted DOUBLE PRECISION NOT NULL DEFAULT 0, lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0,
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
-		`CREATE TABLE IF NOT EXISTS lxc_ledger (id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL,
-			balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
-			metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+		`CREATE TABLE IF NOT EXISTS lxc_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			lifetime_minted BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`, // BIGINT µLXC (prod 0083)
+		`CREATE TABLE IF NOT EXISTS lxc_ledger (id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, amount BIGINT NOT NULL,
+			balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+			metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`, // BIGINT µLXC (prod 0083)
 		`CREATE TABLE IF NOT EXISTS agent_lxc_subbudgets (scoped_key_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
-			ceiling_lxc DOUBLE PRECISION NOT NULL DEFAULT 50, spent_lxc DOUBLE PRECISION NOT NULL DEFAULT 0,
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+			ceiling_lxc BIGINT NOT NULL DEFAULT 50000000, spent_lxc BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`, // BIGINT µLXC + default 50 LXC = 50_000_000 µLXC (prod 0083:34-37)
 		`CREATE TABLE IF NOT EXISTS lxc_spend_claims (request_id TEXT PRIMARY KEY, scoped_key_id TEXT NOT NULL,
-			lxc_amount DOUBLE PRECISION NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+			lxc_amount BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`, // BIGINT µLXC (prod 0083)
 		`TRUNCATE lxc_balances, lxc_ledger, agent_lxc_subbudgets, lxc_spend_claims`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {

@@ -26,7 +26,7 @@ func earnTestPool(t *testing.T) *pgxpool.Pool {
 		`DROP TABLE IF EXISTS lxc_purchases`,
 		`DROP TABLE IF EXISTS workspaces`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount DOUBLE PRECISION NOT NULL DEFAULT 0)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0)`, // BIGINT µLXC (matches prod 0083)
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			t.Fatalf("schema: %v", err)

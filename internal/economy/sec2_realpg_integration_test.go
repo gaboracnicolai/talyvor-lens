@@ -72,16 +72,31 @@ func TestSEC2_RealPG_LedgerRoundTripThroughMigratedSchema(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// (0) the physical column types must be BIGINT after 0081/0082 — the whole point.
+	// (0) the physical column types must be BIGINT after 0081/0082/0083 — the whole
+	// point. This is the AUTHORITATIVE divergence-catcher: it reads the REAL migrated
+	// schema, so ANY conserved money column shipping DOUBLE (a new mint table born
+	// float, a reverted ALTER) goes RED here — the systemic backstop the per-file test
+	// DDL duplication otherwise lacks. Phase-4-PRE: extended to EVERY held-mint table's
+	// minted_amount (was only pool_royalty_mints) + the balances/ledger/stake/lxc set.
 	for _, c := range []struct{ table, col string }{
 		{"lens_token_ledger", "amount"}, {"lens_token_ledger", "balance_after"},
 		{"lens_token_balances", "balance"}, {"lens_token_balances", "held_balance"},
 		{"lens_token_balances", "locked_balance"},
-		{"lxc_balances", "balance"}, {"lxc_ledger", "amount"},
+		{"lens_token_balances", "lifetime_earned"}, {"lens_token_balances", "lifetime_spent"},
+		{"lxc_balances", "balance"}, {"lxc_ledger", "amount"}, {"lxc_ledger", "balance_after"},
+		{"lxc_purchases", "lxc_amount"}, {"lxc_spend_claims", "lxc_amount"},
+		{"agent_lxc_subbudgets", "ceiling_lxc"}, {"agent_lxc_subbudgets", "spent_lxc"},
 		{"annotator_stakes", "staked"}, {"stake_positions", "amount"},
-		{"marketplace_trades", "talyvor_fee"}, {"povi_stakes", "amount"},
-		{"pool_royalty_mints", "minted_amount"}, {"agent_lxc_subbudgets", "ceiling_lxc"},
-		{"lxc_purchases", "lxc_amount"},
+		{"marketplace_trades", "talyvor_fee"}, {"marketplace_trades", "amount"},
+		{"povi_stakes", "amount"}, {"povi_stakes", "slashed_amount"},
+		{"routing_patterns", "earned"}, {"pattern_mine_credits", "earned"},
+		{"mint_idempotency", "amount"}, {"provenance_bonds", "amount_ulens"},
+		// EVERY held-mint minted_amount — the crux of this investigation. All eight
+		// must be BIGINT µLENS (six via 0082:84-89, traffic born BIGINT in 0090).
+		{"pool_royalty_mints", "minted_amount"}, {"distill_royalty_mints", "minted_amount"},
+		{"eval_contribution_mints", "minted_amount"}, {"routing_prediction_mints", "minted_amount"},
+		{"node_latency_mints", "minted_amount"}, {"confidential_compute_mints", "minted_amount"},
+		{"traffic_mint_holds", "minted_amount"},
 	} {
 		var typ string
 		if err := pool.QueryRow(ctx,
@@ -90,7 +105,26 @@ func TestSEC2_RealPG_LedgerRoundTripThroughMigratedSchema(t *testing.T) {
 			t.Fatalf("type of %s.%s: %v", c.table, c.col, err)
 		}
 		if typ != "bigint" {
-			t.Errorf("%s.%s is %q, want bigint (SEC-2 migration did not convert it)", c.table, c.col, typ)
+			t.Errorf("%s.%s is %q, want bigint (a conserved LENS/LXC column must be integer µ-units — SEC-2)", c.table, c.col, typ)
+		}
+	}
+
+	// (0b) The DISTINGUISHER: the Tier-3 USD/score columns that SEC-2 deliberately
+	// KEPT as DOUBLE must still be DOUBLE. Pinning both directions proves this guard
+	// genuinely reads the type (it would catch a conserved col drifting to DOUBLE AND
+	// a USD col being wrongly converted to BIGINT) — it is not coercing them together.
+	for _, c := range []struct{ table, col string }{
+		{"pool_royalty_mints", "avoided_cogs_usd"}, {"distill_royalty_mints", "avoided_cogs_usd"},
+		{"routing_prediction_mints", "skill_margin"}, {"inference_nodes", "price_per_token"},
+	} {
+		var typ string
+		if err := pool.QueryRow(ctx,
+			`SELECT data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3`,
+			schema, c.table, c.col).Scan(&typ); err != nil {
+			t.Fatalf("type of %s.%s: %v", c.table, c.col, err)
+		}
+		if typ != "double precision" {
+			t.Errorf("%s.%s is %q, want double precision (a Tier-2/3 USD/rate/score column — SEC-2 keeps these float)", c.table, c.col, typ)
 		}
 	}
 
