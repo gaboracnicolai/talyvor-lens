@@ -347,6 +347,15 @@ type Config struct {
 	AntiGamingScanWindow        time.Duration // LENS_ANTIGAMING_SCAN_WINDOW (default 168h — must exceed the 72h holdback so every held row is scanned)
 	AntiGamingInterval          time.Duration // LENS_ANTIGAMING_INTERVAL (default 1m — frequent, to catch rings well before finalize)
 
+	// SettlementFailClosedEnabled (Phase-3 Item 3) arms the settlement-side fail-closed layer for the
+	// cross-tenant reuse tables (pool_royalty_mints / distill_royalty_mints). When ON: the finalize
+	// sweeper settles ONLY status='cleared' rows, and the settlement clearer promotes ONLY examined-clean-
+	// and-due held rows to 'cleared' — so a held mint the ring detector never examined (detector down /
+	// lagging / the 72h window closed first) is NEVER cleared and NEVER settles (it holds). DEFAULT FALSE
+	// and byte-identical when off (the sweeper settles 'held' as before, the clearer is a total no-op).
+	// Scheduler starts iff EconomyEnabled. Env: LENS_SETTLEMENT_FAIL_CLOSED_ENABLED.
+	SettlementFailClosedEnabled bool // LENS_SETTLEMENT_FAIL_CLOSED_ENABLED (default FALSE)
+
 	// Keel* gate the U25 cross-tenant DRIFT-ATTRIBUTION sweep — DEFAULT-OFF capability flag (mint-free,
 	// descriptive, read-only; NOT force-off because it never touches money). Thresholds are PLACEHOLDERS —
 	// calibrate at N3 turn-on; synthetic data proved only the mechanism, never these values.
@@ -1338,6 +1347,13 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_ANTIGAMING_INTERVAL (Go duration > 0, e.g. 1m): %s", v)
 		}
 		c.AntiGamingInterval = d
+	}
+	// Phase-3 Item 3 settlement fail-closed — DEFAULT FALSE (byte-identical off). Turned on deliberately
+	// (Phase 4), and only alongside the ring detector running healthily, since it withholds settlement from
+	// any un-examined held row. Env: LENS_SETTLEMENT_FAIL_CLOSED_ENABLED.
+	c.SettlementFailClosedEnabled = false
+	if os.Getenv("LENS_SETTLEMENT_FAIL_CLOSED_ENABLED") != "" {
+		c.SettlementFailClosedEnabled = parseBoolEnv("LENS_SETTLEMENT_FAIL_CLOSED_ENABLED")
 	}
 
 	c.PoolRoyaltyShare = 0.5

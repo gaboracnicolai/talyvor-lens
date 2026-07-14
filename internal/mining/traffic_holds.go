@@ -7,13 +7,16 @@ import (
 	"time"
 )
 
-// Phase-1 Item 1 — the holdback window for the CreditOnce traffic mints.
+// Phase-1 / Phase-3 Item 1 — the holdback window for the CreditOnce traffic mints.
 //
-// The cache / compute / embedding mints landed DIRECTLY in spendable balance (no
-// held state ⇒ no clawback surface). This routes them through the SAME proven held
-// machinery pool-royalty uses: land HELD (uncounted) with a finalize window, settle
-// held→spendable via a sweeper, and expose RevokeHeldTxAs for reversal before
-// settlement (the clawback surface the anti-gaming layer needs).
+// The cache / compute / embedding mints previously landed DIRECTLY in spendable
+// balance (no held state ⇒ no clawback surface). They now ALL route through the
+// SAME proven held machinery pool-royalty uses: land HELD (uncounted) with a
+// finalize window, settle held→spendable via a sweeper, and expose RevokeHeldTxAs
+// for reversal before settlement (the clawback surface the anti-gaming layer needs).
+// Cache was routed in Phase-1; compute + embedding — the NODE mints — in Phase-3
+// (RecordServedRequest / RecordEmbeddingsServed → CreditOnceHeld), so when the node
+// network lands, a node mint can never reach spendable un-adjudicated.
 
 // heldTypeFor is the UNCOUNTED ledger type written at the held mint moment for a
 // traffic mint whose COUNTED (final) type is mintType — e.g. "cache_mine" →

@@ -121,51 +121,13 @@ func expectGetNode(mock pgxmock.PgxPoolIface, n InferenceNode) {
 		))
 }
 
-func TestRecordServedRequest_CreditsOwner(t *testing.T) {
-	miner, _, mock := newMockMiner(t)
-
-	node := InferenceNode{
-		ID: "node1", WorkspaceID: "ws_owner", URL: "http://x", Provider: "ollama",
-		Models: []string{"llama3"}, GPUType: "rtx4090", MaxConcurrent: 4,
-		PricePerToken: 0.05, Active: true, Verified: true, CreatedAt: time.Now(),
-	}
-	expectGetNode(mock, node)
-	// 2000 tokens × rtx4090 (1.0×) → 0.10 LENS.
-	expectCreditOnce(mock, "req-1", "ws_owner", TypeComputeMine, 0, 0, 0, micro(0.10), micro(0.10), micro(0.10), 0)
-	// metrics UPDATE
-	mock.ExpectExec("UPDATE node_metrics").
-		WithArgs("node1", 2000, int64(250)).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	if err := miner.RecordServedRequest(context.Background(),
-		"node1", "ws_requester", "req-1", 2000, 250); err != nil {
-		t.Fatalf("RecordServedRequest: %v", err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("expectations: %v", err)
-	}
-}
-
-func TestRecordServedRequest_UsesGPUMultiplier(t *testing.T) {
-	miner, _, mock := newMockMiner(t)
-	node := InferenceNode{
-		ID: "h100node", WorkspaceID: "ws_h", URL: "http://x", Provider: "vllm",
-		Models: []string{"llama3"}, GPUType: "h100", MaxConcurrent: 4,
-		PricePerToken: 0.15, Active: true, Verified: true, CreatedAt: time.Now(),
-	}
-	expectGetNode(mock, node)
-	// 1000 tokens × h100 (3.0×) → 0.15 LENS.
-	expectCreditOnce(mock, "req-1", "ws_h", TypeComputeMine, 0, 0, 0, micro(0.15), micro(0.15), micro(0.15), 0)
-	mock.ExpectExec("UPDATE node_metrics").
-		WithArgs("h100node", 1000, int64(180)).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	if err := miner.RecordServedRequest(context.Background(),
-		"h100node", "ws_requester", "req-1", 1000, 180); err != nil {
-		t.Fatalf("RecordServedRequest: %v", err)
-	}
-}
-
+// The credit-path proofs for RecordServedRequest (owner credited the earned
+// amount, GPU multiplier applied) moved to the real-PG held-routing integration
+// tests (traffic_held_node_mints_integration_test.go) when Phase-3 Item 1 routed
+// the mint through CreditOnceHeld — a held mint is a DB behavior (held vs
+// spendable balance, traffic_mint_holds claim, finalize), so it is proven against
+// a real engine rather than a mock of the settlement SQL. The self-serve guard
+// below stays a fast mock test — it touches no ledger, only the metrics UPDATE.
 func TestRecordServedRequest_NoSelfServing(t *testing.T) {
 	miner, _, mock := newMockMiner(t)
 	node := InferenceNode{

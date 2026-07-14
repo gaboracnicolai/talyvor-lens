@@ -731,6 +731,12 @@ func run() error {
 	// contributor LENS strands in held forever. With minting off and no held
 	// rows, each sweep is a single cheap indexed SELECT.
 	finalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "pool_royalty_mints")
+	// Phase-3 Item 3: when the settlement fail-closed layer is armed, the sweeper
+	// settles ONLY adjudicated-clean ('cleared') rows — an un-examined held row never
+	// finalizes. Default OFF ⇒ 'held' (byte-identical). Paired with the SettlementClearer below.
+	if cfg.SettlementFailClosedEnabled {
+		finalizeSweeper.SetSettleStatus("cleared")
+	}
 	// U3: economy worker — gated on the master switch so no held→final settlement
 	// (an economy-state ledger write) runs when the economy is off.
 	if cfg.EconomyEnabled {
@@ -743,15 +749,18 @@ func run() error {
 			slog.Float64("royalty_share", cfg.PoolRoyaltyShare))
 	}
 
-	// Phase-1 Item 1 (settlement half): the traffic-mint finalize sweeper settles
-	// due held CreditOnceHeld mints (cache/compute/embedding traffic mints) —
-	// held → spendable, per-row CAS on traffic_mint_holds, supply counted here via
-	// the counted final type FinalizeHeldTxAs writes. Mirrors the pool-royalty
-	// finalize sweeper: leader-elected, minute tick, registered UNCONDITIONALLY
-	// (EconomyEnabled-gated START) so any committed held row settles even if the
-	// producing mint is later disabled — otherwise held LENS strands forever. No
-	// producer is wired today (see the cacheMiner finding above), so with no held
-	// rows each sweep is a single cheap indexed SELECT.
+	// Phase-1/3 Item 1 (settlement half): the traffic-mint finalize sweeper settles
+	// due held CreditOnceHeld mints (cache/compute/embedding traffic mints — ALL
+	// three now route to held) — held → spendable, per-row CAS on traffic_mint_holds,
+	// supply counted here via the counted final type FinalizeHeldTxAs writes. Mirrors
+	// the pool-royalty finalize sweeper: leader-elected, minute tick, registered
+	// UNCONDITIONALLY (EconomyEnabled-gated START) so any committed held row settles
+	// even if the producing mint is later disabled — otherwise held LENS strands
+	// forever. No producer is LIVE today: cache is deliberately unwired (the
+	// cacheMiner finding above), and the compute/embedding node mints route to held
+	// (Phase-3) but their producers stay dormant until the node network lands
+	// (compute's NotifyServed hook has no caller; embeddingMiner is unwired). So with
+	// no held rows each sweep is a single cheap indexed SELECT.
 	trafficMintSweeper := mining.NewTrafficMintSweeper(pool, tokenLedger)
 	if cfg.EconomyEnabled {
 		go haComps.leader.Run(ctx, "traffic-mint-finalize", 30*time.Second, func(lctx context.Context) {
@@ -786,6 +795,9 @@ func run() error {
 		logger.Info("proof-of-improvement: capability flag ON — the cost anchor stands for the royalty mints; the held-benchmark anchor is selected ONLY by the eval-contribution minter (instance 1)")
 	}
 	distillFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "distill_royalty_mints")
+	if cfg.SettlementFailClosedEnabled {
+		distillFinalizeSweeper.SetSettleStatus("cleared") // Phase-3 Item 3: settle only adjudicated-clean rows
+	}
 
 	// Proof-of-Improvement instance 1: proof-of-eval-contribution. NewEvalContributionMinter is the SOLE
 	// live caller of HeldBenchmarkAnchor (it constructs it from the rate). INERT by default: rate 0 ⇒ nil
@@ -926,6 +938,27 @@ func run() error {
 		go haComps.leader.Run(ctx, "antigaming-auto-adjudicate-distill", 30*time.Second, func(lctx context.Context) {
 			distillAntiGaming.StartScheduler(lctx, cfg.AntiGamingInterval)
 		})
+
+		// Phase-3 Item 3: the settlement CLEARER. It promotes examined-clean-AND-due held
+		// rows to 'cleared' so the fail-closed FinalizeSweeper (armed above when
+		// SettlementFailClosedEnabled) can settle them; a held row the ring detector never
+		// examined is never cleared → never settles (the fail-closed money guarantee). Reuses
+		// the SAME read-only RingDetector as the auto-adjudicator (examined = the held rows it
+		// scanned this tick; flagged rings excluded). DEFAULT OFF; fail-closed on a detector
+		// error. Same scan window as anti-gaming (MUST exceed the 72h holdback so every held
+		// row is examined before it is due). Over both cross-tenant reuse tables.
+		poolClearer := poolroyalty.NewSettlementClearer(
+			poolroyalty.NewRingDetector(pool, "pool_royalty_mints"), pool, "pool_royalty_mints",
+			func() bool { return cfg.SettlementFailClosedEnabled }, cfg.AntiGamingScanWindow)
+		go haComps.leader.Run(ctx, "settlement-clearer", 30*time.Second, func(lctx context.Context) {
+			poolClearer.StartScheduler(lctx, cfg.AntiGamingInterval)
+		})
+		distillClearer := poolroyalty.NewSettlementClearer(
+			poolroyalty.NewRingDetector(pool, "distill_royalty_mints"), pool, "distill_royalty_mints",
+			func() bool { return cfg.SettlementFailClosedEnabled }, cfg.AntiGamingScanWindow)
+		go haComps.leader.Run(ctx, "settlement-clearer-distill", 30*time.Second, func(lctx context.Context) {
+			distillClearer.StartScheduler(lctx, cfg.AntiGamingInterval)
+		})
 	}
 
 	// Compute mining (Batch 2 Item 2). Wires its hook into the
@@ -933,6 +966,7 @@ func run() error {
 	// cross-workspace request gets credited automatically.
 	computeMiner := mining.NewComputeMiner(tokenLedger, pool)
 	computeMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second, nodeCIDRAllow))
+	computeMiner.SetHoldbackWindow(cfg.PoolHoldbackWindow) // Phase-3 Item 1: node mint lands HELD, finalizes after this window (mirrors cache/royalty)
 	localRouterMulti.SetOnRequestServed(func(nodeID, requesterWS, requestID string, tokens int, latencyMs int64) {
 		// RETIREMENT SWITCH (PoVI Part 3): the LEGACY trust-based mint (mints LENS
 		// per served request, no receipt). U6: now DEFAULT OFF — an unprotected
@@ -1064,6 +1098,7 @@ func run() error {
 	// path in a follow-up.
 	embeddingMiner := mining.NewEmbeddingMiner(tokenLedger, pool)
 	embeddingMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second, nodeCIDRAllow))
+	embeddingMiner.SetHoldbackWindow(cfg.PoolHoldbackWindow) // Phase-3 Item 1: node mint lands HELD, finalizes after this window (mirrors cache/royalty)
 	_ = embeddingMiner
 
 	// Annotation mining (Batch 2 Item 4). Proof-of-useful-work
@@ -1716,6 +1751,28 @@ func run() error {
 		distillRoyaltyRevoker := poolroyalty.NewRevokerForTable(pool, tokenLedger, "distill_royalty_mints")
 		distillRoyaltyAdjudicator := poolroyalty.NewAdjudicationWriterForTable(pool, distillRoyaltyRevoker, "distill_royalty_adjudications")
 		econ.post(authed, "/v1/admin/distill-royalty/adjudicate", newAdjudicateHandler(authManager, distillRoyaltyAdjudicator))
+
+		// Phase-3 Item 2: manual clawback for the FOUR single-party held tables Phase-2
+		// left unreachable (eval-contribution / routing-prediction / node-latency /
+		// confidential-compute). The generic Revoker reaches them unchanged (proven on
+		// the real DOUBLE-PRECISION schema in held_clawback_realschema_integration_test)
+		// — the gap was purely that none was constructed. Same admin-gated, record-
+		// before-revoke AdjudicationWriter, over the shared held_mint_adjudications
+		// audit (0091, target table named in flag_type). Doubly inert today (needs an
+		// admin AND the P-o-I mint rate>0 — no held rows exist otherwise).
+		for _, mt := range []string{"eval_contribution_mints", "routing_prediction_mints", "node_latency_mints", "confidential_compute_mints"} {
+			adj := poolroyalty.NewAdjudicationWriterForTable(pool, poolroyalty.NewRevokerForTable(pool, tokenLedger, mt), "held_mint_adjudications")
+			econ.post(authed, "/v1/admin/held-mints/"+mt+"/adjudicate", newAdjudicateHandler(authManager, adj))
+		}
+
+		// Phase-3 Item 2: manual clawback for traffic_mint_holds (the cache/compute/
+		// embedding NODE mints). The generic Revoker is column-incompatible here
+		// (composite key + workspace_id), so this uses the purpose-built TrafficRevoker
+		// (mining), record-before-revoke over the same shared audit. Keys are composite
+		// "request_id|workspace_id|mint_type". Admin-gated; inert until the node network
+		// produces held rows.
+		trafficRevoker := mining.NewTrafficRevoker(pool, tokenLedger)
+		econ.post(authed, "/v1/admin/held-mints/traffic/adjudicate", newTrafficRevokeHandler(authManager, pool, trafficRevoker))
 
 		// Pool-B royalty OBSERVABILITY (read-only, admin-gated, NOT economy-gated).
 		// Forensic infra must survive the kill-switch — the economy is likeliest OFF

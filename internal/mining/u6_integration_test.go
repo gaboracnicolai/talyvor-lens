@@ -118,7 +118,7 @@ func TestU6Chokepoint_BlocksUnverified_AllowsVerified(t *testing.T) {
 	store.SetMintVerifier(earnverify.New())
 	mustExec(t, pool, `INSERT INTO workspaces (id) VALUES ('ws_u')`) // unverified
 
-	if _, err := store.CreditOnce(ctx, "r1", "ws_u", micro(1.0), TypeComputeMine, "compute", nil); !errors.Is(err, ErrEarnNotVerified) {
+	if _, err := store.CreditOnce(ctx, "r1", "ws_u", micro(1.0), TypeComputeMineHeld, "compute", nil); !errors.Is(err, ErrEarnNotVerified) {
 		t.Fatalf("unverified compute mint must be blocked, got %v", err)
 	}
 	if b := balanceOf(t, pool, "ws_u"); b != 0 {
@@ -126,7 +126,7 @@ func TestU6Chokepoint_BlocksUnverified_AllowsVerified(t *testing.T) {
 	}
 
 	mustExec(t, pool, `UPDATE workspaces SET earn_verified=true WHERE id='ws_u'`) // vouch
-	if _, err := store.CreditOnce(ctx, "r1", "ws_u", micro(1.0), TypeComputeMine, "compute", nil); err != nil {
+	if _, err := store.CreditOnce(ctx, "r1", "ws_u", micro(1.0), TypeComputeMineHeld, "compute", nil); err != nil {
 		t.Fatalf("verified compute mint must succeed, got %v", err)
 	}
 	if b := balanceOf(t, pool, "ws_u"); b != micro(1.0) {
@@ -258,14 +258,14 @@ func TestU6RateCap_BlocksAcrossMintTypes(t *testing.T) {
 	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_cap', true)`)
 
 	// 8 (compute) + micro(1.5) (cache) = micro(9.5) ≤ 10 → both mint.
-	if _, err := store.CreditOnce(ctx, "r1", "ws_cap", micro(8.0), TypeComputeMine, "c", nil); err != nil {
+	if _, err := store.CreditOnce(ctx, "r1", "ws_cap", micro(8.0), TypeComputeMineHeld, "c", nil); err != nil { // Phase-3: compute_mine_held is the gated mint type
 		t.Fatalf("mint 1: %v", err)
 	}
 	if _, err := store.CreditOnce(ctx, "r2", "ws_cap", micro(1.5), TypeCacheMineHeld, "c", nil); err != nil { // Phase-1: cache_mine_held is the gated mint type
 		t.Fatalf("mint 2: %v", err)
 	}
 	// +micro(1.0) (embedding) = micro(10.5) > 10 → BLOCKED (sums across the three different types).
-	if _, err := store.CreditOnce(ctx, "r3", "ws_cap", micro(1.0), TypeEmbeddingMine, "c", nil); !errors.Is(err, ErrMintRateCapExceeded) {
+	if _, err := store.CreditOnce(ctx, "r3", "ws_cap", micro(1.0), TypeEmbeddingMineHeld, "c", nil); !errors.Is(err, ErrMintRateCapExceeded) { // Phase-3: embedding_mine_held
 		t.Fatalf("over-cap mint must be blocked across mint types, got %v", err)
 	}
 	if b := balanceOf(t, pool, "ws_cap"); b != micro(9.5) {
@@ -281,8 +281,9 @@ func TestU6RateCap_HeldMintCapped(t *testing.T) {
 	store := ratecapStore(t, pool, micro(5.0))
 	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_h', true)`)
 
-	// 2 (compute, spendable) + micro(2.5) (held) = micro(4.5) ≤ 5 → both.
-	if _, err := store.CreditOnce(ctx, "r1", "ws_h", micro(2.0), TypeComputeMine, "c", nil); err != nil {
+	// 2 (annotation, spendable) + micro(2.5) (held) = micro(4.5) ≤ 5 → both.
+	// (annotation is still a DIRECT/spendable mint after Phase-3 moved compute to held.)
+	if _, err := store.CreditOnce(ctx, "r1", "ws_h", micro(2.0), TypeAnnotationMine, "c", nil); err != nil {
 		t.Fatalf("spendable mint: %v", err)
 	}
 	if err := heldMint(t, pool, store, "ws_h", micro(2.5)); err != nil {

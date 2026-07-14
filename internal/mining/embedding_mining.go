@@ -143,16 +143,27 @@ func EmbeddingRates() map[string]any {
 // EmbeddingMiner is the persistence + earning engine for
 // embedding mining.
 type EmbeddingMiner struct {
-	ledger     *LedgerStore
-	pool       pgxDB
-	httpClient *http.Client
+	ledger         *LedgerStore
+	pool           pgxDB
+	httpClient     *http.Client
+	holdbackWindow time.Duration // Phase-3 Item 1: the mint lands HELD, finalizes after this (default 72h)
 }
 
 func NewEmbeddingMiner(ledger *LedgerStore, pool pgxDB) *EmbeddingMiner {
 	return &EmbeddingMiner{
-		ledger:     ledger,
-		pool:       pool,
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		ledger:         ledger,
+		pool:           pool,
+		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		holdbackWindow: 72 * time.Hour, // Phase-3 Item 1: default held window (mirrors cache/pool-royalty)
+	}
+}
+
+// SetHoldbackWindow sets the held→spendable delay for embedding mints (Phase-3
+// Item 1). Non-positive keeps the 72h default. The mint lands HELD and the
+// traffic finalize sweeper settles it after this window (revocable before then).
+func (m *EmbeddingMiner) SetHoldbackWindow(d time.Duration) {
+	if d > 0 {
+		m.holdbackWindow = d
 	}
 }
 
@@ -287,7 +298,11 @@ func (m *EmbeddingMiner) RecordEmbeddingsServed(
 		"requesting_workspace": requestingWorkspace,
 	}
 	desc := fmt.Sprintf("embeddings served: %d on %s", embeddingCount, node.Model)
-	_, err = m.ledger.CreditOnce(ctx, requestID, node.WorkspaceID, earning, TypeEmbeddingMine, desc, meta)
+	// Phase-3 Item 1: mint HELD (not spendable), mirroring cache/compute. Writes
+	// the uncounted TypeEmbeddingMineHeld + a traffic_mint_holds claim; the
+	// finalize sweeper settles it to the counted TypeEmbeddingMine after the
+	// window, and it is revocable before then.
+	_, err = m.ledger.CreditOnceHeld(ctx, requestID, node.WorkspaceID, earning, TypeEmbeddingMine, desc, m.holdbackWindow, meta)
 	return err
 }
 
