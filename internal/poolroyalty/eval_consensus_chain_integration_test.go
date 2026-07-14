@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/benchprobe"
+	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/poolroyalty"
 )
@@ -126,7 +127,9 @@ func TestEvalConsensusChain_Acceptance(t *testing.T) {
 	ledger := mining.NewLedgerStore(pool) // nil verifier ⇒ U6 floor no-op (independently tested); consensus focus
 	store := benchprobe.NewStore(pool)
 
-	const rate = 10.0
+	// PRODUCTION rate — bound to the config default (single source of truth), NOT a lookalike literal. A
+	// money-path test at a rate production never uses proves nothing about production.
+	const rate = config.DefaultEvalContributionRatePerPoint // 0.05
 	minter := poolroyalty.NewEvalContributionMinter(pool, ledger, rate, func() bool { return true })
 	minter.SetHoldbackWindow(time.Millisecond) // finalize_after immediately past
 
@@ -207,12 +210,15 @@ func TestEvalConsensusChain_Acceptance(t *testing.T) {
 		t.Fatalf("finalize: %v", err)
 	}
 
-	// GOOD author settled ~ rate × 4·Var (scores 1,1,0 → 4·0.2222 ≈ 0.889 → ~8.89 LENS). Nothing strands.
+	// GOOD author settled EXACTLY rate × 4·Var. discrimination = 4·Var_pop{1,1,0} = 8/9 = 0.888888…;
+	// amount = floor(0.05 × 0.888888… × 1e6) = 44,444 µLENS. An EXACT literal (not derived from `rate`) so a
+	// change to the config rate FAILS this test and forces a money-path review.
+	const wantSettled int64 = 44_444
 	var bal, held int64
 	_ = pool.QueryRow(ctx, `SELECT COALESCE(balance,0), COALESCE(held_balance,0) FROM lens_token_balances WHERE workspace_id='wsA'`).
 		Scan(&bal, &held)
-	if bal < mining.FloatToMicroFloor(8.5) || bal > mining.FloatToMicroFloor(9.2) || held != 0 {
-		t.Errorf("good author spendable=%d held=%d, want ~8.89 LENS / 0 (examined→cleared→settled)", bal, held)
+	if bal != wantSettled || held != 0 {
+		t.Errorf("good author spendable=%d held=%d, want %d/0 (production rate 0.05 × discrimination 0.888888 → µLENS floor)", bal, held, wantSettled)
 	}
 	var lingering int
 	_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM eval_contribution_mints WHERE status='held'`).Scan(&lingering)
@@ -242,7 +248,7 @@ func TestEvalConsensusFarm_TenThousandUnusedEarnZero(t *testing.T) {
 		t.Fatalf("seed 10k: %v", err)
 	}
 
-	minter := poolroyalty.NewEvalContributionMinter(pool, ledger, 10.0, func() bool { return true })
+	minter := poolroyalty.NewEvalContributionMinter(pool, ledger, config.DefaultEvalContributionRatePerPoint, func() bool { return true })
 	minter.SetHoldbackWindow(time.Millisecond)
 	// Several sweeps (each scans ≤500) — none may ever mint an unused/unconsensed item.
 	for i := 0; i < 3; i++ {
