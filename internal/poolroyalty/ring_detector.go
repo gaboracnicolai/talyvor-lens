@@ -119,6 +119,50 @@ func (d *RingDetector) DetectSelfDealingRings(ctx context.Context, window time.D
 	return flags, nil
 }
 
+// DetectAndPartition scans the held rows ONCE and returns both the EXAMINED set
+// (every held request_id it actually read this tick) and the flagged rings. The
+// Phase-3 settlement clearer promotes (examined − flagged) to 'cleared'. This is
+// what makes fail-closed sound: a row the detector did NOT examine is never in
+// `examined`, so it is never cleared → never settles. A detector outage (load
+// error) returns err with a NIL examined set, so nothing is cleared on an unknown
+// picture — the rows stay held and are retried next tick.
+func (d *RingDetector) DetectAndPartition(ctx context.Context, window time.Duration) (examined []string, flags []RingFlag, err error) {
+	if d == nil || d.db == nil {
+		return nil, nil, nil
+	}
+	held, err := d.loadHeld(ctx, window)
+	if err != nil {
+		return nil, nil, err // fail-closed: unknown held set → clear nothing
+	}
+	examined = make([]string, 0, len(held))
+	for _, h := range held {
+		examined = append(examined, h.requestID)
+	}
+	if len(held) == 0 {
+		return examined, nil, nil
+	}
+	graph, err := d.loadIdentityGraph(ctx)
+	if err != nil {
+		return nil, nil, err // fail-closed: unknown identity graph → clear nothing (nil examined)
+	}
+	for _, h := range held {
+		if graph.SameOperator(h.contributor, h.requester) {
+			comp := graph.Component(h.contributor)
+			flags = append(flags, RingFlag{
+				RequestID:            h.requestID,
+				ContributorWorkspace: h.contributor,
+				RequesterWorkspace:   h.requester,
+				Amount:               h.amount,
+				ComponentID:          comp,
+				Reason: fmt.Sprintf(
+					"self-dealing: contributor %s and requester %s are the same operator (identity component %s) — a royalty paid by an operator to itself",
+					h.contributor, h.requester, comp),
+			})
+		}
+	}
+	return examined, flags, nil
+}
+
 func (d *RingDetector) loadHeld(ctx context.Context, window time.Duration) ([]heldRingRow, error) {
 	rows, err := d.db.Query(ctx, heldRingSelectSQLFor(d.table), window.Microseconds())
 	if err != nil {

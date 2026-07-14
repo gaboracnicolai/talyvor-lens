@@ -114,25 +114,11 @@ func expectGetEmbeddingNode(mock pgxmock.PgxPoolIface, n EmbeddingNode) {
 		))
 }
 
-func TestRecordEmbeddingsServed_CreditsOwner(t *testing.T) {
-	miner, mock := newMockEmbMiner(t)
-	node := EmbeddingNode{
-		ID: "e1", WorkspaceID: "ws_owner", URL: "http://x", Model: "e5-large",
-		Dimensions: 1024, MaxBatch: 100, SpeedTPS: 500,
-		Active: true, Verified: true, CreatedAt: time.Now(),
-	}
-	expectGetEmbeddingNode(mock, node)
-	// 2000 embeddings × e5-large (medium=1.5) → 0.002 × 1.5 × 2 = 0.006.
-	expectCreditOnce(mock, "req-1", "ws_owner", TypeEmbeddingMine, 0, 0, 0, micro(0.006), micro(0.006), micro(0.006), 0)
-	if err := miner.RecordEmbeddingsServed(context.Background(),
-		"e1", "ws_other", "req-1", 2000); err != nil {
-		t.Fatalf("RecordEmbeddingsServed: %v", err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("expectations: %v", err)
-	}
-}
-
+// TestRecordEmbeddingsServed_CreditsOwner moved to the real-PG held-routing
+// integration test (traffic_held_node_mints_integration_test.go, incl. the
+// e5-large medium-tier rate) when Phase-3 Item 1 routed the embedding mint
+// through CreditOnceHeld — held vs spendable is a DB behavior proven on a real
+// engine. The self-serve skip below stays a fast mock test (no ledger touch).
 func TestRecordEmbeddingsServed_SkipsSelfServing(t *testing.T) {
 	miner, mock := newMockEmbMiner(t)
 	node := EmbeddingNode{

@@ -142,16 +142,27 @@ func EarningRate(gpuType string, tokens int) int64 {
 // mining. Holds an HTTP client used for the async verification
 // probe and a reference to the shared ledger.
 type ComputeMiner struct {
-	ledger     *LedgerStore
-	pool       pgxDB
-	httpClient *http.Client
+	ledger         *LedgerStore
+	pool           pgxDB
+	httpClient     *http.Client
+	holdbackWindow time.Duration // Phase-3 Item 1: the mint lands HELD, finalizes after this (default 72h)
 }
 
 func NewComputeMiner(ledger *LedgerStore, pool pgxDB) *ComputeMiner {
 	return &ComputeMiner{
-		ledger:     ledger,
-		pool:       pool,
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		ledger:         ledger,
+		pool:           pool,
+		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		holdbackWindow: 72 * time.Hour, // Phase-3 Item 1: default held window (mirrors cache/pool-royalty)
+	}
+}
+
+// SetHoldbackWindow sets the held→spendable delay for compute mints (Phase-3
+// Item 1). Non-positive keeps the 72h default. The mint lands HELD and the
+// traffic finalize sweeper settles it after this window (revocable before then).
+func (m *ComputeMiner) SetHoldbackWindow(d time.Duration) {
+	if d > 0 {
+		m.holdbackWindow = d
 	}
 }
 
@@ -380,10 +391,15 @@ func (m *ComputeMiner) RecordServedRequest(
 		"requesting_workspace": requestingWorkspace,
 	}
 	desc := fmt.Sprintf("compute serve: %d tokens on %s", tokens, node.GPUType)
-	// U6: idempotent mint on (requestID, node-owner) + verified-to-earn gate.
-	// Empty requestID ⇒ ErrNoMintRequestID ⇒ no mint (the dormant hook passes ""
-	// until the live wire-up threads a server-derived id).
-	if _, err := m.ledger.CreditOnce(ctx, requestID, node.WorkspaceID, earning, TypeComputeMine, desc, meta); err != nil {
+	// Phase-3 Item 1: mint HELD (not spendable), mirroring cache. CreditOnceHeld
+	// writes the uncounted TypeComputeMineHeld at the mint moment (U6 floor +
+	// rate cap apply via mintTypeList) and a traffic_mint_holds claim; the
+	// finalize sweeper settles it to the counted TypeComputeMine after the
+	// window — and it is revocable before then (the clawback surface node mints
+	// previously lacked). U6: idempotent on (requestID, node-owner). Empty
+	// requestID ⇒ ErrNoMintRequestID ⇒ no mint (the dormant hook passes "" until
+	// the live wire-up threads a server-derived id).
+	if _, err := m.ledger.CreditOnceHeld(ctx, requestID, node.WorkspaceID, earning, TypeComputeMine, desc, m.holdbackWindow, meta); err != nil {
 		return err
 	}
 	return m.updateMetrics(ctx, nodeID, tokens, latencyMs)

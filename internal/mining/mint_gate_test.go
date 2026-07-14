@@ -21,20 +21,24 @@ func (f fakeVerifier) MayEarn(context.Context, pgx.Tx, string) (bool, error) { r
 // aligning the two would silently un-gate the held mint or double-gate finalize
 // — a Sybil hole introduced by tidying. This test is the tripwire for that.
 func TestMintTypes_GateSet(t *testing.T) {
-	// The eight mint-MOMENT types must be gated.
+	// The mint-MOMENT types must be gated. Phase-3 Item 1: compute/embedding join
+	// cache as HELD mints, so their mint MOMENT is the _held type (gated here); the
+	// counted base rows are written at finalize (asserted NOT gated below).
 	for _, ty := range []string{
-		TypeCacheMineHeld, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine,
+		TypeCacheMineHeld, TypeComputeMineHeld, TypeEmbeddingMineHeld, TypeAnnotationMine,
 		TypePatternMine, "receipt_mine_provisional", TypePoolRoyaltyHeld, TypeEvalContributionHeld,
 	} {
 		if !IsMintType(ty) {
 			t.Errorf("%q must be a gated mint type", ty)
 		}
 	}
-	// Phase-1 Item 1: cache mints HELD, so the mint MOMENT is cache_mine_held (gated
-	// above). The counted cache_mine row is written at finalize (settlement) — NOT a
-	// mint moment, so it must NOT be gated (else finalize would be double-gated).
-	if IsMintType(TypeCacheMine) {
-		t.Error("cache_mine is now the finalize/settlement type — must NOT be gated (cache_mine_held is the mint moment)")
+	// The counted cache/compute/embedding rows are written at finalize (settlement)
+	// — NOT a mint moment, so they must NOT be gated (else finalize double-gates the
+	// already-gated held mint).
+	for _, ty := range []string{TypeCacheMine, TypeComputeMine, TypeEmbeddingMine} {
+		if IsMintType(ty) {
+			t.Errorf("%q is the finalize/settlement type — must NOT be gated (its _held type is the mint moment)", ty)
+		}
 	}
 	// pool_royalty_held (the held MINT — the worst Sybil hole) MUST be gated even
 	// though supply counts it LATER as pool_royalty. Dropping it "to match
@@ -99,10 +103,10 @@ func TestVerifiedGate_BlocksUnverified(t *testing.T) {
 	store.SetMintVerifier(fakeVerifier{ok: false})
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO mint_idempotency").
-		WithArgs("r1", "ws", TypeComputeMine, pgxmock.AnyArg()).
+		WithArgs("r1", "ws", TypeComputeMineHeld, pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectRollback() // verifyEarn blocks before the ensure-balance INSERT
-	if _, err := store.CreditOnce(context.Background(), "r1", "ws", 1.0, TypeComputeMine, "", nil); !errors.Is(err, ErrEarnNotVerified) {
+	if _, err := store.CreditOnce(context.Background(), "r1", "ws", 1.0, TypeComputeMineHeld, "", nil); !errors.Is(err, ErrEarnNotVerified) {
 		t.Fatalf("unverified mint must be blocked with ErrEarnNotVerified, got %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

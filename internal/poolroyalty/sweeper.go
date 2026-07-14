@@ -54,15 +54,19 @@ const sweepBatchLimit = 500
 // the generic (request_id, contributor_workspace_id, minted_amount, status,
 // finalize_after) finalize columns the kernel reads; the partial index
 // idx_<table>_finalize (finalize_after) WHERE status='held' backs the SELECT.
-func sweepSelectSQLFor(table string) string {
+// settleStatus is the row status the sweeper settles FROM: 'held' by default
+// (today's behavior, byte-identical) or 'cleared' when the Phase-3 fail-closed
+// layer is armed (only adjudicated-clean rows settle). Both table and status are
+// TRUSTED internal literals (never user input) — see SetSettleStatus's whitelist.
+func sweepSelectSQLFor(table, settleStatus string) string {
 	return fmt.Sprintf(`SELECT request_id, contributor_workspace_id, minted_amount
 FROM %s
-WHERE status = 'held' AND finalize_after < now()
-LIMIT %d`, table, sweepBatchLimit)
+WHERE status = '%s' AND finalize_after < now()
+LIMIT %d`, table, settleStatus, sweepBatchLimit)
 }
 
-func finalizeCASSQLFor(table string) string {
-	return fmt.Sprintf(`UPDATE %s SET status = 'final' WHERE request_id = $1 AND status = 'held'`, table)
+func finalizeCASSQLFor(table, settleStatus string) string {
+	return fmt.Sprintf(`UPDATE %s SET status = 'final' WHERE request_id = $1 AND status = '%s'`, table, settleStatus)
 }
 
 type sweeperDB interface {
@@ -81,11 +85,12 @@ type heldFinalizer interface {
 // both pool_royalty_mints (cache royalty) and distill_royalty_mints (L2/S4) — the
 // finalize logic reads only generic columns, so one implementation serves both.
 type FinalizeSweeper struct {
-	db        sweeperDB
-	ledger    heldFinalizer
-	table     string
-	selectSQL string
-	casSQL    string
+	db           sweeperDB
+	ledger       heldFinalizer
+	table        string
+	settleStatus string // 'held' (default) or 'cleared' (Phase-3 fail-closed)
+	selectSQL    string
+	casSQL       string
 }
 
 // NewFinalizeSweeper wires the pool, the held ledger, and the claim TABLE to
@@ -96,12 +101,28 @@ func NewFinalizeSweeper(db sweeperDB, ledger heldFinalizer, table string) *Final
 		table = "pool_royalty_mints"
 	}
 	return &FinalizeSweeper{
-		db:        db,
-		ledger:    ledger,
-		table:     table,
-		selectSQL: sweepSelectSQLFor(table),
-		casSQL:    finalizeCASSQLFor(table),
+		db:           db,
+		ledger:       ledger,
+		table:        table,
+		settleStatus: "held",
+		selectSQL:    sweepSelectSQLFor(table, "held"),
+		casSQL:       finalizeCASSQLFor(table, "held"),
 	}
+}
+
+// SetSettleStatus arms the Phase-3 Item 3 fail-closed layer. status='cleared'
+// makes the sweeper settle ONLY adjudicated-clean rows (an un-adjudicated 'held'
+// row never finalizes → fail-closed); status='held' is the default (byte-identical
+// to pre-Phase-3). Both values are interpolated into SQL, so this WHITELIST is
+// load-bearing: any other value is ignored (the status is a trusted internal
+// literal from main.go, never user input — the whitelist is defense-in-depth).
+func (s *FinalizeSweeper) SetSettleStatus(status string) {
+	if s == nil || (status != "held" && status != "cleared") {
+		return
+	}
+	s.settleStatus = status
+	s.selectSQL = sweepSelectSQLFor(s.table, status)
+	s.casSQL = finalizeCASSQLFor(s.table, status)
 }
 
 type dueMint struct {
