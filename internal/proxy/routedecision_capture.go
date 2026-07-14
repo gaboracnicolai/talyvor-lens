@@ -26,7 +26,7 @@ func (p *Proxy) SetRouteDecision(sink routeDecisionSink, enabled func() bool) {
 // captureRouteDecision persists the routing Advisor's decision for an auto-routed request — POST-FLUSH,
 // off-path, obsLimiter-shed, detached, best-effort, void, MINT-FREE. It runs after the response is flushed and
 // CANNOT affect it. It prices the served AND the counterfactual (baseline) model AT THE ACTUAL token counts —
-// the counterfactual figure is an ESTIMATE (see routedecision / migration 0091), stored as evidence, never as
+// the counterfactual figure is an ESTIMATE (see routedecision / migration 0092), stored as evidence, never as
 // money.
 func (p *Proxy) captureRouteDecision(ctx context.Context, workspaceID, baselineModel, actualModel, cohortBasis string,
 	cohortOverrode bool, cohortN, inputTokens, outputTokens int) {
