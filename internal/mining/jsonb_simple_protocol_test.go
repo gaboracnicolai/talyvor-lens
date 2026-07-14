@@ -53,16 +53,16 @@ func TestLedgerMetadata_JSONBAcrossExecModes_Integration(t *testing.T) {
 				`DROP TABLE IF EXISTS lens_token_ledger`,
 				`DROP TABLE IF EXISTS lens_token_balances`,
 				`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY,
-					balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-					lifetime_earned DOUBLE PRECISION NOT NULL DEFAULT 0,
-					lifetime_spent DOUBLE PRECISION NOT NULL DEFAULT 0,
-					updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+					balance BIGINT NOT NULL DEFAULT 0,
+					lifetime_earned BIGINT NOT NULL DEFAULT 0,
+					lifetime_spent BIGINT NOT NULL DEFAULT 0,
+					updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`, // BIGINT µLENS (prod 0082)
 				// metadata NOT NULL DEFAULT '{}'::jsonb — the production shape
 				// (0019/0034). A NULL would violate it, so the fix must emit
 				// valid JSON text, never SQL NULL, for empty metadata.
 				`CREATE TABLE lens_token_ledger (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-					workspace_id TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL,
-					balance_after DOUBLE PRECISION NOT NULL, type TEXT NOT NULL, description TEXT,
+					workspace_id TEXT NOT NULL, amount BIGINT NOT NULL,
+					balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT,
 					metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 			} {
 				if _, err := pool.Exec(ctx, ddl); err != nil {
