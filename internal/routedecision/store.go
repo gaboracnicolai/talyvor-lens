@@ -5,7 +5,7 @@
 //
 // It MOVES NO MONEY: it imports no ledger/economy package and exposes only Exec/QueryRow seams. The
 // counterfactual cost is an ESTIMATE (a different model emits different tokens), stored as such and never as a
-// "saving" — this table is evidence, not value. See migration 0091.
+// "saving" — this table is evidence, not value. See migration 0092.
 package routedecision
 
 import (

@@ -11,7 +11,7 @@ import (
 
 // MINT-FREE, mechanically enforced: the route-decision evidence store must reach no ledger/mint/economy path.
 // It records descriptive cost EVIDENCE (an estimate), never value. If this test fails, the "it moves no money"
-// claim in migration 0091 has been broken.
+// claim in migration 0092 has been broken.
 func TestImportGuard_RouteDecision_MintFree(t *testing.T) {
 	forbiddenImports := []string{
 		"internal/mining",      // the ledger / mint gate
