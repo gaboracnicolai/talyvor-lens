@@ -66,6 +66,7 @@ import (
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/guardrails"
+	"github.com/talyvor/lens/internal/haircutobs"
 	"github.com/talyvor/lens/internal/inference"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/keel"
@@ -1492,6 +1493,11 @@ func run() error {
 	// drift attribution). Rows name only a self workspace + cohort aggregates; no counterparty raw value.
 	r.Handle("/v1/admin/keel/findings", requireAdmin(authManager,
 		newKeelFindingsHandler(keel.NewReader(dbrouting.ReadPool(pool, replicaPool)))))
+	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
+	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
+	// unchanged).
+	r.Handle("/v1/admin/keel/haircuts", requireAdmin(authManager,
+		newKeelHaircutsHandler(haircutobs.NewReader(pool), time.Now)))
 
 	// K4 output verdicts — admin forensic read (all workspaces), requireAdmin-gated. Reads the PRIMARY
 	// pool (non-money read; keeps the U8/U9 ExactlySix replica-reader invariant unchanged).

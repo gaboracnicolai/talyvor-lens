@@ -453,8 +453,12 @@ type Config struct {
 
 	// KeelRoyaltyHaircutEnabled gates KE-2: a REDUCE-ONLY reuse-royalty haircut for a workspace with a sustained
 	// HARDENED idiosyncratic drift finding (never common-mode, never a slash — it can only LOWER a mint, never
-	// below the floor, never increase anyone's earnings). DEFAULT FALSE — it CHANGES MONEY, off until N3
-	// calibration. Env: LENS_KEEL_ROYALTY_HAIRCUT_ENABLED.
+	// below the floor, never increase anyone's earnings). DEFAULT-ON — closed-test: the reuse-royalty economy
+	// has no external contributors, so a haircut takes nothing from anyone real, and running it is the ONLY way
+	// to observe the guard fire against real routing behaviour before N3. It is REDUCE-ONLY, clamped to
+	// [HaircutFloor, 1.0], can never burn/slash, can never increase a mint, and fails open on any doubt.
+	// ⚠ THE THRESHOLD IS STILL AN UNCALIBRATED PLACEHOLDER — recalibrate at N3 BEFORE any external contributor
+	// earns. Env LENS_KEEL_ROYALTY_HAIRCUT_ENABLED can still force it off.
 	KeelRoyaltyHaircutEnabled bool
 
 	// H5BondsEnabled gates H5.β PROVENANCE BONDS — THE MONEY PATH. A workspace stakes collateral on a
@@ -874,7 +878,7 @@ func Load() (*Config, error) {
 		WorkTierEnabled:               parseBoolEnv("LENS_WORKTIER_ENABLED"),
 		K4VerifierEnabled:             parseBoolEnv("LENS_K4_VERIFIER_ENABLED"),
 		RoutingDecisionCaptureEnabled: parseBoolEnvDefaultTrue("LENS_ROUTING_DECISION_CAPTURE_ENABLED"),
-		KeelRoyaltyHaircutEnabled:     parseBoolEnv("LENS_KEEL_ROYALTY_HAIRCUT_ENABLED"),
+		KeelRoyaltyHaircutEnabled:     parseBoolEnvDefaultTrue("LENS_KEEL_ROYALTY_HAIRCUT_ENABLED"),
 		H5BondsEnabled:                parseBoolEnv("LENS_H5_BONDS_ENABLED"),
 		H5BuildVerifyEnabled:          parseBoolEnv("LENS_H5_BUILDVERIFY_ENABLED"),
 		H5AttestEnabled:               parseBoolEnv("LENS_H5_ATTEST_ENABLED"),
