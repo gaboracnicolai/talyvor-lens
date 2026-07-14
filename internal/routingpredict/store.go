@@ -104,6 +104,36 @@ func (s *Store) SubmitPrediction(ctx context.Context, p Prediction) (string, err
 	return id, nil
 }
 
+// EmitLivePrediction records a prediction from the LIVE request path (the Advisor
+// picked model M for a real request and it OVERRODE the baseline) directly as
+// 'active' — a real routing decision is an authoritative live assertion, no
+// operator validation step. Same (workspace, cohort) dedup as SubmitPrediction
+// (partial-unique) → ErrDuplicatePrediction if a live prediction already holds the
+// cohort slot (one live model per cohort; the scorer/mint run offline off it).
+// Gated by the same submission flag. This REPLACES the lens-routeseed CLI as the
+// production emit.
+func (s *Store) EmitLivePrediction(ctx context.Context, p Prediction) (string, error) {
+	if s.enabled == nil || !s.enabled() {
+		return "", ErrSubmissionDisabled
+	}
+	if err := validate(p); err != nil {
+		return "", err
+	}
+	var id string
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO routing_predictions (workspace_id, feature_category, input_token_range, complexity_bucket, model, provider, status)
+		 VALUES ($1,$2,$3,$4,$5,$6,'active') RETURNING id`,
+		p.WorkspaceID, p.FeatureCategory, p.InputTokenRange, p.ComplexityBucket, p.Model, p.Provider).Scan(&id)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return "", ErrDuplicatePrediction
+		}
+		return "", fmt.Errorf("routingpredict: emit live prediction: %w", err)
+	}
+	return id, nil
+}
+
 // ValidatePrediction flips a prediction 'pending'→'active' (operator-mediated validation), making it the
 // live assertion for its cohort. It stays in the dedup set (active blocks further duplicates).
 func (s *Store) ValidatePrediction(ctx context.Context, id string) error {

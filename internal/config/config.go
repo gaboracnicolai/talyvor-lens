@@ -1060,9 +1060,13 @@ func Load() (*Config, error) {
 		c.POVIMinStake = f
 	}
 	// EvalContributionRatePerPoint: LENS per discrimination-point. Default 0 ⇒ INERT (the held-benchmark
-	// anchor refuses a non-positive rate → the eval-contribution minter is a total no-op). A deliberate
-	// later flip.
-	c.EvalContributionRatePerPoint = 0
+	// anchor refuses a non-positive rate → the eval-contribution minter is a total no-op).
+	// Set 0.05 LENS/discrimination-point: amount = 0.05 × clamp01(discrimination), so a max-
+	// discriminating eval pays ≤ 0.05 LENS ($0.005 @ $0.10 peg) ONCE per item, and only after
+	// ≥3 INDEPENDENT graders actually scored it (usage-anchored) — far below the value of the
+	// accurate model-scoring that eval enables across the fleet. (Minting still gated by the
+	// enable flags, default off.)
+	c.EvalContributionRatePerPoint = 0.05
 	if v := os.Getenv("LENS_EVAL_CONTRIBUTION_RATE_PER_POINT"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil || f < 0 {
@@ -1071,9 +1075,13 @@ func Load() (*Config, error) {
 		c.EvalContributionRatePerPoint = f
 	}
 
-	// RoutingPredictionRatePerPoint — DEFAULT 0 (INERT: the held-benchmark anchor refuses a non-positive
-	// rate → the routing-prediction minter is a total no-op). A deliberate later flip.
-	c.RoutingPredictionRatePerPoint = 0
+	// RoutingPredictionRatePerPoint — set 0.02 LENS/skill-point: amount = 0.02 × clamp01(skill_margin),
+	// so a prediction pays ≤ 0.02 LENS ($0.002 @ $0.10 peg) ONCE per scored prediction, and only when
+	// the predicted model genuinely BEAT the baseline on the author-excluded held slice (margin>0). A
+	// better-routing prediction improves EVERY future request in its cohort (compounding COGS/quality
+	// value) — so 0.02 LENS is far below the value of the decision it improved. (Minting still gated by
+	// the enable flags, default off.)
+	c.RoutingPredictionRatePerPoint = 0.02
 	if v := os.Getenv("LENS_ROUTING_PREDICTION_RATE_PER_POINT"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil || f < 0 {

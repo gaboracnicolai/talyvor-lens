@@ -48,6 +48,7 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
+	"github.com/talyvor/lens/internal/cohort"
 	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
@@ -93,6 +94,7 @@ import (
 	"github.com/talyvor/lens/internal/routedecision"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
+	"github.com/talyvor/lens/internal/routingpredict"
 	"github.com/talyvor/lens/internal/routingscore"
 	"github.com/talyvor/lens/internal/royaltyhaircut"
 	"github.com/talyvor/lens/internal/safehttp"
@@ -851,6 +853,9 @@ func run() error {
 	)
 	evalContributionMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
 	evalContributionFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "eval_contribution_mints")
+	if cfg.SettlementFailClosedEnabled { // examined-before-settle: settle only rows the single-party clearer cleared
+		evalContributionFinalizeSweeper.SetSettleStatus("cleared")
+	}
 
 	// Proof-of-Improvement instance 2: proof-of-routing-prediction. NewRoutingPredictionMinter is the SECOND
 	// sanctioned caller of HeldBenchmarkAnchor (it constructs it from the rate). INERT by default: rate 0 ⇒
@@ -864,6 +869,9 @@ func run() error {
 	)
 	routingPredictionMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
 	routingPredictionFinalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "routing_prediction_mints")
+	if cfg.SettlementFailClosedEnabled { // examined-before-settle: settle only rows the single-party clearer cleared
+		routingPredictionFinalizeSweeper.SetSettleStatus("cleared")
+	}
 
 	// Proof-of-Improvement instance 3: proof-of-latency-locality. NewLatencyMinter is the THIRD sanctioned
 	// caller of HeldBenchmarkAnchor (it constructs it from the rate). INERT by default: rate 0 ⇒ nil anchor ⇒
@@ -999,6 +1007,28 @@ func run() error {
 			func() bool { return cfg.SettlementFailClosedEnabled }, cfg.AntiGamingScanWindow)
 		go haComps.leader.Run(ctx, "settlement-clearer-distill", 30*time.Second, func(lctx context.Context) {
 			distillClearer.StartScheduler(lctx, cfg.AntiGamingInterval)
+		})
+
+		// The single-party P-o-I mints (routing-prediction, eval-contribution) are HELD
+		// + fail-closed too, but a workspace earns for its OWN contribution — no ring. So
+		// a per-workspace VELOCITY concentration detector examines them (mirrors pattern's
+		// single-party guard). CRITICAL: without these clearers, arming their finalize
+		// sweepers fail-closed (below) would STRAND every held row (nothing would ever
+		// clear them). Same default-off/fail-closed/scan-window discipline; velocity
+		// threshold shared with pattern (PatternConcentrationVelocityMax placeholder).
+		routingClearer := poolroyalty.NewSettlementClearer(
+			poolroyalty.NewSinglePartyConcentrationDetector(pool, "routing_prediction_mints", cfg.PatternConcentrationVelocityMax, time.Hour),
+			pool, "routing_prediction_mints",
+			func() bool { return cfg.SettlementFailClosedEnabled }, cfg.AntiGamingScanWindow)
+		go haComps.leader.Run(ctx, "settlement-clearer-routing", 30*time.Second, func(lctx context.Context) {
+			routingClearer.StartScheduler(lctx, cfg.AntiGamingInterval)
+		})
+		evalClearer := poolroyalty.NewSettlementClearer(
+			poolroyalty.NewSinglePartyConcentrationDetector(pool, "eval_contribution_mints", cfg.PatternConcentrationVelocityMax, time.Hour),
+			pool, "eval_contribution_mints",
+			func() bool { return cfg.SettlementFailClosedEnabled }, cfg.AntiGamingScanWindow)
+		go haComps.leader.Run(ctx, "settlement-clearer-eval", 30*time.Second, func(lctx context.Context) {
+			evalClearer.StartScheduler(lctx, cfg.AntiGamingInterval)
 		})
 	}
 
@@ -1268,6 +1298,14 @@ func run() error {
 	routeDecisionWriter := routedecision.NewWriter(pool)
 	p.SetRouteDecision(routeDecisionWriter, func() bool { return cfg.RoutingDecisionCaptureEnabled })
 	routeDecisionReader := routedecision.NewReader(pool)
+
+	// Routing-PREDICTION LIVE emit — the production emit that REPLACES the lens-routeseed CLI. When the live
+	// cohort override fires (the farm gate), the auto-route path records a contributor prediction the offline
+	// scorer (wired above) grades and the routing-prediction minter pays on. DEFAULT-OFF: gated by the same
+	// LENS_ROUTING_PREDICTION_ENABLED capability flag as CLI submission (a prediction records nothing that
+	// mints — minting stays behind RoutingPredictionMintingEnabled + ProofOfImprovementEnabled + a rate).
+	routingPredictStore := routingpredict.NewStore(pool, func() bool { return cfg.RoutingPredictionEnabled })
+	p.SetRoutingPredictEmit(routingPredictStore, func() bool { return cfg.RoutingPredictionEnabled })
 
 	// K4 intrinsic output verifier — DEFAULT-OFF (LENS_K4_VERIFIER_ENABLED). Post-serve, off-path,
 	// mint-free (import-guarded); writes verdicts to the PRIMARY pool. Reads (admin + workspace-scoped,
@@ -2793,6 +2831,86 @@ func run() error {
 		})
 
 		// ─── Annotation mining (Batch 2 Item 4) ─────────
+		// Proof-of-eval-contribution LIVE submission surface (the endpoint REPLACING the benchseed CLI). A
+		// workspace submits an eval (author = caller); OTHER workspaces attest its claimed answer's correctness.
+		// Submission activates the eval immediately (drawable), but EARNING stays gated downstream by the eval
+		// minter's correctness-consensus + usage warmup + U6 floor — an active-but-unconsensed eval mints
+		// nothing. econ.post registers only when the economy is on; the eval mint flags are default-off, so this
+		// is inert in production until the operator turns the economy on.
+		evalSubmitStore := benchprobe.NewStore(pool)
+		econ.post(authed, "/v1/evals", func(w http.ResponseWriter, req *http.Request) {
+			var in struct {
+				Input             string `json:"input"`
+				ExpectedOutput    string `json:"expected_output"`
+				EvalMethod        string `json:"eval_method"`
+				FeatureCategory   string `json:"feature_category"`
+				AuthorWorkspaceID string `json:"author_workspace_id"` // honored only for admin callers
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			author, _, ok := effectiveWorkspaceID(req, in.AuthorWorkspaceID)
+			if !ok || author == "" {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			if strings.TrimSpace(in.Input) == "" || strings.TrimSpace(in.ExpectedOutput) == "" {
+				writeJSONErr(w, http.StatusBadRequest, "input and expected_output are required")
+				return
+			}
+			if len(in.Input) > 16384 || len(in.ExpectedOutput) > 16384 {
+				writeJSONErr(w, http.StatusRequestEntityTooLarge, "input/expected_output too large (max 16384 bytes each)")
+				return
+			}
+			// Derive the cohort dims the same way the serve path + scorer do, so the eval is also usable as a
+			// held-eval slice item for a matching cohort (dual use).
+			inRange, complexity := cohort.DeriveInputCohort(in.Input)
+			id, err := evalSubmitStore.SubmitLiveEval(req.Context(), benchprobe.EvalItem{
+				Input: in.Input, ExpectedOutput: in.ExpectedOutput, EvalMethod: in.EvalMethod,
+				AuthorWorkspaceID: author, FeatureCategory: in.FeatureCategory,
+				InputTokenRange: inRange, ComplexityBucket: complexity,
+			})
+			if err != nil {
+				if errors.Is(err, benchprobe.ErrDuplicateItem) {
+					writeJSONErr(w, http.StatusConflict, err.Error())
+					return
+				}
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusCreated, map[string]string{"id": id})
+		})
+
+		econ.post(authed, "/v1/evals/{id}/attest", func(w http.ResponseWriter, req *http.Request) {
+			id := chi.URLParam(req, "id")
+			var in struct {
+				Agrees              bool   `json:"agrees"`
+				AttesterWorkspaceID string `json:"attester_workspace_id"` // honored only for admin callers
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			attester, _, ok := effectiveWorkspaceID(req, in.AttesterWorkspaceID)
+			if !ok || attester == "" {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
+				return
+			}
+			if err := evalSubmitStore.AttestCorrectness(req.Context(), id, attester, in.Agrees); err != nil {
+				switch {
+				case errors.Is(err, benchprobe.ErrUnknownItem):
+					writeJSONErr(w, http.StatusNotFound, err.Error())
+				case errors.Is(err, benchprobe.ErrSelfAttestation):
+					writeJSONErr(w, http.StatusForbidden, err.Error())
+				default:
+					writeJSONErr(w, http.StatusBadRequest, err.Error())
+				}
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+
 		econ.post(authed, "/v1/workspaces/{wsID}/annotate/stake", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {

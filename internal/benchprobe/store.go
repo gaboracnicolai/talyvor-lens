@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -16,6 +17,14 @@ import (
 // ErrDuplicateItem is returned by ContributeItem when an item with the same content_hash already
 // exists — the exact-dedup anti-farming reject at the contribution boundary.
 var ErrDuplicateItem = errors.New("benchprobe: duplicate eval item (content_hash already present)")
+
+// ErrUnknownItem is returned by AttestCorrectness when the target eval item does not exist.
+var ErrUnknownItem = errors.New("benchprobe: eval item not found")
+
+// ErrSelfAttestation is returned when a workspace attempts to attest the correctness of its OWN eval item
+// — the literal-self reject at the boundary (the transitive same-operator exclusion is enforced deeper, in
+// the mint's consensus gate, so sockpuppets are also caught; this is the cheap first line).
+var ErrSelfAttestation = errors.New("benchprobe: a workspace cannot attest the correctness of its own eval item")
 
 // ContentHash is the exact-dedup key over the item input — hex(sha256(input)), the same algorithm as
 // distill.ContentHash (replicated locally so benchprobe stays dependency-free / mint-free).
@@ -98,6 +107,82 @@ func (s *Store) ContributeItem(ctx context.Context, item EvalItem) error {
 		return fmt.Errorf("benchprobe: contribute item: %w", err)
 	}
 	return nil
+}
+
+// AttestCorrectness records one INDEPENDENT workspace's judgment that an eval item's CLAIMED answer is
+// correct (agrees=true) or disputed (agrees=false) — the correctness-consensus substrate the eval minter
+// gates payment on. It is the second half of the live submission surface (ContributeItem submits the eval;
+// other workspaces attest it). One vote per (item, attester): ON CONFLICT upserts, so re-attestation only
+// updates the SAME operator's single vote and can never inflate the independent count.
+//
+// The literal author is rejected here (ErrSelfAttestation); the deeper transitive same-operator exclusion
+// (an author's sockpuppets) is enforced by the mint-time consensus gate against the identity graph. Mint-
+// free: this writes only eval_correctness_attestations (no ledger, no money).
+func (s *Store) AttestCorrectness(ctx context.Context, itemID, attesterWorkspaceID string, agrees bool) error {
+	if itemID == "" || attesterWorkspaceID == "" {
+		return errors.New("benchprobe: attest requires item_id and attester_workspace_id")
+	}
+	var author *string // author_workspace_id is NULL for operator-seeded items
+	err := s.pool.QueryRow(ctx, `SELECT author_workspace_id FROM benchmark_eval_items WHERE id=$1`, itemID).Scan(&author)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrUnknownItem
+		}
+		return fmt.Errorf("benchprobe: attest load item: %w", err)
+	}
+	if author != nil && *author == attesterWorkspaceID {
+		return ErrSelfAttestation
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO eval_correctness_attestations (item_id, attester_workspace_id, agrees)
+		 VALUES ($1,$2,$3)
+		 ON CONFLICT (item_id, attester_workspace_id) DO UPDATE SET agrees=$3, created_at=NOW()`,
+		itemID, attesterWorkspaceID, agrees); err != nil {
+		return fmt.Errorf("benchprobe: attest correctness: %w", err)
+	}
+	return nil
+}
+
+// NewItemID mints a fresh, unique eval-item id for the live submission surface (the endpoint generates one
+// per submission). Prefixed for debuggability.
+func NewItemID() string { return "eval_" + newID() }
+
+// SubmitLiveEval is the LIVE submission surface's write (the endpoint's action, REPLACING the benchseed CLI).
+// It lands the contributor's eval ACTIVE + author-stamped + content-deduped and returns the generated id.
+// Symmetric with the routing EmitLivePrediction: a live contribution is drawable immediately; EARNING is
+// gated downstream by correctness consensus + the usage warmup + the U6 floor (an active-but-unconsensed eval
+// mints nothing). A content_hash collision returns ErrDuplicateItem (the exact-dedup anti-farm reject).
+func (s *Store) SubmitLiveEval(ctx context.Context, item EvalItem) (string, error) {
+	if item.AuthorWorkspaceID == "" {
+		return "", errors.New("benchprobe: submit requires AuthorWorkspaceID")
+	}
+	if item.Input == "" || item.ExpectedOutput == "" {
+		return "", errors.New("benchprobe: submit requires input and expected_output")
+	}
+	if item.ID == "" {
+		item.ID = NewItemID()
+	}
+	method := item.EvalMethod
+	if method == "" {
+		method = "exact"
+	}
+	thr := item.PassThreshold
+	if thr == 0 {
+		thr = 1.0
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO benchmark_eval_items (id, input, expected_output, eval_method, pass_threshold, active, content_hash, status, author_workspace_id, feature_category, input_token_range, complexity_bucket)
+		 VALUES ($1,$2,$3,$4,$5,true,$6,'active',$7,$8,$9,$10)`,
+		item.ID, item.Input, item.ExpectedOutput, method, thr, ContentHash(item.Input), item.AuthorWorkspaceID,
+		nullIfEmpty(item.FeatureCategory), nullIfEmpty(item.InputTokenRange), nullIfEmpty(item.ComplexityBucket))
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation on idx_eval_items_content_hash
+			return "", ErrDuplicateItem
+		}
+		return "", fmt.Errorf("benchprobe: submit live eval: %w", err)
+	}
+	return item.ID, nil
 }
 
 // BackfillCohort sets the two DERIVED cohort dimensions (input_token_range, complexity_bucket) on an

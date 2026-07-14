@@ -90,12 +90,14 @@ type evalMinterDB interface {
 // EvalContributionMinter is the flag-gated proof-of-eval-contribution mint sweeper. A nil anchor (the
 // rate-0 default) makes it inert.
 type EvalContributionMinter struct {
-	db         evalMinterDB
-	ledger     ledgerCreditTx
-	enabled    func() bool
-	anchor     Anchor // HeldBenchmarkAnchor{rate}; nil ⇒ inert (rate ≤ 0). The ONE live held-benchmark anchor.
-	minGraders int
-	holdWindow time.Duration
+	db               evalMinterDB
+	ledger           ledgerCreditTx
+	enabled          func() bool
+	anchor           Anchor // HeldBenchmarkAnchor{rate}; nil ⇒ inert (rate ≤ 0). The ONE live held-benchmark anchor.
+	minGraders       int
+	holdWindow       time.Duration
+	requireConsensus bool // correctness-consensus gate (default TRUE): an item earns only after independent operators agree its claimed answer is correct
+	minConsensus     int  // independent-operator agreement floor (default DefaultMinConsensusAttesters)
 }
 
 // NewEvalContributionMinter builds the sweeper. ratePerPoint is the LENS-per-discrimination-point rate;
@@ -104,11 +106,13 @@ type EvalContributionMinter struct {
 // This is the SOLE non-test caller of NewHeldBenchmarkAnchor (pinned by the inverted reachability guard).
 func NewEvalContributionMinter(db evalMinterDB, ledger ledgerCreditTx, ratePerPoint float64, enabled func() bool) *EvalContributionMinter {
 	m := &EvalContributionMinter{
-		db:         db,
-		ledger:     ledger,
-		enabled:    enabled,
-		minGraders: DefaultMinUnlinkedGraders,
-		holdWindow: 72 * time.Hour,
+		db:               db,
+		ledger:           ledger,
+		enabled:          enabled,
+		minGraders:       DefaultMinUnlinkedGraders,
+		holdWindow:       72 * time.Hour,
+		requireConsensus: true, // correctness-consensus is REQUIRED by default; it can only BLOCK a mint, never enable one
+		minConsensus:     DefaultMinConsensusAttesters,
 	}
 	if a, ok := NewHeldBenchmarkAnchor(ratePerPoint); ok {
 		m.anchor = a // positive rate ⇒ live; otherwise nil ⇒ inert
@@ -129,6 +133,67 @@ func (m *EvalContributionMinter) SetMinUnlinkedGraders(n int) {
 	if m != nil && n > 0 {
 		m.minGraders = n
 	}
+}
+
+// SetRequireConsensus toggles the correctness-consensus gate. Production keeps it ON (the default); a
+// test that isolates an ORTHOGONAL property (rate-0 inertness, the grader warmup, the U6 floor) may turn
+// it OFF so it need not also seed attestations. It can only BLOCK a mint, so turning it off never enables
+// one that was otherwise ineligible.
+func (m *EvalContributionMinter) SetRequireConsensus(v bool) {
+	if m != nil {
+		m.requireConsensus = v
+	}
+}
+
+// SetMinConsensus overrides the independent-operator agreement floor (non-positive keeps the default).
+// Lower is only for tests; production keeps DefaultMinConsensusAttesters.
+func (m *EvalContributionMinter) SetMinConsensus(n int) {
+	if m != nil && n > 0 {
+		m.minConsensus = n
+	}
+}
+
+// loadIdentityGraph builds the transitive same-operator graph (card fingerprint ∪ owner_key) — the SAME
+// edge set + union-find the ring detector uses — so the consensus gate's "independent" test is transitive.
+// Loaded ONCE per sweep (not per item). An empty graph (no edges) makes every workspace its own operator.
+func (m *EvalContributionMinter) loadIdentityGraph(ctx context.Context) (*IdentityGraph, error) {
+	rows, err := m.db.Query(ctx, identityEdgesSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	g := NewIdentityGraph()
+	for rows.Next() {
+		var a, b string
+		if err := rows.Scan(&a, &b); err != nil {
+			return nil, err
+		}
+		g.Link(a, b)
+	}
+	return g, rows.Err()
+}
+
+// consensusReached reads an item's correctness attestations and applies the transitive-independence gate.
+// (false, reason, nil) ⇒ the item is withheld from minting this tick (re-eligible as attestations arrive).
+func (m *EvalContributionMinter) consensusReached(ctx context.Context, itemID, authorWS string, g *IdentityGraph) (bool, string, error) {
+	rows, err := m.db.Query(ctx, evalAttestationsSQL, itemID)
+	if err != nil {
+		return false, "", err
+	}
+	defer rows.Close()
+	var attns []evalAttestation
+	for rows.Next() {
+		var a evalAttestation
+		if err := rows.Scan(&a.workspace, &a.agrees); err != nil {
+			return false, "", err
+		}
+		attns = append(attns, a)
+	}
+	if err := rows.Err(); err != nil {
+		return false, "", err
+	}
+	ok, reason := evalConsensusReached(attns, g, authorWS, m.minConsensus)
+	return ok, reason, nil
 }
 
 // RunOnce mints every currently mint-eligible item, each in its OWN claim-then-credit transaction.
@@ -158,8 +223,34 @@ func (m *EvalContributionMinter) RunOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
+	// CORRECTNESS-CONSENSUS gate (default ON): an item earns ONLY after independent operators agree its
+	// claimed answer is correct. Load the transitive identity graph ONCE per sweep; a per-item read of the
+	// item's attestations then decides. An unconsensed item is SKIPPED (not claimed) → re-eligible as
+	// attestations arrive. This is orthogonal to — and composes with — the discrimination/warmup readout.
+	var graph *IdentityGraph
+	if m.requireConsensus {
+		var gerr error
+		if graph, gerr = m.loadIdentityGraph(ctx); gerr != nil {
+			return 0, gerr
+		}
+	}
+
 	minted := 0
 	for _, c := range cands {
+		if m.requireConsensus {
+			ok, reason, cerr := m.consensusReached(ctx, c.itemID, c.authorWS, graph)
+			if cerr != nil {
+				slog.Warn("poolroyalty: eval-contribution consensus read failed (item stays un-minted; retries next tick)",
+					slog.String("author", c.authorWS), slog.String("error", cerr.Error()))
+				continue
+			}
+			if !ok {
+				// Withheld on correctness, not paid — the self-certified / unconsensed item earns nothing.
+				slog.Debug("poolroyalty: eval-contribution withheld — no correctness consensus",
+					slog.String("item", c.itemID), slog.String("reason", reason))
+				continue
+			}
+		}
 		ok, err := m.mintOne(ctx, c.itemID, c.authorWS)
 		if err != nil {
 			slog.Warn("poolroyalty: eval-contribution mint failed (item stays un-minted; retries next tick)",
