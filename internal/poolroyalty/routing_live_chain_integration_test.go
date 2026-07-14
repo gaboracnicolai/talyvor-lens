@@ -22,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/routingpredict"
@@ -115,9 +116,10 @@ func TestRoutingLiveChain_EmitScoredMintExaminedSettles(t *testing.T) {
 	}
 	// NO score for unprovenID — it never cleared the scorer.
 
-	// ── (3) MINT via the REAL minter: amount = rate × clamp01(skill_margin). Rate 0.02 = the shipped
-	//        coherence rate (config.go). A tiny holdback so finalize_after is immediately past.
-	const rate = 0.02
+	// ── (3) MINT via the REAL minter: amount = rate × clamp01(skill_margin). PRODUCTION rate — bound to the
+	//        config default (single source of truth), NOT a lookalike literal. A tiny holdback so finalize_after
+	//        is immediately past.
+	const rate = config.DefaultRoutingPredictionRatePerPoint // 0.02
 	minter := poolroyalty.NewRoutingPredictionMinter(pool, ledger, rate, func() bool { return true })
 	minter.SetHoldbackWindow(time.Millisecond)
 	minted, err := minter.RunOnce(ctx)
@@ -127,7 +129,9 @@ func TestRoutingLiveChain_EmitScoredMintExaminedSettles(t *testing.T) {
 	if minted != 1 {
 		t.Fatalf("minted %d predictions, want 1 (only the SCORED, skill-positive one; the unproven mints nothing)", minted)
 	}
-	wantAmount := mining.FloatToMicroFloor(rate * margin) // floor(0.02 × 0.5 × 1e6) = 10000 µLENS
+	// EXACT literal (not derived from `rate`) so a change to the config rate FAILS this test and forces a
+	// money-path review: floor(0.02 × 0.5 × 1e6) = 10,000 µLENS.
+	const wantAmount int64 = 10_000
 	var mintedAmount int64
 	var mintStatus string
 	if err := pool.QueryRow(ctx, `SELECT minted_amount, status FROM routing_prediction_mints WHERE request_id=$1`, goodID).

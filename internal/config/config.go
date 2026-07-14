@@ -839,6 +839,16 @@ type Config struct {
 	DistillWorkerBin string
 }
 
+// Proof-of-Improvement mint rate defaults (LENS per readout-point). Exported as the SINGLE SOURCE OF TRUTH
+// so money-path tests bind to the SAME value production runs at (not a lookalike literal). Env overrides:
+// LENS_EVAL_CONTRIBUTION_RATE_PER_POINT / LENS_ROUTING_PREDICTION_RATE_PER_POINT.
+const (
+	// DefaultEvalContributionRatePerPoint — LENS per discrimination-point for proof-of-eval-contribution.
+	DefaultEvalContributionRatePerPoint = 0.05
+	// DefaultRoutingPredictionRatePerPoint — LENS per skill-margin-point for proof-of-routing-prediction.
+	DefaultRoutingPredictionRatePerPoint = 0.02
+)
+
 func Load() (*Config, error) {
 	c := &Config{
 		ListenAddr:        getEnv("LENS_LISTEN_ADDR", "0.0.0.0:8080"),
@@ -1066,7 +1076,7 @@ func Load() (*Config, error) {
 	// ≥3 INDEPENDENT graders actually scored it (usage-anchored) — far below the value of the
 	// accurate model-scoring that eval enables across the fleet. (Minting still gated by the
 	// enable flags, default off.)
-	c.EvalContributionRatePerPoint = 0.05
+	c.EvalContributionRatePerPoint = DefaultEvalContributionRatePerPoint
 	if v := os.Getenv("LENS_EVAL_CONTRIBUTION_RATE_PER_POINT"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil || f < 0 {
@@ -1081,7 +1091,7 @@ func Load() (*Config, error) {
 	// better-routing prediction improves EVERY future request in its cohort (compounding COGS/quality
 	// value) — so 0.02 LENS is far below the value of the decision it improved. (Minting still gated by
 	// the enable flags, default off.)
-	c.RoutingPredictionRatePerPoint = 0.02
+	c.RoutingPredictionRatePerPoint = DefaultRoutingPredictionRatePerPoint
 	if v := os.Getenv("LENS_ROUTING_PREDICTION_RATE_PER_POINT"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil || f < 0 {
