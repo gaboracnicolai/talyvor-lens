@@ -1491,8 +1491,10 @@ func run() error {
 
 	// Keel (U25) drift findings — requireAdmin forensic read (a tenant must NEVER read another tenant's
 	// drift attribution). Rows name only a self workspace + cohort aggregates; no counterparty raw value.
+	// One keel reader feeds both the admin (all-workspace) and the tenant (self-scoped) findings reads.
+	keelFindingsReader := keel.NewReader(dbrouting.ReadPool(pool, replicaPool))
 	r.Handle("/v1/admin/keel/findings", requireAdmin(authManager,
-		newKeelFindingsHandler(keel.NewReader(dbrouting.ReadPool(pool, replicaPool)))))
+		newKeelFindingsHandler(keelFindingsReader)))
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
 	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
 	// unchanged).
@@ -1649,6 +1651,9 @@ func run() error {
 		// K4 output verdicts — WORKSPACE-SCOPED read: a tenant sees ONLY its OWN verdicts (scoped to the
 		// authenticated WorkspaceID; never another's). Intra-tenant by construction.
 		authed.Get("/v1/output-verdicts", newOutputVerdictsWorkspaceHandler(authManager, outputVerdictReader))
+		// Keel drift findings — WORKSPACE-SCOPED read: a tenant sees ONLY its OWN drift attribution (scoped to
+		// the authenticated WorkspaceID; a caller-supplied workspace_id is ignored). Gives the feature a user.
+		authed.Get("/v1/keel/findings", newKeelFindingsWorkspaceHandler(authManager, keelFindingsReader))
 		// K4 CODE LOOP — the producing workspace self-reports a MECHANICAL verdict (compiled/tests) for an
 		// output it produced. Ownership-bound (only the producer, per k4_output_verdicts) + append-only.
 		authed.Post("/v1/output-verdicts/{output_id}/mechanical", newMechanicalVerdictHandler(authManager, mechanicalVerdictWriter))

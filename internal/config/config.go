@@ -1292,8 +1292,13 @@ func Load() (*Config, error) {
 	c.KeelInterval = time.Hour
 	c.KeelLookback = 48 * time.Hour
 
-	// Keel HARDENED (K3) — DEFAULT-OFF; ALL PLACEHOLDERS, calibrate at N3; NO MONEY MAY MOVE ON AN UNCALIBRATED THRESHOLD.
-	c.KeelHardenedEnabled = parseBoolEnv("LENS_KEEL_HARDENED_ENABLED") // default false
+	// Keel HARDENED (K3) — DEFAULT-ON (closed-test): the money-grade leave-one-out detector runs and produces
+	// the hardened findings the reduce-only haircut acts on. Safe by the same closed-test logic as the haircut
+	// — Talyvor has no external contributors, so a reduction takes nothing from anyone real, and running it is
+	// the only way to observe the full drift→haircut chain before N3. ⚠ ALL THRESHOLDS (sigma, MoneyCohortFloor,
+	// MinSamples, PersistenceWindows) REMAIN UNCALIBRATED PLACEHOLDERS — recalibrate at N3 before any external
+	// contributor earns. Env LENS_KEEL_HARDENED_ENABLED can still force off.
+	c.KeelHardenedEnabled = parseBoolEnvDefaultTrue("LENS_KEEL_HARDENED_ENABLED")
 	c.KeelMoneyCohortFloor = 10
 	if v := os.Getenv("LENS_KEEL_MONEY_COHORT_FLOOR"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

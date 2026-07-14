@@ -14,13 +14,20 @@ import (
 )
 
 type fakeKeelLister struct {
-	rows   []keel.ListedFinding
-	called bool
+	rows         []keel.ListedFinding
+	called       bool
+	byWorkspace  map[string][]keel.ListedFinding
+	wsCalledWith string
 }
 
 func (f *fakeKeelLister) ListFindings(_ context.Context, _ int) ([]keel.ListedFinding, error) {
 	f.called = true
 	return f.rows, nil
+}
+
+func (f *fakeKeelLister) ListFindingsForWorkspace(_ context.Context, ws string, _ int) ([]keel.ListedFinding, error) {
+	f.wsCalledWith = ws
+	return f.byWorkspace[ws], nil
 }
 
 // The keel drift-findings read surface is requireAdmin-gated: a tenant must NEVER read another tenant's
