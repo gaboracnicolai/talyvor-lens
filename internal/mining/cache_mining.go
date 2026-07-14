@@ -24,15 +24,15 @@ import (
 
 // ─── constants ───────────────────────────────────
 
-// Token rates in µLENS (SEC-2: integer smallest-unit). Tuned so
-// cross-workspace contributions pay ~10× the trivial own-cache case
-// — encourages anonymised sharing without giving teams a way to farm
-// themselves. 1_000 µLENS = 0.001 LENS.
-const (
-	CacheHitSameWorkspace  int64 = 1_000  // 0.001 LENS
-	CacheHitCrossWorkspace int64 = 10_000 // 0.010 LENS
-	SemanticCacheHit       int64 = 5_000  // 0.005 LENS
-)
+// Phase-4a Item 0: the CacheMiner cache-mining track was RETIRED here. It was
+// constructed-but-never-called (superseded by pool-royalty, which value-anchors
+// a contributor's earning at s×avoided_COGS on opt-in pooled cross-tenant hits).
+// Its only unique path — own-cache minting (owner==requester) — is self-inflation
+// (no second party, no real value received) and trivially farmable in a
+// single-workspace loop that no linkage guard can see. The generic held-mint
+// plumbing it once used (traffic_mint_holds, TypeCacheMineHeld, the sweeper) stays
+// as inert generic infra now reused by the pattern held mint; TypeCacheMine below
+// remains a counted supply type with no producer.
 
 // Ledger transaction types — keep in sync with the type column
 // CHECK constraint we'd add in a future migration (we leave the
@@ -68,18 +68,6 @@ type BalanceSnapshot struct {
 	LifetimeEarned int64     `json:"lifetime_earned_ulens"`
 	LifetimeSpent  int64     `json:"lifetime_spent_ulens"`
 	UpdatedAt      time.Time `json:"updated_at"`
-}
-
-// CacheMiningStats is the response shape for the
-// /v1/workspaces/:wsID/tokens/mining/cache endpoint. LENS amounts are integer
-// µLENS (SEC-2); JSON keys carry the explicit _ulens unit suffix.
-type CacheMiningStats struct {
-	WorkspaceID        string `json:"workspace_id"`
-	CurrentBalance     int64  `json:"current_balance_ulens"`
-	LifetimeEarned     int64  `json:"lifetime_earned_ulens"`
-	CacheHitsServed    int    `json:"cache_hits_served"`
-	CacheHitsBenefited int    `json:"cache_hits_benefited"`
-	EstimatedMonthly   int64  `json:"estimated_monthly_ulens"`
 }
 
 // ─── errors ──────────────────────────────────────
@@ -735,226 +723,4 @@ func (s *LedgerStore) GetHistory(ctx context.Context, workspaceID string, limit,
 		out = append(out, e)
 	}
 	return out, rows.Err()
-}
-
-// ─── CacheMiner ──────────────────────────────────
-
-// CacheMiner is the LENS earner for the cache-contribution
-// track. Wraps a LedgerStore + the cross-workspace toggle.
-type CacheMiner struct {
-	ledger         *LedgerStore
-	crossWorkspace bool
-	linkageEnabled bool          // Phase-0: owner-linkage self-deal guard (off by default; the wire-up enables it)
-	holdbackWindow time.Duration // Phase-1 Item 1: the mint lands HELD, finalizes after this (default 72h)
-}
-
-// SetHoldbackWindow sets the held→spendable delay for cache mints (Phase-1 Item 1).
-// Non-positive keeps the 72h default. The mint lands HELD and the finalize sweeper
-// settles it after this window (revocable before then).
-func (m *CacheMiner) SetHoldbackWindow(d time.Duration) {
-	if d > 0 {
-		m.holdbackWindow = d
-	}
-}
-
-// NewCacheMiner builds a miner. `crossWorkspaceEnabled` mirrors
-// LENS_CACHE_SHARING_ENABLED — when false, the cross-workspace
-// rate is never applied (even if a different workspace gets the
-// hit, only the same-workspace tiny reward is credited, because
-// in non-sharing mode the cache is still being treated as a
-// workspace-private artefact).
-func NewCacheMiner(ledger *LedgerStore, crossWorkspaceEnabled bool) *CacheMiner {
-	return &CacheMiner{
-		ledger:         ledger,
-		crossWorkspace: crossWorkspaceEnabled,
-		holdbackWindow: 72 * time.Hour, // Phase-1 Item 1: default held window (mirrors pool-royalty)
-	}
-}
-
-// SetOwnerLinkageCheck enables/disables the owner-linkage self-deal guard
-// (Phase-0). Off by default (parity with the pool-royalty minter); the cache
-// wire-up must enable it. When on, a cross-workspace cache hit between two
-// workspaces the SAME operator controls is downgraded to the same-workspace rate
-// (the 10× cross bonus is never minted to a self-deal).
-func (m *CacheMiner) SetOwnerLinkageCheck(enabled bool) { m.linkageEnabled = enabled }
-
-// ownerLinkedSQL is the owner-linkage signal used to detect cache self-dealing.
-// TRUE iff the two workspaces share ANY captured card fingerprint (the carded
-// one-operator-many-workspaces washer) OR ANY operator-declared owner_key (the
-// ONLY signal that covers VOUCHED workspaces, which have no card — see
-// migration 0088 and the Item A recon). EXISTS is false when neither signal is
-// present (default-ALLOW on missing: an inconclusive check never blocks honest
-// cross-actor reuse; the rate cap bounds yield regardless). Plain read, no lock.
-const ownerLinkedSQL = `SELECT
-    EXISTS (SELECT 1 FROM workspace_card_fingerprints a
-            JOIN workspace_card_fingerprints b ON a.fingerprint_hash = b.fingerprint_hash
-            WHERE a.workspace_id = $1 AND b.workspace_id = $2)
- OR EXISTS (SELECT 1 FROM workspace_owner_links a
-            JOIN workspace_owner_links b ON a.owner_key = b.owner_key
-            WHERE a.workspace_id = $1 AND b.workspace_id = $2)`
-
-// areLinked reports whether owner and requester are the same operator (shared
-// card fingerprint OR declared owner_key). A query error is surfaced fail-CLOSED
-// by the caller (a linkage check we can't run must not pay the cross bonus).
-func (m *CacheMiner) areLinked(ctx context.Context, owner, requester string) (bool, error) {
-	var linked bool
-	if err := m.ledger.pool.QueryRow(ctx, ownerLinkedSQL, owner, requester).Scan(&linked); err != nil {
-		return false, fmt.Errorf("cache mining: owner-linkage check: %w", err)
-	}
-	return linked, nil
-}
-
-// RecordCacheHit credits the cache owner for serving a hit.
-// hitType ∈ {"exact", "semantic"}. The two workspace IDs may be
-// equal (workspace serving its own cache → the throttled tiny reward).
-//
-// requestID MUST be a SERVER-DERIVED work-product key (cache content hash) so
-// the mint is idempotent on (requestID, owner); an empty requestID mints
-// nothing (fail-closed). This track is dormant today (the proxy cache-hit path
-// only increments the Prometheus counter, not this); the live wire-up supplies
-// the id. The mint is gated on verified-to-earn via CreditOnce.
-func (m *CacheMiner) RecordCacheHit(
-	ctx context.Context,
-	cacheOwnerWorkspace string,
-	requestWorkspace string,
-	hitType string,
-	requestID string,
-) error {
-	if cacheOwnerWorkspace == "" {
-		// No owner recorded — older cache entries from before
-		// owner tracking landed. Skip (no one to credit).
-		return nil
-	}
-
-	earning := m.earnFor(cacheOwnerWorkspace, requestWorkspace, hitType)
-	if earning <= 0 {
-		return nil
-	}
-	// Phase-0 owner-linkage self-deal guard: a cross-workspace rate paid between two
-	// workspaces the SAME operator controls is self-dealing (the cache track had no
-	// such guard while pool-royalty did). Downgrade a linked pair to the
-	// same-workspace rate so the 10× cross bonus is never minted to a self-deal.
-	// Covers CARDED (shared fingerprint) AND VOUCHED (declared owner_key) workspaces
-	// — see areLinked / migration 0088. Fail-CLOSED: a linkage check we cannot run
-	// must not pay the cross bonus.
-	if m.linkageEnabled && earning > CacheHitSameWorkspace && cacheOwnerWorkspace != requestWorkspace {
-		linked, err := m.areLinked(ctx, cacheOwnerWorkspace, requestWorkspace)
-		if err != nil {
-			return err
-		}
-		if linked {
-			earning = CacheHitSameWorkspace
-		}
-	}
-
-	meta := map[string]interface{}{
-		"hit_type":             hitType,
-		"request_workspace_id": requestWorkspace,
-	}
-	desc := fmt.Sprintf("cache hit (%s) served to %s", hitType, requestWorkspace)
-	// Phase-1 Item 1: mint HELD (not spendable). CreditOnceHeld writes the uncounted
-	// cache_mine_held row + a traffic_mint_holds claim; the finalize sweeper settles it
-	// to the counted cache_mine after the window, and RevokeHeldTxAs can reverse it
-	// before then (the clawback surface). Exactly-once on (requestID, owner, cache_mine).
-	_, err := m.ledger.CreditOnceHeld(ctx, requestID, cacheOwnerWorkspace, earning, TypeCacheMine, desc, m.holdbackWindow, meta)
-	return err
-}
-
-// earnFor encapsulates the rate-selection rules — same workspace
-// gets the tiny reward; cross-workspace gets the bigger reward
-// when sharing is enabled; semantic hits get the middle rate
-// even cross-workspace.
-func (m *CacheMiner) earnFor(owner, requester, hitType string) int64 {
-	if owner == requester || requester == "" || !m.crossWorkspace {
-		return CacheHitSameWorkspace
-	}
-	if hitType == "semantic" {
-		return SemanticCacheHit
-	}
-	return CacheHitCrossWorkspace
-}
-
-// GetMiningStats summarises the workspace's cache-mining activity.
-// EstimatedMonthly is a 30× projection of the average daily earn
-// over the last 30 days — naive but it's what the dashboard wants.
-func (m *CacheMiner) GetMiningStats(ctx context.Context, workspaceID string) (*CacheMiningStats, error) {
-	snap, err := m.ledger.GetSnapshot(ctx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	served, err := m.ledger.CountCacheHitsServed(ctx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	benefited, err := m.ledger.CountCacheHitsBenefited(ctx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-
-	// EstimatedMonthly: lifetimeEarned across a guessed
-	// onboarding-to-now window. Without a per-day breakdown we
-	// project from "rough average across the workspace lifetime",
-	// floored at 30 days so a brand-new workspace doesn't
-	// extrapolate one big hit into a giant projection.
-	// EstimatedMonthly is a projection (display-only) — compute in float from the
-	// integer µLENS lifetime, then floor back to an integer µLENS count.
-	var monthly int64
-	if !snap.UpdatedAt.IsZero() {
-		days := time.Since(snap.UpdatedAt).Hours()/24 + 1
-		if days < 30 {
-			days = 30
-		}
-		monthly = int64(float64(snap.LifetimeEarned) / days * 30)
-	}
-
-	return &CacheMiningStats{
-		WorkspaceID:        workspaceID,
-		CurrentBalance:     snap.Balance,
-		LifetimeEarned:     snap.LifetimeEarned,
-		CacheHitsServed:    served,
-		CacheHitsBenefited: benefited,
-		EstimatedMonthly:   monthly,
-	}, nil
-}
-
-const countServedSQL = `SELECT COUNT(*) FROM lens_token_ledger WHERE workspace_id = $1 AND type = 'cache_mine'`
-
-// CountCacheHitsServed returns the number of cache-mine credits issued to
-// workspaceID — the count of cache hits this workspace's entries served to any
-// requester. Queries PG directly so the count is consistent across instances.
-func (s *LedgerStore) CountCacheHitsServed(ctx context.Context, workspaceID string) (int, error) {
-	if s.pool == nil {
-		return 0, nil
-	}
-	var n int
-	if err := s.pool.QueryRow(ctx, countServedSQL, workspaceID).Scan(&n); err != nil {
-		return 0, fmt.Errorf("mining: count served: %w", err)
-	}
-	return n, nil
-}
-
-const countBeneditedSQL = `SELECT COUNT(*) FROM lens_token_ledger WHERE type = 'cache_mine' AND metadata->>'request_workspace_id' = $1`
-
-// CountCacheHitsBenefited returns the number of times workspaceID benefited
-// from another workspace's cache entry. Reads the request_workspace_id field
-// stored in ledger metadata. Cross-partition query — analytics only, not hot path.
-func (s *LedgerStore) CountCacheHitsBenefited(ctx context.Context, workspaceID string) (int, error) {
-	if s.pool == nil {
-		return 0, nil
-	}
-	var n int
-	if err := s.pool.QueryRow(ctx, countBeneditedSQL, workspaceID).Scan(&n); err != nil {
-		return 0, fmt.Errorf("mining: count benefited: %w", err)
-	}
-	return n, nil
-}
-
-// Rates returns the public rate table in µLENS (SEC-2) — backs the
-// /v1/tokens/rates endpoint. Values are integer µLENS per hit.
-func Rates() map[string]int64 {
-	return map[string]int64{
-		"cache_hit_same":  CacheHitSameWorkspace,
-		"cache_hit_cross": CacheHitCrossWorkspace,
-		"semantic_hit":    SemanticCacheHit,
-	}
 }

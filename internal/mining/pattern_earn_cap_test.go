@@ -47,7 +47,19 @@ func TestRecordPattern_OverCap_AtomicBlock(t *testing.T) {
 		WithArgs("ws_e", "code", "claude", "anthropic", InputBucketMedium,
 			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", true, micro(0.001)).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow("p1", time.Now()))
-	expectApplyTx(mock, "ws_e", 0, 0, 0, micro(0.001), micro(0.001), micro(0.001), 0)
+	// Phase-4a Item 1: the credit is now HELD (CreditHeldTx → pattern_mine_held) +
+	// a traffic_mint_holds claim, both in-tx BEFORE the cap COUNT — so the over-cap
+	// rollback still discards the held credit + hold row atomically.
+	expectHeldRead(mock, "ws_e", 0, 0, 0)
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_e", micro(0.001), int64(0), TypePatternMineHeld, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_e", int64(0), micro(0.001), int64(0)). // balance unchanged, held 0→0.001, earned unchanged
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("INSERT INTO traffic_mint_holds").
+		WithArgs("req-over", "ws_e", TypePatternMine, micro(0.001), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM routing_patterns").
 		WithArgs("ws_e", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(3))) // 3 > cap 2
@@ -75,7 +87,17 @@ func TestRecordPattern_CapCountError_FailsClosed(t *testing.T) {
 		WithArgs("ws_e", "code", "claude", "anthropic", InputBucketMedium,
 			0.85, LatencyFast, 0.0, 1.0, 1, 0.0, "", true, micro(0.001)).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow("p1", time.Now()))
-	expectApplyTx(mock, "ws_e", 0, 0, 0, micro(0.001), micro(0.001), micro(0.001), 0)
+	// Phase-4a Item 1: held credit + hold row, then the cap COUNT errors.
+	expectHeldRead(mock, "ws_e", 0, 0, 0)
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_e", micro(0.001), int64(0), TypePatternMineHeld, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_e", int64(0), micro(0.001), int64(0)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("INSERT INTO traffic_mint_holds").
+		WithArgs("req-cap", "ws_e", TypePatternMine, micro(0.001), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM routing_patterns").
 		WithArgs("ws_e", pgxmock.AnyArg()).WillReturnError(errors.New("db down"))
 	mock.ExpectRollback()
@@ -112,6 +134,11 @@ func earnTestPool(t *testing.T) *pgxpool.Pool {
 		`DROP TABLE IF EXISTS lens_token_ledger`,
 		`DROP TABLE IF EXISTS lens_token_balances`,
 		`DROP TABLE IF EXISTS pattern_mine_credits`,
+		`DROP TABLE IF EXISTS traffic_mint_holds`,
+		// Phase-4a Item 1: pattern mint lands HELD in traffic_mint_holds.
+		`CREATE TABLE traffic_mint_holds (request_id TEXT NOT NULL, workspace_id TEXT NOT NULL, mint_type TEXT NOT NULL,
+			minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (request_id, workspace_id, mint_type))`,
 		`CREATE TABLE routing_patterns (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
 			feature_category TEXT NOT NULL, model_used TEXT NOT NULL, provider_used TEXT NOT NULL,
@@ -121,6 +148,7 @@ func earnTestPool(t *testing.T) *pgxpool.Pool {
 			rarity DOUBLE PRECISION NOT NULL DEFAULT 0, complexity_bucket TEXT NOT NULL DEFAULT '', opted_in BOOLEAN NOT NULL DEFAULT FALSE,
 			earned BIGINT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			held_balance BIGINT NOT NULL DEFAULT 0, locked_balance BIGINT NOT NULL DEFAULT 0,
 			lifetime_earned BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE lens_token_ledger (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL,
@@ -169,7 +197,7 @@ func TestRecordPattern_EarnCap_Exactness_Integration(t *testing.T) {
 		t.Fatalf("EXACTNESS: %d concurrent earns vs cap %d → want exactly %d committed earn rows, got %d", N, K, K, earnedRows)
 	}
 	var bal int64
-	if err := pool.QueryRow(ctx, `SELECT balance FROM lens_token_balances WHERE workspace_id='ws_race'`).Scan(&bal); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT held_balance FROM lens_token_balances WHERE workspace_id='ws_race'`).Scan(&bal); err != nil {
 		t.Fatal(err)
 	}
 	if want := int64(K) * PatternBaseRate; bal != want { // integer µLENS — exact

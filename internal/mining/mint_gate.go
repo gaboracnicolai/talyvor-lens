@@ -82,7 +82,8 @@ var mintTypeList = []string{
 	TypeEmbeddingMineHeld, // counted compute_mine/embedding_mine rows are written at finalize (OUT of
 	// this list, like cache_mine) — so the held mint is gated + capped ONCE, no double-count at settle.
 	TypeAnnotationMine,
-	TypePatternMine,
+	TypePatternMineHeld, // Phase-4a Item 1: pattern mints HELD; the mint MOMENT is pattern_mine_held
+	// (gated + rate-capped here). The counted pattern_mine row is written at finalize (OUT of this list).
 	"receipt_mine_provisional", // == povi.TypeReceiptMineProvisional (cycle-free literal)
 	TypePoolRoyaltyHeld,
 	TypeEvalContributionHeld,    // P-o-I instance 1: proof-of-eval-contribution held mint — U6 floor + 24h cap apply

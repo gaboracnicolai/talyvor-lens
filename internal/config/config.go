@@ -347,6 +347,14 @@ type Config struct {
 	AntiGamingScanWindow        time.Duration // LENS_ANTIGAMING_SCAN_WINDOW (default 168h — must exceed the 72h holdback so every held row is scanned)
 	AntiGamingInterval          time.Duration // LENS_ANTIGAMING_INTERVAL (default 1m — frequent, to catch rings well before finalize)
 
+	// PatternConcentrationVelocityMax — Phase-4a Item 3: the SINGLE-PARTY concentration
+	// guard flags a workspace with MORE than this many held pattern mints in a 1h
+	// velocity window (a farm spike); its mints are WITHHELD from settlement (held for
+	// review — recoverable, not destroyed). PLACEHOLDER — calibrate at scale (like the
+	// keel thresholds). Default 2000/h sits just below the earn cap's sustained max
+	// rate (~2083/h) so only farm-level velocity is withheld. 0 disables flagging.
+	PatternConcentrationVelocityMax int // LENS_PATTERN_CONCENTRATION_VELOCITY_MAX (default 2000)
+
 	// SettlementFailClosedEnabled (Phase-3 Item 3) arms the settlement-side fail-closed layer for the
 	// cross-tenant reuse tables (pool_royalty_mints / distill_royalty_mints). When ON: the finalize
 	// sweeper settles ONLY status='cleared' rows, and the settlement clearer promotes ONLY examined-clean-
@@ -1355,6 +1363,14 @@ func Load() (*Config, error) {
 	}
 	// Scan window default 168h — MUST exceed the 72h holdback so every currently-held row is
 	// scanned (a shorter window would let an old held ring slip past the detector to finalize).
+	c.PatternConcentrationVelocityMax = 2000 // Phase-4a Item 3 placeholder (per 1h)
+	if v := os.Getenv("LENS_PATTERN_CONCENTRATION_VELOCITY_MAX"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid LENS_PATTERN_CONCENTRATION_VELOCITY_MAX (int >= 0): %s", v)
+		}
+		c.PatternConcentrationVelocityMax = n
+	}
 	c.AntiGamingScanWindow = 168 * time.Hour
 	if v := os.Getenv("LENS_ANTIGAMING_SCAN_WINDOW"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -1371,10 +1387,13 @@ func Load() (*Config, error) {
 		}
 		c.AntiGamingInterval = d
 	}
-	// Phase-3 Item 3 settlement fail-closed — DEFAULT FALSE (byte-identical off). Turned on deliberately
-	// (Phase 4), and only alongside the ring detector running healthily, since it withholds settlement from
-	// any un-examined held row. Env: LENS_SETTLEMENT_FAIL_CLOSED_ENABLED.
-	c.SettlementFailClosedEnabled = false
+	// Settlement fail-closed — Phase-4a Item 4: DEFAULT TRUE for the closed test. An
+	// un-examined held mint HOLDS, never settles (the money guarantee); the accepted
+	// trade is that a prolonged detector outage strands legitimate mints (recoverable,
+	// deflationary) rather than settling blind — the detector-health signal makes such
+	// a stall VISIBLE. Inert when the economy is off (the sweepers/clearers don't run).
+	// Env override: LENS_SETTLEMENT_FAIL_CLOSED_ENABLED.
+	c.SettlementFailClosedEnabled = true
 	if os.Getenv("LENS_SETTLEMENT_FAIL_CLOSED_ENABLED") != "" {
 		c.SettlementFailClosedEnabled = parseBoolEnv("LENS_SETTLEMENT_FAIL_CLOSED_ENABLED")
 	}
@@ -1574,6 +1593,29 @@ func Load() (*Config, error) {
 	if os.Getenv("LENS_ECONOMY_ENABLED") != "" {
 		c.EconomyEnabled = parseBoolEnv("LENS_ECONOMY_ENABLED")
 	}
+
+	// Phase-4a Item 5: the THREE live traffic mints ship DEFAULT-ON for the closed
+	// test (pool-royalty + distill share PoolRoyaltyMintingEnabled; distill also needs
+	// its poolable-serve flag; pool-royalty needs CachePoolableEnabled to produce a
+	// pooled hit; pattern needs PatternEarningEnabled). Each is env-overridable and
+	// force-off'd below when EconomyEnabled=false, so production (LENS_ECONOMY_ENABLED
+	// =false) stays inert until the operator turns the master switch on + vouches a
+	// workspace. Node/eval/routing/confidential mints are NOT here — they stay OFF.
+	for _, f := range []struct {
+		p   *bool
+		env string
+	}{
+		{&c.PoolRoyaltyMintingEnabled, "LENS_POOL_ROYALTY_MINTING_ENABLED"}, // arms pool-royalty AND distill mints
+		{&c.CachePoolableEnabled, "LENS_CACHE_POOLABLE_ENABLED"},            // enables the pooled cross-tenant cache serve → pool-royalty
+		{&c.DistillPoolableEnabled, "LENS_DISTILL_POOLABLE_ENABLED"},        // enables the cross-tenant distill serve → distill basis
+		{&c.PatternEarningEnabled, "LENS_PATTERN_EARNING_ENABLED"},          // arms the pattern held mint
+	} {
+		*f.p = true
+		if os.Getenv(f.env) != "" {
+			*f.p = parseBoolEnv(f.env)
+		}
+	}
+
 	if !c.EconomyEnabled {
 		c.PatternMiningEnabled = false
 		c.PatternCaptureEnabled = false
