@@ -128,6 +128,7 @@ func TestEvalContribution_InertThenLive_Integration(t *testing.T) {
 
 	// LIVE: rate 10 → mints once at 10 × 0.8889 ≈ 8.89.
 	live := NewEvalContributionMinter(pool, ledger, 10, bothOn)
+	live.SetRequireConsensus(false) // isolates the discrimination readout; the consensus gate has its own test
 	n, err := live.RunOnce(ctx)
 	if err != nil || n != 1 {
 		t.Fatalf("rate-10 minter must mint exactly 1: n=%d err=%v", n, err)
@@ -151,6 +152,7 @@ func TestEvalContribution_WarmupAndNonDiscriminating_Integration(t *testing.T) {
 	ctx := context.Background()
 	verifyWorkspace(t, pool, "authorA")
 	live := NewEvalContributionMinter(pool, ledger, 10, func() bool { return true })
+	live.SetRequireConsensus(false) // isolates the grader warmup / non-discrimination floor
 
 	// (a) Only 2 distinct graders < 3 → zero (warmup not cleared).
 	evalSeedItem(t, pool, "warm", "authorA")
@@ -184,6 +186,7 @@ func TestEvalContribution_U6Floor_Integration(t *testing.T) {
 	evalGrade(t, pool, "item1", "wsG2", 1.0)
 	evalGrade(t, pool, "item1", "wsG3", 0.0)
 	live := NewEvalContributionMinter(pool, ledger, 10, func() bool { return true })
+	live.SetRequireConsensus(false) // isolates the U6 verified-earn floor
 
 	// Unverified → the per-item tx rolls back at verifyEarn; no claim row, no credit, RunOnce reports 0 minted.
 	if n, err := live.RunOnce(ctx); err != nil || n != 0 {

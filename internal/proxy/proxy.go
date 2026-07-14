@@ -163,6 +163,13 @@ type Proxy struct {
 	routeDecisionSink    routeDecisionSink
 	routeDecisionEnabled func() bool
 
+	// Routing-prediction LIVE emit (Proof-of-Improvement piece 3) — optional, nil-safe post-serve. Records a
+	// contributor's routing PREDICTION when the live cohort override fires (the FARM GATE). Mint-free itself;
+	// the offline scorer+minter turn a proven prediction into a held mint. Default-off. See
+	// routing_predict_emit.go.
+	routingPredictEmitter     routingPredictEmitter
+	routingPredictEmitEnabled func() bool
+
 	// nodeLatency descriptive capture (optional, nil-safe post-serve on the node-route path). Shares the
 	// obsLimiter budget; default-off; mint-free (the sink has no ledger handle). See nodelatency_capture.go.
 	nodeLatencySink    nodeLatencySink
@@ -1024,6 +1031,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	var rdBaselineModel, rdCohortBasis string
 	var rdCohortOverrode, rdRouteWasAuto bool
 	var rdCohortN int
+	// Hoisted for the post-flush routing-PREDICTION emit (money-path producer, farm-gated on rdCohortOverrode):
+	// the cohort-recommended model and the canonical complexity bucket of THIS request's cohort. Set only when
+	// the auto-route branch runs; the emit binds them (with the input bucket) to cohort.DeriveInputCohort.
+	var rdCohortModel, rdComplexityBucket string
 
 	// Routing intelligence (Upgrade 22) engages ONLY when enabled AND the
 	// request explicitly cedes the model choice ("auto" pseudo-model or the
@@ -1043,7 +1054,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// persisted post-serve WorkTier (unknowable here). The tier conditions the pick only when
 		// LENS_ROUTING_TIER_COHORTS_ENABLED is on; otherwise Recommend ignores it.
 		complexityScore := router.AnalyseComplexity(compressedPrompt).Score()
-		rec := p.routingAdvisor.Recommend(ctx, wsID, feature, len(compressedPrompt)/4, string(worktier.ComplexityBucketFor(complexityScore)), cfg.ProviderName(), allowedModels, allowedProviders)
+		rdComplexityBucket = string(worktier.ComplexityBucketFor(complexityScore)) // canonical cohort bucket (same input the router analysed)
+		rec := p.routingAdvisor.Recommend(ctx, wsID, feature, len(compressedPrompt)/4, rdComplexityBucket, cfg.ProviderName(), allowedModels, allowedProviders)
 		// Base-path pick: the model an auto request gets if NO recommendation is
 		// applied (the complexity router). Pure/in-memory (no DB, no side
 		// effects), computed once — it is BOTH the downgrade baseline for the
@@ -1071,6 +1083,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			upstreamModel = res.model
 			overrideModel = res.model
 			overrideReason = res.reason
+			// The cohort's ASSERTED model — captured here (not from upstreamModel, which a later circuit-breaker
+			// override could replace) so the emitted prediction records what the cohort actually recommended.
+			rdCohortModel = res.model
 		}
 		if res.applied {
 			metrics.RoutingIntelligenceApplied()
@@ -1412,6 +1427,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			if rdRouteWasAuto {
 				p.captureRouteDecision(ctx, wsID, rdBaselineModel, upstreamModel, rdCohortBasis,
 					rdCohortOverrode, rdCohortN, len(compressedPrompt)/4, outT)
+				// Routing-PREDICTION live emit — POST-FLUSH, off-path, obsLimiter-shed, mint-free, default-off.
+				// Fires ONLY when the cohort OVERRODE the baseline (rdCohortOverrode = the farm gate): that live
+				// decision becomes a contributor prediction ("cohort C → rdCohortModel") the offline scorer grades
+				// on the held eval slice and the minter pays on. Trivial requests (no override) emit nothing. See
+				// routing_predict_emit.go.
+				p.emitRoutingPrediction(ctx, wsID, feature, rdCohortModel, cfg.ProviderName(),
+					rdCohortOverrode, len(compressedPrompt)/4, rdComplexityBucket)
 			}
 			// K4 intrinsic output verdict — POST-FLUSH, off-path, default-off, mint-free. Derives the
 			// gateway-bound output id + checks the response against a constraint the REQUEST declared;
