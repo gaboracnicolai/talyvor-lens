@@ -89,9 +89,11 @@ import (
 	"github.com/talyvor/lens/internal/ratelimit"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/roi"
+	"github.com/talyvor/lens/internal/routedecision"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
 	"github.com/talyvor/lens/internal/routingscore"
+	"github.com/talyvor/lens/internal/royaltyhaircut"
 	"github.com/talyvor/lens/internal/safehttp"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/status"
@@ -670,6 +672,22 @@ func run() error {
 	// live; OFF (default) ⇒ the mint path is byte-identical (no reputation read). An ADDITIVE
 	// constraint downstream of the U6 floor/rate-cap — only ever reduces or blocks a mint.
 	tokenLedger.SetReputationGate(func() bool { return cfg.ReputationBondedMintingEnabled })
+	// KE-2: Keel HARDENED idiosyncratic drift → a REDUCE-ONLY haircut on bonded reuse royalties. DEFAULT-OFF
+	// (it changes money — off until N3 calibration). When off the seam is never wired, so the mint path is
+	// byte-identical. The oracle reads keel_findings via the mint's tx (mining imports no keel); the money-path
+	// floor/clamp/fail-open is enforced in mining.reputationBondedAmount. minWindowBucket restricts to findings
+	// within the recent keel-persistence horizon (a few windows), so a long-ago drift does not penalise forever.
+	if cfg.KeelRoyaltyHaircutEnabled {
+		windowSecs := cfg.KeelWindowSeconds
+		if windowSecs <= 0 {
+			windowSecs = 3600
+		}
+		const recentWindows = 6 // recency horizon (placeholder — calibrate at N3)
+		tokenLedger.SetDriftHaircut(func(ctx context.Context, tx pgx.Tx, workspaceID string) (float64, error) {
+			minBucket := (time.Now().Unix() / windowSecs) - recentWindows
+			return royaltyhaircut.Factor(ctx, tx, workspaceID, minBucket)
+		})
+	}
 	cacheMiner := mining.NewCacheMiner(tokenLedger, cfg.CacheSharingEnabled)
 	cacheMiner.SetOwnerLinkageCheck(true) // Phase-1: self-deal guard armed (parity with the royalty minters), ready if a value-backed serve path ever calls it
 	// Phase-1 Item 3 FINDING — cacheMiner is deliberately NOT called from the
@@ -1220,6 +1238,12 @@ func run() error {
 	worktierStore := worktier.NewStore(pool)
 	p.SetWorkTier(worktierStore, func() bool { return cfg.WorkTierEnabled })
 
+	// Route-decision capture — DESCRIPTIVE, MINT-FREE, default-ON. The go/no-go substrate for a
+	// corpus-contribution mint: records baseline vs served model + estimated cost off-path, post-serve.
+	routeDecisionWriter := routedecision.NewWriter(pool)
+	p.SetRouteDecision(routeDecisionWriter, func() bool { return cfg.RoutingDecisionCaptureEnabled })
+	routeDecisionReader := routedecision.NewReader(pool)
+
 	// K4 intrinsic output verifier — DEFAULT-OFF (LENS_K4_VERIFIER_ENABLED). Post-serve, off-path,
 	// mint-free (import-guarded); writes verdicts to the PRIMARY pool. Reads (admin + workspace-scoped,
 	// below) also use the PRIMARY, so this adds NO replica reader and the U8/U9 ExactlySix invariant is
@@ -1473,6 +1497,10 @@ func run() error {
 	// pool (non-money read; keeps the U8/U9 ExactlySix replica-reader invariant unchanged).
 	r.Handle("/v1/admin/output-verdicts", requireAdmin(authManager,
 		newOutputVerdictsAdminHandler(outputVerdictReader)))
+	// KEEL ECONOMY go/no-go: the routing-decision summary (override rate + estimated cost delta). Admin-only,
+	// descriptive; the estimate is NOT money.
+	r.Handle("/v1/admin/routing-decisions/summary", requireAdmin(authManager,
+		newRoutingDecisionsSummaryHandler(routeDecisionReader, time.Now)))
 
 	// H5.β — settle a provenance bond (slash-or-release; deadline-guarded + CAS-safe + idempotent).
 	// requireAdmin as defense-in-depth; registered ONLY when the flag is on.

@@ -121,6 +121,12 @@ type LedgerStore struct {
 	// byte-identical). When on, applyTx/CreditHeldTx scale a bonded mint by f(R) and gate it to 0
 	// below the access floor — an ADDITIVE constraint downstream of verifyEarn (mint_gate.go).
 	reputationGate func() bool
+
+	// driftHaircut is KE-2: a REDUCE-ONLY multiplier in [floor, 1.0] applied AFTER the reputation factor,
+	// derived from Keel's HARDENED idiosyncratic drift finding for the workspace. nil ⇒ no-op (byte-identical).
+	// It can only LOWER a bonded mint (never increase, never below the floor, never burn/slash). Reads via the
+	// caller's tx so mining imports no keel. See mint_gate.go:reputationBondedAmount.
+	driftHaircut func(ctx context.Context, tx pgx.Tx, workspaceID string) (float64, error)
 }
 
 // NewLedgerStore wraps a real *pgxpool.Pool.

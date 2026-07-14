@@ -157,6 +157,12 @@ type Proxy struct {
 	workTierSink    workTierSink
 	workTierEnabled func() bool
 
+	// routeDecision descriptive capture (optional, nil-safe post-serve). MINT-FREE go/no-go substrate: records
+	// the routing Advisor's baseline vs served model + estimated cost. Shares the obsLimiter. See
+	// routedecision_capture.go.
+	routeDecisionSink    routeDecisionSink
+	routeDecisionEnabled func() bool
+
 	// nodeLatency descriptive capture (optional, nil-safe post-serve on the node-route path). Shares the
 	// obsLimiter budget; default-off; mint-free (the sink has no ledger handle). See nodelatency_capture.go.
 	nodeLatencySink    nodeLatencySink
@@ -1013,6 +1019,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// model in the same provider family; it never silently upgrades.
 	upstreamModel := model
 	var overrideModel, overrideReason string
+	// Hoisted for the post-flush route-decision capture (descriptive, mint-free): the pre-cohort baseline, the
+	// cohort's dims, and whether cohort intelligence overrode the baseline. Set only on the auto-route path.
+	var rdBaselineModel, rdCohortBasis string
+	var rdCohortOverrode, rdRouteWasAuto bool
+	var rdCohortN int
 
 	// Routing intelligence (Upgrade 22) engages ONLY when enabled AND the
 	// request explicitly cedes the model choice ("auto" pseudo-model or the
@@ -1048,6 +1059,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// total, no cost, never stored; see routing_decision_tier.go).
 		dt := newDecisionTier(len(compressedPrompt)/4, complexityScore, piiDetected, guardrailFired, loggingPolicy)
 		res := resolveAutoRoute(p.router, rec, base, dt)
+		// Route-decision evidence (descriptive, mint-free): the pre-cohort baseline, the cohort dims, and
+		// whether the cohort recommendation was APPLIED (i.e. overrode the baseline). res.applied is exactly
+		// "cohort intelligence overrode the default"; res.model is baseline when not applied.
+		rdRouteWasAuto = true
+		rdBaselineModel = base.Model
+		rdCohortOverrode = res.applied
+		rdCohortBasis = string(rec.Basis)
+		rdCohortN = rec.DistinctWorkspaces
 		if res.model != "" {
 			upstreamModel = res.model
 			overrideModel = res.model
@@ -1387,6 +1406,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// the router analyzed (compressedPrompt) so it equals the routing decision's.
 			p.captureWorkTier(ctx, wsID, feature, upstreamModel, cfg.ProviderName(), compressedPrompt,
 				len(compressedPrompt)/4, outT, piiDetected, guardrailFired, string(loggingPolicy))
+			// Route-decision evidence — POST-FLUSH, off-path, obsLimiter-shed, detached, mint-free. Only on the
+			// auto-route path (rdRouteWasAuto). Records baseline vs served model + estimated cost (the go/no-go
+			// substrate). Cannot affect the already-flushed response. See routedecision_capture.go.
+			if rdRouteWasAuto {
+				p.captureRouteDecision(ctx, wsID, rdBaselineModel, upstreamModel, rdCohortBasis,
+					rdCohortOverrode, rdCohortN, len(compressedPrompt)/4, outT)
+			}
 			// K4 intrinsic output verdict — POST-FLUSH, off-path, default-off, mint-free. Derives the
 			// gateway-bound output id + checks the response against a constraint the REQUEST declared;
 			// records a verdict (hashes only). Cannot affect the already-flushed response. See

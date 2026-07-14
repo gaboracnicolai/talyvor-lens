@@ -445,6 +445,18 @@ type Config struct {
 	// import-guarded), never blocks/alters the response, and is intra-tenant only. Env: LENS_K4_VERIFIER_ENABLED.
 	K4VerifierEnabled bool
 
+	// RoutingDecisionCaptureEnabled gates the DESCRIPTIVE, MINT-FREE route-decision capture
+	// (internal/routedecision) — records the routing Advisor's baseline vs served model + estimated cost, the
+	// go/no-go substrate for a corpus-contribution mint. DEFAULT TRUE (descriptive, closed-test,
+	// money-decoupled — the sink has no ledger handle). Env: LENS_ROUTING_DECISION_CAPTURE_ENABLED (falsey disables).
+	RoutingDecisionCaptureEnabled bool
+
+	// KeelRoyaltyHaircutEnabled gates KE-2: a REDUCE-ONLY reuse-royalty haircut for a workspace with a sustained
+	// HARDENED idiosyncratic drift finding (never common-mode, never a slash — it can only LOWER a mint, never
+	// below the floor, never increase anyone's earnings). DEFAULT FALSE — it CHANGES MONEY, off until N3
+	// calibration. Env: LENS_KEEL_ROYALTY_HAIRCUT_ENABLED.
+	KeelRoyaltyHaircutEnabled bool
+
 	// H5BondsEnabled gates H5.β PROVENANCE BONDS — THE MONEY PATH. A workspace stakes collateral on a
 	// gateway-bound output_id; a self-reported mechanical FAILURE (the only slash-usable signal) BURNS a
 	// fraction of the bond (supply reduced, paid to nobody), else time RELEASES it. DEFAULT FALSE: off = no
@@ -858,14 +870,16 @@ func Load() (*Config, error) {
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
 
-		GuardrailsEnabled:            parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
-		WorkTierEnabled:              parseBoolEnv("LENS_WORKTIER_ENABLED"),
-		K4VerifierEnabled:            parseBoolEnv("LENS_K4_VERIFIER_ENABLED"),
-		H5BondsEnabled:               parseBoolEnv("LENS_H5_BONDS_ENABLED"),
-		H5BuildVerifyEnabled:         parseBoolEnv("LENS_H5_BUILDVERIFY_ENABLED"),
-		H5AttestEnabled:              parseBoolEnv("LENS_H5_ATTEST_ENABLED"),
-		NodeLatencyCaptureEnabled:    parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
-		NodeAttestationVerifyEnabled: parseBoolEnv("LENS_NODE_ATTESTATION_VERIFY_ENABLED"),
+		GuardrailsEnabled:             parseBoolEnv("LENS_GUARDRAILS_ENABLED"),
+		WorkTierEnabled:               parseBoolEnv("LENS_WORKTIER_ENABLED"),
+		K4VerifierEnabled:             parseBoolEnv("LENS_K4_VERIFIER_ENABLED"),
+		RoutingDecisionCaptureEnabled: parseBoolEnvDefaultTrue("LENS_ROUTING_DECISION_CAPTURE_ENABLED"),
+		KeelRoyaltyHaircutEnabled:     parseBoolEnv("LENS_KEEL_ROYALTY_HAIRCUT_ENABLED"),
+		H5BondsEnabled:                parseBoolEnv("LENS_H5_BONDS_ENABLED"),
+		H5BuildVerifyEnabled:          parseBoolEnv("LENS_H5_BUILDVERIFY_ENABLED"),
+		H5AttestEnabled:               parseBoolEnv("LENS_H5_ATTEST_ENABLED"),
+		NodeLatencyCaptureEnabled:     parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
+		NodeAttestationVerifyEnabled:  parseBoolEnv("LENS_NODE_ATTESTATION_VERIFY_ENABLED"),
 
 		RoutingIntelligenceEnabled:      parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 		RoutingTierCohortsEnabled:       parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
@@ -1627,4 +1641,14 @@ func parseBoolEnv(key string) bool {
 		return true
 	}
 	return false
+}
+
+// parseBoolEnvDefaultTrue defaults TRUE; only an explicit falsey value disables. For descriptive,
+// money-decoupled captures that are on in closed-test unless deliberately turned off.
+func parseBoolEnvDefaultTrue(key string) bool {
+	switch os.Getenv(key) {
+	case "0", "false", "FALSE", "False", "no", "NO", "No", "off", "OFF", "Off":
+		return false
+	}
+	return true
 }
