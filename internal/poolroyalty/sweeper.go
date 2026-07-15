@@ -17,9 +17,9 @@
 //	    finalize is impossible by this guard — the same claim/RowsAffected
 //	    discipline as povi_challenges, the 2.1 mint claim, and the 2.2
 //	    RecordReceipt fix.
-//	(2) FinalizeHeldTx: the single-row FOR UPDATE held→spendable move, which
-//	    writes the EXISTING counted TypePoolRoyalty ledger row — the moment
-//	    the mint enters supply.
+//	(2) FinalizeHeldTxAs: the single-row FOR UPDATE held→spendable move, which
+//	    writes the counted ledger row for THIS table's mint (finalTypeForTable) —
+//	    the moment the mint enters supply.
 //
 // Two single-row writes in one tx, no cross-row ordering surface (each claim
 // row is only ever touched by its own request_id-keyed transition; distinct
@@ -40,6 +40,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/mining"
 )
 
 // sweepBatchLimit bounds one tick's settle work. NOT a silent cap: rows past
@@ -75,9 +76,47 @@ type sweeperDB interface {
 }
 
 // heldFinalizer is the minimal settle surface; *mining.LedgerStore's
-// FinalizeHeldTx satisfies it exactly.
+// FinalizeHeldTxAs satisfies it exactly.
+//
+// Deliberately FinalizeHeldTxAs, not FinalizeHeldTx: the latter hardcodes
+// mining.TypePoolRoyalty, and this sweeper settles SIX different claim tables. Taking the
+// type-less overload is what let every settled mint land labelled pool_royalty regardless
+// of what it actually was. The finalType must be supplied per table — see finalTypeForTable.
 type heldFinalizer interface {
-	FinalizeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, description string, metadata map[string]interface{}) error
+	FinalizeHeldTxAs(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, finalType, description string, metadata map[string]interface{}) error
+}
+
+// finalTypeForTable maps each claim TABLE this sweeper settles to the COUNTED ledger type
+// its settled row must carry. The sweeper is parameterized BY TABLE, so the table IS the
+// mint's identity — this map is the ONLY place that identity becomes a ledger label.
+//
+// Each entry pairs with the held type its minter writes at the mint moment (final + "_held"
+// == held), and every value is counted in mining.GetTotalSupply — so settling attributes a
+// mint honestly WITHOUT moving a µLENS in or out of supply.
+//
+//	pool_royalty_mints         pool_royalty_held              → pool_royalty
+//	distill_royalty_mints      pool_royalty_held              → pool_royalty  (see below)
+//	eval_contribution_mints    eval_contribution_held         → eval_contribution
+//	routing_prediction_mints   eval_routing_prediction_held   → eval_routing_prediction
+//	node_latency_mints         eval_latency_locality_held     → eval_latency_locality
+//	confidential_compute_mints eval_confidential_compute_held → eval_confidential_compute
+//
+// distill shares pool_royalty by DESIGN, not by the old bug: NewDistillMinter reuses the
+// Pool-B held kernel and mints TypePoolRoyaltyHeld, so its held row and settled row agree.
+// Giving distill its own final type would need its HELD type changed too — the mint moment,
+// i.e. the money path.
+//
+// A table absent from this map is a mint whose settled label nobody decided. That is
+// FAIL-CLOSED here (settleOne refuses; the row stays held and is retried) rather than
+// silently mislabelled — stranding is visible and recoverable, mislabelled money is neither.
+// TestFinalTypeForTable_CoversEveryWiredSweeper pins main.go's tables against these keys.
+var finalTypeForTable = map[string]string{
+	"pool_royalty_mints":         mining.TypePoolRoyalty,
+	"distill_royalty_mints":      mining.TypePoolRoyalty,
+	"eval_contribution_mints":    mining.TypeEvalContribution,
+	"routing_prediction_mints":   mining.TypeRoutingPrediction,
+	"node_latency_mints":         mining.TypeLatencyLocality,
+	"confidential_compute_mints": mining.TypeConfidentialCompute,
 }
 
 // FinalizeSweeper settles due held mints (Stage 2.3a) for ONE claim table. The
@@ -88,14 +127,19 @@ type FinalizeSweeper struct {
 	db           sweeperDB
 	ledger       heldFinalizer
 	table        string
+	finalType    string // the COUNTED ledger type this table's settled rows carry
 	settleStatus string // 'held' (default) or 'cleared' (Phase-3 fail-closed)
 	selectSQL    string
 	casSQL       string
 }
 
 // NewFinalizeSweeper wires the pool, the held ledger, and the claim TABLE to
-// settle (a trusted internal constant — "pool_royalty_mints" or
+// settle (a trusted internal constant — e.g. "pool_royalty_mints" or
 // "distill_royalty_mints"; empty defaults to pool_royalty_mints).
+//
+// The table also selects the settled row's ledger TYPE via finalTypeForTable: the sweeper
+// settles six different mints, so its own table is the only thing that knows which one this
+// is. An unmapped table leaves finalType empty and settleOne refuses (fail-closed).
 func NewFinalizeSweeper(db sweeperDB, ledger heldFinalizer, table string) *FinalizeSweeper {
 	if table == "" {
 		table = "pool_royalty_mints"
@@ -104,6 +148,7 @@ func NewFinalizeSweeper(db sweeperDB, ledger heldFinalizer, table string) *Final
 		db:           db,
 		ledger:       ledger,
 		table:        table,
+		finalType:    finalTypeForTable[table],
 		settleStatus: "held",
 		selectSQL:    sweepSelectSQLFor(table, "held"),
 		casSQL:       finalizeCASSQLFor(table, "held"),
@@ -188,6 +233,12 @@ func (casLost) Error() string { return "finalize CAS lost (already settled)" }
 // held→spendable, in one transaction. A lost CAS is a silent skip (not an
 // error and not a finalize).
 func (s *FinalizeSweeper) settleOne(ctx context.Context, d dueMint) error {
+	// Fail-closed: without a decided settled type this row could only be labelled by a
+	// guess, and a mislabelled settle is silent and permanent. Refuse BEFORE the CAS, so
+	// the row stays held (visible, retried, recoverable) instead of settling as a lie.
+	if s.finalType == "" {
+		return fmt.Errorf("poolroyalty: no settled ledger type mapped for table %q — refusing to finalize (add it to finalTypeForTable)", s.table)
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -204,19 +255,23 @@ func (s *FinalizeSweeper) settleOne(ctx context.Context, d dueMint) error {
 		return casLost{}
 	}
 	meta := map[string]interface{}{"request_id": d.requestID}
-	if err := s.ledger.FinalizeHeldTx(ctx, tx, d.contributor, d.amount,
-		"pool royalty finalized (holdback window elapsed)", meta); err != nil {
+	// FinalizeHeldTxAs with THIS table's own type — the settled row is attributed to the
+	// mint it actually came from. Amount, timing and the held→spendable move are untouched:
+	// only the label is parameterized.
+	if err := s.ledger.FinalizeHeldTxAs(ctx, tx, d.contributor, d.amount, s.finalType,
+		s.finalType+" finalized (holdback window elapsed)", meta); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	// The mint enters circulation NOW (the counted TypePoolRoyalty row was
-	// just committed) — this is where the supply counter agrees with SQL.
+	// The mint enters circulation NOW (this table's counted row was just committed) —
+	// this is where the supply counter agrees with SQL.
 	metrics.MintedTokens(microToFloatLENS(d.amount))
-	slog.Info("poolroyalty: royalty finalized (held → spendable)",
+	slog.Info("poolroyalty: held mint finalized (held → spendable)",
 		slog.String("request_id", d.requestID),
 		slog.String("contributor", d.contributor),
+		slog.String("type", s.finalType),
 		slog.Int64("amount_ulens", d.amount),
 	)
 	return nil

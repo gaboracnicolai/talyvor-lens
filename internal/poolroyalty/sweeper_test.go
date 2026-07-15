@@ -9,11 +9,17 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
-// fakeFinalizer records FinalizeHeldTx calls (the real
-// *mining.LedgerStore.FinalizeHeldTx matches the signature).
+// fakeFinalizer records FinalizeHeldTxAs calls (the real
+// *mining.LedgerStore.FinalizeHeldTxAs matches the signature).
+//
+// finalType is recorded, not discarded: this fake previously captured only the workspace
+// and the amount, which is precisely why the mock tier stayed green while the sweeper
+// labelled every settled mint pool_royalty. A finalizer fake that drops the type cannot
+// see a mislabel.
 type finalizeCall struct {
 	workspaceID string
 	amount      int64
+	finalType   string
 }
 
 type fakeFinalizer struct {
@@ -21,8 +27,8 @@ type fakeFinalizer struct {
 	err   error
 }
 
-func (f *fakeFinalizer) FinalizeHeldTx(_ context.Context, _ pgx.Tx, ws string, amount int64, _ string, _ map[string]interface{}) error {
-	f.calls = append(f.calls, finalizeCall{workspaceID: ws, amount: amount})
+func (f *fakeFinalizer) FinalizeHeldTxAs(_ context.Context, _ pgx.Tx, ws string, amount int64, finalType, _ string, _ map[string]interface{}) error {
+	f.calls = append(f.calls, finalizeCall{workspaceID: ws, amount: amount, finalType: finalType})
 	return f.err
 }
 
