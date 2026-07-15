@@ -488,6 +488,13 @@ type Config struct {
 	// it is inert in production until a gateway commits buildable provenance. Env: LENS_H5_ATTEST_ENABLED.
 	H5AttestEnabled bool
 
+	// H5ArtifactEnabled gates the OPT-IN BUILDABLE-ARTIFACT COMMIT endpoint (POST /v1/outputs/{id}/artifact) —
+	// a workspace commits, bound to an output it produced, the manifest hash of its buildable module (output
+	// slot folded from the served response_sha256). DEFAULT FALSE. Off → the endpoint is not registered and no
+	// artifact_sha256 is ever populated, so the attestor's opt-in binding is dormant (every output stays on the
+	// legacy response_sha256 binding — fail-open, unchanged). Env: LENS_H5_ARTIFACT_ENABLED.
+	H5ArtifactEnabled bool
+
 	// NodeLatencyCaptureEnabled gates the DESCRIPTIVE proof-of-latency capture (P3 #6) — a post-serve,
 	// off-path record of gateway-measured node serve latency into a per-(node,cohort) EWMA aggregate
 	// (node_cohort_latency_stats), the substrate a LATER mint reads. CAPABILITY flag, default false: off =
@@ -900,6 +907,7 @@ func Load() (*Config, error) {
 		H5BondsEnabled:                parseBoolEnv("LENS_H5_BONDS_ENABLED"),
 		H5BuildVerifyEnabled:          parseBoolEnv("LENS_H5_BUILDVERIFY_ENABLED"),
 		H5AttestEnabled:               parseBoolEnv("LENS_H5_ATTEST_ENABLED"),
+		H5ArtifactEnabled:             parseBoolEnv("LENS_H5_ARTIFACT_ENABLED"),
 		NodeLatencyCaptureEnabled:     parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),
 		NodeAttestationVerifyEnabled:  parseBoolEnv("LENS_NODE_ATTESTATION_VERIFY_ENABLED"),
 

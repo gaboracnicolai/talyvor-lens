@@ -86,33 +86,55 @@ func (a *Attestor) Attest(ctx context.Context, outputID string, treeTar []byte) 
 		return Result{Outcome: OutcomeRefused, Reason: "attestation disabled (LENS_H5_ATTEST_ENABLED=false)"}, nil
 	}
 
-	// Look up what the output committed to + who owns it.
+	// Look up what the output committed to + who owns it. artifact_sha256 is the H5 OPT-IN buildable
+	// commitment — NULL (nil) for every output that did not opt in (today's behavior).
 	var responseSHA, ownerWS string
+	var artifactSHA *string
 	err := a.db.QueryRow(ctx,
-		`SELECT response_sha256, workspace_id FROM k4_output_verdicts WHERE output_id=$1`, outputID).
-		Scan(&responseSHA, &ownerWS)
+		`SELECT response_sha256, workspace_id, artifact_sha256 FROM k4_output_verdicts WHERE output_id=$1`, outputID).
+		Scan(&responseSHA, &ownerWS, &artifactSHA)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Result{Outcome: OutcomeRefused, Reason: "output_id not recorded (K4 off?) — cannot bind a source, refusing"}, nil
 	}
 	if err != nil {
 		return Result{}, fmt.Errorf("attest: lookup: %w", err)
 	}
+	optedIn := artifactSHA != nil && *artifactSHA != ""
 
-	// THE BINDING: the supplied bytes must be EXACTLY the output's committed response. Anything else is an
-	// unbound tree and is refused — we never build an input we cannot tie to the output_id.
-	sum := sha256.Sum256(treeTar)
-	if hex.EncodeToString(sum[:]) != responseSHA {
-		return Result{Outcome: OutcomeRefused, Reason: "supplied source does not match the output's committed response hash — unbound tree, refusing"}, nil
+	// LEGACY BINDING (NOT opted in) — UNCHANGED, fail-fast before extraction: the supplied bytes must be
+	// EXACTLY the output's committed response envelope. For today's JSON-envelope outputs nothing buildable
+	// ever matches, so this refuses and H5 stays fail-open — existing bonds are untouched.
+	if !optedIn {
+		sum := sha256.Sum256(treeTar)
+		if hex.EncodeToString(sum[:]) != responseSHA {
+			return Result{Outcome: OutcomeRefused, Reason: "supplied source does not match the output's committed response hash — unbound tree, refusing"}, nil
+		}
 	}
 
-	// Extract the bound bytes as a source tree (host-side, hardened against path-traversal/symlink/bomb).
+	// Extract the supplied tree (host-side, hardened against path-traversal/symlink/bomb).
 	dir, err := os.MkdirTemp("", "attest-src-*")
 	if err != nil {
 		return Result{}, err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	if err := safeExtractTar(treeTar, dir, a.maxTree); err != nil {
-		return Result{Outcome: OutcomeRefused, Reason: "bound bytes are not a safe buildable archive: " + err.Error()}, nil
+		return Result{Outcome: OutcomeRefused, Reason: "bytes are not a safe buildable archive: " + err.Error()}, nil
+	}
+
+	// OPT-IN BUILDABLE BINDING: the supplied tree's manifest must equal the committed artifact_sha256. Because
+	// CommitArtifactSHA256 FORCED the output slot to response_sha256 at commit time, a matching manifest
+	// PROVES the tree carries exactly the served output at artifact_output_path — the served-output tie IS the
+	// manifest match, not a separate check. (A redundant output-slot re-check was deliberately NOT added: it
+	// would independently mask a regression of the generation-time forcing, hiding it from the served-different
+	// test.) A mismatch → unbound tree → refuse.
+	if optedIn {
+		mh, _, mErr := outputverify.ManifestHashDir(dir)
+		if mErr != nil {
+			return Result{Outcome: OutcomeRefused, Reason: "cannot manifest the supplied tree: " + mErr.Error()}, nil
+		}
+		if mh != *artifactSHA {
+			return Result{Outcome: OutcomeRefused, Reason: "supplied tree does not match the committed buildable-artifact manifest — unbound tree, refusing"}, nil
+		}
 	}
 
 	// Talyvor's OWN sandboxed build — reproduce-before-burn.
