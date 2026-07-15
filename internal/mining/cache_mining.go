@@ -539,12 +539,59 @@ func (s *LedgerStore) Burn(ctx context.Context, workspaceID string, amount int64
 	return tx.Commit(ctx)
 }
 
+// countedSupplyTypeList is the SINGLE SOURCE OF TRUTH for the types GetTotalSupply counts:
+// the query reads it directly (type = ANY($1)), so a caller checking membership cannot
+// drift from what supply actually sums.
+//
+// ⚠️ DELIBERATELY NOT EQUAL to mintTypeList — see mint_gate.go. These sets answer different
+// questions: this one is "when did LENS enter circulation" (settlement), that one is "where
+// does value first accrue to an earner" (the mint moment). Aligning them would either
+// un-gate a held mint or double-gate a finalize.
+//
+// Everything here is a SETTLED / counted type. The _held types are absent by design (a held
+// mint has not entered circulation); transfers and marketplace_fee move existing LENS;
+// receipt_mine_provisional stays excluded per its own go-live treatment.
+var countedSupplyTypeList = []string{
+	TypeCacheMine,
+	TypeComputeMine,
+	TypeEmbeddingMine,
+	TypeAnnotationMine,
+	TypePatternMine,
+	TypePoolRoyalty,
+	// The four P-o-I final types. Their µLENS were ALWAYS counted — until the finalize
+	// sweeper was fixed they were summed under the pool_royalty label — so counting them
+	// under their own labels keeps total supply byte-identical while making per-mint-type
+	// supply honest. Dropping any of them would shrink supply and the LXC math reading it.
+	TypeEvalContribution,
+	TypeRoutingPrediction,
+	TypeLatencyLocality,
+	TypeConfidentialCompute,
+}
+
+// CountedSupplyTypes returns the ledger types GetTotalSupply counts. Exported so the
+// finalize sweeper's guard test can pin every settled label it can write as counted —
+// against the REAL list the query uses, not a copy.
+func CountedSupplyTypes() []string {
+	out := make([]string, len(countedSupplyTypeList))
+	copy(out, countedSupplyTypeList)
+	return out
+}
+
 // GetTotalSupply returns the all-time minted LENS — the sum of
 // every credit-side ledger row that came from a mining track or the Pool-B
 // royalty mint (Stage 2.2: pool_royalty counted so royalty LENS is honestly
 // in supply). Explicit allow-list: transfers and marketplace_fee move
 // existing LENS (not mints) and stay excluded; receipt_mine_provisional
 // stays excluded per its own go-live treatment (PoVI preconditions).
+//
+// The four P-o-I final types (eval_contribution / eval_routing_prediction /
+// eval_latency_locality / eval_confidential_compute) are counted here for the SAME
+// reason pool_royalty is: settlement is when a held mint enters circulation. They were
+// added when the finalize sweeper stopped labelling every settled mint pool_royalty —
+// their µLENS were ALWAYS in supply (counted under the wrong label), so counting them
+// under their own labels keeps total supply byte-identical. Attribution moved; the money
+// did not. Dropping any of them from this list would silently shrink supply and the LXC
+// conversion math that reads it.
 func (s *LedgerStore) GetTotalSupply(ctx context.Context) (int64, error) {
 	if s.pool == nil {
 		return 0, nil
@@ -552,9 +599,7 @@ func (s *LedgerStore) GetTotalSupply(ctx context.Context) (int64, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount), 0)
 		FROM lens_token_ledger
-		WHERE amount > 0 AND type IN ($1, $2, $3, $4, $5, $6)`,
-		TypeCacheMine, TypeComputeMine, TypeEmbeddingMine,
-		TypeAnnotationMine, TypePatternMine, TypePoolRoyalty)
+		WHERE amount > 0 AND type = ANY($1)`, countedSupplyTypeList)
 	var n int64
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("mining: total supply: %w", err)

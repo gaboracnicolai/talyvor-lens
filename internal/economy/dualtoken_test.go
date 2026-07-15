@@ -19,11 +19,11 @@ func pgxNoRows() error { return pgx.ErrNoRows }
 
 // miningTypeArgs is the arg list GetTotalSupply binds (6 since Stage 2.2
 // added pool_royalty to the minted-supply allow-list).
+// miningTypeArgs is the arg list GetTotalSupply passes: ONE array (type = ANY($1)) holding
+// the counted-supply allow-list. Read from mining.CountedSupplyTypes so this cannot drift
+// from the list the real query uses.
 func miningTypeArgs() []any {
-	return []any{
-		mining.TypeCacheMine, mining.TypeComputeMine, mining.TypeEmbeddingMine,
-		mining.TypeAnnotationMine, mining.TypePatternMine, mining.TypePoolRoyalty,
-	}
+	return []any{mining.CountedSupplyTypes()}
 }
 
 // uLENS / uLXC are the µ-unit scale (SEC-2): 1 token = 1e6 µ. Test helpers

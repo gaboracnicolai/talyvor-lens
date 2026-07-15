@@ -120,9 +120,10 @@ func TestSlashStake_InsufficientLocked(t *testing.T) {
 // query must count povi_stake_slash rows, not just plain burns.
 func TestGetCirculatingSupply_CountsSlashBurns(t *testing.T) {
 	store, mock := newMockStore(t)
-	// total minted (incl. pool_royalty since Stage micro(2.2))
-	mock.ExpectQuery(`amount > 0 AND type IN`).
-		WithArgs(TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine, TypePoolRoyalty).
+	// total minted (incl. pool_royalty since Stage micro(2.2)); the allow-list is passed as
+	// one array arg (type = ANY($1)) — countedSupplyTypeList is the list the query reads.
+	mock.ExpectQuery(`amount > 0 AND type = ANY`).
+		WithArgs(countedSupplyTypeList).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(1000.0)))
 	// burned: MUST include both plain burns AND stake slashes.
 	mock.ExpectQuery(`SUM\(-amount\)`).

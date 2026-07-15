@@ -407,9 +407,10 @@ func TestTransfer_Validation(t *testing.T) {
 func TestGetTotalSupply_CountsPoolRoyalty_ExcludesNonMints(t *testing.T) {
 	s, mock := newMockStore(t)
 
+	// The query passes the allow-list as ONE array arg (type = ANY($1)), so pinning the arg
+	// pins the real list — countedSupplyTypeList is what GetTotalSupply itself reads.
 	mock.ExpectQuery(`SELECT COALESCE\(SUM\(amount\), 0\)`).
-		WithArgs(TypeCacheMine, TypeComputeMine, TypeEmbeddingMine,
-			TypeAnnotationMine, TypePatternMine, TypePoolRoyalty).
+		WithArgs(countedSupplyTypeList).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(42.5)))
 
 	got, err := s.GetTotalSupply(context.Background())
@@ -420,16 +421,43 @@ func TestGetTotalSupply_CountsPoolRoyalty_ExcludesNonMints(t *testing.T) {
 		t.Errorf("supply = %v, want micro(42.5)", got)
 	}
 
-	// The allow-list itself is the assertion above (WithArgs pins all six
-	// types, in order). Guard the exclusions explicitly so a future edit
-	// can't sneak them in: the counted set must NOT contain these.
-	excluded := []string{"marketplace_fee", "receipt_mine_provisional", TypeBurn, TypeStakeSlash, TypeTransferIn, TypePoolRoyaltyHeld, TypePoolRoyaltyRevoked}
-	counted := []string{TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine, TypePoolRoyalty}
+	// Pin the allow-list MEMBERSHIP exactly, against the real list rather than a copy of it
+	// (a hand-copied list here could agree with itself while the query drifted). Counting is
+	// how LENS enters supply, so both directions matter: an omission understates supply, an
+	// accidental addition (e.g. a _held type) double-counts a mint that has not settled.
+	wantCounted := []string{
+		TypeCacheMine, TypeComputeMine, TypeEmbeddingMine, TypeAnnotationMine, TypePatternMine,
+		TypePoolRoyalty,
+		// The four P-o-I final types: settled by the table-parameterized FinalizeSweeper,
+		// each under its OWN label. They must be counted for exactly the reason pool_royalty
+		// is — settlement is the moment the mint enters circulation. Before the sweeper was
+		// fixed these µLENS were counted under the pool_royalty label; they are the SAME
+		// µLENS, so this list keeps total supply identical while attributing it honestly.
+		TypeEvalContribution, TypeRoutingPrediction, TypeLatencyLocality, TypeConfidentialCompute,
+	}
+	if len(countedSupplyTypeList) != len(wantCounted) {
+		t.Errorf("counted-supply allow-list has %d types, want %d:\n got: %v\nwant: %v",
+			len(countedSupplyTypeList), len(wantCounted), countedSupplyTypeList, wantCounted)
+	}
+	counted := map[string]bool{}
+	for _, c := range countedSupplyTypeList {
+		counted[c] = true
+	}
+	for _, w := range wantCounted {
+		if !counted[w] {
+			t.Errorf("type %q MUST be in the minted-supply allow-list (an omission silently shrinks supply)", w)
+		}
+	}
+
+	// Guard the exclusions explicitly so a future edit can't sneak them in: the counted set
+	// must NOT contain these. The _held types are the sharp edge — counting a held mint would
+	// put un-settled LENS into supply.
+	excluded := []string{"marketplace_fee", "receipt_mine_provisional", TypeBurn, TypeStakeSlash, TypeTransferIn,
+		TypePoolRoyaltyHeld, TypePoolRoyaltyRevoked,
+		TypeEvalContributionHeld, TypeRoutingPredictionHeld, TypeLatencyLocalityHeld, TypeConfidentialComputeHeld}
 	for _, ex := range excluded {
-		for _, c := range counted {
-			if c == ex {
-				t.Errorf("type %q must NOT be in the minted-supply allow-list", ex)
-			}
+		if counted[ex] {
+			t.Errorf("type %q must NOT be in the minted-supply allow-list", ex)
 		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

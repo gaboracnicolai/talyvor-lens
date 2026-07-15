@@ -70,6 +70,35 @@ const (
 	TypeConfidentialComputeHeld = "eval_confidential_compute_held"
 )
 
+// The COUNTED (final) types for the four P-o-I mints — the label the finalize sweeper
+// writes when a held row settles. Each is EXACTLY its held type minus the "_held" suffix
+// (heldTypeFor's convention, which the traffic mints already follow), so held↔final pair
+// by construction.
+//
+// Before these existed the table-parameterized FinalizeSweeper settled every held mint via
+// FinalizeHeldTx — whose hardcoded TypePoolRoyalty made an eval-contribution or routing-
+// prediction mint land in the ledger labelled pool_royalty. Amounts were always exact; only
+// the attribution lied, which made per-mint-type supply/revenue (the closed-test calibration
+// input) unusable.
+//
+// Each MUST satisfy both halves of the finalize contract:
+//   - COUNTED: in GetTotalSupply's allow-list. Settlement is when a mint enters supply, so
+//     a final type outside the allow-list would drop that mint out of total supply (and out
+//     of the LXC conversion math reading it) — turning a label fix into a money change.
+//   - NOT a mint MOMENT: absent from mintTypeList. Finalize settles already-gated held
+//     value; re-gating it would double-gate (a workspace verified at mint time but later
+//     un-verified could never settle value it legitimately earned) — see mint_gate.go.
+//
+// The pool-royalty and distill mints are deliberately NOT here: distill mints
+// TypePoolRoyaltyHeld by design (it reuses the Pool-B held kernel), so TypePoolRoyalty is
+// already the correct settled label for both.
+const (
+	TypeEvalContribution    = "eval_contribution"
+	TypeRoutingPrediction   = "eval_routing_prediction"
+	TypeLatencyLocality     = "eval_latency_locality"
+	TypeConfidentialCompute = "eval_confidential_compute"
+)
+
 // ErrInsufficientHeld is returned when held_balance can't cover a finalize
 // or revoke — the tx rolls back, nothing partial persists.
 var ErrInsufficientHeld = errors.New("mining: insufficient held balance")
