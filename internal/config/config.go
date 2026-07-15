@@ -527,6 +527,19 @@ type Config struct {
 	// also on. Opt in via LENS_ROUTING_TIER_COHORTS_ENABLED=true.
 	RoutingTierCohortsEnabled bool
 
+	// RoutingBrainEnabled gates the H8.1 Routing Brain — the OFFLINE learner that reads
+	// verified outcomes (H2 capability curves + Keel drift, keyed by the H1/H2 work-tier
+	// difficulty) and writes a per-(workspace, cohort) best-model recommendation the serve
+	// path reads as a cheap in-memory lookup. CAPABILITY flag, DEFAULT FALSE: off → the
+	// offline job never runs and the serve path reads no recommendation (routing is
+	// byte-for-byte unchanged). It is DESCRIPTIVE + mint-free (advises routing, never mints),
+	// so — like WorkTier — it is deliberately NOT in the economy kill-switch force-off block
+	// (off REMOVES a capability, it does not remove a money guard). When ON, ADVISORY is the
+	// per-workspace default; AUTONOMOUS (the brain's pick is APPLIED within the hard floor) is
+	// a further EXPLICIT per-workspace opt-in stored in routing_brain_autonomous. Env:
+	// LENS_ROUTING_BRAIN_ENABLED.
+	RoutingBrainEnabled bool
+
 	// NodeAutoRouteEnabled (blocker 6) gates gateway auto-routing of normal inference traffic to a
 	// registered inference node (which then auto-signs + submits its own receipt). DEFAULT FALSE.
 	// It is a ROUTING flag, NOT a mint gate — minting stays gated downstream by stake +
@@ -913,6 +926,7 @@ func Load() (*Config, error) {
 
 		RoutingIntelligenceEnabled:      parseBoolEnv("LENS_ROUTING_INTELLIGENCE_ENABLED"),
 		RoutingTierCohortsEnabled:       parseBoolEnv("LENS_ROUTING_TIER_COHORTS_ENABLED"),
+		RoutingBrainEnabled:             parseBoolEnv("LENS_ROUTING_BRAIN_ENABLED"),
 		NodeAutoRouteEnabled:            parseBoolEnv("LENS_NODE_AUTOROUTE_ENABLED"),
 		ReputationBondedMintingEnabled:  parseBoolEnv("LENS_REPUTATION_BONDED_MINTING_ENABLED"),
 		ProofOfBenchmarkEnabled:         parseBoolEnv("LENS_PROOF_OF_BENCHMARK_ENABLED"),

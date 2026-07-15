@@ -78,6 +78,7 @@ import (
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/modality"
+	"github.com/talyvor/lens/internal/modelcapability"
 	"github.com/talyvor/lens/internal/nodelatency"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/outputverify"
@@ -94,6 +95,7 @@ import (
 	"github.com/talyvor/lens/internal/routedecision"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
+	"github.com/talyvor/lens/internal/routingbrain"
 	"github.com/talyvor/lens/internal/routingpredict"
 	"github.com/talyvor/lens/internal/routingscore"
 	"github.com/talyvor/lens/internal/royaltyhaircut"
@@ -1292,6 +1294,29 @@ func run() error {
 	// Aggregate; the routing Advisor tier-conditioning is still a future PR.
 	worktierStore := worktier.NewStore(pool)
 	p.SetWorkTier(worktierStore, func() bool { return cfg.WorkTierEnabled })
+
+	// Routing Brain (H8.1) — DEFAULT-OFF capability flag, MINT-FREE. It learns OFFLINE
+	// from verified outcomes (H2 capability curves + Keel drift, keyed by the H1/H2
+	// work-tier difficulty) and writes a per-(workspace, cohort) recommendation; the
+	// serve path reads the latest via a cheap in-memory lookup. Off → the offline job
+	// never runs and the serve path reads nothing (routing byte-identical). Advisory is
+	// the per-workspace default; autonomous is an explicit per-workspace opt-in.
+	brainCost := func(m string) float64 { return alerts.CostUSD(m, 1000, 1000) } // blended per-model price for the hard floor
+	brainStore := routingbrain.NewStore(pool)
+	routingBrain := routingbrain.New(brainStore, brainCost, routingbrain.Config{Enabled: cfg.RoutingBrainEnabled})
+	routingBrain.StartRefresh(ctx) // no-op while disabled
+	p.SetRoutingBrain(routingBrain)
+	if cfg.RoutingBrainEnabled {
+		brainJob := routingbrain.NewJob(
+			modelcapability.NewStore(pool),  // H2 capability curves (primary — the store is read-write)
+			keel.NewReader(pool),            // Keel verified drift; primary keeps the brain's DB access uniform (its H2 + recommendation stores are read-write, so primary-only)
+			brainWorkspaceSource{wsManager}, // workspaces + allow-lists (in-memory)
+			brainStore, brainCost)
+		go haComps.leader.Run(ctx, "routing-brain-compute", 30*time.Second, func(lctx context.Context) {
+			brainJob.StartScheduler(lctx, 5*time.Minute) // recompute recommendations off the hot path
+		})
+		logger.Info("routing brain: ENABLED — offline compute leader-scheduled; advisory default, autonomous per-workspace opt-in")
+	}
 
 	// Route-decision capture — DESCRIPTIVE, MINT-FREE, default-ON. The go/no-go substrate for a
 	// corpus-contribution mint: records baseline vs served model + estimated cost off-path, post-serve.
