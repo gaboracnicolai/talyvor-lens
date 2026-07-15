@@ -51,6 +51,7 @@ import (
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
+	"github.com/talyvor/lens/internal/routingbrain"
 	"github.com/talyvor/lens/internal/safehttp"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/templates"
@@ -162,6 +163,12 @@ type Proxy struct {
 	// routedecision_capture.go.
 	routeDecisionSink    routeDecisionSink
 	routeDecisionEnabled func() bool
+
+	// routingBrain (H8.1) is the OFFLINE-computed, MINT-FREE routing recommender read
+	// on the serve path as a cheap in-memory lookup. Nil / disabled → routing is
+	// byte-for-byte unchanged. Advisory surfaces; autonomous applies within the hard
+	// floor. See routing_brain_apply.go.
+	routingBrain *routingbrain.Brain
 
 	// Routing-prediction LIVE emit (Proof-of-Improvement piece 3) — optional, nil-safe post-serve. Records a
 	// contributor's routing PREDICTION when the live cohort override fires (the FARM GATE). Mint-free itself;
@@ -1102,6 +1109,34 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			upstreamModel = decision.Model
 			overrideModel = decision.Model
 			overrideReason = decision.Reason
+		}
+	}
+
+	// Routing Brain (H8.1) — OFFLINE-computed recommendation read as a cheap in-memory
+	// lookup. AUTO-ROUTE only (a pinned model is the caller's explicit choice, never
+	// touched); disabled/nil → the whole block is skipped and routing is byte-identical.
+	// ADVISORY (default) surfaces the advice and leaves upstreamModel as the router's;
+	// AUTONOMOUS (per-workspace opt-in) applies the brain's pick ONLY within the hard
+	// floor (cost cap + verified/allowed), else falls back. Placed BEFORE the circuit
+	// breaker + modality gates so those hard safety overrides still win over the brain.
+	if isAutoRoute(r, model) && p.routingBrain.Enabled() && upstreamModel != "" {
+		var brainAllowed []string
+		if ws, ok := p.workspaceManager.GetWorkspace(wsID); ok {
+			brainAllowed = ws.AllowedModels
+		}
+		bModel, bReason, bApplied, bSurfaced := p.applyRoutingBrain(
+			wsID, len(compressedPrompt)/4, router.AnalyseComplexity(compressedPrompt).Score(), upstreamModel, brainAllowed)
+		if bSurfaced {
+			if bApplied {
+				upstreamModel = bModel
+				overrideModel = bModel
+				overrideReason = bReason
+				w.Header().Set("X-Talyvor-Brain", "applied")
+				metrics.RoutingBrainApplied()
+			} else {
+				w.Header().Set("X-Talyvor-Brain", "advisory")
+				metrics.RoutingBrainAdvisory()
+			}
 		}
 	}
 

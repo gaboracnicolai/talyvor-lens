@@ -201,6 +201,17 @@ var (
 	RoutingIntelligenceAppliedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_routing_intelligence_applied_total", Help: "Requests whose model was changed from the default by routing intelligence."},
 	)
+	// RoutingBrainAppliedTotal / RoutingBrainAdvisoryTotal count the H8.1 Routing
+	// Brain's serve-path outcomes: APPLIED = an autonomous workspace's route became
+	// the brain's pick (within the hard floor); ADVISORY = a recommendation was
+	// surfaced but the router's model stood (advisory posture, or an autonomous floor
+	// fallback). Mint-free — these are routing observations, never a mint signal.
+	RoutingBrainAppliedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_routing_brain_applied_total", Help: "Auto-route requests whose model became the Routing Brain's autonomous pick (within the hard floor)."},
+	)
+	RoutingBrainAdvisoryTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "lens_routing_brain_advisory_total", Help: "Auto-route requests where a Routing Brain recommendation was surfaced but the router's model stood."},
+	)
 	RoutingFallbackTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "lens_routing_fallback_total", Help: "Requests that fell back to the default route (no recommendation / below sample floor)."},
 	)
@@ -356,6 +367,7 @@ func init() {
 		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged, DetectorLastRunAgeSeconds, AnnotationReputationEvents,
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal, RoutingTierGatedTotal,
+		RoutingBrainAppliedTotal, RoutingBrainAdvisoryTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 		SpendRecordsTotal,
 		DistillCacheTotal, DistillTokensSavedTotal,
@@ -479,6 +491,8 @@ func ObserveROIReportDuration(d time.Duration) {
 
 func RoutingRecommendation(basis string) { RoutingRecommendationsTotal.WithLabelValues(basis).Inc() }
 func RoutingIntelligenceApplied()        { RoutingIntelligenceAppliedTotal.Inc() }
+func RoutingBrainApplied()               { RoutingBrainAppliedTotal.Inc() }
+func RoutingBrainAdvisory()              { RoutingBrainAdvisoryTotal.Inc() }
 func RoutingFallback()                   { RoutingFallbackTotal.Inc() }
 func RoutingTierGated(reason string)     { RoutingTierGatedTotal.WithLabelValues(reason).Inc() }
 
