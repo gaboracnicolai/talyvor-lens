@@ -7,7 +7,36 @@ import (
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
 	"github.com/talyvor/lens/internal/workspace"
+	"github.com/talyvor/lens/internal/worktier"
 )
+
+// TestDecisionTier_DelegatesToWorkTierAdvisor — the Shape-1 consumer now derives
+// its two gate signals from the FULL work-classification via the WorkTier Advisor:
+// sensitive() == advice.SensitiveOptOut and smallSimple() == advice.DowngradeEligible
+// for the SAME request signals. This is the "extend the consumer to the full
+// work-classification" binding — the gate and the descriptive classifier speak one
+// tier vocabulary, so they can never drift.
+func TestDecisionTier_DelegatesToWorkTierAdvisor(t *testing.T) {
+	a := worktier.NewAdvisor()
+	for _, d := range []decisionTier{
+		{inputTokens: 500, complexity: 1},
+		{inputTokens: 999, complexity: 2},
+		{inputTokens: 1000, complexity: 1},
+		{inputTokens: 999, complexity: 3},
+		{inputTokens: 500, complexity: 1, pii: true},
+		{inputTokens: 500, complexity: 1, guardrail: true},
+		{inputTokens: 500, complexity: 1, loggingNone: true},
+		{inputTokens: 50000, complexity: 5},
+	} {
+		adv := a.Advise(d.signals())
+		if d.sensitive() != adv.SensitiveOptOut {
+			t.Errorf("sensitive()=%v but advisor SensitiveOptOut=%v for %+v", d.sensitive(), adv.SensitiveOptOut, d)
+		}
+		if d.smallSimple() != adv.DowngradeEligible {
+			t.Errorf("smallSimple()=%v but advisor DowngradeEligible=%v for %+v", d.smallSimple(), adv.DowngradeEligible, d)
+		}
+	}
+}
 
 // qualifying recommendation + a premium base pick, the workhorses of the
 // conservatism table. gpt-4o-mini (rank 1) is a strict downgrade from the
