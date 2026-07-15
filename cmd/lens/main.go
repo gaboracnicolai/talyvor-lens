@@ -1719,6 +1719,13 @@ func run() error {
 		// K4 CODE LOOP — the producing workspace self-reports a MECHANICAL verdict (compiled/tests) for an
 		// output it produced. Ownership-bound (only the producer, per k4_output_verdicts) + append-only.
 		authed.Post("/v1/output-verdicts/{output_id}/mechanical", newMechanicalVerdictHandler(authManager, mechanicalVerdictWriter))
+		// H5 OPT-IN buildable-artifact commitment — the producing workspace commits, bound to an output it
+		// produced, the manifest hash of its buildable module (output slot folded from the served
+		// response_sha256). Owner-bound + append-once. Registered ONLY when LENS_H5_ARTIFACT_ENABLED; until then
+		// no artifact_sha256 is ever populated and the attestor's opt-in binding stays dormant.
+		if cfg.H5ArtifactEnabled {
+			authed.Post("/v1/outputs/{output_id}/artifact", newArtifactCommitHandler(authManager, outputverify.NewArtifactCommitter(pool)))
+		}
 		// H5.β — the workspace stakes a provenance bond on an output it produced (locks µLENS collateral).
 		// Scoped to the caller's workspace; registered ONLY when LENS_H5_BONDS_ENABLED.
 		if cfg.H5BondsEnabled {

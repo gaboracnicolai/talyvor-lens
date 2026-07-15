@@ -84,6 +84,9 @@ func TestBreach_NoRawContent_NoCounterparty(t *testing.T) {
 	allowed := map[string]bool{
 		"output_id": true, "workspace_id": true, "model": true, "verdict": true,
 		"reason": true, "constraint_kind": true, "prompt_sha256": true, "response_sha256": true, "created_at": true,
+		// H5 opt-in buildable-artifact commitment (0094): a manifest HASH + the output-slot PATH (a
+		// module-relative filename like "gen.go" — structure metadata, never raw content or a counterparty).
+		"artifact_sha256": true, "artifact_output_path": true,
 	}
 	forbidden := []string{"prompt_text", "response_text", "content", "counterparty", "other_workspace", "raw"}
 	for rows.Next() {
