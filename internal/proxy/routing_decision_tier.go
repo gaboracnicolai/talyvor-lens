@@ -4,7 +4,16 @@ import (
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
 	"github.com/talyvor/lens/internal/workspace"
+	"github.com/talyvor/lens/internal/worktier"
 )
+
+// tierAdvisor is the shared, stateless WorkTier advisory surface (H1). The
+// Shape-1 gate derives its two conservatism signals (sensitivity opt-out,
+// downgrade eligibility) from the FULL pre-serve work-classification through it,
+// so the gate and the descriptive classifier speak ONE tier vocabulary. It is
+// read-only and mint-free (worktier imports no minter; the Advisor holds no DB
+// handle), so routing the gate through it adds no money path.
+var tierAdvisor = worktier.NewAdvisor()
 
 // decisionTier is the PRE-SERVE, request-local work tier used ONLY to gate
 // acceptance of a U22 routing recommendation (Shape 1, issue #198). It is a
@@ -33,13 +42,24 @@ type decisionTier struct {
 	loggingNone bool
 }
 
-// Boundaries mirror worktier's small/simple bands on the SAME signals but are
-// declared locally so the routing gate carries no dependency on — and cannot be
-// confused with — the persisted classifier's identity (see the type comment).
-const (
-	decisionSizeSmallMaxTokens  = 1000 // input tokens < this ⇒ "small"
-	decisionComplexitySimpleMax = 2    // score ≤ this ⇒ "simple" (trivial 0, simple 1–2)
-)
+// signals projects this request-local tier onto the WorkTier Advisor's pre-serve
+// signal shape. loggingNone maps back to the "none" policy (any other value is
+// non-restricted and identical for sensitivity). This is the seam that lets the
+// gate consume the FULL work-classification while decisionTier stays a distinct,
+// never-persisted, primitive-only type.
+func (d decisionTier) signals() worktier.PreServeSignals {
+	policy := "full"
+	if d.loggingNone {
+		policy = "none"
+	}
+	return worktier.PreServeSignals{
+		InputTokens:     d.inputTokens,
+		ComplexityScore: d.complexity,
+		PIIDetected:     d.pii,
+		GuardrailFired:  d.guardrail,
+		LoggingPolicy:   policy,
+	}
+}
 
 // newDecisionTier builds the pre-serve tier from request-local signals ONLY —
 // no DB read, no cross-tenant data. Total (no error, no panic) so it can never
@@ -56,15 +76,15 @@ func newDecisionTier(inputTokens, complexityScore int, piiDetected, guardrailFir
 }
 
 // sensitive reports elevated (PII or a fired guardrail) or restricted (logging
-// none) sensitivity. Such requests OPT OUT of cross-tenant routing intelligence
-// entirely — they must leave the pooled path. Privacy-positive.
-func (d decisionTier) sensitive() bool { return d.pii || d.guardrail || d.loggingNone }
+// none) sensitivity — derived from the FULL work-classification via the WorkTier
+// Advisor (advice.SensitiveOptOut). Such requests OPT OUT of cross-tenant routing
+// intelligence entirely — they must leave the pooled path. Privacy-positive.
+func (d decisionTier) sensitive() bool { return tierAdvisor.Advise(d.signals()).SensitiveOptOut }
 
 // smallSimple reports small (by INPUT tokens) AND at most "simple" complexity —
-// the only shape eligible to accept a downgrade recommendation.
-func (d decisionTier) smallSimple() bool {
-	return d.inputTokens < decisionSizeSmallMaxTokens && d.complexity <= decisionComplexitySimpleMax
-}
+// the only shape eligible to accept a downgrade recommendation. Sourced from the
+// Advisor (advice.DowngradeEligible) so the gate's bands ARE the classifier's.
+func (d decisionTier) smallSimple() bool { return tierAdvisor.Advise(d.signals()).DowngradeEligible }
 
 // Shape-1 gate outcomes (also the RoutingTierGated metric reason labels).
 const (
