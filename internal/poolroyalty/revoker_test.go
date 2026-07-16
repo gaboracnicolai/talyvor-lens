@@ -9,12 +9,15 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
-// fakeRevokeLedger records RevokeHeldTx calls (the real *mining.LedgerStore
+// fakeRevokeLedger records RevokeHeldTxAs calls (the real *mining.LedgerStore
 // satisfies the same signature). It lets the unit tests assert the held-burn
-// fires exactly when — and only when — the CAS transitioned a row.
+// fires exactly when — and only when — the CAS transitioned a row, AND that it
+// is attributed to the per-table clawback type. Capturing revokeType is what lets
+// the mock tier see a mislabel at all — the #312 fakeFinalizer lesson, on the revoke side.
 type revokeCall struct {
 	workspaceID string
 	amount      int64
+	revokeType  string
 }
 
 type fakeRevokeLedger struct {
@@ -22,8 +25,8 @@ type fakeRevokeLedger struct {
 	err   error
 }
 
-func (f *fakeRevokeLedger) RevokeHeldTx(_ context.Context, _ pgx.Tx, ws string, amount int64, _ string, _ map[string]interface{}) error {
-	f.calls = append(f.calls, revokeCall{workspaceID: ws, amount: amount})
+func (f *fakeRevokeLedger) RevokeHeldTxAs(_ context.Context, _ pgx.Tx, ws string, amount int64, revokeType, _ string, _ map[string]interface{}) error {
+	f.calls = append(f.calls, revokeCall{workspaceID: ws, amount: amount, revokeType: revokeType})
 	return f.err
 }
 
@@ -61,7 +64,7 @@ func TestRevokeHeldMints_SingleRevoked(t *testing.T) {
 		t.Errorf("totals[revoked] = %d, want 1", rep.Totals[OutcomeRevoked])
 	}
 	if len(led.calls) != 1 || led.calls[0].workspaceID != "wsA" || led.calls[0].amount != micro(1.5) {
-		t.Errorf("RevokeHeldTx calls = %+v, want one wsA/1.5", led.calls)
+		t.Errorf("RevokeHeldTxAs calls = %+v, want one wsA/1.5", led.calls)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet: %v", err)
@@ -245,7 +248,7 @@ func TestRevokeHeldMints_MixedSet(t *testing.T) {
 	}
 }
 
-// BURN FAILURE rolls back the CAS too: if RevokeHeldTx errors after a
+// BURN FAILURE rolls back the CAS too: if RevokeHeldTxAs errors after a
 // successful CAS, the whole row tx rolls back (no orphan status flip, no burn),
 // outcome=error. Atomicity of the flip+burn pair.
 func TestRevokeHeldMints_BurnFailureRollsBackFlip(t *testing.T) {
@@ -318,5 +321,39 @@ func TestRevokeHeldMints_DuplicateInBatchProcessedOnce(t *testing.T) {
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet (only ONE tx for a duplicated id): %v", err)
+	}
+}
+
+// PER-TABLE CLAWBACK TYPE (mock tier): a Revoker built for a P-o-I table records the held-burn
+// under THAT table's own supply-neutral *_revoked type — not a hardcoded pool_royalty_revoked.
+// Capturing revokeType in the fake is what lets this tier see a mislabel at all; before the fix the
+// fake took the type-less RevokeHeldTx and could not (the #312 fakeFinalizer lesson, on the revoke
+// side). Real-PG coverage is TestRevokerRevokedType_RecordsOwnRevokeType; this is the DB-free mirror.
+func TestRevokeHeldMints_RecordsPerTableRevokeType(t *testing.T) {
+	pool := newRevokeMock(t)
+	led := &fakeRevokeLedger{}
+	r := NewRevokerForTable(pool, led, "eval_contribution_mints")
+
+	pool.ExpectBegin()
+	pool.ExpectQuery(`UPDATE eval_contribution_mints SET status = 'revoked'`).
+		WithArgs("req-poi").
+		WillReturnRows(pgxmock.NewRows([]string{"contributor_workspace_id", "minted_amount"}).AddRow("wsP", micro(3.0)))
+	pool.ExpectCommit()
+
+	rep, err := r.RevokeHeldMints(context.Background(), []string{"req-poi"})
+	if err != nil {
+		t.Fatalf("RevokeHeldMints: %v", err)
+	}
+	if rep.Outcomes["req-poi"] != OutcomeRevoked {
+		t.Fatalf("outcome = %q, want revoked", rep.Outcomes["req-poi"])
+	}
+	if len(led.calls) != 1 {
+		t.Fatalf("held burned %d times, want 1", len(led.calls))
+	}
+	if got := led.calls[0].revokeType; got != "eval_contribution_revoked" {
+		t.Errorf("clawback recorded type %q, want eval_contribution_revoked — a P-o-I clawback must carry its OWN type", got)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
 	}
 }

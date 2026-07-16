@@ -42,6 +42,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/mining"
 )
 
 // RevokeOutcome is the per-request_id result of a revoke attempt.
@@ -67,19 +69,60 @@ type revokerDB interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-// heldRevoker is the held-burn surface; *mining.LedgerStore.RevokeHeldTx
+// heldRevoker is the held-burn surface; *mining.LedgerStore.RevokeHeldTxAs
 // satisfies it exactly (we CALL it, never change it).
+//
+// Deliberately RevokeHeldTxAs, not RevokeHeldTx: the latter hardcodes
+// mining.TypePoolRoyaltyRevoked, and this Revoker claws back SIX different mint tables. Taking
+// the type-less overload is what let every clawback land labelled pool_royalty_revoked regardless
+// of the mint it reversed. The revokeType must be supplied per table — see revokeTypeForTable.
 type heldRevoker interface {
-	RevokeHeldTx(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, description string, metadata map[string]interface{}) error
+	RevokeHeldTxAs(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64, revokeType, description string, metadata map[string]interface{}) error
+}
+
+// revokeTypeForTable maps each claim TABLE the Revoker claws back to the SUPPLY-NEUTRAL ledger
+// type its clawback row must carry. The Revoker is parameterized BY TABLE, so the table IS the
+// mint's identity — this map is the ONLY place that identity becomes a clawback label. It mirrors
+// the finalize sweeper's finalTypeForTable one hop over: each value is that table's final type
+// plus "_revoked", so a table's held / final / revoke labels form one consistent family.
+//
+//	pool_royalty_mints         → pool_royalty_revoked
+//	distill_royalty_mints      → pool_royalty_revoked   (shares pool by design; see below)
+//	eval_contribution_mints    → eval_contribution_revoked
+//	routing_prediction_mints   → eval_routing_prediction_revoked
+//	node_latency_mints         → eval_latency_locality_revoked
+//	confidential_compute_mints → eval_confidential_compute_revoked
+//
+// Every value is in NEITHER GetTotalSupply's allow-list NOR the burned list, so attributing a
+// clawback to its own type moves no µLENS in or out of supply or burned — the money-safety
+// inversion of the finalize map, whose values MUST be counted. distill shares pool_royalty_revoked
+// because NewDistillMinter reuses the Pool-B held kernel and mints TypePoolRoyaltyHeld, so its held
+// and clawback rows already agree; a distinct revoke type would need its HELD type changed too —
+// the mint moment, i.e. the money path.
+//
+// A table absent from this map is a clawback whose label nobody decided. That is FAIL-CLOSED in
+// revokeOne (it refuses; the held row stays held and is retryable) rather than burned under a
+// guessed label — stranding is visible and recoverable, a mislabelled burn is neither.
+// TestRevokeTypeForTable_CoversEveryWiredRevoker pins main.go's wired tables against these keys.
+var revokeTypeForTable = map[string]string{
+	"pool_royalty_mints":         mining.TypePoolRoyaltyRevoked,
+	"distill_royalty_mints":      mining.TypePoolRoyaltyRevoked,
+	"eval_contribution_mints":    mining.TypeEvalContributionRevoked,
+	"routing_prediction_mints":   mining.TypeRoutingPredictionRevoked,
+	"node_latency_mints":         mining.TypeLatencyLocalityRevoked,
+	"confidential_compute_mints": mining.TypeConfidentialComputeRevoked,
 }
 
 // Revoker turns the held-burn primitive into a production operation. The
-// zero/nil Revoker is inert. `table` scopes the CAS to one mint table
-// (pool_royalty_mints or distill_royalty_mints).
+// zero/nil Revoker is inert. `table` scopes the CAS to one mint table (e.g.
+// pool_royalty_mints); it also selects the clawback row's ledger TYPE via
+// revokeTypeForTable, so each table's clawback records its own supply-neutral
+// label rather than a blanket pool_royalty_revoked.
 type Revoker struct {
-	db     revokerDB
-	ledger heldRevoker
-	table  string
+	db         revokerDB
+	ledger     heldRevoker
+	table      string
+	revokeType string // the SUPPLY-NEUTRAL ledger type this table's clawback rows carry (revokeTypeForTable)
 }
 
 // NewRevoker builds a revoke orchestrator over the cache royalty
@@ -89,9 +132,11 @@ func NewRevoker(db revokerDB, ledger heldRevoker) *Revoker {
 }
 
 // NewRevokerForTable builds a revoke orchestrator over an EXPLICIT mint table.
-// table is a hardcoded literal from the caller (never user input).
+// table is a hardcoded literal from the caller (never user input); it also selects the clawback
+// ledger type via revokeTypeForTable. An unmapped table leaves revokeType empty and revokeOne
+// refuses (fail-closed) rather than clawing back under a blank label.
 func NewRevokerForTable(db revokerDB, ledger heldRevoker, table string) *Revoker {
-	return &Revoker{db: db, ledger: ledger, table: table}
+	return &Revoker{db: db, ledger: ledger, table: table, revokeType: revokeTypeForTable[table]}
 }
 
 // revokeCASSQLFor / classifyStatusSQLFor build the table-scoped revoke SQL. Both
@@ -140,6 +185,14 @@ func (r *Revoker) RevokeHeldMints(ctx context.Context, requestIDs []string) (Rev
 
 // revokeOne handles a single request_id in its own transaction.
 func (r *Revoker) revokeOne(ctx context.Context, requestID string) RevokeOutcome {
+	// Fail-closed: an unmapped table has no decided clawback ledger type. Refuse BEFORE the CAS,
+	// so the held row stays held (visible, retryable) rather than burned under a blank label —
+	// mirrors the finalize sweeper's settleOne finalType guard. Only reachable if a new table is
+	// wired without a revokeTypeForTable entry (TestRevokeTypeForTable_CoversEveryWiredRevoker
+	// pins the wired set against the map, so that gap fails in CI, not silently in production).
+	if r.revokeType == "" {
+		return OutcomeError
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return OutcomeError
@@ -150,11 +203,11 @@ func (r *Revoker) revokeOne(ctx context.Context, requestID string) RevokeOutcome
 	var amount int64 // µLENS (SEC-2: minted_amount is BIGINT)
 	err = tx.QueryRow(ctx, revokeCASSQLFor(r.table), requestID).Scan(&contributor, &amount)
 	if err == nil {
-		// The CAS transitioned the row (held → revoked) and returned its
-		// contributor + amount. Burn from held in the SAME tx; commit only if
-		// both succeed (atomic flip+burn).
-		if berr := r.ledger.RevokeHeldTx(ctx, tx, contributor, amount,
-			"pool royalty revoked (held mint clawed back)", map[string]interface{}{"request_id": requestID}); berr != nil {
+		// The CAS transitioned the row (held → revoked) and returned its contributor + amount.
+		// Burn from held in the SAME tx, attributed to THIS table's own supply-neutral clawback
+		// type; commit only if both succeed (atomic flip+burn).
+		if berr := r.ledger.RevokeHeldTxAs(ctx, tx, contributor, amount, r.revokeType,
+			r.revokeType+" (held mint clawed back)", map[string]interface{}{"request_id": requestID}); berr != nil {
 			return OutcomeError // deferred rollback discards the flip with the failed burn
 		}
 		if cerr := tx.Commit(ctx); cerr != nil {
