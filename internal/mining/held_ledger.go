@@ -99,6 +99,37 @@ const (
 	TypeConfidentialCompute = "eval_confidential_compute"
 )
 
+// The CLAWBACK (revoke) types for the four P-o-I mints — the label the Revoker writes when a
+// confirmed-bad held mint is burned from held. Each is EXACTLY its counted final type plus the
+// "_revoked" suffix (so held / final / revoke form one consistent family:
+// eval_contribution_held → eval_contribution → eval_contribution_revoked).
+//
+// The MONEY CONTRACT is the MIRROR-IMAGE of the final types above. A final type MUST be counted
+// in GetTotalSupply (settlement is when a mint enters supply). A revoke type must be counted in
+// NEITHER total:
+//   - NOT in GetTotalSupply's allow-list (countedSupplyTypeList): the held LENS never entered
+//     circulation, so reversing it must not move total supply. Revoke rows are also negative-
+//     amount, which GetTotalSupply's `amount > 0` filter excludes independently — belt and braces.
+//   - NOT in the burned list (TypeBurn / TypeStakeSlash): a revoke of held is not a burn of
+//     circulating supply. Adding a revoke type to either list would turn this relabel into a
+//     money change — the exact inverse of the finalize trap that made the four final types above
+//     have to JOIN the supply list.
+//
+// Before these existed the table-parameterized Revoker clawed back every held mint via the
+// type-less RevokeHeldTx — whose hardcoded TypePoolRoyaltyRevoked made an eval-contribution or
+// routing-prediction clawback land in the ledger labelled pool_royalty_revoked. Amounts were
+// always exact; only the attribution lied (the revoke sibling of the #312 finalize bug).
+//
+// pool-royalty and distill are deliberately NOT here: distill mints TypePoolRoyaltyHeld by design
+// (it reuses the Pool-B held kernel), so TypePoolRoyaltyRevoked is already the correct clawback
+// label for both.
+const (
+	TypeEvalContributionRevoked    = "eval_contribution_revoked"
+	TypeRoutingPredictionRevoked   = "eval_routing_prediction_revoked"
+	TypeLatencyLocalityRevoked     = "eval_latency_locality_revoked"
+	TypeConfidentialComputeRevoked = "eval_confidential_compute_revoked"
+)
+
 // ErrInsufficientHeld is returned when held_balance can't cover a finalize
 // or revoke — the tx rolls back, nothing partial persists.
 var ErrInsufficientHeld = errors.New("mining: insufficient held balance")
