@@ -1779,42 +1779,9 @@ func run() error {
 		// a token for an arbitrary workspace/user is a privileged
 		// op. /refresh accepts any valid JWT and extends it.
 		// /me echoes the resolved AuthContext for the caller.
-		authed.Post("/v1/auth/token", func(w http.ResponseWriter, req *http.Request) {
-			if authManager.PrivateKey() == nil {
-				writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not available")
-				return
-			}
-			// Require global-admin auth via the unified manager.
-			actx, err := authManager.Authenticate(req)
-			if err != nil || !actx.IsAdmin {
-				writeJSONErr(w, http.StatusForbidden, "admin credentials required")
-				return
-			}
-			var in struct {
-				WorkspaceID string   `json:"workspace_id"`
-				UserID      string   `json:"user_id"`
-				Scopes      []string `json:"scopes"`
-				TTLHours    int      `json:"ttl_hours"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			if in.WorkspaceID == "" {
-				writeJSONErr(w, http.StatusBadRequest, "workspace_id required")
-				return
-			}
-			ttl := auth.ClampTTL(time.Duration(in.TTLHours) * time.Hour)
-			tok, err := auth.GenerateToken(in.WorkspaceID, in.UserID, in.Scopes, authManager.PrivateKey(), ttl)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, map[string]any{
-				"token":      tok,
-				"expires_at": time.Now().Add(ttl).UTC().Format(time.RFC3339),
-			})
-		})
+		// Extracted to newAuthTokenMintHandler (auth_token_mint_handler.go) so the
+		// admin-scoping invariant is provable over HTTP; behavior is unchanged.
+		authed.Post("/v1/auth/token", newAuthTokenMintHandler(authManager))
 
 		// Admin-only: approve the LENS->LXC conversion rate. The
 		// admin can ONLY approve the algorithm's output (within
