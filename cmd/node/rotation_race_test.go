@@ -34,7 +34,7 @@ func (s *countingSlasher) count() int { s.mu.Lock(); defer s.mu.Unlock(); return
 type noopChallengeStore struct{}
 
 func (noopChallengeStore) Record(context.Context, povi.Challenge) error { return nil }
-func (noopChallengeStore) UpdateResult(context.Context, string, povi.ChallengeResult, int64, string) error {
+func (noopChallengeStore) UpdateResult(context.Context, string, string, povi.ChallengeResult, int64, string) error {
 	return nil
 }
 func (noopChallengeStore) AlreadyChallenged(context.Context, string) (bool, error) {

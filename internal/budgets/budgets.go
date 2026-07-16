@@ -305,7 +305,7 @@ func (s *Service) Load(ctx context.Context) error {
 	// Persist the reconciled snapshots so the API/dashboard read fresh
 	// numbers without recomputing. Best-effort.
 	for _, b := range bs {
-		_ = s.store.UpdateSpent(ctx, b.ID, b.SpentUSD)
+		_ = s.store.UpdateSpent(ctx, b.WorkspaceID, b.ID, b.SpentUSD)
 	}
 	return nil
 }

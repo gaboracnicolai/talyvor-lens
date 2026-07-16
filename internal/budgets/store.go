@@ -266,15 +266,19 @@ func (s *Store) Delete(ctx context.Context, workspaceID, id string) error {
 	return nil
 }
 
-const updateSpentSQL = `UPDATE budgets SET spent_usd = $2, updated_at = NOW() WHERE id = $1`
+const updateSpentSQL = `UPDATE budgets SET spent_usd = $2, updated_at = NOW() WHERE id = $1 AND workspace_id = $3`
 
-// UpdateSpent persists the reconciled running total. Called during refresh,
-// never on the request hot path.
-func (s *Store) UpdateSpent(ctx context.Context, id string, spent float64) error {
+// UpdateSpent persists the reconciled running total for a budget, CONFINED to its owning
+// workspace. Called during refresh, never on the request hot path. Keying the write on
+// (id, workspace_id) — not id alone — makes it a money-path identity guard: a wrong or foreign
+// budget id can never move another workspace's spend (SEC-11: a scoping key must hold every
+// identity it protects). spent_usd is advisory USD, not conserved µLENS — no amount arithmetic
+// changes here; only which row the write is allowed to touch.
+func (s *Store) UpdateSpent(ctx context.Context, workspaceID, id string, spent float64) error {
 	if s.pool == nil || id == "" {
 		return nil
 	}
-	if _, err := s.pool.Exec(ctx, updateSpentSQL, id, spent); err != nil {
+	if _, err := s.pool.Exec(ctx, updateSpentSQL, id, spent, workspaceID); err != nil {
 		return fmt.Errorf("budgets: update spent: %w", err)
 	}
 	return nil
