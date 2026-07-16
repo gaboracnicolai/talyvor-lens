@@ -33,7 +33,7 @@ ON CONFLICT (request_id) DO NOTHING`
 
 const updateChallengeSQL = `UPDATE povi_challenges
 SET result=$2, slashed_amount=$3, reason=$4
-WHERE id=$1`
+WHERE id=$1 AND workspace_id=$5`
 
 const existsChallengeSQL = `SELECT EXISTS (SELECT 1 FROM povi_challenges WHERE request_id = $1)`
 
@@ -86,13 +86,17 @@ func (s *ChallengeStore) Record(ctx context.Context, c Challenge) error {
 	return nil
 }
 
-// UpdateResult writes the final outcome (pass/fail/timeout) and slash
-// amount to the previously-claimed pending challenge row.
-func (s *ChallengeStore) UpdateResult(ctx context.Context, id string, result ChallengeResult, slashedAmount int64, reason string) error {
+// UpdateResult writes the final outcome (pass/fail/timeout) and slash amount to the
+// previously-claimed pending challenge row, CONFINED to the challenge's owning workspace.
+// Keying the write on (id, workspace_id) — not id alone — makes it a money-path identity guard:
+// a wrong or foreign challenge id can never settle or slash another workspace's challenge (SEC-11:
+// a scoping key must hold every identity it protects). slashedAmount (µLENS, SEC-2) is written
+// UNCHANGED — this hardens only which row the write may touch, never the amount.
+func (s *ChallengeStore) UpdateResult(ctx context.Context, workspaceID, id string, result ChallengeResult, slashedAmount int64, reason string) error {
 	if s.pool == nil {
 		return nil
 	}
-	if _, err := s.pool.Exec(ctx, updateChallengeSQL, id, string(result), slashedAmount, reason); err != nil {
+	if _, err := s.pool.Exec(ctx, updateChallengeSQL, id, string(result), slashedAmount, reason, workspaceID); err != nil {
 		return fmt.Errorf("povi: update challenge result: %w", err)
 	}
 	return nil

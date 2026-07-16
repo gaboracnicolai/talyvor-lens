@@ -83,12 +83,14 @@ func (s *memChallengeStore) Record(_ context.Context, c Challenge) error {
 	s.byID[c.ID] = c
 	return nil
 }
-func (s *memChallengeStore) UpdateResult(_ context.Context, id string, result ChallengeResult, slashedAmount int64, reason string) error {
+func (s *memChallengeStore) UpdateResult(_ context.Context, workspaceID, id string, result ChallengeResult, slashedAmount int64, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.byID[id]
-	if !ok {
-		return nil // no-op if pool is nil equivalent
+	// Confined to the owning workspace — mirrors the real store's WHERE id=$1 AND workspace_id=$2,
+	// so a cross-workspace (id, workspace) pair is a no-op here too.
+	if !ok || c.WorkspaceID != workspaceID {
+		return nil
 	}
 	c.Result = result
 	c.SlashedAmount = slashedAmount

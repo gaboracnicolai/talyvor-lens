@@ -154,8 +154,9 @@ type challengeStore interface {
 	// Record atomically claims the receipt. Returns ErrAlreadyChallenged
 	// when the receipt is already claimed (UNIQUE conflict).
 	Record(ctx context.Context, c Challenge) error
-	// UpdateResult persists the final outcome after FetchPaths + optional Slash.
-	UpdateResult(ctx context.Context, id string, result ChallengeResult, slashedAmount int64, reason string) error
+	// UpdateResult persists the final outcome after FetchPaths + optional Slash, confined to
+	// the challenge's owning workspace (id + workspace_id, never id alone).
+	UpdateResult(ctx context.Context, workspaceID, id string, result ChallengeResult, slashedAmount int64, reason string) error
 	Get(ctx context.Context, id string) (*Challenge, error)
 	AlreadyChallenged(ctx context.Context, requestID string) (bool, error)
 	List(ctx context.Context, nodeID string) ([]Challenge, error)
@@ -297,7 +298,7 @@ func (c *Challenger) Challenge(ctx context.Context, rec StoredReceipt) (*Challen
 	}
 
 	metrics.POVIChallenge(string(ch.Result))
-	if err := c.store.UpdateResult(ctx, ch.ID, ch.Result, ch.SlashedAmount, ch.Reason); err != nil {
+	if err := c.store.UpdateResult(ctx, ch.WorkspaceID, ch.ID, ch.Result, ch.SlashedAmount, ch.Reason); err != nil {
 		return &ch, err
 	}
 	return &ch, nil
