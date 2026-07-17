@@ -54,7 +54,7 @@ func moneyDump(t *testing.T, pool *pgxpool.Pool, ledger *mining.LedgerStore) str
 	if err != nil {
 		t.Fatal(err)
 	}
-	out.WriteString(fmt.Sprintf("# totals: supply=%d burned=%d\n", supply, burned))
+	fmt.Fprintf(&out, "# totals: supply=%d burned=%d\n", supply, burned)
 	return out.String()
 }
 
