@@ -324,7 +324,7 @@ func (m *Manager) validateJWTCached(token string) (*TokenClaims, error) {
 	// after first use stayed accepted for up to jwtCacheTTL more — the
 	// cache lifetime was silently decoupled from the credential lifetime.
 	cacheExp := time.Now().Add(jwtCacheTTL)
-	if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(cacheExp) {
+	if claims.ExpiresAt != nil && claims.ExpiresAt.Before(cacheExp) {
 		cacheExp = claims.ExpiresAt.Time
 	}
 	m.mu.Lock()
