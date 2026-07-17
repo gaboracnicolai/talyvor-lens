@@ -319,8 +319,16 @@ func (m *Manager) validateJWTCached(token string) (*TokenClaims, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The cache entry must never outlive the credential: bounded by
+	// min(token exp, cache TTL). Without the bound, a token expiring 1s
+	// after first use stayed accepted for up to jwtCacheTTL more — the
+	// cache lifetime was silently decoupled from the credential lifetime.
+	cacheExp := time.Now().Add(jwtCacheTTL)
+	if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(cacheExp) {
+		cacheExp = claims.ExpiresAt.Time
+	}
 	m.mu.Lock()
-	m.jwtCache[token] = &jwtCacheEntry{claims: claims, expires: time.Now().Add(jwtCacheTTL)}
+	m.jwtCache[token] = &jwtCacheEntry{claims: claims, expires: cacheExp}
 	m.mu.Unlock()
 	return claims, nil
 }

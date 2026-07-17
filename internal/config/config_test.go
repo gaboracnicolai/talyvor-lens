@@ -374,6 +374,10 @@ func TestLoad_HADefaults(t *testing.T) {
 func TestLoad_HAEnabledParsing(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("LENS_HA_ENABLED", "true")
+	// HA fails closed without stable signing keys (signing_keys_ha_test.go),
+	// so this parsing test must supply them.
+	t.Setenv("LENS_JWT_PRIVATE_KEY", testJWTPEMPresent)
+	t.Setenv("LENS_POVI_CHALLENGE_KEY", b64Bytes(32))
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)

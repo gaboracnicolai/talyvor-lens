@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -1459,6 +1461,33 @@ func Load() (*Config, error) {
 		c.POVISlashFraction = f
 	}
 	c.POVIChallengeKey = os.Getenv("LENS_POVI_CHALLENGE_KEY")
+	// A SET challenge key must actually parse — base64 of an ed25519 32-byte
+	// seed or 64-byte private key. The old path silently replaced an operator-
+	// supplied-but-mistyped key with an ephemeral one (loadOrGenChallengeKey's
+	// Warn branch), which invalidates node-pinned pubkeys and only surfaces
+	// later as honest nodes failing challenges. Mirrors main.go's existing
+	// hard failure on an unparsable LENS_JWT_PRIVATE_KEY. Empty stays allowed
+	// here (single-node dev keeps the ephemeral+warn path); HA requires it below.
+	if c.POVIChallengeKey != "" {
+		raw, err := base64.StdEncoding.DecodeString(c.POVIChallengeKey)
+		if err != nil || (len(raw) != ed25519.SeedSize && len(raw) != ed25519.PrivateKeySize) {
+			return nil, fmt.Errorf("invalid LENS_POVI_CHALLENGE_KEY: must be base64 of an ed25519 32-byte seed or 64-byte private key")
+		}
+	}
+	// HA fail-closed: with LENS_HA_ENABLED every replica must share STABLE
+	// signing keys. Ephemeral per-replica keys "work" at startup and break
+	// silently in production: JWTs minted by one instance are rejected by the
+	// others, /v1/auth/jwks advertises the wrong key, and a challenge-key
+	// mismatch fails honest nodes' pinned pubkeys. Refuse to start instead of
+	// Warn — the single-node dev path (HA off) is unchanged.
+	if c.HAEnabled {
+		if c.JWTPrivateKey == "" {
+			return nil, fmt.Errorf("LENS_HA_ENABLED requires LENS_JWT_PRIVATE_KEY: an ephemeral per-replica JWT key makes tokens minted by one instance unverifiable by the others")
+		}
+		if c.POVIChallengeKey == "" {
+			return nil, fmt.Errorf("LENS_HA_ENABLED requires LENS_POVI_CHALLENGE_KEY: an ephemeral per-replica challenge key invalidates node-pinned pubkeys")
+		}
+	}
 	// U6 Sybil floor: the legacy trust-mint defaults FALSE — an unprotected mint
 	// path (no receipt, caller-asserted tokens, no idempotency) must be opt-IN.
 	c.TrustfulComputeMintEnabled = false
