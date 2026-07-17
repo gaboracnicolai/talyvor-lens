@@ -53,3 +53,39 @@ func TestAttribution_CrossTenant_Refused(t *testing.T) {
 		t.Fatalf("CROSS-TENANT WRITE LANDED: %d attribution row(s) under a non-producer workspace — the ownership gate leaked", n)
 	}
 }
+
+// seedProducer makes ws the producer of oid (an ordinary K4 verdict row = the ownership anchor).
+func seedProducer(t *testing.T, pool interface {
+	Record(context.Context, outputverify.VerdictRecord) (bool, error)
+}, oid, ws, salt string) {
+	t.Helper()
+	if _, err := pool.Record(context.Background(), outputverify.VerdictRecord{
+		OutputID: oid, WorkspaceID: ws, Model: "openai/gpt-4o",
+		Verdict: outputverify.VerdictUnverifiable, ConstraintKind: outputverify.KindNone,
+		PromptSHA256: outputverify.Sha256Hex([]byte("p" + salt)), ResponseSHA256: outputverify.Sha256Hex([]byte("r" + salt)),
+	}); err != nil {
+		t.Fatalf("seed producer %s/%s: %v", oid, ws, err)
+	}
+}
+
+// PROPERTY 2 — OWNERSHIP HAPPY PATH: the producing workspace attributes its OWN output → owned+recorded;
+// the stored row carries the CALLER's workspace_id.
+func TestAttribution_OwnershipHappyPath(t *testing.T) {
+	ctx := context.Background()
+	pool := ovTestPool(t)
+	seedProducer(t, outputverify.NewWriter(pool), "oid-attr-happy", "ws-A", "happy")
+
+	owned, recorded, conflict, err := outputverify.NewAttributionWriter(pool).RecordAttributionIfOwned(ctx,
+		outputverify.Attribution{OutputID: "oid-attr-happy", WorkspaceID: "ws-A", TargetKind: "pr", TargetRef: "spec://feature-x"})
+	if err != nil || !owned || !recorded || conflict {
+		t.Fatalf("producer attribution: owned=%v recorded=%v conflict=%v err=%v, want true/true/false/nil", owned, recorded, conflict, err)
+	}
+	var ws, kind, ref string
+	if err := pool.QueryRow(ctx,
+		`SELECT workspace_id, target_kind, target_ref FROM output_attributions WHERE output_id='oid-attr-happy'`).Scan(&ws, &kind, &ref); err != nil {
+		t.Fatal(err)
+	}
+	if ws != "ws-A" || kind != "pr" || ref != "spec://feature-x" {
+		t.Errorf("stored row = (%q,%q,%q), want (ws-A, pr, spec://feature-x)", ws, kind, ref)
+	}
+}

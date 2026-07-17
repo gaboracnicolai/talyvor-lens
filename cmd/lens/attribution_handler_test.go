@@ -48,3 +48,19 @@ func TestAttribution_Handler_CrossTenant_403(t *testing.T) {
 		t.Errorf("handler must pass caller+path to the store; got %+v", notOwner.got)
 	}
 }
+
+// PROPERTY 2 (handler) — the producer attributing its own output → 200; the attribution is scoped to
+// the caller's workspace + the path output_id, and the body reports recorded:true.
+func TestAttribution_Handler_Producer_200(t *testing.T) {
+	rec := &fakeAttrRecorder{owned: true, recorded: true}
+	w := serveAttr(fakeAuthn{ctx: &auth.AuthContext{WorkspaceID: "ws-A"}}, rec, validAttrBody)
+	if w.Code != http.StatusOK {
+		t.Fatalf("producer: status=%d, want 200", w.Code)
+	}
+	if rec.got.WorkspaceID != "ws-A" || rec.got.OutputID != "oid-1" || rec.got.TargetKind != "pr" || rec.got.TargetRef == "" {
+		t.Errorf("attribution must be scoped to caller+path; got %+v", rec.got)
+	}
+	if !strings.Contains(w.Body.String(), `"recorded":true`) {
+		t.Errorf("body must report recorded:true; got %s", w.Body.String())
+	}
+}
