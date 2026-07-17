@@ -89,3 +89,28 @@ func TestAttribution_OwnershipHappyPath(t *testing.T) {
 		t.Errorf("stored row = (%q,%q,%q), want (ws-A, pr, spec://feature-x)", ws, kind, ref)
 	}
 }
+
+// PROPERTY 3 — IDEMPOTENCY: an IDENTICAL re-post is an append-only no-op → recorded:false, exactly one
+// row (never a conflict). The PK (output_id, workspace_id, target_kind) carries every identity (SEC-11).
+func TestAttribution_Idempotent_RePost(t *testing.T) {
+	ctx := context.Background()
+	pool := ovTestPool(t)
+	seedProducer(t, outputverify.NewWriter(pool), "oid-attr-idem", "ws-A", "idem")
+	aw := outputverify.NewAttributionWriter(pool)
+	a := outputverify.Attribution{OutputID: "oid-attr-idem", WorkspaceID: "ws-A", TargetKind: "spec", TargetRef: "spec://v1"}
+
+	if owned, recorded, conflict, err := aw.RecordAttributionIfOwned(ctx, a); err != nil || !owned || !recorded || conflict {
+		t.Fatalf("first post: owned=%v recorded=%v conflict=%v err=%v, want true/true/false/nil", owned, recorded, conflict, err)
+	}
+	// Identical re-post → idempotent no-op: still owned, recorded=false, NOT a conflict.
+	if owned, recorded, conflict, err := aw.RecordAttributionIfOwned(ctx, a); err != nil || !owned || recorded || conflict {
+		t.Fatalf("identical re-post: owned=%v recorded=%v conflict=%v err=%v, want true/false/false/nil (idempotent)", owned, recorded, conflict, err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM output_attributions WHERE output_id='oid-attr-idem'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("idempotency: %d rows for the same (output,workspace,kind), want exactly 1", n)
+	}
+}

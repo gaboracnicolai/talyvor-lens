@@ -64,3 +64,15 @@ func TestAttribution_Handler_Producer_200(t *testing.T) {
 		t.Errorf("body must report recorded:true; got %s", w.Body.String())
 	}
 }
+
+// PROPERTY 3 (handler) — an idempotent re-post (store: owned, recorded:false, not conflict) → 200 recorded:false.
+func TestAttribution_Handler_Idempotent_200(t *testing.T) {
+	rec := &fakeAttrRecorder{owned: true, recorded: false, conflict: false}
+	w := serveAttr(fakeAuthn{ctx: &auth.AuthContext{WorkspaceID: "ws-A"}}, rec, validAttrBody)
+	if w.Code != http.StatusOK {
+		t.Fatalf("idempotent: status=%d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"recorded":false`) {
+		t.Errorf("body must report recorded:false; got %s", w.Body.String())
+	}
+}
