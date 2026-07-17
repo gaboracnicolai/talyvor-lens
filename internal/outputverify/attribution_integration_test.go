@@ -114,3 +114,40 @@ func TestAttribution_Idempotent_RePost(t *testing.T) {
 		t.Fatalf("idempotency: %d rows for the same (output,workspace,kind), want exactly 1", n)
 	}
 }
+
+// PROPERTY 4 — APPEND-ONLY CONFLICT (D1): the same output+kind with a DIFFERENT target_ref is REFUSED
+// (conflict=true, recorded=false, still owned); the ORIGINAL row is unchanged (first-wins), one row.
+func TestAttribution_AppendOnlyConflict(t *testing.T) {
+	ctx := context.Background()
+	pool := ovTestPool(t)
+	seedProducer(t, outputverify.NewWriter(pool), "oid-attr-conflict", "ws-A", "conflict")
+	aw := outputverify.NewAttributionWriter(pool)
+
+	if owned, recorded, conflict, err := aw.RecordAttributionIfOwned(ctx, outputverify.Attribution{
+		OutputID: "oid-attr-conflict", WorkspaceID: "ws-A", TargetKind: "pr", TargetRef: "pr://1"}); err != nil || !owned || !recorded || conflict {
+		t.Fatalf("first attribution: owned=%v recorded=%v conflict=%v err=%v, want true/true/false/nil", owned, recorded, conflict, err)
+	}
+	// Same output+kind, DIFFERENT target_ref → conflict (append-only first-wins).
+	owned, recorded, conflict, err := aw.RecordAttributionIfOwned(ctx, outputverify.Attribution{
+		OutputID: "oid-attr-conflict", WorkspaceID: "ws-A", TargetKind: "pr", TargetRef: "pr://2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owned || recorded || !conflict {
+		t.Fatalf("CONFLICT: a different target_ref for the same kind must be refused; owned=%v recorded=%v conflict=%v, want true/false/true", owned, recorded, conflict)
+	}
+	var ref string
+	if err := pool.QueryRow(ctx, `SELECT target_ref FROM output_attributions WHERE output_id='oid-attr-conflict' AND target_kind='pr'`).Scan(&ref); err != nil {
+		t.Fatal(err)
+	}
+	if ref != "pr://1" {
+		t.Fatalf("append-only: the ORIGINAL target_ref must survive; got %q, want pr://1", ref)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM output_attributions WHERE output_id='oid-attr-conflict'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("a conflicting re-attribution must not add a row; got %d, want 1", n)
+	}
+}

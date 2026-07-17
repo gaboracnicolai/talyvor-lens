@@ -76,3 +76,12 @@ func TestAttribution_Handler_Idempotent_200(t *testing.T) {
 		t.Errorf("body must report recorded:false; got %s", w.Body.String())
 	}
 }
+
+// PROPERTY 4 (handler) — the store signals a conflicting re-attribution → 409.
+func TestAttribution_Handler_Conflict_409(t *testing.T) {
+	rec := &fakeAttrRecorder{owned: true, recorded: false, conflict: true}
+	w := serveAttr(fakeAuthn{ctx: &auth.AuthContext{WorkspaceID: "ws-A"}}, rec, validAttrBody)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("conflict: status=%d, want 409", w.Code)
+	}
+}

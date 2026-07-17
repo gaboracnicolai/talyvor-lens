@@ -2,6 +2,7 @@ package outputverify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -47,12 +48,20 @@ SELECT $1, $2, $3, $4
 WHERE EXISTS (SELECT 1 FROM k4_output_verdicts WHERE output_id = $1 AND workspace_id = $2)
 ON CONFLICT (output_id, workspace_id, target_kind) DO NOTHING`
 
+// existingAttributionRefSQL reads the target_ref already recorded for (output_id, workspace_id,
+// target_kind), to distinguish an IDENTICAL re-post (same ref → idempotent, recorded:false) from a
+// CONFLICTING one (a different ref → append-only refuse, 409). The row is append-only (ON CONFLICT DO
+// NOTHING never overwrites), so this read is stable and reflects the FIRST-wins target_ref.
+const existingAttributionRefSQL = `SELECT target_ref FROM output_attributions WHERE output_id = $1 AND workspace_id = $2 AND target_kind = $3`
+
 // RecordAttributionIfOwned records an attribution ONLY if the caller produced output_id.
 //   - owned=false ⇒ the caller is not the producer (handler → 403); no row is written.
 //   - recorded=true ⇒ a new attribution row was inserted (handler → 200 recorded:true).
-//   - recorded=false ⇒ an attribution for this (output_id, workspace_id, target_kind) already exists
-//     (append-only dedup; handler → 200 recorded:false). Distinguishing an IDENTICAL re-post from a
-//     CONFLICTING one (a different target_ref → 409) is Property 4 — `conflict` is always false here.
+//   - recorded=false, conflict=false ⇒ an IDENTICAL attribution already exists (idempotent no-op;
+//     handler → 200 recorded:false).
+//   - conflict=true ⇒ a DIFFERENT target_ref is already recorded for this (output_id, workspace_id,
+//     target_kind) — append-only first-wins; the re-attribution is refused (handler → 409) and the
+//     original row is UNCHANGED.
 //
 // No amount is read, written, summed, or rounded on any path — attribution ≠ settlement.
 func (w *AttributionWriter) RecordAttributionIfOwned(ctx context.Context, a Attribution) (owned, recorded, conflict bool, err error) {
@@ -69,5 +78,20 @@ func (w *AttributionWriter) RecordAttributionIfOwned(ctx context.Context, a Attr
 	if err != nil {
 		return true, false, false, fmt.Errorf("outputverify: record attribution: %w", err)
 	}
-	return true, tag.RowsAffected() == 1, false, nil
+	if tag.RowsAffected() == 1 {
+		return true, true, false, nil // newly attributed
+	}
+	// Owned but nothing inserted ⇒ the ON CONFLICT path: a row already exists for this
+	// (output_id, workspace_id, target_kind). Compare the stored (first-wins) target_ref to decide
+	// idempotent vs conflict.
+	var existing string
+	if err := w.db.QueryRow(ctx, existingAttributionRefSQL, a.OutputID, a.WorkspaceID, a.TargetKind).Scan(&existing); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Unreachable while k4_output_verdicts rows are append-only (owned held, so the insert's WHERE
+			// EXISTS held); treat as a benign idempotent no-op rather than a spurious conflict.
+			return true, false, false, nil
+		}
+		return true, false, false, fmt.Errorf("outputverify: attribution existing-ref read: %w", err)
+	}
+	return true, false, existing != a.TargetRef, nil
 }
