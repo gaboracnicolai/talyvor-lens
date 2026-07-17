@@ -1352,6 +1352,7 @@ func run() error {
 	// K4 CODE LOOP — the ownership-bound mechanical report-back writer (reads k4_output_verdicts to verify the
 	// caller produced the output_id, writes k4_mechanical_verdicts). PRIMARY pool — no replica reader.
 	mechanicalVerdictWriter := outputverify.NewMechanicalWriter(pool)
+	attributionWriter := outputverify.NewAttributionWriter(pool)
 
 	// P3 #6: the DESCRIPTIVE node-latency capture sink (default-off, mint-free — writes the aggregate the
 	// future latency mint reads; RunOnce/capture no-ops while the flag is off).
@@ -1744,6 +1745,10 @@ func run() error {
 		// K4 CODE LOOP — the producing workspace self-reports a MECHANICAL verdict (compiled/tests) for an
 		// output it produced. Ownership-bound (only the producer, per k4_output_verdicts) + append-only.
 		authed.Post("/v1/output-verdicts/{output_id}/mechanical", newMechanicalVerdictHandler(authManager, mechanicalVerdictWriter))
+		// K4 ATTRIBUTION — the producing workspace attributes an output it OWNS to a PR or spec
+		// (opaque target_ref). Ownership-bound (only the producer, per k4_output_verdicts) + append-only,
+		// first-wins per kind (409 on a conflicting re-attribution). Attribution ≠ settlement: no amount.
+		authed.Post("/v1/outputs/{output_id}/attribution", newAttributionHandler(authManager, attributionWriter))
 		// H5 OPT-IN buildable-artifact commitment — the producing workspace commits, bound to an output it
 		// produced, the manifest hash of its buildable module (output slot folded from the served
 		// response_sha256). Owner-bound + append-once. Registered ONLY when LENS_H5_ARTIFACT_ENABLED; until then
