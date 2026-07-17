@@ -85,3 +85,49 @@ func TestAttribution_Handler_Conflict_409(t *testing.T) {
 		t.Fatalf("conflict: status=%d, want 409", w.Code)
 	}
 }
+
+// PROPERTY 5 (handler) — validation: invalid target_kind / missing target_ref / bad body → 400;
+// no workspace → 401; missing output_id → 400. The store is NEVER reached on a rejected request.
+func TestAttribution_Handler_Validation(t *testing.T) {
+	authA := fakeAuthn{ctx: &auth.AuthContext{WorkspaceID: "ws-A"}}
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"invalid target_kind", `{"target_kind":"issue","target_ref":"x"}`},
+		{"missing target_ref", `{"target_kind":"pr"}`},
+		{"bad body (not JSON)", `{`},
+	}
+	for _, c := range cases {
+		rec := &fakeAttrRecorder{owned: true}
+		w := serveAttr(authA, rec, c.body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status=%d, want 400", c.name, w.Code)
+		}
+		if rec.called {
+			t.Errorf("%s: the store must not be reached on a 400", c.name)
+		}
+	}
+
+	// no workspace → 401, store never reached.
+	unauth := &fakeAttrRecorder{}
+	w := serveAttr(fakeAuthn{ctx: &auth.AuthContext{}}, unauth, validAttrBody)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("no workspace: status=%d, want 401", w.Code)
+	}
+	if unauth.called {
+		t.Error("unauth: the store must not be reached")
+	}
+
+	// missing output_id → 400 (handler invoked without a routed {output_id} → chi.URLParam == "").
+	noid := &fakeAttrRecorder{owned: true}
+	wr := httptest.NewRecorder()
+	newAttributionHandler(authA, noid)(wr, httptest.NewRequest(http.MethodPost, "/v1/outputs//attribution", strings.NewReader(validAttrBody)))
+	if wr.Code != http.StatusBadRequest {
+		t.Errorf("missing output_id: status=%d, want 400", wr.Code)
+	}
+	if noid.called {
+		t.Error("missing output_id: the store must not be reached")
+	}
+}
