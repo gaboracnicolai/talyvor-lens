@@ -2004,18 +2004,12 @@ func run() error {
 			writeJSONErr(w, http.StatusNotFound, "key not found")
 		})
 
-		authed.Post("/v1/workspaces", func(w http.ResponseWriter, req *http.Request) {
-			var in workspace.Workspace
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			if err := wsManager.RegisterWorkspace(req.Context(), in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, map[string]string{"id": in.ID})
-		})
+		// ADMIN-ONLY (cross-tenant IDOR fix): RegisterWorkspace is a blind upsert on the body-supplied
+		// id, and this route has no {wsID} segment so workspaceIsolationMiddleware skips it — ungated,
+		// any authenticated non-admin key could overwrite ANOTHER tenant's config (spend cap / cache+
+		// distill pooling / logging policy). Provisioning is privileged; gate it like the ~30 sibling
+		// control-plane routes. Handler body extracted verbatim to newRegisterWorkspaceHandler.
+		authed.Post("/v1/workspaces", requireAdmin(authManager, newRegisterWorkspaceHandler(wsManager)))
 
 		authed.Get("/v1/workspaces/{wsID}", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
