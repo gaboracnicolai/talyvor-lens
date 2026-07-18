@@ -1,6 +1,26 @@
 package outputverify
 
-import "testing"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"testing"
+)
+
+// DOMAIN v2 — the content-binding manifest domain. Bumped from v1 (which folded the ENVELOPE hash into the
+// output slot) so an old-world manifest value can never verify against a new-world one, even by accident.
+// Pinned by reconstruction: the exact byte layout (domain ‖ per-entry path ‖ 0x00 ‖ content_sha256 ‖ 0x0A).
+func TestManifestHash_DomainV2_Pinned(t *testing.T) {
+	h := sha256.New()
+	h.Write([]byte("h5_artifact_manifest/v2\n"))
+	h.Write([]byte("a.go"))
+	h.Write([]byte{0})
+	h.Write([]byte("contenthash"))
+	h.Write([]byte{'\n'})
+	want := hex.EncodeToString(h.Sum(nil))
+	if got := ManifestHash([]ManifestEntry{{Path: "a.go", ContentSHA256: "contenthash"}}); got != want {
+		t.Fatalf("ManifestHash must use the h5_artifact_manifest/v2 domain; got %s want %s", got, want)
+	}
+}
 
 // ManifestHash is a canonical, order-independent hash over (path → content-sha256) entries.
 func TestManifestHash_OrderIndependentAndSensitive(t *testing.T) {

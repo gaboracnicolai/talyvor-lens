@@ -87,6 +87,9 @@ func TestBreach_NoRawContent_NoCounterparty(t *testing.T) {
 		// H5 opt-in buildable-artifact commitment (0094): a manifest HASH + the output-slot PATH (a
 		// module-relative filename like "gen.go" — structure metadata, never raw content or a counterparty).
 		"artifact_sha256": true, "artifact_output_path": true,
+		// H5 content binding (0098): hex(sha256(canonical assistant text)) — a HASH of the content, never
+		// the content itself; the raw text still never lands anywhere (hashes-only discipline intact).
+		"output_content_sha256": true,
 	}
 	forbidden := []string{"prompt_text", "response_text", "content", "counterparty", "other_workspace", "raw"}
 	for rows.Next() {
@@ -96,6 +99,9 @@ func TestBreach_NoRawContent_NoCounterparty(t *testing.T) {
 		}
 		if !allowed[col] {
 			t.Errorf("unexpected column %q — the schema must carry hashes only, self only", col)
+		}
+		if strings.HasSuffix(col, "_sha256") {
+			continue // a *_sha256 column is by construction a hash (prompt/response/content) — never raw text
 		}
 		for _, bad := range forbidden {
 			if strings.Contains(col, bad) {

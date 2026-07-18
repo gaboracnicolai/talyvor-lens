@@ -2,14 +2,20 @@
 // a bonded output_id and a candidate source tree, it REPRODUCES the build and records ONLY a trustworthy
 // compile verdict as verdict_source='talyvor_verified'. It is the producer step 3 promised.
 //
-// ⚠ SOURCE PROVENANCE — the binding, stated honestly. An output_id commits (via k4_output_verdicts.
-// response_sha256) to the RAW UPSTREAM RESPONSE BYTES; lens stores only the hash, never the bytes. The ONLY
-// sound binding is therefore: sha256(supplied tree) == response_sha256. That matches only if the supplied
-// bytes ARE the exact committed output. For today's chat-completion outputs the committed bytes are a JSON
-// response envelope, NOT a buildable tree, so the binding REFUSES every real output — no attested verdict is
-// ever recorded, and H5 stays fail-open. It becomes usable only for a FUTURE gateway convention that commits
-// a buildable-module provenance hash at generation time. We REFUSE rather than build an UNBOUND tree, because
-// an attested verdict on an input we cannot tie to the output is worse than no attestation.
+// ⚠ SOURCE PROVENANCE — the two bindings, stated honestly.
+//
+// NOT OPTED IN (artifact_sha256 NULL): an output_id commits (via k4_output_verdicts.response_sha256) to the
+// RAW UPSTREAM RESPONSE BYTES; lens stores only the hash, never the bytes. The only sound binding is
+// sha256(supplied tree) == response_sha256, which no buildable tree ever satisfies for a chat-completion
+// envelope — so non-opted outputs are REFUSED and stay on the self-reported, fail-open path (unchanged,
+// deliberate: an attested verdict on an input we cannot tie to the output is worse than no attestation).
+//
+// OPTED IN (artifact_sha256 set): the producer committed — via POST /v1/outputs/{id}/artifact — the manifest
+// hash of its buildable module with the output slot FORCED to the output's captured output_content_sha256
+// (the CANONICAL served content; outputverify/content.go pins the bytes — exactly what the flagship writer
+// materializes on disk). A tree whose manifest matches therefore PROVABLY carries the served content at the
+// slot path AND is real, compilable source — the binding is sound and satisfiable, and this package attests
+// it end-to-end: manifest match → sandboxed reproduce → talyvor_verified verdict.
 //
 // This package is mint-free: it reads k4_output_verdicts and writes k4_mechanical_verdicts; it never touches
 // the ledger. verdict_source is HARD-CODED 'talyvor_verified' and workspace_id is the OWNER from
@@ -122,11 +128,11 @@ func (a *Attestor) Attest(ctx context.Context, outputID string, treeTar []byte) 
 	}
 
 	// OPT-IN BUILDABLE BINDING: the supplied tree's manifest must equal the committed artifact_sha256. Because
-	// CommitArtifactSHA256 FORCED the output slot to response_sha256 at commit time, a matching manifest
-	// PROVES the tree carries exactly the served output at artifact_output_path — the served-output tie IS the
-	// manifest match, not a separate check. (A redundant output-slot re-check was deliberately NOT added: it
-	// would independently mask a regression of the generation-time forcing, hiding it from the served-different
-	// test.) A mismatch → unbound tree → refuse.
+	// CommitArtifactSHA256 FORCED the output slot to output_content_sha256 (the canonical served content) at
+	// commit time, a matching manifest PROVES the tree carries exactly the served content at
+	// artifact_output_path — the served-output tie IS the manifest match, not a separate check. (A redundant
+	// output-slot re-check was deliberately NOT added: it would independently mask a regression of the
+	// generation-time forcing, hiding it from the served-different test.) A mismatch → unbound tree → refuse.
 	if optedIn {
 		mh, _, mErr := outputverify.ManifestHashDir(dir)
 		if mErr != nil {

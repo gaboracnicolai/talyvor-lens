@@ -492,9 +492,10 @@ type Config struct {
 
 	// H5ArtifactEnabled gates the OPT-IN BUILDABLE-ARTIFACT COMMIT endpoint (POST /v1/outputs/{id}/artifact) —
 	// a workspace commits, bound to an output it produced, the manifest hash of its buildable module (output
-	// slot folded from the served response_sha256). DEFAULT FALSE. Off → the endpoint is not registered and no
-	// artifact_sha256 is ever populated, so the attestor's opt-in binding is dormant (every output stays on the
-	// legacy response_sha256 binding — fail-open, unchanged). Env: LENS_H5_ARTIFACT_ENABLED.
+	// slot folded from the output's captured output_content_sha256 — the canonical served content a real tree
+	// can carry; outputverify/content.go pins the bytes). DEFAULT FALSE. Off → the endpoint is not registered
+	// and no artifact_sha256 is ever populated, so the attestor's opt-in binding is dormant (every output stays
+	// on the legacy response_sha256 binding — fail-open, unchanged). Env: LENS_H5_ARTIFACT_ENABLED.
 	H5ArtifactEnabled bool
 
 	// NodeLatencyCaptureEnabled gates the DESCRIPTIVE proof-of-latency capture (P3 #6) — a post-serve,

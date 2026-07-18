@@ -25,8 +25,10 @@ type artifactCommitBody struct {
 // newArtifactCommitHandler serves POST /v1/outputs/{output_id}/artifact — the PRODUCING workspace opts in to
 // commit the manifest hash of the buildable module it relies on, bound to the output. Authenticated; no
 // workspace → 401. OWNERSHIP-BOUND: only the producer may commit (→ 403 otherwise). The committed output slot
-// is folded from the output's stored response_sha256 (the served bytes) — a caller-supplied output hash is
-// ignored — so the commitment binds what was served. Append-once. Registered only when LENS_H5_ARTIFACT_ENABLED.
+// is folded from the output's stored output_content_sha256 (the canonical served content — the bytes a real
+// buildable tree can carry) — a caller-supplied output hash is ignored — so the commitment binds what was
+// served. An output with no content binding can never commit (→ 409, permanent). Append-once. Registered
+// only when LENS_H5_ARTIFACT_ENABLED.
 func newArtifactCommitHandler(authn verdictAuthenticator, c artifactCommitter) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		ac, err := authn.Authenticate(req)
@@ -53,6 +55,10 @@ func newArtifactCommitHandler(authn verdictAuthenticator, c artifactCommitter) h
 				writeJSONErr(w, http.StatusNotFound, "output not found")
 			case errors.Is(err, outputverify.ErrNotOutputOwner):
 				writeJSONErr(w, http.StatusForbidden, "not the producer of this output")
+			case errors.Is(err, outputverify.ErrNoContentBinding):
+				// Permanent for this output: no canonical content was captured (pre-0098 row, extraction
+				// failure, or a true stream) — nothing a buildable tree could ever match. Do not retry.
+				writeJSONErr(w, http.StatusConflict, "output has no content binding; artifact commitment impossible")
 			default:
 				slog.Warn("artifact commit failed", slog.String("workspace", ac.WorkspaceID), slog.String("err", err.Error()))
 				writeJSONErr(w, http.StatusInternalServerError, "internal error")
