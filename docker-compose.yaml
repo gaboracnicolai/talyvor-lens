@@ -1,6 +1,9 @@
 # Talyvor Lens — production docker-compose
 #
-# One-command deploy: `cp .env.production.example .env && docker compose up -d`
+# Deploy: `cp .env.production.example .env`, set POSTGRES_PASSWORD + a provider
+# key in .env, then `docker compose up -d`. The stack FAILS CLOSED if
+# POSTGRES_PASSWORD is unset (compose ${POSTGRES_PASSWORD:?}) — there is no weak
+# default, so an insecure DB password can never silently reach production.
 # Lens listens on :8080. The dashboard is at /dashboard, the public status
 # page is at /status, and the OpenAI-compatible proxy is at /v1/proxy/*.
 #
@@ -18,7 +21,7 @@ services:
       # Route through PgBouncer (transaction pooling) instead of Postgres directly.
       # LENS_DB_PGBOUNCER switches pgx to simple query protocol (required).
       # LENS_DB_MAX_CONNS is raised — connections are cheap against PgBouncer.
-      - LENS_DATABASE_URL=postgres://lens:${POSTGRES_PASSWORD:-changeme}@pgbouncer:6432/talyvor_lens?sslmode=disable
+      - LENS_DATABASE_URL=postgres://lens:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (see .env.production.example)}@pgbouncer:6432/talyvor_lens?sslmode=disable
       - LENS_DB_PGBOUNCER=true
       - LENS_DB_MAX_CONNS=100
       - LENS_REDIS_URL=redis://redis:6379
@@ -86,7 +89,7 @@ services:
       context: .
     command: ["migrate"]
     environment:
-      LENS_DATABASE_URL: postgres://lens:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_lens?sslmode=disable
+      LENS_DATABASE_URL: postgres://lens:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (see .env.production.example)}@postgres:5432/talyvor_lens?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,7 +119,7 @@ services:
       - DB_PORT=5432
       - DB_NAME=talyvor_lens
       - DB_USER=lens
-      - DB_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (see .env.production.example)}
       - LISTEN_PORT=6432
       - AUTH_TYPE=scram-sha-256
       - POOL_MODE=transaction
@@ -160,7 +163,7 @@ services:
     environment:
       POSTGRES_DB: talyvor_lens
       POSTGRES_USER: lens
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (see .env.production.example)}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
