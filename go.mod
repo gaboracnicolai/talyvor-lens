@@ -2,7 +2,7 @@ module github.com/talyvor/lens
 
 go 1.25.0
 
-toolchain go1.26.4
+toolchain go1.26.5 // >= 1.26.5 fixes GO-2026-5856 (crypto/tls ECH privacy leak); enforced by the govulncheck CI gate
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
@@ -10,7 +10,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // UNMAINTAINED (single-owner, stale, no security contact); parses attacker input. KEPT deliberately: best pure-Go text extractor + CGO-free is required. Risk controlled by the killable-subprocess sandbox (internal/distill/isolator.go) + this pin + the govulncheck CI gate. See internal/distill/pdf.go.
 	github.com/nats-io/nats-server/v2 v2.14.1
 	github.com/nats-io/nats.go v1.52.0
 	github.com/pashagolub/pgxmock/v4 v4.9.0

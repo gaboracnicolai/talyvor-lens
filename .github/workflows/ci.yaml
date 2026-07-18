@@ -81,16 +81,37 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          # Must be >= go.mod's `toolchain` (go1.26.4): golangci-lint refuses to run if it
+          # Must be >= go.mod's `toolchain` (go1.26.5): golangci-lint refuses to run if it
           # was built with a Go older than the module's targeted version. (The test/build
           # jobs can stay on 1.25 — `go test`/`go build` auto-fetch the toolchain; a
           # `go install`-built golangci-lint does not, so it needs the newer Go here.)
-          go-version: "1.26.4"
+          go-version: "1.26.5"
           cache: false
       - name: golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
           "$(go env GOPATH)/bin/golangci-lint" run ./...
+
+  # Supply-chain gate: govulncheck against the Go vulnerability DB. This is the
+  # standing guard for the unmaintained-but-sandboxed github.com/ledongthuc/pdf
+  # dependency (see internal/distill/pdf.go): a future CVE in it — or any dep, or
+  # the stdlib — fails the build so we ACT on it, rather than silently carrying a
+  # vulnerable parser of attacker-controlled input. govulncheck is
+  # reachability-aware (reports only vulns on code paths the binary actually
+  # calls), so it stays low-noise: a require-only/unreachable vuln does not fail.
+  # Tool pinned; the vuln DB is fetched fresh at scan time.
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26.5" # keep in lockstep with go.mod toolchain so stdlib vulns are assessed against the shipped runtime
+          cache: false
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
 
   build:
     runs-on: ubuntu-latest
