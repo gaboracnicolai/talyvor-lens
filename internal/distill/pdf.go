@@ -15,6 +15,21 @@ import (
 // rare), so the output is honestly plain — the page text in reading order,
 // not richly-structured Markdown like HTML/DOCX.
 //
+// SUPPLY-CHAIN POSTURE (accept + isolate + monitor): ledongthuc/pdf is
+// UNMAINTAINED (single-owner personal repo, long stale, no security contact,
+// untagged pseudo-version) and it parses ATTACKER-CONTROLLED input — the
+// weakest link in the tree. We keep it deliberately: it is the best pure-Go
+// text extractor, and Lens ships a CGO-free static binary, which rules out the
+// better-maintained MuPDF/PDFium bindings; the one maintained pure-Go fork
+// (dslipak/pdf) regresses text quality (drops the Td positioning operator, so
+// Td-laid-out lines run together). The risk is CONTROLLED, not ignored:
+//   1. blast radius — every parse runs in a killable subprocess with a memory
+//      ceiling + wall-clock kill (cmd/distill-worker + isolator.go); a zlib
+//      bomb or cyclic-graph hang kills the worker, never the gateway;
+//   2. version — pinned in go.mod (see the require-line note);
+//   3. monitoring — the govulncheck CI gate fails the build on any future CVE
+//      in this dep, so "unmaintained" cannot silently become "vulnerable".
+//
 // TEXT-LESS handling is the load-bearing behavior: a scanned/image-only PDF
 // has no text operators, so extraction yields empty text. Both empty output
 // AND any extraction error/panic are treated as "no text layer" → the result
