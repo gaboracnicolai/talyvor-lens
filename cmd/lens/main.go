@@ -4365,6 +4365,18 @@ func writeJSONOK(w http.ResponseWriter, status int, body any) {
 }
 
 func writeJSONErr(w http.ResponseWriter, status int, msg string) {
+	// 5xx REDACTION (defense-in-depth, centralised). An internal error must not
+	// leak its raw string — DB/driver messages, file paths, internal hosts,
+	// stack context — to the caller. For status >= 500 we log the full detail
+	// server-side (through the app's slog default, wired in main) and return a
+	// generic body. 4xx messages are legitimately client-facing (validation,
+	// not-found, auth) and pass through unchanged. Doing this in the ONE helper
+	// means no 500 call site (there are ~77 passing err.Error()) can forget to
+	// redact — the information-disclosure class is closed by construction.
+	if status >= http.StatusInternalServerError {
+		slog.Error("request failed", slog.Int("status", status), slog.String("detail", msg))
+		msg = "internal server error"
+	}
 	writeJSONOK(w, status, map[string]string{"error": msg})
 }
 
