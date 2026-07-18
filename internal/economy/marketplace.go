@@ -563,9 +563,24 @@ func (s *MarketplaceStore) Unstake(ctx context.Context, positionID, workspaceID 
 	if s.pool == nil {
 		return nil
 	}
-	row := s.pool.QueryRow(ctx, `
+	// One transaction start-to-finish. The position is read UNDER `FOR UPDATE`
+	// (inside the tx, not on the pool) so concurrent Unstake calls on the same
+	// row serialize: the second waits for the first to commit, then its locked
+	// read finds the row already deleted and returns ErrPositionNotFound — never
+	// a second credit. The DELETE's RowsAffected is checked and the payout is
+	// credited ONLY when THIS tx removed the row, so delete+credit commit
+	// atomically and exactly once. Loss-of-funds protection is preserved: a
+	// Credit failure rolls the DELETE back (the position is never removed
+	// without the LENS being returned).
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: begin unstake tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
 		SELECT id, workspace_id, amount, lock_days, apy, started_at, unlocks_at
-		FROM stake_positions WHERE id = $1`, positionID)
+		FROM stake_positions WHERE id = $1 FOR UPDATE`, positionID)
 	var pos StakePosition
 	if err := row.Scan(&pos.ID, &pos.WorkspaceID, &pos.Amount,
 		&pos.LockDays, &pos.APY, &pos.StartedAt, &pos.UnlocksAt); err != nil {
@@ -583,18 +598,14 @@ func (s *MarketplaceStore) Unstake(ctx context.Context, positionID, workspaceID 
 	yield := computeYield(pos.Amount, pos.APY, time.Since(pos.StartedAt))
 	payout := pos.Amount + yield
 
-	// DELETE stake_position + Credit payout run inside one transaction so the
-	// position is never removed without the LENS being returned (loss-of-funds
-	// protection: if Credit fails, the DELETE is rolled back).
-	tx, err := s.pool.Begin(ctx)
+	ct, err := tx.Exec(ctx, `DELETE FROM stake_positions WHERE id = $1`, positionID)
 	if err != nil {
-		return fmt.Errorf("economy: begin unstake tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM stake_positions WHERE id = $1`, positionID); err != nil {
 		return fmt.Errorf("economy: delete stake: %w", err)
+	}
+	if ct.RowsAffected() != 1 {
+		// The row was already unstaked by a concurrent/prior committed call —
+		// do NOT credit. Clean already-unstaked signal (handler maps it to 404).
+		return ErrPositionNotFound
 	}
 	meta := map[string]interface{}{
 		"position_id": positionID,

@@ -432,12 +432,16 @@ func TestStake_90DayUsesCorrectAPY(t *testing.T) {
 func TestUnstake_BeforeLockFails(t *testing.T) {
 	store, mock := newStore(t)
 	future := time.Now().Add(7 * 24 * time.Hour)
+	// Unstake now reads the row FOR UPDATE inside the tx, so the tx opens before
+	// the read and rolls back on the still-locked early return.
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, workspace_id, amount, lock_days").
 		WithArgs("stake1").
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "workspace_id", "amount", "lock_days", "apy", "started_at", "unlocks_at",
 		}).AddRow("stake1", "ws_s", 50*uLENS, 30, APY30,
 			time.Now().Add(-time.Hour), future))
+	mock.ExpectRollback()
 	err := store.Unstake(context.Background(), "stake1", "ws_s")
 	if !errors.Is(err, ErrStakeLocked) {
 		t.Fatalf("expected ErrStakeLocked, got %v", err)
@@ -448,12 +452,14 @@ func TestUnstake_AfterLockCreditsYield(t *testing.T) {
 	store, mock := newStore(t)
 	started := time.Now().Add(-31 * 24 * time.Hour)
 	unlocks := time.Now().Add(-time.Hour)
+	// Unstake now opens the tx first, reads the row FOR UPDATE inside it, then
+	// deletes (RowsAffected must be 1 to credit) and credits — all one tx.
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, workspace_id, amount, lock_days").
 		WithArgs("stake_done").
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "workspace_id", "amount", "lock_days", "apy", "started_at", "unlocks_at",
 		}).AddRow("stake_done", "ws_u", 100*uLENS, 30, APY30, started, unlocks))
-	mock.ExpectBegin()
 	mock.ExpectExec("DELETE FROM stake_positions").
 		WithArgs("stake_done").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
