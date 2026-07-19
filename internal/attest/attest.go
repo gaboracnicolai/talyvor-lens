@@ -118,7 +118,7 @@ func (a *Attestor) Attest(ctx context.Context, outputID string, treeTar []byte) 
 	}
 
 	// Extract the supplied tree (host-side, hardened against path-traversal/symlink/bomb).
-	dir, err := os.MkdirTemp("", "attest-src-*")
+	dir, err := newExtractionDir()
 	if err != nil {
 		return Result{}, err
 	}
@@ -162,6 +162,29 @@ func (a *Attestor) Attest(ctx context.Context, outputID string, treeTar []byte) 
 	}
 	return Result{Outcome: OutcomeAttested, Verdict: string(r.Verdict), Recorded: tag.RowsAffected() == 1,
 		Reason: "talyvor_verified " + string(r.Verdict) + " on " + platform}, nil
+}
+
+// newExtractionDir creates the temp directory the supplied tree is extracted into — the directory that is
+// bind-mounted read-only at /src and built by the sandbox's NON-ROOT user (--user 65534:65534).
+//
+// It MUST be world-traversable/readable (0755): os.MkdirTemp creates 0700, and on a real Linux daemon the
+// sandbox uid then cannot read the module dir, so `go build ./...` fails as "directory prefix /src does not
+// contain main module" and is misclassified as a toolchain crash — every real Attest breaks. (Docker
+// Desktop's virtiofs masks host permissions, which is why macOS never showed it.) 0755 here is safe: the
+// contents are the CALLER-SUPPLIED source tree already destined for the sandbox (never a secret), the dir
+// name is unguessable MkdirTemp randomness under os.TempDir, per-file modes from safeExtractTar stay 0644,
+// and the whole dir is removed on defer as soon as the attest attempt ends. buildverify's own green
+// fixtures (t.TempDir → 0755) prove this is exactly the mode the sandbox needs.
+func newExtractionDir() (string, error) {
+	dir, err := os.MkdirTemp("", "attest-src-*")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	return dir, nil
 }
 
 // safeExtractTar extracts a tar to dest with maximum caution (this runs on the HOST before the sandbox):
