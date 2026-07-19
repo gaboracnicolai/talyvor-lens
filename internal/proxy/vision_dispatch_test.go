@@ -58,7 +58,7 @@ func TestVisionDispatcher_AnthropicSuccess(t *testing.T) {
 	if res.InputTokens != 1200 || res.OutputTokens != 50 {
 		t.Errorf("token cost from reported usage wrong: in=%d out=%d", res.InputTokens, res.OutputTokens)
 	}
-	if res.Model != "claude-haiku-4-6" || gotModel != "claude-haiku-4-6" {
+	if res.Model != "claude-haiku-4-5" || gotModel != "claude-haiku-4-5" {
 		t.Errorf("expected the preferred document-capable model; res=%q forwarded=%q", res.Model, gotModel)
 	}
 
@@ -82,7 +82,7 @@ func TestVisionDispatcher_AnthropicSuccess(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &sent); err != nil {
 		t.Fatalf("forwarded body is not valid JSON: %v", err)
 	}
-	if sent.Model != "claude-haiku-4-6" || sent.MaxTokens != 4096 {
+	if sent.Model != "claude-haiku-4-5" || sent.MaxTokens != 4096 {
 		t.Errorf("request envelope wrong: model=%q max_tokens=%d", sent.Model, sent.MaxTokens)
 	}
 	if len(sent.Messages) != 1 || len(sent.Messages[0].Content) != 2 {

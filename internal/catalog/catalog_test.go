@@ -23,7 +23,6 @@ var previousPrices = map[string][2]float64{
 	"claude-haiku-4-5":  {0.80, 4.00},
 	"claude-opus-4-6":   {15.00, 75.00},
 	"claude-sonnet-4-6": {3.00, 15.00},
-	"claude-haiku-4-6":  {0.80, 4.00},
 	"gemini-2.5-pro":    {1.25, 10.00},
 	"gemini-2.5-flash":  {0.075, 0.30},
 	"gemini-2.0-flash":  {0.10, 0.40},
@@ -31,7 +30,6 @@ var previousPrices = map[string][2]float64{
 	"gemini-1.5-flash":  {0.075, 0.30},
 	"anthropic.claude-opus-4-6-20251101-v1:0":   {17.25, 86.25},
 	"anthropic.claude-sonnet-4-6-20251101-v1:0": {3.45, 17.25},
-	"anthropic.claude-haiku-4-6-20251103-v1:0":  {0.92, 4.60},
 	"mistral-large-latest":                      {2.00, 6.00},
 	"mistral-small-latest":                      {0.10, 0.30},
 	"mistral-nemo":                              {0.015, 0.045},
@@ -70,7 +68,6 @@ var previousCapabilities = map[string][3]bool{
 	"claude-sonnet-4-5": {true, false, true},
 	"claude-sonnet-4-6": {true, false, true},
 	"claude-haiku-4-5":  {true, false, true},
-	"claude-haiku-4-6":  {true, false, true},
 	"gemini-1.5-pro":    {true, true, true},
 	"gemini-1.5-flash":  {true, true, true},
 	"gemini-2.0-flash":  {true, true, true},
@@ -78,7 +75,6 @@ var previousCapabilities = map[string][3]bool{
 	"gemini-2.5-pro":    {true, true, true},
 	"anthropic.claude-opus-4-6-20251101-v1:0":   {true, false, true},
 	"anthropic.claude-sonnet-4-6-20251101-v1:0": {true, false, true},
-	"anthropic.claude-haiku-4-6-20251103-v1:0":  {true, false, true},
 }
 
 func TestCapabilityParity(t *testing.T) {

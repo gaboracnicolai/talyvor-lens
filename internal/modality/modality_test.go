@@ -77,8 +77,8 @@ func TestSupports_KnownVisionAndConservativeUnknown(t *testing.T) {
 	if !Supports("gpt-4o", img) {
 		t.Error("gpt-4o is a known vision model — should support image")
 	}
-	if !Supports("claude-haiku-4-6", img) {
-		t.Error("claude-haiku-4-6 should support image")
+	if !Supports("claude-haiku-4-5", img) {
+		t.Error("claude-haiku-4-5 should support image")
 	}
 	// Unknown model → conservative text-only → cannot serve an image.
 	if Supports("totally-unknown-model", img) {

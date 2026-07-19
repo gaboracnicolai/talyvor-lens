@@ -16,7 +16,7 @@ func sampleExperiment() *Experiment {
 		Name:        "haiku vs sonnet",
 		Metric:      MetricQuality,
 		Variants: []Variant{
-			{ID: "a", Name: "Haiku", Model: "claude-haiku-4-6", Provider: "anthropic", Weight: 0.5},
+			{ID: "a", Name: "Haiku", Model: "claude-haiku-4-5", Provider: "anthropic", Weight: 0.5},
 			{ID: "b", Name: "Sonnet", Model: "claude-sonnet-4-6", Provider: "anthropic", Weight: 0.5},
 		},
 		TrafficSplit: []float64{0.5, 0.5},

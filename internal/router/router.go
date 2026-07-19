@@ -37,16 +37,15 @@ type modelInfo struct {
 // routing decision is a strict cost reduction.
 var modelRanks = map[string]modelInfo{
 	// OpenAI, cheapest first.
-	"gpt-4.1-nano":  {"openai", 0},
-	"gpt-4o-mini":   {"openai", 1},
-	"gpt-4.1-mini":  {"openai", 2},
-	"gpt-4.1":       {"openai", 3},
-	"gpt-4o":        {"openai", 4},
-	"gpt-5.4-mini":  {"openai", 5},
-	"gpt-5.4":       {"openai", 6},
+	"gpt-4.1-nano": {"openai", 0},
+	"gpt-4o-mini":  {"openai", 1},
+	"gpt-4.1-mini": {"openai", 2},
+	"gpt-4.1":      {"openai", 3},
+	"gpt-4o":       {"openai", 4},
+	"gpt-5.4-mini": {"openai", 5},
+	"gpt-5.4":      {"openai", 6},
 	// Anthropic, cheapest first.
 	"claude-haiku-4-5":  {"anthropic", 0},
-	"claude-haiku-4-6":  {"anthropic", 1},
 	"claude-sonnet-4-5": {"anthropic", 2},
 	"claude-sonnet-4-6": {"anthropic", 3},
 	"claude-opus-4-5":   {"anthropic", 4},
@@ -78,7 +77,6 @@ var explicitCheapModels = map[string]struct{}{
 	"gpt-4.1-mini":     {},
 	"gpt-5.4-mini":     {},
 	"claude-haiku-4-5": {},
-	"claude-haiku-4-6": {},
 	"gemini-2.5-flash": {},
 	"gemini-2.0-flash": {},
 	"gemini-1.5-flash": {},
@@ -139,7 +137,9 @@ func cheap(provider string) RoutingDecision {
 	}
 	switch provider {
 	case "anthropic":
-		d.Model = "claude-haiku-4-6"
+		// The real cheapest Anthropic model. Was "claude-haiku-4-6" — a phantom that
+		// 404'd on the first live cost-routed request (no Haiku 4.6 exists).
+		d.Model = "claude-haiku-4-5"
 	case "google":
 		d.Model = "gemini-2.5-flash"
 	case "mistral":

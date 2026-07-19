@@ -31,8 +31,8 @@ func TestRoute_SimplePromptCheapAnthropic(t *testing.T) {
 	if got.Provider != "anthropic" {
 		t.Errorf("Provider = %q, want %q", got.Provider, "anthropic")
 	}
-	if got.Model != "claude-haiku-4-6" {
-		t.Errorf("Model = %q, want %q", got.Model, "claude-haiku-4-6")
+	if got.Model != "claude-haiku-4-5" {
+		t.Errorf("Model = %q, want %q", got.Model, "claude-haiku-4-5")
 	}
 	if got.CostTier != "cheap" {
 		t.Errorf("CostTier = %q, want %q", got.CostTier, "cheap")
@@ -184,12 +184,12 @@ func TestRoute_PremiumTierAnthropicReturnsClaudeOpus46(t *testing.T) {
 func TestRoute_ClaudeHaiku46RecognisedAsCheap(t *testing.T) {
 	r := New()
 	// Premium-looking prompt; an explicit cheap-model request must still
-	// win, proving claude-haiku-4-6 is in the explicit-cheap set.
+	// win, proving claude-haiku-4-5 is in the explicit-cheap set.
 	prompt := "Calculate step by step and explain why with ```code``` proof"
 
-	got := r.Route(context.Background(), "anthropic", "claude-haiku-4-6", prompt)
-	if got.Model != "claude-haiku-4-6" {
-		t.Errorf("Model = %q, want claude-haiku-4-6 (explicit cheap model should be respected)", got.Model)
+	got := r.Route(context.Background(), "anthropic", "claude-haiku-4-5", prompt)
+	if got.Model != "claude-haiku-4-5" {
+		t.Errorf("Model = %q, want claude-haiku-4-5 (explicit cheap model should be respected)", got.Model)
 	}
 	if got.CostTier != "cheap" {
 		t.Errorf("CostTier = %q, want cheap", got.CostTier)

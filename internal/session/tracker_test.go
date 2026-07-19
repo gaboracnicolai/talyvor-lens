@@ -134,7 +134,7 @@ func TestSummariseSession_FindsMostUsedModel(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		_ = tr.RecordTurn(ctx, "s1", Turn{Model: "gpt-4o"})
 	}
-	_ = tr.RecordTurn(ctx, "s1", Turn{Model: "claude-haiku-4-6"})
+	_ = tr.RecordTurn(ctx, "s1", Turn{Model: "claude-haiku-4-5"})
 
 	sum := tr.SummariseSession(ctx, "s1")
 	if sum.MostUsedModel != "gpt-4o" {

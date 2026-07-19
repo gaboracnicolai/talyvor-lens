@@ -28,7 +28,6 @@ type BedrockConfig struct {
 var bedrockModelMap = map[string]string{
 	"claude-opus-4-6":   "anthropic.claude-opus-4-6-20251101-v1:0",
 	"claude-sonnet-4-6": "anthropic.claude-sonnet-4-6-20251101-v1:0",
-	"claude-haiku-4-6":  "anthropic.claude-haiku-4-6-20251103-v1:0",
 	"claude-opus-4-5":   "anthropic.claude-opus-4-5-20251101-v1:0",
 	"claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-20251022-v2:0",
 	"claude-haiku-4-5":  "anthropic.claude-haiku-4-5-20241022-v1:0",

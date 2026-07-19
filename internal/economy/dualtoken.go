@@ -61,7 +61,13 @@ const (
 	LXCTypeConvertFromLENS = "convert_from_lens"
 	LXCTypeSpend           = "spend"
 	LXCTypePurchase        = "purchase"
-	LENSTypeConvertToLXC   = "convert_to_lxc"
+	// LXCTypeGrant marks a COMPED admin grant (economy.GrantLXC) — LXC that entered
+	// a workspace's balance without a fiat purchase. Deliberately DISTINCT from
+	// LXCTypePurchase so an auditor summing revenue (type='purchase') never counts a
+	// comp as a sale, and a comp is always self-identifying in the ledger. Not a LENS
+	// mint type (mint_gate.mintTypeList is the lens_token_ledger; this is lxc_ledger).
+	LXCTypeGrant         = "admin_grant"
+	LENSTypeConvertToLXC = "convert_to_lxc"
 )
 
 // ─── errors ──────────────────────────────────────
@@ -451,6 +457,21 @@ func (s *DualTokenStore) SpendLXC(ctx context.Context, workspaceID string, lxcAm
 // money guarantee. Returns the new LXC balance. The caller owns Begin/Commit/
 // Rollback (and must never let billing write lxc_ledger/lxc_balances directly).
 func (s *DualTokenStore) CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount int64, reason string, metadata map[string]interface{}) (int64, error) {
+	return s.creditLXCTxTyped(ctx, tx, workspaceID, lxcAmount, LXCTypePurchase, reason, metadata)
+}
+
+// GrantLXCTx credits COMPED LXC (an admin grant, NOT a paid purchase) on the caller's tx — the exact
+// same atomic ledger-row + balance move as CreditLXCTx, recorded under LXCTypeGrant so a comp is
+// always distinguishable from a sale. Callers must never write lxc_ledger/lxc_balances directly.
+func (s *DualTokenStore) GrantLXCTx(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount int64, reason string, metadata map[string]interface{}) (int64, error) {
+	return s.creditLXCTxTyped(ctx, tx, workspaceID, lxcAmount, LXCTypeGrant, reason, metadata)
+}
+
+// creditLXCTxTyped is the shared atomic credit kernel: read balance → insert one lxc_ledger row of
+// `ledgerType` → write the new balance, all on the caller's tx (ledger + balance move together or not
+// at all). Integer µLXC throughout — no float. CreditLXCTx (purchase) and GrantLXCTx (admin grant)
+// differ ONLY in the self-describing ledger type.
+func (s *DualTokenStore) creditLXCTxTyped(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount int64, ledgerType, reason string, metadata map[string]interface{}) (int64, error) {
 	if lxcAmount <= 0 {
 		return 0, errors.New("economy: credit amount must be positive")
 	}
@@ -460,7 +481,7 @@ func (s *DualTokenStore) CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID
 	}
 	newBal := bal + lxcAmount // exact integer µLXC
 	if err := insertLXCLedger(ctx, tx, workspaceID, lxcAmount, newBal,
-		LXCTypePurchase, reason, metadata); err != nil {
+		ledgerType, reason, metadata); err != nil {
 		return 0, err
 	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted+lxcAmount, spent); err != nil {
@@ -489,6 +510,32 @@ func (s *DualTokenStore) CreditLXC(ctx context.Context, workspaceID string, lxcA
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("economy: commit credit: %w", err)
+	}
+	return newBal, nil
+}
+
+// GrantLXC credits a COMPED admin grant to a workspace in its own transaction — the ledger row and the
+// balance update commit atomically and roll back together on any error. Same shape as CreditLXC, but
+// the row is recorded under LXCTypeGrant ("admin_grant"), never LXCTypePurchase. Positive-amount is
+// enforced in the shared kernel. Never write lxc_ledger/lxc_balances directly.
+func (s *DualTokenStore) GrantLXC(ctx context.Context, workspaceID string, lxcAmount int64, reason string, metadata map[string]interface{}) (int64, error) {
+	if lxcAmount <= 0 {
+		return 0, errors.New("economy: credit amount must be positive")
+	}
+	if s.pool == nil {
+		return 0, nil // no-DB path (pure-arithmetic unit tests)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("economy: begin grant: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	newBal, err := s.GrantLXCTx(ctx, tx, workspaceID, lxcAmount, reason, metadata)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("economy: commit grant: %w", err)
 	}
 	return newBal, nil
 }

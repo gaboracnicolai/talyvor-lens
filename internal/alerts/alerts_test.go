@@ -118,7 +118,7 @@ func TestRecordSpendWithDistill_TagsMethod(t *testing.T) {
 				).
 				WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-			if err := mgr.RecordSpendWithDistill(context.Background(), "ws-test", "core", "", "search", "claude-haiku-4-6", 1000, 40, "", "", "", tc.modality, tc.estimated, tc.method); err != nil {
+			if err := mgr.RecordSpendWithDistill(context.Background(), "ws-test", "core", "", "search", "claude-haiku-4-5", 1000, 40, "", "", "", tc.modality, tc.estimated, tc.method); err != nil {
 				t.Fatalf("RecordSpendWithDistill: %v", err)
 			}
 			if err := pool.ExpectationsWereMet(); err != nil {

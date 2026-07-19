@@ -194,7 +194,7 @@ func (m mockVision) DispatchVision(context.Context, distill.VisionRequest) (dist
 func TestMaybeDistill_NeedsVision_LiveVisionOCR(t *testing.T) {
 	conv := &fakeDistillConv{res: distill.Result{NeedsVision: true}}
 	d := newDistiller(t, conv, workspace.DistillAlways)
-	vis := mockVision{res: distill.VisionResult{Markdown: "# OCR\n\nrecovered text", InputTokens: 900, OutputTokens: 30, Model: "claude-haiku-4-6"}}
+	vis := mockVision{res: distill.VisionResult{Markdown: "# OCR\n\nrecovered text", InputTokens: 900, OutputTokens: 30, Model: "claude-haiku-4-5"}}
 	body := anthropicDocBody(t, false)
 	_, newPrompt, _, did, vs, _ := d.MaybeDistill(context.Background(), reqWith("true"), body, "ws1", modality.Detect(body), vis)
 	if !did {
@@ -204,7 +204,7 @@ func TestMaybeDistill_NeedsVision_LiveVisionOCR(t *testing.T) {
 		t.Errorf("OCR'd Markdown must reach the prompt; got %q", newPrompt)
 	}
 	// The OCR sub-call cost must be SURFACED for a durable 'vision_ocr' spend row.
-	if !vs.recorded() || vs.inputTokens != 900 || vs.outputTokens != 30 || vs.model != "claude-haiku-4-6" {
+	if !vs.recorded() || vs.inputTokens != 900 || vs.outputTokens != 30 || vs.model != "claude-haiku-4-5" {
 		t.Errorf("vision spend must be surfaced (model + real token split); got %+v", vs)
 	}
 }
