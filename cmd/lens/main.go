@@ -2012,6 +2012,16 @@ func run() error {
 		// control-plane routes. Handler body extracted verbatim to newRegisterWorkspaceHandler.
 		authed.Post("/v1/workspaces", requireAdmin(authManager, newRegisterWorkspaceHandler(wsManager)))
 
+		// ADMIN-ONLY comped-LXC grant (default-off behind LENS_ADMIN_LXC_GRANT_ENABLED). Bootstrap
+		// escape hatch for a closed trial: a fresh workspace has 0 LXC and no funding path without
+		// Stripe, so it cannot transact. This funds it through economy.GrantLXC (the atomic ledger+
+		// balance move, recorded under LXCTypeGrant so a comp is never mistaken for a paid purchase).
+		// Off ⇒ the route is never registered (chi 404). Body-param target, no {wsID} — requireAdmin
+		// is the sole authority (matching the workspace-register admin route above).
+		if cfg.AdminLXCGrantEnabled {
+			authed.Post("/v1/admin/lxc/grant", requireAdmin(authManager, newAdminLXCGrantHandler(dualToken)))
+		}
+
 		authed.Get("/v1/workspaces/{wsID}", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			ws, ok := wsManager.GetWorkspace(wsID)

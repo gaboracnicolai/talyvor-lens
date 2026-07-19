@@ -217,6 +217,16 @@ type Config struct {
 	// shadow=observe, shadow+gating=enforce. Env: LENS_LXC_GATING_ENABLED.
 	LXCGatingEnabled bool
 
+	// AdminLXCGrantEnabled gates the ADMIN-ONLY comped-LXC grant endpoint
+	// (POST /v1/admin/lxc/grant). It is the bootstrap escape hatch for a closed
+	// trial: a fresh workspace has 0 LXC and (without Stripe) no funding path, so
+	// it cannot transact. The grant credits LXC through economy.GrantLXC — the
+	// same atomic ledger+balance move as a purchase, but recorded under the
+	// distinct LXCTypeGrant ("admin_grant") type so an auditor can always tell a
+	// comp from paid revenue. DEFAULT FALSE: off ⇒ the route is never registered
+	// (chi 404, no oracle). Env: LENS_ADMIN_LXC_GRANT_ENABLED.
+	AdminLXCGrantEnabled bool
+
 	// PatternCaptureEnabled gates the Phase-3 routing-pattern CAPTURE WRITE —
 	// the producer for the already-live routing Advisor. When ON, a served
 	// model call persists an anonymized routing observation (post-serve, void)
@@ -904,6 +914,7 @@ func Load() (*Config, error) {
 		PoolRoyaltyMintingEnabled: parseBoolEnv("LENS_POOL_ROYALTY_MINTING_ENABLED"),
 		LXCShadowSpendEnabled:     parseBoolEnv("LENS_LXC_SHADOW_SPEND_ENABLED"),
 		LXCGatingEnabled:          parseBoolEnv("LENS_LXC_GATING_ENABLED"),
+		AdminLXCGrantEnabled:      parseBoolEnv("LENS_ADMIN_LXC_GRANT_ENABLED"),
 		PatternCaptureEnabled:     parseBoolEnv("LENS_PATTERN_CAPTURE_ENABLED"),
 		PatternEarningEnabled:     parseBoolEnv("LENS_PATTERN_EARNING_ENABLED"),
 
