@@ -477,12 +477,6 @@ type Config struct {
 	// bond endpoints, no locks, no slashes, zero behavior change. Env: LENS_H5_BONDS_ENABLED.
 	H5BondsEnabled bool
 
-	// H5BuildVerifyEnabled gates the SANDBOXED COMPILE-ONLY VERIFIER (internal/buildverify) — Talyvor's own
-	// hard-contained `go build` of untrusted code, which will produce the 'talyvor_verified' attested compile
-	// verdict. DEFAULT FALSE. NOT wired to the slash path yet (step 3 does that); today nothing calls the
-	// verifier and it emits no attested verdict. Env: LENS_H5_BUILDVERIFY_ENABLED.
-	H5BuildVerifyEnabled bool
-
 	// H5AttestEnabled gates the ATTESTED-SLASH PRODUCER (internal/attest) — Talyvor reproduces a bonded
 	// output's build in its sandbox and records a talyvor_verified compile verdict (admin-only path). DEFAULT
 	// FALSE. Off → the attest endpoint is not registered and no talyvor_verified row is ever written. Even ON,
@@ -921,7 +915,6 @@ func Load() (*Config, error) {
 		RoutingDecisionCaptureEnabled: parseBoolEnvDefaultTrue("LENS_ROUTING_DECISION_CAPTURE_ENABLED"),
 		KeelRoyaltyHaircutEnabled:     parseBoolEnvDefaultTrue("LENS_KEEL_ROYALTY_HAIRCUT_ENABLED"),
 		H5BondsEnabled:                parseBoolEnv("LENS_H5_BONDS_ENABLED"),
-		H5BuildVerifyEnabled:          parseBoolEnv("LENS_H5_BUILDVERIFY_ENABLED"),
 		H5AttestEnabled:               parseBoolEnv("LENS_H5_ATTEST_ENABLED"),
 		H5ArtifactEnabled:             parseBoolEnv("LENS_H5_ARTIFACT_ENABLED"),
 		NodeLatencyCaptureEnabled:     parseBoolEnv("LENS_NODE_LATENCY_CAPTURE_ENABLED"),

@@ -48,9 +48,10 @@ func WithDocker(path string) Option    { return func(v *Verifier) { v.docker = p
 func WithLimits(l Limits) Option       { return func(v *Verifier) { v.limits = l } }
 func WithPlatforms(p ...string) Option { return func(v *Verifier) { v.platforms = p } }
 
-// NewVerifier constructs the verifier. enabled=false (the default posture, gated by LENS_H5_BUILDVERIFY_ENABLED)
-// makes Verify return not_verifiable WITHOUT running anything. The container runtime is auto-detected unless
-// overridden with WithDocker.
+// NewVerifier constructs the verifier. enabled=false makes Verify return not_verifiable WITHOUT running
+// anything. cmd/lens is the sole caller and wires `enabled` to cfg.H5AttestEnabled — so the operator flag
+// that controls this verifier is LENS_H5_ATTEST_ENABLED (there is no separate buildverify gate: the attestor
+// is the verifier's only consumer). The container runtime is auto-detected unless overridden with WithDocker.
 func NewVerifier(enabled bool, opts ...Option) *Verifier {
 	v := &Verifier{enabled: enabled, image: DefaultImage, limits: defaultLimits(), platforms: defaultPlatforms}
 	for _, o := range opts {
@@ -70,7 +71,7 @@ func NewVerifier(enabled bool, opts ...Option) *Verifier {
 // container runtime is present (FAIL CLOSED on containment — there is NO unsandboxed fallback, ever).
 func (v *Verifier) Verify(ctx context.Context, srcDir string) Result {
 	if !v.enabled {
-		return Result{Verdict: NotVerifiable, Reason: "buildverify disabled (LENS_H5_BUILDVERIFY_ENABLED=false)"}
+		return Result{Verdict: NotVerifiable, Reason: "buildverify disabled (LENS_H5_ATTEST_ENABLED=false)"}
 	}
 	if !v.dockerAvailable(ctx) {
 		// FAIL CLOSED on containment: without a sandbox we refuse — we do NOT run the build unsandboxed.
