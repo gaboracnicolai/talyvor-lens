@@ -1,11 +1,11 @@
 package provenance_test
 
-// h5_optin_artifact_integration_test.go — the ONE new money-path proof: an OPT-IN buildable-artifact
+// h5_optin_artifact_integration_test.go — the money-path proof that an OPT-IN buildable-artifact
 // commitment makes H5 ENFORCEABLE. A workspace commits artifact_sha256 (the manifest of its buildable
-// module, output slot bound to the served response), bonds the output, and Talyvor reproduces the build. A
-// genuine compile_failed → a talyvor_verified row → the bond BURNS — even though the workspace never
-// self-reported a failure. Today (no artifact seam) the attestor binds the JSON envelope and refuses, so no
-// burn ever fires; this test FAILS without the seam and PASSES with it.
+// module, output slot bound to the CAPTURED output_content_sha256 — the canonical served content), bonds
+// the output, and Talyvor reproduces the build. A genuine compile_failed → a talyvor_verified row → the
+// bond BURNS — even though the workspace never self-reported a failure. Without the seam the attestor
+// binds the JSON envelope and refuses everything; with the content binding a real tree can match.
 
 import (
 	"archive/tar"
@@ -51,32 +51,34 @@ func tarModule(t *testing.T, gomod, code string) []byte {
 
 // TestH5OptIn_ServedDifferentBytes_Refused is the SOUNDNESS proof (the mutation target). A workspace SERVES
 // broken code X but commits an artifact CLAIMING its output is a different, compiling Y, then supplies the
-// compiling Y tree at attest time. Because CommitArtifactSHA256 FORCES the output slot to the served
-// response_sha256 (H(X)), the committed artifact binds X — so the Y tree fails the manifest binding and is
-// REFUSED. The workspace cannot escape by substituting a compiling tree for what it served. (Neuter the
-// generation-time forcing and this REFUSAL becomes an ATTESTATION — the unsound bond-time-supply path.)
+// compiling Y tree at attest time. Because CommitArtifactSHA256 FORCES the output slot to the captured
+// output_content_sha256 (H(canonical X)), the committed artifact binds X — so the Y tree fails the manifest
+// binding and is REFUSED. The workspace cannot escape by substituting a compiling tree for what it served.
+// (Neuter the generation-time forcing and this REFUSAL becomes an ATTESTATION — the unsound
+// bond-time-supply path.)
 func TestH5OptIn_ServedDifferentBytes_Refused(t *testing.T) {
 	ctx := context.Background()
 	pool := bondTestPool(t)
 	const ws, oid = "wsH5diff", "oid-h5-served-diff"
 
 	const gomod = "module ex\ngo 1.21\n"
-	const brokenX = "package ex\nfunc F() int { return }\n"  // ACTUALLY served — does not compile
+	const brokenX = "package ex\nfunc F() int { return }\n" // ACTUALLY served (canonical content) — does not compile
 	const goodY = "package ex\nfunc F() int { return 0 }\n" // the compiling tree the workspace SUBSTITUTES
-	servedSHA := outputverify.Sha256Hex([]byte(brokenX))
+	servedContentSHA := outputverify.Sha256Hex([]byte(brokenX))
+	envelopeSHA := outputverify.Sha256Hex([]byte(`{"content":[{"type":"text","text":"` + brokenX + `"}]}`)) // identity, distinct
 
 	// The workspace commits a manifest CLAIMING gen.go = goodY. CommitArtifactSHA256 ignores the claim and
-	// binds the served H(brokenX) — the sound path.
+	// binds the served H(canonical brokenX) — the sound path.
 	claimed := []outputverify.ManifestEntry{
 		{Path: "go.mod", ContentSHA256: outputverify.Sha256Hex([]byte(gomod))},
 		{Path: "gen.go", ContentSHA256: outputverify.Sha256Hex([]byte(goodY))}, // bogus claim
 	}
-	artifactSHA := outputverify.CommitArtifactSHA256(claimed, "gen.go", servedSHA)
+	artifactSHA := outputverify.CommitArtifactSHA256(claimed, "gen.go", servedContentSHA)
 
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO k4_output_verdicts (output_id, workspace_id, model, verdict, reason, constraint_kind, prompt_sha256, response_sha256, artifact_sha256, artifact_output_path)
-		 VALUES ($1,$2,'m','unverifiable','','none','ph',$3,$4,'gen.go') ON CONFLICT DO NOTHING`,
-		oid, ws, servedSHA, artifactSHA); err != nil {
+		`INSERT INTO k4_output_verdicts (output_id, workspace_id, model, verdict, reason, constraint_kind, prompt_sha256, response_sha256, output_content_sha256, artifact_sha256, artifact_output_path)
+		 VALUES ($1,$2,'m','unverifiable','','none','ph',$3,$4,$5,'gen.go') ON CONFLICT DO NOTHING`,
+		oid, ws, envelopeSHA, servedContentSHA, artifactSHA); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -117,10 +119,12 @@ func TestH5OptIn_NonOptedOutput_StillBindsResponse(t *testing.T) {
 	}
 }
 
-// buildableModule tars a {go.mod, <outputPath>:<outputCode>} module and returns the tar plus the three
-// commitment values a genuine opt-in would produce: response_sha256 = the SERVED output (raw-code mode: the
-// served bytes ARE the buildable file), and artifact_sha256 = the generation-time-bound manifest.
-func buildableModule(t *testing.T, gomod, outputPath, outputCode string) (tarBytes []byte, responseSHA, artifactSHA string) {
+// buildableModule tars a {go.mod, <outputPath>:<outputCode>} module and returns the tar plus the commitment
+// values a genuine opt-in produces under the CONTENT binding: output_content_sha256 = H(the canonical served
+// content — the code file's exact bytes), and artifact_sha256 = the generation-time-bound manifest folding
+// that content hash into the output slot. (response_sha256 — the envelope identity — is separate and
+// distinct; the tree never contains it.)
+func buildableModule(t *testing.T, gomod, outputPath, outputCode string) (tarBytes []byte, contentSHA, artifactSHA string) {
 	t.Helper()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -137,11 +141,11 @@ func buildableModule(t *testing.T, gomod, outputPath, outputCode string) (tarByt
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	responseSHA = outputverify.Sha256Hex([]byte(outputCode)) // served output = the code file (raw-code mode)
+	contentSHA = outputverify.Sha256Hex([]byte(outputCode)) // canonical served content = the code file's bytes
 	artifactSHA = outputverify.CommitArtifactSHA256(
 		[]outputverify.ManifestEntry{{Path: "go.mod", ContentSHA256: outputverify.Sha256Hex([]byte(gomod))}},
-		outputPath, responseSHA)
-	return buf.Bytes(), responseSHA, artifactSHA
+		outputPath, contentSHA)
+	return buf.Bytes(), contentSHA, artifactSHA
 }
 
 func TestH5OptIn_BoundBrokenModule_TalyvorVerifiedBurn(t *testing.T) {
@@ -150,14 +154,14 @@ func TestH5OptIn_BoundBrokenModule_TalyvorVerifiedBurn(t *testing.T) {
 	const ws, oid = "wsH5", "oid-h5-optin"
 
 	// A module whose generated file does NOT compile (missing return value).
-	tarBytes, responseSHA, artifactSHA := buildableModule(t, "module ex\ngo 1.21\n", "gen.go",
+	tarBytes, contentSHA, artifactSHA := buildableModule(t, "module ex\ngo 1.21\n", "gen.go",
 		"package ex\nfunc F() int { return }\n")
 
 	seedBalance(t, pool, ws, 5_000_000)
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO k4_output_verdicts (output_id, workspace_id, model, verdict, reason, constraint_kind, prompt_sha256, response_sha256, artifact_sha256, artifact_output_path)
-		 VALUES ($1,$2,'m','unverifiable','','none','ph',$3,$4,'gen.go') ON CONFLICT DO NOTHING`,
-		oid, ws, responseSHA, artifactSHA); err != nil {
+		`INSERT INTO k4_output_verdicts (output_id, workspace_id, model, verdict, reason, constraint_kind, prompt_sha256, response_sha256, output_content_sha256, artifact_sha256, artifact_output_path)
+		 VALUES ($1,$2,'m','unverifiable','','none','ph',$3,$4,$5,'gen.go') ON CONFLICT DO NOTHING`,
+		oid, ws, outputverify.Sha256Hex([]byte(`{"envelope":"h5-optin"}`)), contentSHA, artifactSHA); err != nil {
 		t.Fatalf("seed opted-in output: %v", err)
 	}
 

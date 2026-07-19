@@ -67,6 +67,9 @@ func (p *Proxy) captureOutputVerdict(ctx context.Context, workspaceID, model, pr
 
 	outputID, promptHash, responseHash := deriveOutputID(workspaceID, model, prompt, responseBody, servedAt)
 	res := outputverify.Verify(requestBody, responseBody)
+	// H5 CONTENT BINDING — the canonical-content hash, computed on the SAME served bytes the identity hashes.
+	// "" (→ NULL) when the body carries no committable content; the identity inputs above are untouched.
+	contentHash, _ := outputverify.CanonicalContentSHA256(provider, responseBody)
 
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), captureWriteTimeout)
 	defer cancel()
@@ -74,6 +77,7 @@ func (p *Proxy) captureOutputVerdict(ctx context.Context, workspaceID, model, pr
 		OutputID: outputID, WorkspaceID: workspaceID, Model: model,
 		Verdict: res.Verdict, Reason: res.Reason, ConstraintKind: res.ConstraintKind,
 		PromptSHA256: promptHash, ResponseSHA256: responseHash,
+		OutputContentSHA256: contentHash,
 	}); err != nil {
 		slog.Warn("outputverify: verdict write failed (observational; serve unaffected)",
 			slog.String("workspace", workspaceID), slog.String("err", err.Error()))

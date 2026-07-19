@@ -2,14 +2,20 @@
 // a bonded output_id and a candidate source tree, it REPRODUCES the build and records ONLY a trustworthy
 // compile verdict as verdict_source='talyvor_verified'. It is the producer step 3 promised.
 //
-// ⚠ SOURCE PROVENANCE — the binding, stated honestly. An output_id commits (via k4_output_verdicts.
-// response_sha256) to the RAW UPSTREAM RESPONSE BYTES; lens stores only the hash, never the bytes. The ONLY
-// sound binding is therefore: sha256(supplied tree) == response_sha256. That matches only if the supplied
-// bytes ARE the exact committed output. For today's chat-completion outputs the committed bytes are a JSON
-// response envelope, NOT a buildable tree, so the binding REFUSES every real output — no attested verdict is
-// ever recorded, and H5 stays fail-open. It becomes usable only for a FUTURE gateway convention that commits
-// a buildable-module provenance hash at generation time. We REFUSE rather than build an UNBOUND tree, because
-// an attested verdict on an input we cannot tie to the output is worse than no attestation.
+// ⚠ SOURCE PROVENANCE — the two bindings, stated honestly.
+//
+// NOT OPTED IN (artifact_sha256 NULL): an output_id commits (via k4_output_verdicts.response_sha256) to the
+// RAW UPSTREAM RESPONSE BYTES; lens stores only the hash, never the bytes. The only sound binding is
+// sha256(supplied tree) == response_sha256, which no buildable tree ever satisfies for a chat-completion
+// envelope — so non-opted outputs are REFUSED and stay on the self-reported, fail-open path (unchanged,
+// deliberate: an attested verdict on an input we cannot tie to the output is worse than no attestation).
+//
+// OPTED IN (artifact_sha256 set): the producer committed — via POST /v1/outputs/{id}/artifact — the manifest
+// hash of its buildable module with the output slot FORCED to the output's captured output_content_sha256
+// (the CANONICAL served content; outputverify/content.go pins the bytes — exactly what the flagship writer
+// materializes on disk). A tree whose manifest matches therefore PROVABLY carries the served content at the
+// slot path AND is real, compilable source — the binding is sound and satisfiable, and this package attests
+// it end-to-end: manifest match → sandboxed reproduce → talyvor_verified verdict.
 //
 // This package is mint-free: it reads k4_output_verdicts and writes k4_mechanical_verdicts; it never touches
 // the ledger. verdict_source is HARD-CODED 'talyvor_verified' and workspace_id is the OWNER from
@@ -112,7 +118,7 @@ func (a *Attestor) Attest(ctx context.Context, outputID string, treeTar []byte) 
 	}
 
 	// Extract the supplied tree (host-side, hardened against path-traversal/symlink/bomb).
-	dir, err := os.MkdirTemp("", "attest-src-*")
+	dir, err := newExtractionDir()
 	if err != nil {
 		return Result{}, err
 	}
@@ -122,11 +128,11 @@ func (a *Attestor) Attest(ctx context.Context, outputID string, treeTar []byte) 
 	}
 
 	// OPT-IN BUILDABLE BINDING: the supplied tree's manifest must equal the committed artifact_sha256. Because
-	// CommitArtifactSHA256 FORCED the output slot to response_sha256 at commit time, a matching manifest
-	// PROVES the tree carries exactly the served output at artifact_output_path — the served-output tie IS the
-	// manifest match, not a separate check. (A redundant output-slot re-check was deliberately NOT added: it
-	// would independently mask a regression of the generation-time forcing, hiding it from the served-different
-	// test.) A mismatch → unbound tree → refuse.
+	// CommitArtifactSHA256 FORCED the output slot to output_content_sha256 (the canonical served content) at
+	// commit time, a matching manifest PROVES the tree carries exactly the served content at
+	// artifact_output_path — the served-output tie IS the manifest match, not a separate check. (A redundant
+	// output-slot re-check was deliberately NOT added: it would independently mask a regression of the
+	// generation-time forcing, hiding it from the served-different test.) A mismatch → unbound tree → refuse.
 	if optedIn {
 		mh, _, mErr := outputverify.ManifestHashDir(dir)
 		if mErr != nil {
@@ -156,6 +162,29 @@ func (a *Attestor) Attest(ctx context.Context, outputID string, treeTar []byte) 
 	}
 	return Result{Outcome: OutcomeAttested, Verdict: string(r.Verdict), Recorded: tag.RowsAffected() == 1,
 		Reason: "talyvor_verified " + string(r.Verdict) + " on " + platform}, nil
+}
+
+// newExtractionDir creates the temp directory the supplied tree is extracted into — the directory that is
+// bind-mounted read-only at /src and built by the sandbox's NON-ROOT user (--user 65534:65534).
+//
+// It MUST be world-traversable/readable (0755): os.MkdirTemp creates 0700, and on a real Linux daemon the
+// sandbox uid then cannot read the module dir, so `go build ./...` fails as "directory prefix /src does not
+// contain main module" and is misclassified as a toolchain crash — every real Attest breaks. (Docker
+// Desktop's virtiofs masks host permissions, which is why macOS never showed it.) 0755 here is safe: the
+// contents are the CALLER-SUPPLIED source tree already destined for the sandbox (never a secret), the dir
+// name is unguessable MkdirTemp randomness under os.TempDir, per-file modes from safeExtractTar stay 0644,
+// and the whole dir is removed on defer as soon as the attest attempt ends. buildverify's own green
+// fixtures (t.TempDir → 0755) prove this is exactly the mode the sandbox needs.
+func newExtractionDir() (string, error) {
+	dir, err := os.MkdirTemp("", "attest-src-*")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	return dir, nil
 }
 
 // safeExtractTar extracts a tar to dest with maximum caution (this runs on the HOST before the sandbox):

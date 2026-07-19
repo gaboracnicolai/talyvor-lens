@@ -11,10 +11,13 @@ import (
 
 // artifact_commit.go — the GENERATION-TIME opt-in producer. A workspace that produced an output may commit,
 // bound to that output, the sha256 of the buildable module it relies on. The soundness is that the OUTPUT
-// SLOT is folded from the output's ALREADY-STORED response_sha256 (the actually-served bytes, locked when the
-// output was recorded) — never a workspace-supplied output hash. So even though the commit call lands after
-// serving, the commitment binds what was served: a workspace cannot bind a module whose output differs from
-// its output. Append-once + owner-bound.
+// SLOT is folded from the output's ALREADY-STORED output_content_sha256 (the canonical served content,
+// locked at capture — content.go pins the byte definition) — never a workspace-supplied output hash. So even
+// though the commit call lands after serving, the commitment binds what was served: a workspace cannot bind
+// a module whose output differs from its output. And because the canonical content IS the code the flagship
+// writer materializes on disk, the committed manifest is satisfiable by a real, BUILDABLE tree (the old
+// envelope-hash fold was satisfiable by nothing buildable). Append-once + owner-bound. An output captured
+// without a content binding (NULL — pre-0098 rows, extraction failure, streaming) can never commit.
 
 var (
 	// ErrOutputNotFound — no such output_id (K4 off, or never served).
@@ -23,9 +26,12 @@ var (
 	ErrNotOutputOwner = errors.New("outputverify: caller is not the output's producer")
 	// ErrNoOutputPath — an artifact commitment must name the output slot path.
 	ErrNoOutputPath = errors.New("outputverify: output_path required")
+	// ErrNoContentBinding — the output has no output_content_sha256 (captured before 0098, extraction failed,
+	// or a true stream); there is nothing a buildable tree could match, so no artifact can ever be committed.
+	ErrNoContentBinding = errors.New("outputverify: output has no content binding; artifact commitment impossible")
 )
 
-// artifactCommitDB needs a read (response_sha256 + owner) and the once-only owner-bound UPDATE.
+// artifactCommitDB needs a read (content hash + owner) and the once-only owner-bound UPDATE.
 type artifactCommitDB interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
@@ -40,10 +46,10 @@ const artifactCommitSQL = `UPDATE k4_output_verdicts
     SET artifact_sha256 = $2, artifact_output_path = $3
     WHERE output_id = $1 AND workspace_id = $4 AND artifact_sha256 IS NULL`
 
-// Commit folds the output's stored response_sha256 (the served bytes) into the workspace's context manifest at
-// outputPath and records the resulting artifact_sha256 — ONCE, and only for the output's producer. Returns
-// the committed hash and committed=true on the first commit; committed=false if the output was already
-// committed (the existing commitment stands — this never overwrites).
+// Commit folds the output's stored output_content_sha256 (the canonical served content) into the workspace's
+// context manifest at outputPath and records the resulting artifact_sha256 — ONCE, and only for the output's
+// producer. Returns the committed hash and committed=true on the first commit; committed=false if the output
+// was already committed (the existing commitment stands — this never overwrites).
 func (c *ArtifactCommitter) Commit(ctx context.Context, outputID, callerWorkspaceID, outputPath string, contextManifest []ManifestEntry) (artifactSHA256 string, committed bool, err error) {
 	if c == nil || c.db == nil {
 		return "", false, nil
@@ -51,9 +57,10 @@ func (c *ArtifactCommitter) Commit(ctx context.Context, outputID, callerWorkspac
 	if outputPath == "" {
 		return "", false, ErrNoOutputPath
 	}
-	var responseSHA, ownerWS string
-	err = c.db.QueryRow(ctx, `SELECT response_sha256, workspace_id FROM k4_output_verdicts WHERE output_id=$1`, outputID).
-		Scan(&responseSHA, &ownerWS)
+	var contentSHA *string
+	var ownerWS string
+	err = c.db.QueryRow(ctx, `SELECT output_content_sha256, workspace_id FROM k4_output_verdicts WHERE output_id=$1`, outputID).
+		Scan(&contentSHA, &ownerWS)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, ErrOutputNotFound
 	}
@@ -63,9 +70,12 @@ func (c *ArtifactCommitter) Commit(ctx context.Context, outputID, callerWorkspac
 	if ownerWS != callerWorkspaceID {
 		return "", false, ErrNotOutputOwner
 	}
-	// THE GENERATION-TIME BINDING: the output slot is the SERVED response hash (from the DB), not anything the
-	// caller supplied. CommitArtifactSHA256 drops any output-slot the caller put in contextManifest.
-	artifactSHA256 = CommitArtifactSHA256(contextManifest, outputPath, responseSHA)
+	if contentSHA == nil || *contentSHA == "" {
+		return "", false, ErrNoContentBinding
+	}
+	// THE GENERATION-TIME BINDING: the output slot is the canonical SERVED content hash (from the DB), not
+	// anything the caller supplied. CommitArtifactSHA256 drops any output-slot the caller put in contextManifest.
+	artifactSHA256 = CommitArtifactSHA256(contextManifest, outputPath, *contentSHA)
 	tag, err := c.db.Exec(ctx, artifactCommitSQL, outputID, artifactSHA256, outputPath, callerWorkspaceID)
 	if err != nil {
 		return "", false, fmt.Errorf("outputverify: artifact commit: %w", err)

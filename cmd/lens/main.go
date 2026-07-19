@@ -1750,9 +1750,10 @@ func run() error {
 		// first-wins per kind (409 on a conflicting re-attribution). Attribution ≠ settlement: no amount.
 		authed.Post("/v1/outputs/{output_id}/attribution", newAttributionHandler(authManager, attributionWriter))
 		// H5 OPT-IN buildable-artifact commitment — the producing workspace commits, bound to an output it
-		// produced, the manifest hash of its buildable module (output slot folded from the served
-		// response_sha256). Owner-bound + append-once. Registered ONLY when LENS_H5_ARTIFACT_ENABLED; until then
-		// no artifact_sha256 is ever populated and the attestor's opt-in binding stays dormant.
+		// produced, the manifest hash of its buildable module (output slot folded from the captured
+		// output_content_sha256 — the canonical served content a buildable tree can actually carry).
+		// Owner-bound + append-once. Registered ONLY when LENS_H5_ARTIFACT_ENABLED; until then no
+		// artifact_sha256 is ever populated and the attestor's opt-in binding stays dormant.
 		if cfg.H5ArtifactEnabled {
 			authed.Post("/v1/outputs/{output_id}/artifact", newArtifactCommitHandler(authManager, outputverify.NewArtifactCommitter(pool)))
 		}

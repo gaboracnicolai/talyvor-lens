@@ -99,7 +99,7 @@ func (v *Verifier) Verify(ctx context.Context, srcDir string) Result {
 		}
 		vd := classifyBuildResult(exit, output)
 		if vd == NotVerifiable {
-			return Result{Verdict: NotVerifiable, Reason: "toolchain crash/ICE on " + plat + " — refusing", Toolchain: toolchain, Platform: platformSet}
+			return Result{Verdict: NotVerifiable, Reason: notVerifiableReason(plat, output), Toolchain: toolchain, Platform: platformSet}
 		}
 		if i == 0 {
 			agreed, reason = vd, summarize(output)
@@ -139,6 +139,22 @@ func classifyBuildResult(exit int, output string) Verdict {
 
 // diagnosticLine matches a Go compiler diagnostic (path.go:line[:col]:).
 var diagnosticLine = regexp.MustCompile(`\.go:\d+(:\d+)?:`)
+
+// notVerifiableReason names a non-verdict build failure. A failure where go could not even SEE the module —
+// "does not contain main module" / "go.mod file not found" / a permission denial — is an INVOCATION problem
+// (srcDir permissions/ownership vs the sandbox's non-root user), not a compiler crash; labeling it
+// "toolchain crash/ICE" made exactly that bug (a 0700 extraction dir) indistinguishable from a real ICE.
+// The verdict is NotVerifiable either way (fail-open unchanged); only the reason is sharpened.
+func notVerifiableReason(plat, output string) string {
+	low := strings.ToLower(output)
+	for _, marker := range []string{"does not contain main module", "go.mod file not found", "permission denied"} {
+		if strings.Contains(low, marker) {
+			return "module unreadable or missing in the sandbox on " + plat +
+				" (srcDir permissions/ownership vs the sandbox user?) — refusing: " + summarize(output)
+		}
+	}
+	return "toolchain crash/ICE on " + plat + " — refusing"
+}
 
 // splitPlatform splits "linux/amd64" into ("linux","amd64",true).
 func splitPlatform(p string) (goos, goarch string, ok bool) {

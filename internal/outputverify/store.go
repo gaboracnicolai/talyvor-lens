@@ -28,6 +28,10 @@ type VerdictRecord struct {
 	ConstraintKind string
 	PromptSHA256   string
 	ResponseSHA256 string
+	// OutputContentSHA256 is the H5 content binding: hex(sha256(canonical assistant text)) per
+	// CanonicalContentSHA256 (content.go pins the byte definition). "" = no committable content
+	// (stored as NULL) — the output can never opt in to an artifact commitment.
+	OutputContentSHA256 string
 }
 
 // Writer is the ONLY write path — an append-only sink for k4_output_verdicts. It holds a writeDB and runs
@@ -37,8 +41,8 @@ type Writer struct{ db writeDB }
 func NewWriter(db writeDB) *Writer { return &Writer{db: db} }
 
 const insertVerdictSQL = `INSERT INTO k4_output_verdicts
-    (output_id, workspace_id, model, verdict, reason, constraint_kind, prompt_sha256, response_sha256)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    (output_id, workspace_id, model, verdict, reason, constraint_kind, prompt_sha256, response_sha256, output_content_sha256)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''))
 ON CONFLICT (output_id) DO NOTHING`
 
 // Record appends one verdict; returns inserted=false on a dedup conflict (a re-served identical output, or a
@@ -48,7 +52,7 @@ func (w *Writer) Record(ctx context.Context, r VerdictRecord) (bool, error) {
 		return false, nil
 	}
 	tag, err := w.db.Exec(ctx, insertVerdictSQL,
-		r.OutputID, r.WorkspaceID, r.Model, r.Verdict, r.Reason, r.ConstraintKind, r.PromptSHA256, r.ResponseSHA256)
+		r.OutputID, r.WorkspaceID, r.Model, r.Verdict, r.Reason, r.ConstraintKind, r.PromptSHA256, r.ResponseSHA256, r.OutputContentSHA256)
 	if err != nil {
 		return false, fmt.Errorf("outputverify: record verdict: %w", err)
 	}
