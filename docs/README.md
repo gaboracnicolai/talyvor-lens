@@ -14,6 +14,7 @@ Index of every doc shipped with the repo. The main [project README](../README.md
 
 ## Operations
 
+- [Local standup runbook](local-standup-runbook.md) — bring Lens up standalone and take it from zero to a first real served request that mints a `lens_token_ledger` row; documents every silent-zero trap (stale image, both provider keys, the two pattern flags, `earn_verified`, the LXC bootstrap grant).
 - [Benchmarks](../benchmarks/README.md) — performance suite + reproducible numbers vs LiteLLM / Portkey.
 - [Status page](../README.md#status) — public health surface at `/status` and `/status.json`.
 
