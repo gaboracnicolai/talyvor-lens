@@ -1732,10 +1732,18 @@ func run() error {
 
 		apiServer.MountAuthenticated(authed)
 
-		authed.Post("/v1/proxy/openai/*", p.HandleOpenAI)
-		authed.Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
-		authed.Post("/v1/proxy/google/*", p.HandleGoogle)
-		authed.Post("/v1/proxy/bedrock/*", p.HandleBedrock)
+		// Proxy scope: the LLM serving surface (every /v1/proxy/*, /oai/*,
+		// /anthropic/* route) requires the "proxy" scope. RequireScope
+		// grandfathers empty-scope credentials and fast-path api_keys (which
+		// have no scope field), so no existing key loses access — only a key
+		// created with an explicit, non-proxy scope set (e.g. scopes:["analytics"])
+		// is refused here (403). Admin (the global key) bypasses via IsAdmin.
+		proxyScope := auth.RequireScope(auth.ScopeProxy)
+
+		authed.With(proxyScope).Post("/v1/proxy/openai/*", p.HandleOpenAI)
+		authed.With(proxyScope).Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
+		authed.With(proxyScope).Post("/v1/proxy/google/*", p.HandleGoogle)
+		authed.With(proxyScope).Post("/v1/proxy/bedrock/*", p.HandleBedrock)
 		// K4 output verdicts — WORKSPACE-SCOPED read: a tenant sees ONLY its OWN verdicts (scoped to the
 		// authenticated WorkspaceID; never another's). Intra-tenant by construction.
 		authed.Get("/v1/output-verdicts", newOutputVerdictsWorkspaceHandler(authManager, outputVerdictReader))
@@ -1762,17 +1770,17 @@ func run() error {
 		if cfg.H5BondsEnabled {
 			authed.Post("/v1/bonds", newBondCreateHandler(authManager, bondManager))
 		}
-		authed.Post("/v1/proxy/mistral/*", p.HandleExtraProvider("mistral"))
-		authed.Post("/v1/proxy/groq/*", p.HandleExtraProvider("groq"))
-		authed.Post("/v1/proxy/vllm/*", p.HandleExtraProvider("vllm"))
+		authed.With(proxyScope).Post("/v1/proxy/mistral/*", p.HandleExtraProvider("mistral"))
+		authed.With(proxyScope).Post("/v1/proxy/groq/*", p.HandleExtraProvider("groq"))
+		authed.With(proxyScope).Post("/v1/proxy/vllm/*", p.HandleExtraProvider("vllm"))
 
 		// Helicone-shape URL prefixes. First-class routes (not a
 		// deprecated alias) — migrating teams can keep these URLs
 		// indefinitely. The compat middleware above strips the
 		// Helicone-Auth / Helicone-Property-* headers before the
 		// proxy handler runs.
-		authed.Post("/oai/*", p.HandleOpenAI)
-		authed.Post("/anthropic/*", p.HandleAnthropic)
+		authed.With(proxyScope).Post("/oai/*", p.HandleOpenAI)
+		authed.With(proxyScope).Post("/anthropic/*", p.HandleAnthropic)
 
 		authed.Post("/v1/api/keys", newCreateAPIKeyHandler(keyStore))
 
