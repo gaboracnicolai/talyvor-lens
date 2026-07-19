@@ -52,7 +52,7 @@ func (m *mockVision) DispatchVision(_ context.Context, req VisionRequest) (Visio
 // Savings so the request path can book a durable, model-priced 'vision_ocr'
 // token_events row (PR #4) — not just the blended VisionTokensCost total.
 func TestVision_SavingsCarriesCostSplitAndModel(t *testing.T) {
-	mv := &mockVision{md: "# OCR\n\nrecovered", inTok: 1000, outTok: 25, model: "claude-haiku-4-6"}
+	mv := &mockVision{md: "# OCR\n\nrecovered", inTok: 1000, outTok: 25, model: "claude-haiku-4-5"}
 	_, sav, err := DistillWithCache(context.Background(), nil, buildPDF(), WithVision(mv))
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestVision_SavingsCarriesCostSplitAndModel(t *testing.T) {
 	if sav.VisionInputTokens != 1000 || sav.VisionOutputTokens != 25 {
 		t.Errorf("Savings must carry the OCR token split; in=%d out=%d want 1000/25", sav.VisionInputTokens, sav.VisionOutputTokens)
 	}
-	if sav.VisionModel != "claude-haiku-4-6" {
+	if sav.VisionModel != "claude-haiku-4-5" {
 		t.Errorf("Savings must carry the vision model for pricing; got %q", sav.VisionModel)
 	}
 	if sav.VisionInputTokens+sav.VisionOutputTokens != sav.VisionTokensCost {

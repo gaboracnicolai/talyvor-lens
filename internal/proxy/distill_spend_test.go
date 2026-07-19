@@ -134,7 +134,7 @@ func TestSpend_VisionOCRRecordsSeparateRow(t *testing.T) {
 	if !vrow.estimated {
 		t.Error("vision_ocr rows must be flagged cost_estimated")
 	}
-	if vrow.model != "claude-haiku-4-6" {
+	if vrow.model != "claude-haiku-4-5" {
 		t.Errorf("vision_ocr row must be priced on the vision model; got %q", vrow.model)
 	}
 	if vrow.modality != "document" {

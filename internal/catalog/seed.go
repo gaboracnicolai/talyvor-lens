@@ -30,7 +30,10 @@ func seedModels() []Model {
 		{ID: "claude-haiku-4-5", Provider: "anthropic", DisplayName: "Claude Haiku 4.5", InputPer1M: 0.80, OutputPer1M: 4.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
 		{ID: "claude-opus-4-6", Provider: "anthropic", DisplayName: "Claude Opus 4.6", InputPer1M: 15.00, OutputPer1M: 75.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
 		{ID: "claude-sonnet-4-6", Provider: "anthropic", DisplayName: "Claude Sonnet 4.6", InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
-		{ID: "claude-haiku-4-6", Provider: "anthropic", DisplayName: "Claude Haiku 4.6", InputPer1M: 0.80, OutputPer1M: 4.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
+		// NOTE: there is deliberately NO "claude-haiku-4-6" — no Haiku 4.6 exists at any version
+		// (verified against GET /v1/models). The real cheapest Anthropic model is claude-haiku-4-5
+		// above; a phantom entry here 404s the first cost-routed request. Guarded by
+		// verified_models_test.go.
 		// Claude Opus 4.8 (Upgrade 16) — verified $5 in / $25 out per 1M,
 		// vision-capable, 200K context. Selectable but NOT wired into any
 		// routing default (router tiers unchanged), so it's never
@@ -47,7 +50,7 @@ func seedModels() []Model {
 		// ─── AWS Bedrock Claude (vision + document; ~15% markup) ───
 		{ID: "anthropic.claude-opus-4-6-20251101-v1:0", Provider: "bedrock", DisplayName: "Claude Opus 4.6 (Bedrock)", InputPer1M: 17.25, OutputPer1M: 86.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
 		{ID: "anthropic.claude-sonnet-4-6-20251101-v1:0", Provider: "bedrock", DisplayName: "Claude Sonnet 4.6 (Bedrock)", InputPer1M: 3.45, OutputPer1M: 17.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
-		{ID: "anthropic.claude-haiku-4-6-20251103-v1:0", Provider: "bedrock", DisplayName: "Claude Haiku 4.6 (Bedrock)", InputPer1M: 0.92, OutputPer1M: 4.60, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
+		// NOTE: no Bedrock "claude-haiku-4-6" twin either — the underlying Haiku 4.6 does not exist.
 
 		// ─── Mistral (text-only) ───
 		{ID: "mistral-large-latest", Provider: "mistral", DisplayName: "Mistral Large", InputPer1M: 2.00, OutputPer1M: 6.00, ContextTokens: 128000, MaxOutput: 8192},

@@ -232,7 +232,7 @@ func TestResolveAutoRoute_OptOutFallsToConcreteBaseNotNil(t *testing.T) {
 func TestResolveAutoRoute_NeverInventsThirdModel(t *testing.T) {
 	rt := router.New()
 	recs := []routing.Recommendation{
-		qualRec("gpt-4o-mini"), qualRec("gpt-5.4"), qualRec("claude-haiku-4-6"),
+		qualRec("gpt-4o-mini"), qualRec("gpt-5.4"), qualRec("claude-haiku-4-5"),
 		qualRec("mystery"), {Basis: routing.BasisNone},
 	}
 	bases := []router.RoutingDecision{
@@ -270,7 +270,7 @@ func TestRecDowngrades(t *testing.T) {
 		{"cheaper same provider", qualRec("gpt-4o-mini"), prem, true},
 		{"pricier same provider", qualRec("gpt-5.4"), cheap, false},
 		{"equal", qualRec("gpt-5.4"), prem, false},
-		{"cross provider", routing.Recommendation{Model: "claude-haiku-4-6", Provider: "anthropic"}, prem, false},
+		{"cross provider", routing.Recommendation{Model: "claude-haiku-4-5", Provider: "anthropic"}, prem, false},
 		{"unknown rec model", qualRec("mystery"), prem, false},
 		{"no base model", qualRec("gpt-4o-mini"), router.RoutingDecision{Model: ""}, false},
 	} {
