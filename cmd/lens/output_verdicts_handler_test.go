@@ -18,15 +18,29 @@ type fakeVerdictLister struct {
 	byWorkspace  map[string][]outputverify.ListedVerdict
 	allCalled    bool
 	wsCalledWith string
+	limitSeen    int
+	offsetSeen   int
 }
 
 func (f *fakeVerdictLister) ListAll(_ context.Context, _ int) ([]outputverify.ListedVerdict, error) {
 	f.allCalled = true
 	return f.all, nil
 }
-func (f *fakeVerdictLister) ListForWorkspace(_ context.Context, ws string, _ int) ([]outputverify.ListedVerdict, error) {
+func (f *fakeVerdictLister) ListForWorkspacePage(_ context.Context, ws string, limit, offset int) ([]outputverify.ListedVerdict, error) {
 	f.wsCalledWith = ws
+	f.limitSeen, f.offsetSeen = limit, offset
 	return f.byWorkspace[ws], nil
+}
+
+// The workspace read passes the query ?limit=&offset= straight through to the store (pagination).
+func TestOutputVerdicts_PaginationPassThrough(t *testing.T) {
+	lister := &fakeVerdictLister{byWorkspace: map[string][]outputverify.ListedVerdict{"ws1": {}}}
+	h := newOutputVerdictsWorkspaceHandler(fakeAuthn{ctx: &auth.AuthContext{WorkspaceID: "ws1"}}, lister)
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/v1/output-verdicts?limit=5&offset=10", nil))
+	if lister.limitSeen != 5 || lister.offsetSeen != 10 {
+		t.Errorf("handler must pass query limit/offset to the store; got limit=%d offset=%d want 5/10", lister.limitSeen, lister.offsetSeen)
+	}
 }
 
 // The ADMIN surface is requireAdmin-gated: admin → 200; non-admin → 401, handler never reached.

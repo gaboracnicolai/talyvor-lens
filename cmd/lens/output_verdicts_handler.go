@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"strconv"
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/outputverify"
@@ -12,7 +13,7 @@ import (
 // satisfies it). Kept an interface so both gates are testable without a DB.
 type outputVerdictLister interface {
 	ListAll(ctx context.Context, limit int) ([]outputverify.ListedVerdict, error)
-	ListForWorkspace(ctx context.Context, workspaceID string, limit int) ([]outputverify.ListedVerdict, error)
+	ListForWorkspacePage(ctx context.Context, workspaceID string, limit, offset int) ([]outputverify.ListedVerdict, error)
 }
 
 // newOutputVerdictsAdminHandler serves ALL workspaces' verdicts — wrapped by requireAdmin at the mount site
@@ -46,7 +47,11 @@ func newOutputVerdictsWorkspaceHandler(authn verdictAuthenticator, l outputVerdi
 			writeJSONErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		vs, err := l.ListForWorkspace(req.Context(), ac.WorkspaceID, 100)
+		// Pagination: ?limit=&offset= (newest-first). Absent/garbage → 0, which the store clamps to its
+		// default page; the response stays a bare array, so the shape is unchanged.
+		limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(req.URL.Query().Get("offset"))
+		vs, err := l.ListForWorkspacePage(req.Context(), ac.WorkspaceID, limit, offset)
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return

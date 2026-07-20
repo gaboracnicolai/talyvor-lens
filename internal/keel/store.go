@@ -92,7 +92,7 @@ SELECT workspace_id, unit, window_bucket, deviation_sigma, attribution, mode, co
 FROM keel_findings
 WHERE workspace_id = $1
 ORDER BY first_seen_at DESC
-LIMIT $2`
+LIMIT $2 OFFSET $3`
 
 // ListedFinding is the read projection (admin + tenant). mode ('ordinary'|'hardened') and attribution
 // ('idiosyncratic'|'common_mode') are both surfaced so a reader can tell a money-grade hardened finding from
@@ -131,16 +131,25 @@ func (r *Reader) ListFindings(ctx context.Context, limit int) ([]ListedFinding, 
 	return out, rows.Err()
 }
 
-// ListFindingsForWorkspace reads ONLY workspaceID's own findings, newest-first. The scope is the caller's
-// authenticated workspace — never a request param. Query-only.
+// ListFindingsForWorkspace reads ONLY workspaceID's own findings, newest-first (offset 0). Preserved so
+// non-paginating callers (e.g. the routing brain) keep the same signature.
 func (r *Reader) ListFindingsForWorkspace(ctx context.Context, workspaceID string, limit int) ([]ListedFinding, error) {
+	return r.ListFindingsForWorkspacePage(ctx, workspaceID, limit, 0)
+}
+
+// ListFindingsForWorkspacePage is the paginated read: newest-first, `limit` rows from `offset`. Scope is
+// unchanged (the caller's authenticated workspace — never a request param). Query-only.
+func (r *Reader) ListFindingsForWorkspacePage(ctx context.Context, workspaceID string, limit, offset int) ([]ListedFinding, error) {
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := r.db.Query(ctx, listFindingsForWorkspaceSQL, workspaceID, limit)
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := r.db.Query(ctx, listFindingsForWorkspaceSQL, workspaceID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("keel: list findings for workspace: %w", err)
 	}

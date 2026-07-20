@@ -81,10 +81,21 @@ const selectCols = `output_id, workspace_id, model, verdict, reason, constraint_
 // A tenant may read its own; it can never name another's (the filter is not optional — there is no unscoped
 // tenant read).
 const listForWorkspaceSQL = `SELECT ` + selectCols + `
-FROM k4_output_verdicts WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2`
+FROM k4_output_verdicts WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`
 
+// ListForWorkspace returns the newest `limit` verdicts for the workspace (offset 0). Preserved so
+// non-paginating callers keep the same signature.
 func (r *Reader) ListForWorkspace(ctx context.Context, workspaceID string, limit int) ([]ListedVerdict, error) {
-	return r.query(ctx, listForWorkspaceSQL, workspaceID, clampLimit(limit))
+	return r.ListForWorkspacePage(ctx, workspaceID, limit, 0)
+}
+
+// ListForWorkspacePage is the paginated read: newest-first, `limit` rows starting at `offset`. Scope is
+// unchanged (intra-tenant: WHERE workspace_id = $1). offset is floored at 0; limit runs through clampLimit.
+func (r *Reader) ListForWorkspacePage(ctx context.Context, workspaceID string, limit, offset int) ([]ListedVerdict, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	return r.query(ctx, listForWorkspaceSQL, workspaceID, clampLimit(limit), offset)
 }
 
 // ListAll returns verdicts across workspaces — the requireAdmin forensic read (gated at the mount site).

@@ -15,6 +15,7 @@ package economy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -578,6 +579,63 @@ func (s *DualTokenStore) GetLXCSnapshot(ctx context.Context, workspaceID string)
 	// (MulFloor) — never overstate the balance's worth.
 	snap.USDValue = mining.MulFloor(snap.Balance, LXCUSDValue)
 	return snap, nil
+}
+
+// LXCLedgerEntry is one row of the fiat LXC ledger — µLXC, integer. Mirrors mining.LedgerEntry with _ulxc
+// units. amount is +credit / −spend; balance_after is the running balance after the row.
+type LXCLedgerEntry struct {
+	ID           string                 `json:"id"`
+	WorkspaceID  string                 `json:"workspace_id"`
+	Amount       int64                  `json:"amount_ulxc"`
+	BalanceAfter int64                  `json:"balance_after_ulxc"`
+	Type         string                 `json:"type"`
+	Description  string                 `json:"description"`
+	Metadata     map[string]interface{} `json:"metadata"`
+	CreatedAt    time.Time              `json:"created_at"`
+}
+
+// GetLXCHistory returns the workspace's LXC ledger rows, newest-first, paginated (limit+offset). It mirrors
+// the LENS tokens/history read (mining.LedgerStore.GetHistory) for the fiat ledger, and is the FIRST reader
+// of lxc_ledger (all prior access was INSERT-only). Scope is intra-tenant (WHERE workspace_id = $1). Same
+// clamp policy as the LENS ledger: default 20, max 200, offset floored at 0. There is no counterparty-masking
+// step (the LXC ledger types convert_from_lens|spend|purchase|admin_grant stamp no counterparty).
+func (s *DualTokenStore) GetLXCHistory(ctx context.Context, workspaceID string, limit, offset int) ([]LXCLedgerEntry, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, workspace_id, amount, balance_after, type, description, metadata, created_at
+		FROM lxc_ledger
+		WHERE workspace_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3`, workspaceID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("economy: query lxc history: %w", err)
+	}
+	defer rows.Close()
+	var out []LXCLedgerEntry
+	for rows.Next() {
+		var e LXCLedgerEntry
+		var meta []byte
+		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.Amount, &e.BalanceAfter,
+			&e.Type, &e.Description, &meta, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("economy: scan lxc history: %w", err)
+		}
+		if len(meta) > 0 {
+			_ = json.Unmarshal(meta, &e.Metadata)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // ─── tx-scoped SQL helpers ───────────────────────
