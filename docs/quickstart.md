@@ -5,7 +5,7 @@ End-to-end setup in under five minutes. By the end of this guide you'll have Len
 ## Prerequisites
 
 - Docker and Docker Compose installed (Docker Desktop on macOS / Windows; `docker.io` + `docker-compose-plugin` on Linux).
-- At least one LLM provider API key (OpenAI, Anthropic, Google, Mistral, Groq, or AWS Bedrock).
+- **Both** an OpenAI **and** an Anthropic API key — Lens requires `LENS_OPENAI_API_KEY` **and** `LENS_ANTHROPIC_API_KEY` to start (see Step 1). If you only use one provider, a dummy non-empty value satisfies the boot check for the other. The remaining providers (Google, Mistral, Groq, AWS Bedrock) are optional.
 - A terminal with `curl` and `jq` (optional — for pretty-printing JSON responses).
 
 ## Step 1 — Configure
@@ -14,14 +14,25 @@ End-to-end setup in under five minutes. By the end of this guide you'll have Len
 cp .env.production.example .env
 ```
 
-Edit `.env`. The minimum to bring up Lens with a working provider:
+Edit `.env`. The minimum to bring up Lens:
 
 ```bash
-LENS_OPENAI_API_KEY=sk-...
+LENS_OPENAI_API_KEY=sk-...            # real — this guide proxies to OpenAI in Step 4
+LENS_ANTHROPIC_API_KEY=sk-dummy       # required to boot; a dummy non-empty value is fine if you don't use it
 POSTGRES_PASSWORD=changeme-in-production
+LENS_DOMAIN=localhost                 # required; localhost for a local run (real hostname on a public host)
+LENS_API_KEY=paste-openssl-rand-hex-32 # LOCAL admin key — used once in Step 3 to mint your first key
 ```
 
-Set additional provider keys (Anthropic, Google, Mistral, Groq) if you want to use them. Each missing key just disables that provider's route — it doesn't block startup.
+**Both `LENS_OPENAI_API_KEY` and `LENS_ANTHROPIC_API_KEY` are mandatory.** `config.Load` (`internal/config/config.go`) hard-requires both and refuses to start with `ErrMissingEnv` if *either* is empty — this is **not** "at least one". And because `docker-compose.yaml` defaults these two with `:-` (empty) rather than `:?`, an unset key does **not** fail `docker compose up`; instead the `lens` container comes up and **crash-loops**. The symptom is a `lens` service stuck restarting — `docker compose logs lens` shows `missing required environment variables: [LENS_ANTHROPIC_API_KEY]`. A dummy non-empty string satisfies the boot check for a provider you don't actually call.
+
+The *other* providers (Google, Mistral, Groq, AWS Bedrock) really are optional: a missing key there only disables that provider's `/v1/proxy/*` route (503) and does not block startup.
+
+`LENS_DOMAIN` is also required. Unlike the provider keys, `docker-compose.yaml` passes it with `:?`, so an unset value makes `docker compose up` **abort immediately** — `error … required variable LENS_DOMAIN is missing a value` — before any container starts. Use `localhost` for a local run; on a public host set your real hostname, and the bundled Caddy service provisions the TLS certificate for it automatically (see [remote-host.md](remote-host.md)).
+
+`LENS_API_KEY` is the admin credential. Minting keys and creating workspaces are admin operations, so **locally you set it** — generate one with `openssl rand -hex 32` and paste it; you use it once, in Step 3. This local-admin posture is deliberate and is the **opposite** of the remote recommendation: on a public host you leave `LENS_API_KEY` **unset** so the admin surface fails closed (see [remote-host.md](remote-host.md)). Don't conflate the two.
+
+For the full set of first-boot traps, see [local-standup-runbook.md](local-standup-runbook.md) (Trap 3, which documents this exact requirement).
 
 ## Step 2 — Start
 
@@ -35,14 +46,27 @@ Wait ~10 seconds for healthchecks to settle. Verify:
 docker compose ps
 ```
 
-All five services (`lens`, `postgres`, `redis`, `nats`, `migrate`) should show healthy or completed. The `migrate` service exits 0 after applying schema; that's normal.
+The long-running services — `lens`, `postgres`, `pgbouncer`, `redis`, `nats`, and `autoheal` — should show `healthy`; `caddy` runs no healthcheck, so it shows plain `Up`. The `migrate` service is a one-shot (`restart: "no"`): it applies the schema and exits 0 (shown as `Exited (0)`); that's normal, not a failure.
 
 Verify the proxy is up:
 
 ```bash
 curl -s http://localhost:8080/healthz
-# {"ok":true}
+# (keys are alphabetical — Go marshals the map sorted)
+# {
+#   "checks": {
+#     "database":     {"latency_ms": 1, "status": "healthy"},
+#     "local_models": {"latency_ms": 0, "status": "healthy"},
+#     "read_replica": {"latency_ms": 0, "status": "degraded", "detail": "no replica configured"},
+#     "redis":        {"latency_ms": 0, "status": "healthy"}
+#   },
+#   "status": "degraded",
+#   "uptime_seconds": 42,
+#   "version": "0.1.0"
+# }
 ```
+
+Returns HTTP `200`. On a single-node stack the overall `status` is `degraded`, not `healthy` — the `read_replica` check reports `"no replica configured"`, which is expected and not an error. Only an actual dependency outage flips a check to `unhealthy` and the response to HTTP `503`.
 
 And the public status page:
 
@@ -51,30 +75,43 @@ curl -s http://localhost:8080/status.json | jq .status
 # "operational"
 ```
 
-## Step 3 — Create your first API key
+## Step 3 — Mint your first workspace key
+
+Minting a key is an admin operation, so it uses the `LENS_API_KEY` from Step 1 as the bearer token. Lens seeds a `default` workspace at boot, so you can mint against it directly — there is no workspace to create first. Give the key the `proxy` scope so it can call `/v1/proxy/*`: that scope is enforced, and a key without it is refused on the proxy path with `403`.
 
 ```bash
-curl -X POST http://localhost:8080/v1/api/keys \
+curl -X POST http://localhost:8080/v1/workspaces/default/api-keys \
+  -H "Authorization: Bearer $LENS_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"workspace_id":"default","name":"my-first-key"}'
+  -d '{"name":"my-first-key","scopes":["proxy"]}'
 ```
 
-The response includes the raw key once. Save it — it's never shown again.
+On success it returns `201 Created` with the raw key **once** — save it, it's never shown again (the `warning` field says as much):
 
 ```json
 {
-  "id": "key_...",
-  "raw": "tlv_...",
-  "workspace_id": "default",
-  "name": "my-first-key"
+  "id": "b3f1c2a4-8e7d-4c1a-9f2b-0a1b2c3d4e5f",
+  "key": "tlv_ws_1a2b3c4d5e6f7a8b9c0d1e2f30",
+  "name": "my-first-key",
+  "prefix": "tlv_ws_1a2b3c4d",
+  "scopes": ["proxy"],
+  "warning": "Store this key securely. It will not be shown again."
 }
 ```
 
-Export it for the next steps:
+Export the `key` value for the next steps:
 
 ```bash
-export LENS_KEY=tlv_paste_yours_here
+export LENS_KEY=tlv_ws_paste_yours_here
 ```
+
+> Prefer a dedicated tenant over `default`? Create the workspace first (also admin), then mint against it:
+> ```bash
+> curl -X POST http://localhost:8080/v1/workspaces \
+>   -H "Authorization: Bearer $LENS_API_KEY" -H "Content-Type: application/json" \
+>   -d '{"id":"acme","name":"Acme"}'
+> # then POST /v1/workspaces/acme/api-keys with the same body as above
+> ```
 
 ## Step 4 — Make your first proxied request
 
@@ -137,8 +174,10 @@ docker compose down -v           # stop and wipe volumes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `lens` container restarting / crash-looping | `LENS_OPENAI_API_KEY` or `LENS_ANTHROPIC_API_KEY` unset — `config.Load` requires **both** (compose defaults them with `:-`, so `up` succeeds but lens exits) | `docker compose logs lens` → `missing required environment variables`; set both in `.env`, then `docker compose up -d` |
 | `lens` container restarting | Postgres init failed | `docker compose logs migrate` |
-| `503 Service Unavailable` from `/v1/proxy/openai/*` | `LENS_OPENAI_API_KEY` missing in `.env` | Set the key, `docker compose up -d` |
-| `401 Unauthorized` from proxy | Wrong Lens API key | `curl /v1/api/keys` to list, regenerate if needed |
+| `503 Service Unavailable` from `/v1/proxy/openai/*` | `LENS_OPENAI_API_KEY` is invalid or a dummy value (a *missing* one crash-loops the container instead — see the row above) | Set a real key, `docker compose up -d` |
+| `401 Unauthorized` from proxy | Key not recognized (wrong or expired) | mint a fresh one (Step 3); list a workspace's keys with `GET /v1/workspaces/default/api-keys` (admin or that workspace's key) |
+| `403 Forbidden` from `/v1/proxy/*` | Key authenticated but lacks the `proxy` scope (enforced since #329) | re-mint with `"scopes":["proxy"]` (Step 3) |
 | Dashboard shows no data | First request hasn't fired yet | Send a test request via curl |
 | Status page shows red | One of postgres/redis/nats is down | `docker compose ps`, restart the offender |
