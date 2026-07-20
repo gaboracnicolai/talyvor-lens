@@ -39,7 +39,12 @@ func RunUpstream(ctx context.Context, httpClient *http.Client, rc retry.Config, 
 			return nil, fmt.Errorf("build upstream request: %w", err)
 		}
 		for name, values := range extraHeaders {
-			if strings.EqualFold(name, "Host") {
+			// Skip Host (rewritten per-upstream). Skip Accept-Encoding too: forwarding the client's
+			// Accept-Encoding disables Go's transport transparent gzip decoding, so resp.Body stays
+			// compressed while the proxy re-serves it as application/json with no Content-Encoding —
+			// header/body mismatch. Dropping it lets the transport request + transparently decode gzip,
+			// so respBody is always the plain body we cache, score, and hand back.
+			if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Accept-Encoding") {
 				continue
 			}
 			for _, v := range values {
