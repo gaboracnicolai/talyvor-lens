@@ -18,6 +18,8 @@ type fakeKeelLister struct {
 	called       bool
 	byWorkspace  map[string][]keel.ListedFinding
 	wsCalledWith string
+	limitSeen    int
+	offsetSeen   int
 }
 
 func (f *fakeKeelLister) ListFindings(_ context.Context, _ int) ([]keel.ListedFinding, error) {
@@ -25,9 +27,21 @@ func (f *fakeKeelLister) ListFindings(_ context.Context, _ int) ([]keel.ListedFi
 	return f.rows, nil
 }
 
-func (f *fakeKeelLister) ListFindingsForWorkspace(_ context.Context, ws string, _ int) ([]keel.ListedFinding, error) {
+func (f *fakeKeelLister) ListFindingsForWorkspacePage(_ context.Context, ws string, limit, offset int) ([]keel.ListedFinding, error) {
 	f.wsCalledWith = ws
+	f.limitSeen, f.offsetSeen = limit, offset
 	return f.byWorkspace[ws], nil
+}
+
+// The workspace drift read passes ?limit=&offset= straight through to the store (pagination).
+func TestKeelFindings_PaginationPassThrough(t *testing.T) {
+	lister := &fakeKeelLister{byWorkspace: map[string][]keel.ListedFinding{"ws1": {}}}
+	h := newKeelFindingsWorkspaceHandler(fakeAuthn{ctx: &auth.AuthContext{WorkspaceID: "ws1"}}, lister)
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/v1/keel/findings?limit=7&offset=3", nil))
+	if lister.limitSeen != 7 || lister.offsetSeen != 3 {
+		t.Errorf("handler must pass query limit/offset to the store; got limit=%d offset=%d want 7/3", lister.limitSeen, lister.offsetSeen)
+	}
 }
 
 // The keel drift-findings read surface is requireAdmin-gated: a tenant must NEVER read another tenant's

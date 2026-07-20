@@ -1343,6 +1343,9 @@ func run() error {
 	// edit can never route it to a replica). Endpoints are registered ONLY when LENS_H5_BONDS_ENABLED — off =
 	// no bond surface, no locks, no slashes, zero behavior change. 0/0 → default 72h appeal window, 100% slash.
 	bondManager := provenance.NewBondManager(pool, tokenLedger, 0, 0)
+	// Bond read-back (query-only). PRIMARY pool: bond reads are money-adjacent (collateral + appeal
+	// windows) and must not observe a lagging replica — never wire this through dbrouting.ReadPool.
+	bondReader := provenance.NewBondReader(pool)
 	// STEP 3 — the attested-slash PRODUCER. Talyvor's OWN sandboxed compile (buildverify) reproduces a bonded
 	// output's build; attest records ONLY a trustworthy compile verdict as talyvor_verified (admin-only,
 	// PRIMARY pool). Default-off (LENS_H5_ATTEST_ENABLED). See attest.NewAttestor in the moneyAuthzTx list.
@@ -1353,6 +1356,8 @@ func run() error {
 	// caller produced the output_id, writes k4_mechanical_verdicts). PRIMARY pool — no replica reader.
 	mechanicalVerdictWriter := outputverify.NewMechanicalWriter(pool)
 	attributionWriter := outputverify.NewAttributionWriter(pool)
+	// Attribution read-back (query-only), PRIMARY pool — consistent with the attribution writer.
+	attributionReader := outputverify.NewAttributionReader(pool)
 
 	// P3 #6: the DESCRIPTIVE node-latency capture sink (default-off, mint-free — writes the aggregate the
 	// future latency mint reads; RunOnce/capture no-ops while the flag is off).
@@ -1593,6 +1598,10 @@ func run() error {
 	// pool (non-money read; keeps the U8/U9 ExactlySix replica-reader invariant unchanged).
 	r.Handle("/v1/admin/output-verdicts", requireAdmin(authManager,
 		newOutputVerdictsAdminHandler(outputVerdictReader)))
+	// Full tenant roster — admin forensic/ops read (requireAdmin), sibling of the admin reads here.
+	// Backed by the in-memory workspace.Manager (no DB read; U8/U9 replica-reader invariant unchanged).
+	r.Handle("/v1/admin/workspaces", requireAdmin(authManager,
+		newAdminListWorkspacesHandler(wsManager)))
 	// KEEL ECONOMY go/no-go: the routing-decision summary (override rate + estimated cost delta). Admin-only,
 	// descriptive; the estimate is NOT money.
 	r.Handle("/v1/admin/routing-decisions/summary", requireAdmin(authManager,
@@ -1757,6 +1766,10 @@ func run() error {
 		// (opaque target_ref). Ownership-bound (only the producer, per k4_output_verdicts) + append-only,
 		// first-wins per kind (409 on a conflicting re-attribution). Attribution ≠ settlement: no amount.
 		authed.Post("/v1/outputs/{output_id}/attribution", newAttributionHandler(authManager, attributionWriter))
+		// Attribution READ-BACK (self-scoped; NOT flag-gated, matching the write sibling above). By-output is
+		// owner-scoped (a foreign output → 404, no oracle); /v1/attributions lists the caller's own.
+		authed.Get("/v1/outputs/{output_id}/attribution", newAttributionByOutputHandler(authManager, attributionReader))
+		authed.Get("/v1/attributions", newAttributionListHandler(authManager, attributionReader))
 		// H5 OPT-IN buildable-artifact commitment — the producing workspace commits, bound to an output it
 		// produced, the manifest hash of its buildable module (output slot folded from the captured
 		// output_content_sha256 — the canonical served content a buildable tree can actually carry).
@@ -1770,6 +1783,9 @@ func run() error {
 		if cfg.H5BondsEnabled {
 			authed.Post("/v1/bonds", newBondCreateHandler(authManager, bondManager))
 		}
+		// Bond READ-BACK (list + owner-scoped get) — gated on the SAME flag as the write siblings, so
+		// flag-off ⇒ the routes are never registered (chi 404).
+		registerBondReadRoutes(authed, cfg.H5BondsEnabled, authManager, bondReader)
 		authed.With(proxyScope).Post("/v1/proxy/mistral/*", p.HandleExtraProvider("mistral"))
 		authed.With(proxyScope).Post("/v1/proxy/groq/*", p.HandleExtraProvider("groq"))
 		authed.With(proxyScope).Post("/v1/proxy/vllm/*", p.HandleExtraProvider("vllm"))
@@ -2029,6 +2045,12 @@ func run() error {
 		if cfg.AdminLXCGrantEnabled {
 			authed.Post("/v1/admin/lxc/grant", requireAdmin(authManager, newAdminLXCGrantHandler(dualToken)))
 		}
+
+		// Self-scoped list of the workspaces the caller's credential can act on. No {wsID} segment, so
+		// workspaceIsolationMiddleware passes through and the handler scopes to the authenticated
+		// WorkspaceID. ALWAYS a JSON array (one element today) so a future multi-workspace token widens
+		// it with no contract change — a workspace switcher is buildable now.
+		authed.Get("/v1/workspaces", newListMyWorkspacesHandler(authManager, wsManager))
 
 		authed.Get("/v1/workspaces/{wsID}", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
@@ -2462,6 +2484,22 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, snap)
+		})
+
+		// U18: LXC ledger history — FIAT, so it registers unconditionally on authed.Get like
+		// lxc/balance above (survives LENS_ECONOMY_ENABLED=false), NOT via econ.get. The {wsID}
+		// segment is bound to the caller's credential by workspaceIsolationMiddleware (a foreign
+		// wsID is 403, exactly like tokens/history and lxc/balance). limit/offset mirror tokens/history.
+		authed.Get("/v1/workspaces/{wsID}/lxc/history", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+			offset, _ := strconv.Atoi(req.URL.Query().Get("offset"))
+			entries, err := dualToken.GetLXCHistory(req.Context(), wsID, limit, offset)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, entries)
 		})
 
 		// U18b billing — FIAT, registered under BillingEnabled (independent of the

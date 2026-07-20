@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"strconv"
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/keel"
@@ -12,7 +13,7 @@ import (
 // it). Kept an interface so the gates are testable without a DB.
 type keelFindingsLister interface {
 	ListFindings(ctx context.Context, limit int) ([]keel.ListedFinding, error)
-	ListFindingsForWorkspace(ctx context.Context, workspaceID string, limit int) ([]keel.ListedFinding, error)
+	ListFindingsForWorkspacePage(ctx context.Context, workspaceID string, limit, offset int) ([]keel.ListedFinding, error)
 }
 
 // keelFindingsAuthenticator resolves the caller's identity (the authManager satisfies it). The tenant read's
@@ -49,7 +50,11 @@ func newKeelFindingsWorkspaceHandler(authn keelFindingsAuthenticator, l keelFind
 			writeJSONErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		findings, err := l.ListFindingsForWorkspace(req.Context(), ac.WorkspaceID, 100)
+		// Pagination: ?limit=&offset= (newest-first). Absent/garbage → 0 → store default page; the
+		// response stays a bare array, so the shape is unchanged.
+		limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(req.URL.Query().Get("offset"))
+		findings, err := l.ListFindingsForWorkspacePage(req.Context(), ac.WorkspaceID, limit, offset)
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
