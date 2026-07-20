@@ -306,7 +306,10 @@ func (s *StreamHandler) serve(
 			return nil, err
 		}
 		for name, values := range r.Header {
-			if strings.EqualFold(name, "Host") {
+			// Skip Host, and Accept-Encoding: forwarding the client's Accept-Encoding disables Go's
+			// transparent gzip decoding, so a gzipped upstream stream would be relayed as compressed
+			// bytes under text/event-stream — garbage to a streaming client. Let the transport decode.
+			if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Accept-Encoding") {
 				continue
 			}
 			for _, v := range values {
