@@ -1,0 +1,26 @@
+# The public hostname. For a real domain Caddy provisions a Let's Encrypt
+# certificate automatically on first boot, caches it in the caddy_data volume
+# across restarts, and auto-renews well before expiry; for `localhost` it serves
+# with its own internal CA (local testing, curl -k). Plain :80 is auto-redirected
+# to :443.
+#
+# Certificates are issued WITHOUT an ACME account email — Let's Encrypt does not
+# require one and Caddy's auto-renewal makes expiry notices redundant. To receive
+# Let's Encrypt expiry emails anyway, add a global options block at the top of
+# this file:   { email you@example.com }
+{$LENS_DOMAIN} {
+	# ── Optional admin lockdown ───────────────────────────────────────────────
+	# By default LENS_API_KEY is UNSET, so every admin route already fails closed
+	# (401) and this block is unnecessary. If you DO set an admin key, uncomment
+	# to keep the admin god-key surface off the public door — reach it only over
+	# the loopback :8080 (SSH tunnel). The bulk of admin is under /v1/admin/* and
+	# /metrics; a couple of routes (POST /v1/workspaces, /ha/status) sit
+	# elsewhere, so the robust control remains leaving LENS_API_KEY unset. See
+	# docs/remote-host.md.
+	# @admin path /v1/admin/* /metrics
+	# respond @admin 403
+
+	# Terminate TLS here and forward plain HTTP to lens over the internal compose
+	# network. lens never needs a certificate, so its container stays read_only.
+	reverse_proxy lens:8080
+}

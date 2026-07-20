@@ -1,11 +1,16 @@
 # Talyvor Lens — production docker-compose
 #
-# Deploy: `cp .env.production.example .env`, set POSTGRES_PASSWORD + a provider
-# key in .env, then `docker compose up -d`. The stack FAILS CLOSED if
-# POSTGRES_PASSWORD is unset (compose ${POSTGRES_PASSWORD:?}) — there is no weak
-# default, so an insecure DB password can never silently reach production.
-# Lens listens on :8080. The dashboard is at /dashboard, the public status
-# page is at /status, and the OpenAI-compatible proxy is at /v1/proxy/*.
+# Deploy: `cp .env.production.example .env`, set POSTGRES_PASSWORD, a provider
+# key, and LENS_DOMAIN in .env, then `docker compose up -d`. The stack FAILS
+# CLOSED if POSTGRES_PASSWORD is unset (compose ${POSTGRES_PASSWORD:?}) — there
+# is no weak default, so an insecure DB password can never silently reach
+# production.
+# The Caddy service terminates TLS on :443 (automatic Let's Encrypt for
+# LENS_DOMAIN) and reverse-proxies to lens over the internal network. Lens
+# itself listens on :8080, published only on 127.0.0.1 (loopback) — the
+# internet reaches it ONLY through Caddy. The dashboard is at /dashboard, the
+# public status page at /status, the OpenAI-compatible proxy at /v1/proxy/*.
+# See docs/remote-host.md to put this on a public host.
 #
 # Image source: defaults to the public registry tag. `docker compose build`
 # rebuilds from the local Dockerfile if you want to run unreleased code.
@@ -15,8 +20,13 @@ services:
     image: ghcr.io/gaboracnicolai/talyvor-lens:latest
     build:
       context: .
+    # Loopback-only publish: lens is reachable from the HOST at 127.0.0.1:8080
+    # (local dev, `make status`, the tools/trial harness, and admin bootstrap
+    # over an SSH tunnel) but NEVER from the public internet — that path is
+    # Caddy :443 only. Change this to 0.0.0.0 / "8080:8080" and you re-expose the
+    # raw HTTP proxy + the admin surface directly to the internet.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       # Route through PgBouncer (transaction pooling) instead of Postgres directly.
       # LENS_DB_PGBOUNCER switches pgx to simple query protocol (required).
@@ -196,8 +206,10 @@ services:
   nats:
     image: nats:2.10-alpine
     command: ["-js", "-m", "8222"]
-    ports:
-      - "4222:4222"
+    # No host publish. NATS is an INTERNAL message bus — every service reaches it
+    # at nats://nats:4222 over the compose network. Publishing 4222 on 0.0.0.0
+    # (the previous config) put an UNAUTHENTICATED bus on the public interface of
+    # any internet-facing VM. The -m 8222 monitoring endpoint is internal-only too.
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 5s
@@ -230,6 +242,36 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # ── TLS front door ──────────────────────────────────────────────────────────
+  # Caddy terminates HTTPS on :443 (and 301-redirects :80) and reverse-proxies to
+  # lens over the internal network. Chosen over lens's built-in Let's Encrypt
+  # autocert (cmd/lens/serve.go, LENS_TLS_DOMAIN) because autocert needs a
+  # WRITABLE cert cache on the lens container — which would force relaxing
+  # `read_only: true`, a hardening property worth keeping. Caddy owns its own cert
+  # store (the caddy_data volume), so lens stays fully locked down and cert-free.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Your public hostname (or `localhost` for a local run). Required — the
+      # stack fails closed rather than silently serving on the wrong name. Caddy
+      # provisions + auto-renews the Let's Encrypt cert for it (no email needed).
+      - LENS_DOMAIN=${LENS_DOMAIN:?LENS_DOMAIN must be set — your public hostname, or localhost for a local run (see .env.production.example)}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      lens:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   pgdata:
   redisdata:
+  caddy_data:
+  caddy_config:

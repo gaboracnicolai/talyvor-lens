@@ -1,3 +1,9 @@
+# Local-development backing services (Postgres, Redis, NATS) for running lens
+# from source (`go run ./cmd/lens`) against real infra. Every port is bound to
+# 127.0.0.1 so host tooling (psql, redis-cli) still reaches it while the service
+# is NEVER exposed on a machine's public interface. This file is for local dev
+# only — do not run it on a public VM; the internet-facing stack is
+# docker-compose.yaml (fronted by Caddy). See docs/remote-host.md.
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -5,21 +11,21 @@ services:
       POSTGRES_DB: talyvor_lens
       POSTGRES_USER: lens
       POSTGRES_PASSWORD: localdev
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
 
   nats:
     image: nats:2.10-alpine
     command: ["-js", "-m", "8222"]
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
 
 volumes:
   pgdata:
