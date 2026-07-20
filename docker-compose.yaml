@@ -48,6 +48,27 @@ services:
       - LENS_AWS_SECRET_ACCESS_KEY=${LENS_AWS_SECRET_ACCESS_KEY:-}
       - LENS_OLLAMA_URL=${LENS_OLLAMA_URL:-}
       - LENS_LOG_LEVEL=${LENS_LOG_LEVEL:-info}
+      # Identity / admin / bootstrap. These are read by config.Load but were never
+      # passed through, so setting them in .env did nothing and the container saw an
+      # empty value. All use the `:-` shape so an unset var passes as empty and keeps
+      # its documented fail-safe default: LENS_API_KEY empty ⇒ NO request can be admin
+      # (internal/auth/manager.go:298 — the entire fail-closed posture, unchanged);
+      # LENS_JWT_PRIVATE_KEY / LENS_POVI_CHALLENGE_KEY empty ⇒ an ephemeral key is
+      # generated (fine for a single non-HA instance; set them so JWTs and node-pinned
+      # pubkeys survive a restart — required under LENS_HA_ENABLED); LXC-grant flag
+      # empty ⇒ off.
+      - LENS_API_KEY=${LENS_API_KEY:-}
+      - LENS_JWT_PRIVATE_KEY=${LENS_JWT_PRIVATE_KEY:-}
+      - LENS_POVI_CHALLENGE_KEY=${LENS_POVI_CHALLENGE_KEY:-}
+      - LENS_ADMIN_LXC_GRANT_ENABLED=${LENS_ADMIN_LXC_GRANT_ENABLED:-}
+      # Pattern mining/earning (runbook Trap 5 — "opt-in succeeds, earning silently zero").
+      # These were only ever passed by a gitignored docker-compose.override.yml, so a fresh
+      # clone could never enable them. `:-` is safe for BOTH defaults: MINING is parseBoolEnv
+      # (config.go:911) so empty ⇒ false (the opt-in route 503s until you set it true); EARNING
+      # is in the economy default-ON loop (config.go:1682-1688) which only overrides when the
+      # env value is NON-EMPTY, so empty ⇒ its default TRUE is preserved (no silent disable).
+      - LENS_PATTERN_MINING_ENABLED=${LENS_PATTERN_MINING_ENABLED:-}
+      - LENS_PATTERN_EARNING_ENABLED=${LENS_PATTERN_EARNING_ENABLED:-}
     depends_on:
       pgbouncer:
         condition: service_healthy
