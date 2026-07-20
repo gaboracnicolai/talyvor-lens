@@ -5,7 +5,7 @@ End-to-end setup in under five minutes. By the end of this guide you'll have Len
 ## Prerequisites
 
 - Docker and Docker Compose installed (Docker Desktop on macOS / Windows; `docker.io` + `docker-compose-plugin` on Linux).
-- At least one LLM provider API key (OpenAI, Anthropic, Google, Mistral, Groq, or AWS Bedrock).
+- **Both** an OpenAI **and** an Anthropic API key — Lens requires `LENS_OPENAI_API_KEY` **and** `LENS_ANTHROPIC_API_KEY` to start (see Step 1). If you only use one provider, a dummy non-empty value satisfies the boot check for the other. The remaining providers (Google, Mistral, Groq, AWS Bedrock) are optional.
 - A terminal with `curl` and `jq` (optional — for pretty-printing JSON responses).
 
 ## Step 1 — Configure
@@ -14,14 +14,19 @@ End-to-end setup in under five minutes. By the end of this guide you'll have Len
 cp .env.production.example .env
 ```
 
-Edit `.env`. The minimum to bring up Lens with a working provider:
+Edit `.env`. The minimum to bring up Lens:
 
 ```bash
-LENS_OPENAI_API_KEY=sk-...
+LENS_OPENAI_API_KEY=sk-...            # real — this guide proxies to OpenAI in Step 4
+LENS_ANTHROPIC_API_KEY=sk-dummy       # required to boot; a dummy non-empty value is fine if you don't use it
 POSTGRES_PASSWORD=changeme-in-production
 ```
 
-Set additional provider keys (Anthropic, Google, Mistral, Groq) if you want to use them. Each missing key just disables that provider's route — it doesn't block startup.
+**Both `LENS_OPENAI_API_KEY` and `LENS_ANTHROPIC_API_KEY` are mandatory.** `config.Load` (`internal/config/config.go`) hard-requires both and refuses to start with `ErrMissingEnv` if *either* is empty — this is **not** "at least one". And because `docker-compose.yaml` defaults these two with `:-` (empty) rather than `:?`, an unset key does **not** fail `docker compose up`; instead the `lens` container comes up and **crash-loops**. The symptom is a `lens` service stuck restarting — `docker compose logs lens` shows `missing required environment variables: [LENS_ANTHROPIC_API_KEY]`. A dummy non-empty string satisfies the boot check for a provider you don't actually call.
+
+The *other* providers (Google, Mistral, Groq, AWS Bedrock) really are optional: a missing key there only disables that provider's `/v1/proxy/*` route (503) and does not block startup.
+
+For the full set of first-boot traps, see [local-standup-runbook.md](local-standup-runbook.md) (Trap 3, which documents this exact requirement).
 
 ## Step 2 — Start
 
@@ -137,8 +142,9 @@ docker compose down -v           # stop and wipe volumes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `lens` container restarting / crash-looping | `LENS_OPENAI_API_KEY` or `LENS_ANTHROPIC_API_KEY` unset — `config.Load` requires **both** (compose defaults them with `:-`, so `up` succeeds but lens exits) | `docker compose logs lens` → `missing required environment variables`; set both in `.env`, then `docker compose up -d` |
 | `lens` container restarting | Postgres init failed | `docker compose logs migrate` |
-| `503 Service Unavailable` from `/v1/proxy/openai/*` | `LENS_OPENAI_API_KEY` missing in `.env` | Set the key, `docker compose up -d` |
+| `503 Service Unavailable` from `/v1/proxy/openai/*` | `LENS_OPENAI_API_KEY` is invalid or a dummy value (a *missing* one crash-loops the container instead — see the row above) | Set a real key, `docker compose up -d` |
 | `401 Unauthorized` from proxy | Wrong Lens API key | `curl /v1/api/keys` to list, regenerate if needed |
 | Dashboard shows no data | First request hasn't fired yet | Send a test request via curl |
 | Status page shows red | One of postgres/redis/nats is down | `docker compose ps`, restart the offender |
