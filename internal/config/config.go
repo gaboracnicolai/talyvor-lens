@@ -1714,6 +1714,32 @@ func Load() (*Config, error) {
 		// LENS→LXC conversion route stays economy-gated in main.go.
 	}
 
+	// PoVI minting footgun (fail-closed, mirroring the HA signing-key refusals
+	// above). Provisional receipt minting credits SPENDABLE LENS (povi/mint.go
+	// Credit) and is made safe ONLY by random challenge-and-slash, whose deterrent
+	// is the inequality P(challenge) × slash > gain. LENS_POVI_CHALLENGE_RATE is
+	// P(challenge); at 0 the inequality collapses to 0 > gain and every fabricated
+	// receipt mints unchallenged — "mint on the receipt alone", the exact state
+	// PoVI exists to prevent, reachable by MISCONFIGURATION rather than any code
+	// defect. Refuse to boot.
+	//
+	// Keyed on the EFFECTIVE POVIMintingEnabled — this runs AFTER the economy
+	// kill-switch force-off — so the guard is strictly additive: the ONLY config
+	// that newly fails to boot is effective-minting-on + rate<=0. An economy-off
+	// deployment (minting force-disabled) never trips it.
+	//
+	// We refuse only rate<=0, NOT a positive floor. slash = POVISlashFraction ×
+	// stake is bounded by the node's stake, but gain = ReceiptMineRate ×
+	// attacker-chosen OutputTokens is unbounded, so the safe minimum rate
+	// (gain/slash) is a function of three other configurable knobs (POVIMinStake,
+	// POVISlashFraction, and a per-receipt mint cap that does not yet exist) plus
+	// an attacker-controlled input — an economics decision, not a code constant.
+	// (A negative rate is already rejected by the [0,1] parse above; <=0 restates
+	// the invariant so it survives that bound being loosened.)
+	if c.POVIMintingEnabled && c.POVIChallengeRate <= 0 {
+		return nil, fmt.Errorf("LENS_POVI_MINTING_ENABLED=true requires LENS_POVI_CHALLENGE_RATE > 0: provisional receipt minting credits spendable LENS and is deterred ONLY by random challenge-and-slash (P(challenge) × slash > gain); a zero rate sets P(challenge)=0, removing the only deterrent so a staked node can mint LENS against fabricated, never-challenged traces")
+	}
+
 	return c, nil
 }
 
