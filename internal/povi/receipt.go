@@ -21,13 +21,16 @@
 // provisional/unsafe warning if enabled. Default behavior: verify + record for
 // audit, mint NOTHING.
 //
-// EXISTING TRUST-BASED MINT (the thing PoVI replaces): there is already a
-// trust-based minting path — ComputeMiner.RecordServedRequest mints LENS on
-// every node-served request WITHOUT a receipt. PoVI is designed to replace it.
-// That path remains active and UNSECURED until Part 3 (challenge-and-slash)
-// provides the economic security to switch minting onto verified receipts and
-// retire the blind credit. This is a known, tracked item — the explicit target
-// of Parts 2/3, not an oversight.
+// EXISTING TRUST-BASED MINT (the thing PoVI replaces): there is a legacy
+// trust-based minting path — ComputeMiner.RecordServedRequest mints LENS for a
+// node-served request WITHOUT a receipt. PoVI is its intended successor. It is
+// NOT active by default and does not currently mint: it is gated off by
+// LENS_TRUSTFUL_COMPUTE_MINT_ENABLED (default false, U6 Sybil floor) AND its
+// trigger (Router.NotifyServed, feeding the SetOnRequestServed hook in main.go)
+// has no caller today, so the hook is dormant and mints nothing even if the flag
+// is flipped. It would become a blind, unsecured credit only if it were both
+// deliberately enabled and wired to a live trigger. This is a known, tracked
+// item — the explicit target of Parts 2/3, not an oversight.
 package povi
 
 import (
