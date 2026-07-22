@@ -15,7 +15,7 @@ Index of every doc shipped with the repo. The main [project README](../README.md
 ## Operations
 
 - [Local standup runbook](local-standup-runbook.md) — bring Lens up standalone and take it from zero to a first real served request that mints a `lens_token_ledger` row; documents every silent-zero trap (stale image, both provider keys, the two pattern flags, `earn_verified`, the LXC bootstrap grant).
-- [Remote host](remote-host.md) — put the compose stack on a public VM safely: Caddy TLS front door on :443, lens bound to loopback, NATS closed, and the `LENS_API_KEY`-unset (fail-closed) admin posture. Covers DNS/domain prerequisites, bring-up, TLS verification, and handing a colleague a workspace key.
+- [Remote host](remote-host.md) — put the compose stack on a public VM safely: Caddy TLS front door on :443, lens bound to loopback, NATS closed, and the `LENS_API_KEY`-unset (fail-closed) admin posture. Covers DNS/domain prerequisites, bring-up, TLS verification, and the three-act colleague onboarding (workspace → proxy-scoped key → LXC grant, via `scripts/onboard-trial-user.sh`).
 - [Benchmarks](../benchmarks/README.md) — performance suite + reproducible numbers vs LiteLLM / Portkey.
 - [Status page](../README.md#status) — public health surface at `/status` and `/status.json`.
 

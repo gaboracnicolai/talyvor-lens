@@ -1,6 +1,6 @@
 # Talyvor Lens — Quick Start
 
-End-to-end setup in under five minutes. By the end of this guide you'll have Lens running locally, an issued API key, and a verified working proxy request against OpenAI.
+End-to-end setup in under five minutes. By the end of this guide you'll have Lens running locally, an issued API key, a funded workspace, and a verified working proxy request against OpenAI.
 
 ## Prerequisites
 
@@ -17,11 +17,12 @@ cp .env.production.example .env
 Edit `.env`. The minimum to bring up Lens:
 
 ```bash
-LENS_OPENAI_API_KEY=sk-...            # real — this guide proxies to OpenAI in Step 4
+LENS_OPENAI_API_KEY=sk-...            # real — this guide proxies to OpenAI in Step 5
 LENS_ANTHROPIC_API_KEY=sk-dummy       # required to boot; a dummy non-empty value is fine if you don't use it
 POSTGRES_PASSWORD=changeme-in-production
 LENS_DOMAIN=localhost                 # required; localhost for a local run (real hostname on a public host)
-LENS_API_KEY=paste-openssl-rand-hex-32 # LOCAL admin key — used once in Step 3 to mint your first key
+LENS_API_KEY=paste-openssl-rand-hex-32 # LOCAL admin key — used in Steps 3–4 (mint a key, fund the workspace)
+LENS_ADMIN_LXC_GRANT_ENABLED=true     # exposes the admin funding endpoint used in Step 4 (read once, at boot)
 ```
 
 **Both `LENS_OPENAI_API_KEY` and `LENS_ANTHROPIC_API_KEY` are mandatory.** `config.Load` (`internal/config/config.go`) hard-requires both and refuses to start with `ErrMissingEnv` if *either* is empty — this is **not** "at least one". And because `docker-compose.yaml` defaults these two with `:-` (empty) rather than `:?`, an unset key does **not** fail `docker compose up`; instead the `lens` container comes up and **crash-loops**. The symptom is a `lens` service stuck restarting — `docker compose logs lens` shows `missing required environment variables: [LENS_ANTHROPIC_API_KEY]`. A dummy non-empty string satisfies the boot check for a provider you don't actually call.
@@ -30,7 +31,9 @@ The *other* providers (Google, Mistral, Groq, AWS Bedrock) really are optional: 
 
 `LENS_DOMAIN` is also required. Unlike the provider keys, `docker-compose.yaml` passes it with `:?`, so an unset value makes `docker compose up` **abort immediately** — `error … required variable LENS_DOMAIN is missing a value` — before any container starts. Use `localhost` for a local run; on a public host set your real hostname, and the bundled Caddy service provisions the TLS certificate for it automatically (see [remote-host.md](remote-host.md)).
 
-`LENS_API_KEY` is the admin credential. Minting keys and creating workspaces are admin operations, so **locally you set it** — generate one with `openssl rand -hex 32` and paste it; you use it once, in Step 3. This local-admin posture is deliberate and is the **opposite** of the remote recommendation: on a public host you leave `LENS_API_KEY` **unset** so the admin surface fails closed (see [remote-host.md](remote-host.md)). Don't conflate the two.
+`LENS_API_KEY` is the admin credential. Minting keys, creating workspaces, and funding them are admin operations, so **locally you set it** — generate one with `openssl rand -hex 32` and paste it; you use it in Steps 3 and 4 (mint a key, fund the workspace). This local-admin posture is deliberate and is the **opposite** of the remote recommendation: on a public host you leave `LENS_API_KEY` **unset** so the admin surface fails closed (see [remote-host.md](remote-host.md)). Don't conflate the two.
+
+`LENS_ADMIN_LXC_GRANT_ENABLED=true` registers the admin funding endpoint (`POST /v1/admin/lxc/grant`) that Step 4 uses. It is read **once, at boot** — without it the route is never registered at all (a bare `404`, not a `403`). Same public-host caveat: leave it off there except while actively onboarding ([remote-host.md](remote-host.md) §5).
 
 For the full set of first-boot traps, see [local-standup-runbook.md](local-standup-runbook.md) (Trap 3, which documents this exact requirement).
 
@@ -105,15 +108,36 @@ Export the `key` value for the next steps:
 export LENS_KEY=tlv_ws_paste_yours_here
 ```
 
-> Prefer a dedicated tenant over `default`? Create the workspace first (also admin), then mint against it:
+> Prefer a dedicated tenant over `default`? Create the workspace first (also admin), then mint against it — and in Step 4 fund **that** workspace (`"workspace_id":"acme"`):
 > ```bash
 > curl -X POST http://localhost:8080/v1/workspaces \
 >   -H "Authorization: Bearer $LENS_API_KEY" -H "Content-Type: application/json" \
 >   -d '{"id":"acme","name":"Acme"}'
 > # then POST /v1/workspaces/acme/api-keys with the same body as above
 > ```
+> Or run all three acts (create → mint → fund) in one go with `scripts/onboard-trial-user.sh acme` — its default `LENS_ADMIN_URL` of `http://127.0.0.1:8080` **is** the local stack; no tunnel involved.
 
-## Step 4 — Make your first proxied request
+## Step 4 — Fund the workspace (or your first request fails 402)
+
+Every workspace starts at **0 LXC** — the boot-seeded `default` included — and the **agent allocator** (default-on, fail-closed) pre-debits each scoped-key request's input-cost LXC estimate *before* the upstream call. At 0 LXC that first debit fails and the proxy answers `402 {"error":"agent LXC sub-budget exceeded or insufficient balance"}`.
+
+This is deterministic for the exact request in Step 5, not a corner case: `gpt-4o-mini` is in the price catalog (`internal/catalog/seed.go`, $0.15/1M input), and `lxcEstimate` (`internal/proxy/lxc_gate.go`) rounds any non-zero estimate **up** to whole µLXC — even `"Hello!"` (6 bytes ⇒ 1 estimated token ⇒ 2 µLXC) exceeds a balance of 0. The only inputs that skip the debit entirely (estimate 0) are a model **absent from the catalog** or a prompt **under 4 bytes**; neither applies here, or to any normal request.
+
+Fund `default` with the admin grant (the route exists because Step 1 set `LENS_ADMIN_LXC_GRANT_ENABLED=true`; it is read at boot — if you skipped it, add it to `.env` and run `docker compose up -d lens` first):
+
+```bash
+curl -X POST http://localhost:8080/v1/admin/lxc/grant \
+  -H "Authorization: Bearer $LENS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace_id":"default","amount_ulxc":50000000,"reason":"quickstart funding"}'
+# → {"workspace_id":"default","granted_ulxc":50000000,"new_balance_ulxc":50000000}
+```
+
+`50000000` µLXC = 50 LXC ≈ $5 of estimate headroom — deliberately equal to the per-key agent sub-budget ceiling, so a larger grant buys nothing (see "Why 50 LXC" in [remote-host.md](remote-host.md) §5).
+
+**Local vs public posture — don't conflate.** Locally, hitting an admin endpoint on `localhost` with `LENS_API_KEY` set in `.env` is the normal way of working. On a **public host** these same three acts (workspace → key → grant) are a deliberate ritual: `LENS_API_KEY` armed temporarily, admin reached only over a loopback SSH tunnel, both disarmed afterwards. That tunnel discipline belongs to the public host — [remote-host.md](remote-host.md) §5 — not here.
+
+## Step 5 — Make your first proxied request
 
 ```bash
 curl http://localhost:8080/v1/proxy/openai/v1/chat/completions \
@@ -127,7 +151,7 @@ curl http://localhost:8080/v1/proxy/openai/v1/chat/completions \
 
 Lens forwards the request to OpenAI using `LENS_OPENAI_API_KEY` from your `.env`, caches the response, scores it, and records the cost. The response is OpenAI-format unchanged.
 
-## Step 5 — View your dashboard
+## Step 6 — View your dashboard
 
 Open `http://localhost:8080/dashboard` in a browser. You'll see:
 
@@ -138,7 +162,7 @@ Open `http://localhost:8080/dashboard` in a browser. You'll see:
 
 Send the same request again. Refresh the dashboard. Cache hit rate jumps to 50% — the second request was served from the exact cache, no upstream API call.
 
-## Step 6 — Check your savings
+## Step 7 — Check your savings
 
 ```bash
 curl -H "Authorization: Bearer $LENS_KEY" \
@@ -179,5 +203,6 @@ docker compose down -v           # stop and wipe volumes
 | `503 Service Unavailable` from `/v1/proxy/openai/*` | `LENS_OPENAI_API_KEY` is invalid or a dummy value (a *missing* one crash-loops the container instead — see the row above) | Set a real key, `docker compose up -d` |
 | `401 Unauthorized` from proxy | Key not recognized (wrong or expired) | mint a fresh one (Step 3); list a workspace's keys with `GET /v1/workspaces/default/api-keys` (admin or that workspace's key) |
 | `403 Forbidden` from `/v1/proxy/*` | Key authenticated but lacks the `proxy` scope (enforced since #329) | re-mint with `"scopes":["proxy"]` (Step 3) |
+| `402 Payment Required` from `/v1/proxy/*` (`agent LXC sub-budget exceeded or insufficient balance`) | The **agent allocator** (`LENS_LXC_AGENT_ALLOCATION_ENABLED`, default **on**, fail-closed; fires **only on the scoped-key lane** — admin/JWT traffic never enters it) pre-debits the request's LXC estimate, and the workspace can't cover it — fresh workspaces, the seeded `default` included, start at 0 LXC. **Not** the LXC gate (`LENS_LXC_GATING_ENABLED` + `LENS_LXC_SHADOW_SPEND_ENABLED`, both default-off). Same wall as [Trap 7](local-standup-runbook.md#the-traps-each-cost-real-time) | Fund the workspace (Step 4). The allocator flag isn't in `docker-compose.yaml`'s env list, so it can't be disabled from `.env` — fund, don't fight it |
 | Dashboard shows no data | First request hasn't fired yet | Send a test request via curl |
 | Status page shows red | One of postgres/redis/nats is down | `docker compose ps`, restart the offender |
