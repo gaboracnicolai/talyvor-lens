@@ -53,16 +53,20 @@ type Receipt struct {
 	MerkleRoot   [32]byte `json:"merkle_root"`
 	Timestamp    int64    `json:"timestamp"`
 	Signature    []byte   `json:"signature"`
-	// LeafCount is the number of leaves in the committed trace (output runes).
-	// It is NOT part of the signed CanonicalPayload — it's an informational
-	// hint so Lens knows the sampling range [0, LeafCount) for a Part-3
-	// challenge. A node can't benefit from lying about it: the sampled
-	// positions must still verify against the SIGNED MerkleRoot (understating
-	// just narrows the range checked; overstating gets it asked for positions
-	// it can't answer → the challenge fails).
+	// LeafCount is the number of leaves in the committed trace (output runes). It
+	// IS part of the signed CanonicalPayload (since the mint-basis work): it drives
+	// a security decision — the challenger samples positions in [0, LeafCount) and
+	// pathsValid pins NumLeaves to it — and an unsigned field steering a signed
+	// struct is a trap. Signing it invalidates any signature produced before this
+	// change; that is acceptable because provisional minting has never run (no live
+	// receipts to honor), and nodes + Lens deploy together. A node still can't
+	// benefit from a bad value: sampled positions must verify against the SIGNED
+	// MerkleRoot (understating narrows the range; overstating gets it asked for
+	// positions it can't answer → the challenge fails) — signing just makes it
+	// tamper-evident like every other committed field.
 	LeafCount int `json:"leaf_count,omitempty"`
 	// LeafKind records what each committed leaf REPRESENTS — output runes (the
-	// stand-in for backends with no token boundaries) or true model tokens. Like
+	// stand-in for backends with no token boundaries) or true model tokens. Unlike
 	// LeafCount it is NOT part of the signed CanonicalPayload, so rune-rooted
 	// receipts signed before this field existed stay verifiable unchanged; it labels
 	// granularity for the Part-3 challenge + audit. A node can't benefit from
@@ -80,9 +84,15 @@ func GenerateNodeKey() (ed25519.PublicKey, ed25519.PrivateKey, error) {
 
 // CanonicalPayload is the deterministic, length-prefixed byte layout that the
 // signature covers: RequestID|NodeID|WorkspaceID|Model|InputTokens|
-// OutputTokens|MerkleRoot|Timestamp. Variable-length fields are length-prefixed
-// (4-byte big-endian) so adjacent fields can never blur into one another
-// (the "ab|c" vs "a|bc" ambiguity), making the signed message unambiguous.
+// OutputTokens|MerkleRoot|Timestamp|LeafCount. Variable-length fields are
+// length-prefixed (4-byte big-endian) so adjacent fields can never blur into one
+// another (the "ab|c" vs "a|bc" ambiguity), making the signed message unambiguous.
+//
+// LeafCount is appended LAST (since the mint-basis work): it steers the Part-3
+// challenge (sample range [0, LeafCount), pinned NumLeaves), so it must be signed.
+// This changes the signed bytes and INVALIDATES any pre-existing signature —
+// acceptable because provisional minting has never run and nodes + Lens deploy
+// together, so there are no live receipts to honor.
 func CanonicalPayload(r Receipt) []byte {
 	var buf []byte
 	putStr := func(s string) {
@@ -104,6 +114,7 @@ func CanonicalPayload(r Receipt) []byte {
 	putI64(int64(r.OutputTokens))
 	buf = append(buf, r.MerkleRoot[:]...)
 	putI64(r.Timestamp)
+	putI64(int64(r.LeafCount)) // signed since the mint-basis work — see the doc above
 	return buf
 }
 

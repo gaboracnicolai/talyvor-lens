@@ -61,6 +61,27 @@ func TestVerify_TamperedFieldFails(t *testing.T) {
 	}
 }
 
+// LeafCount drives a SECURITY decision — the challenger samples positions in
+// [0, LeafCount) and pathsValid pins NumLeaves to it — so it must be SIGNED, not
+// a free rider on a signed struct. Tampering it after signing must break
+// verification (it did NOT before it entered CanonicalPayload).
+func TestVerify_TamperedLeafCountFails(t *testing.T) {
+	pub, priv, _ := GenerateNodeKey()
+	r := sampleReceipt()
+	r.LeafCount = 50
+	signed := SignReceipt(priv, r)
+
+	tampered := signed
+	tampered.LeafCount = 5_000_000 // inflate the (now-signed) committed length
+	if err := VerifyReceipt(tampered, pub); err == nil {
+		t.Error("tampering LeafCount must break verification once it is signed")
+	}
+	// The untampered receipt still verifies (LeafCount is part of the signed bytes).
+	if err := VerifyReceipt(signed, pub); err != nil {
+		t.Errorf("untampered LeafCount=50 receipt must verify: %v", err)
+	}
+}
+
 // A receipt signed by one node must not verify under a different node's key.
 func TestVerify_WrongKeyFails(t *testing.T) {
 	_, priv, _ := GenerateNodeKey()
