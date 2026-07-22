@@ -56,13 +56,30 @@ readonly GRANT_ULXC=50000000
 # ── Arguments + environment ───────────────────────────────────────────────────
 [[ $# -eq 1 ]] || usage
 case $1 in -h|--help) usage 0 ;; esac
+
+# God-key check EARLY — before workspace validation or any network use, so a
+# keyless invocation refuses with the ritual spelled out rather than a terse
+# mid-flight failure. (Deliberately after -h|--help: help works keyless.)
+if [[ -z "${LENS_API_KEY:-}" ]]; then
+  cat >&2 <<'EOF'
+ERROR: LENS_API_KEY is not set (or is empty) — refusing before touching anything.
+
+This script performs three ADMIN acts and needs the god-key temporarily armed in
+the server .env (docs/remote-host.md §5, "The full ritual"):
+  on the VM :  add LENS_API_KEY=… and LENS_ADMIN_LXC_GRANT_ENABLED=true to .env,
+               then recreate:  docker compose up -d lens
+  tunnel    :  ssh -N -L 8080:127.0.0.1:8080 user@<host>
+  here      :  read -r -s LENS_API_KEY && export LENS_API_KEY   # stays out of history
+EOF
+  exit 1
+fi
+
 WS=$1
 [[ $WS =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] \
   || die "workspace '$WS' — use lowercase letters, digits, '-' or '_' (max 63 chars)"
 readonly WS
 readonly KEY_NAME="trial"
 
-: "${LENS_API_KEY:?set LENS_API_KEY (the admin key temporarily armed in the server .env — docs/remote-host.md §5)}"
 LENS_ADMIN_URL=${LENS_ADMIN_URL:-http://127.0.0.1:8080}
 LENS_ADMIN_URL=${LENS_ADMIN_URL%/}
 readonly LENS_ADMIN_URL
