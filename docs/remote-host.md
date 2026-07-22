@@ -91,8 +91,8 @@ silently miss one.
 We deliberately did **not** add a second internal-only listener for admin: that is a Go change, and the
 loopback publish already gives a safe admin path (below).
 
-**When you must run an admin action** (creating the first workspace, minting the first key), do it over
-the loopback, never the public door:
+**When you must run an admin action** (creating the first workspace, minting the first key, funding a
+workspace — §5), do it over the loopback, never the public door:
 
 ```bash
 # from your laptop, tunnel to the VM's loopback :8080
@@ -112,19 +112,47 @@ caveat there that a couple of admin routes live outside `/v1/admin/*`).
 ## 5. Hand a colleague a workspace key
 
 Workspace keys are per-tenant `tlv_ws_…` credentials; a colleague uses one as a normal bearer token
-against `https://lens.example.com`. Bootstrap needs admin (over the tunnel from §4):
+against `https://lens.example.com`. Onboarding is **three admin commands, not two** — create the
+workspace, mint its key, **fund it**. Skip the third and the key's very first request fails with
+`402 {"error":"agent LXC sub-budget exceeded or insufficient balance"}` — see "Why the funding step
+is not optional" below.
+
+`scripts/onboard-trial-user.sh` runs all three (one invocation = one onboarded user). The raw
+commands, wrapped in the §4 ritual, are:
 
 ```bash
-# 1. create the workspace (admin)
+# 0. the §4 ritual: tunnel + temporary admin key. On the VM, set BOTH in .env:
+#      LENS_API_KEY=…                      (openssl rand -hex 32)
+#      LENS_ADMIN_LXC_GRANT_ENABLED=true   (the grant route is default-off and UNREGISTERED
+#                                           without it — step 3 would 404)
+#    then restart:  docker compose up -d lens
+ssh -N -L 8080:127.0.0.1:8080 user@lens.example.com &
+export LENS_API_KEY=…   # the same value you just set on the VM
+
+# 1. create the workspace (admin). Both id and name are required; returns 201 {"id":"acme"}.
+#    NOTE: this route is an UPSERT — re-posting an existing id resets its config to this body.
 curl -s -X POST http://127.0.0.1:8080/v1/workspaces \
   -H "Authorization: Bearer $LENS_API_KEY" -H 'Content-Type: application/json' \
   -d '{"id":"acme","name":"Acme"}'
 
-# 2. mint a scoped key for it (admin). Give it the proxy scope so it can call /v1/proxy/*.
+# 2. mint a scoped key for it (admin). Give it the proxy scope so it can call /v1/proxy/*
+#    (optional "expires_at": RFC3339 — good hygiene for trial keys). Returns 201 with
+#    key / id / prefix / name / scopes / warning; "key" (tlv_ws_…) is returned ONCE.
+#    Hand THAT to your colleague (a password manager, not chat).
 curl -s -X POST http://127.0.0.1:8080/v1/workspaces/acme/api-keys \
   -H "Authorization: Bearer $LENS_API_KEY" -H 'Content-Type: application/json' \
   -d '{"name":"alice-laptop","scopes":["proxy"]}'
-# → {"key":"tlv_ws_…"}  ← returned ONCE. Hand THIS to your colleague (a password manager, not chat).
+
+# 3. fund it (admin). 50000000 µLXC = 50 LXC = $5 at the fixed $0.10/LXC peg — sizing
+#    rationale below. Returns 200 {"workspace_id":…,"granted_ulxc":…,"new_balance_ulxc":…}.
+#    Re-running re-grants: the LXC ledger is append-only.
+curl -s -X POST http://127.0.0.1:8080/v1/admin/lxc/grant \
+  -H "Authorization: Bearer $LENS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"acme","amount_ulxc":50000000,"reason":"trial comp: acme"}'
+
+# 4. done onboarding? Remove LENS_API_KEY from the VM's .env and `docker compose up -d lens`
+#    again → admin fails closed. (LENS_ADMIN_LXC_GRANT_ENABLED may stay set: with no admin
+#    key every requireAdmin route is inert, so the flag alone exposes nothing.)
 ```
 
 They then point any OpenAI/Anthropic client at the proxy:
@@ -136,6 +164,32 @@ curl https://lens.example.com/v1/proxy/openai/v1/chat/completions \
 ```
 
 The key never grants admin, and a workspace can only ever see its own data.
+
+### Why the funding step is not optional (the 402, precisely)
+
+A fresh workspace has **0 LXC**, and on the workspace-key lane the first request is blocked
+**pre-serve by the agent allocator — not by the LXC gate**:
+
+- API-key auth stamps the key's ID into the auth context (`internal/auth/manager.go`; JWT/admin
+  traffic structurally carries none), which routes the request into the per-scoped-key allocator
+  (`internal/proxy/agent_allocator.go`). The allocator is **default-on**
+  (`LENS_LXC_AGENT_ALLOCATION_ENABLED`, `internal/config/config.go`) and **fail-closed**: it debits
+  an input-side cost estimate against the workspace's real LXC balance *before* the upstream call,
+  and an insufficient balance means
+  `402 {"error":"agent LXC sub-budget exceeded or insufficient balance"}` (`internal/proxy/proxy.go`).
+- The LXC **gate** (`LENS_LXC_GATING_ENABLED` + `LENS_LXC_SHADOW_SPEND_ENABLED`) is a separate,
+  default-off mechanism and is NOT what rejects a fresh workspace — diagnosing the 402 as the gate
+  sends you to the wrong flags.
+- LXC enters a workspace in exactly three ways: a Stripe purchase (`LENS_BILLING_ENABLED`, default
+  off), `POST /v1/workspaces/{wsID}/lxc/convert` (useless at birth — it spends LENS the workspace
+  has not yet earned), and the admin grant above. Hence step 3.
+
+**Grant sizing — why 50 LXC:** every scoped key draws against a per-key sub-budget ceiling that
+defaults to exactly **50 LXC = $5** (`DefaultAgentCeilingLXC`, `internal/economy/agent_subbudget.go`);
+raising it is a store-level operation with no HTTP route. Granting more than 50 LXC to a one-key
+workspace strands the excess behind the ceiling; granting exactly 50 makes grant == ceiling, all of
+it spendable. Comped LXC cannot compound — an `admin_grant` never satisfies the verified-to-earn
+floor (`internal/earnverify/verify.go`) — so total exposure is exactly the grant.
 
 ## Port exposure — the full sweep
 
