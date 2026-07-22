@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -191,6 +192,7 @@ func (s *Server) MountAuthenticated(r chi.Router) {
 	r.Get("/v1/api/cache/stats", s.handleCacheStats)
 	r.Get("/v1/api/cache/top-patterns", s.handleCacheTopPatterns)
 	r.Get("/v1/api/models/usage", s.handleSpendBy("model"))
+	r.Get("/v1/api/usage", s.handleUsage) // per-model usage + serve_source cache hit rate (trial core), one call
 	r.Get("/v1/api/models/recommendations", s.handleModelsRecommendations)
 	r.Get("/v1/api/eval/runs", s.handleEvalRuns)
 	if s.economyEnabled { // U3: economy dashboard-API surface
@@ -781,6 +783,136 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		"total_hit_rate":        totalRate,
 		"entries_count":         entries,
 		"estimated_savings_usd": savings,
+	})
+}
+
+// usagePerModelSQL — per-model rollup for a workspace+window PLUS the per-model cache-hit count
+// (serve_source, migration 0100). A strict superset of handleSpendBy("model"): same
+// requests/tokens/cost, with cache_hits added. Same tenancy clause (workspace_id + window) as every
+// other spend reader. $1=workspace_id $2=days.
+const usagePerModelSQL = `SELECT model,
+  COUNT(*) AS requests,
+  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(cost_usd), 0) AS cost_usd,
+  COUNT(*) FILTER (WHERE serve_source LIKE 'cache_hit%') AS cache_hits
+FROM token_events
+WHERE workspace_id = $1
+  AND created_at > NOW() - INTERVAL '1 day' * $2
+GROUP BY model
+ORDER BY cost_usd DESC`
+
+// usageBySourceSQL — the serve_source composition for the same workspace+window. The hit rate is
+// hits (serve_source LIKE 'cache_hit%') over this whole recorded denominator; returning the full
+// breakdown makes the denominator's composition explicit (see handleUsage on the node-serve gap).
+// $1=workspace_id $2=days.
+const usageBySourceSQL = `SELECT serve_source, COUNT(*)
+FROM token_events
+WHERE workspace_id = $1
+  AND created_at > NOW() - INTERVAL '1 day' * $2
+GROUP BY serve_source`
+
+// handleUsage serves per-model usage + the cache hit rate for a workspace+window, over token_events,
+// scoped from the AUTHENTICATED key (never client input; an admin key may target ?workspace_id).
+// It is the trial's core read — the /spend by-model table + cache card and the Overview's hit rate
+// in one call — following the /v1/api/spend/* handlers' shape.
+//
+// THE HIT RATE IS MEASURED FROM serve_source (migration 0100): hits = rows LIKE 'cache_hit%', over
+// the whole recorded denominator. The legacy `cached` boolean is deliberately NOT used — nothing
+// writes it true, so the pre-existing cache_hit_rate/total_hit_rate fields read a dead 0.
+//
+// DENOMINATOR CAVEAT — node serves: a node-routed request writes NO token_events row (tryNodeRouting
+// records to the learner, not this table), so node serves are absent from BOTH numerator and
+// denominator. Inert today (node routing default-off, no nodes). When enabled, the denominator would
+// undercount and this rate would read HIGH. A reader sees this in `by_source`: it only ever carries
+// 'upstream' + cache_hit_* keys — there is no 'node' bucket, because node serves are unrecorded. The
+// real fix is tryNodeRouting writing a token_events row (owned by the serve-visibility/node work),
+// not this read endpoint.
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	if s.pool == nil {
+		writeError(w, http.StatusInternalServerError, "database not configured")
+		return
+	}
+	wsID, ok := s.effectiveWorkspaceID(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "forbidden: no workspace identity")
+		return
+	}
+	days := queryInt(r, "days", 30)
+
+	// Per-model rollup (incl. per-model cache hits).
+	rows, err := s.pool.Query(r.Context(), usagePerModelSQL, wsID, days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+	models := []map[string]any{}
+	for rows.Next() {
+		var (
+			model                              string
+			requests, inTok, outTok, cacheHits int64
+			cost                               float64
+		)
+		if err := rows.Scan(&model, &requests, &inTok, &outTok, &cost, &cacheHits); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		models = append(models, map[string]any{
+			"model":         model,
+			"requests":      requests,
+			"input_tokens":  inTok,
+			"output_tokens": outTok,
+			"cost_usd":      cost,
+			"cache_hits":    cacheHits,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Cache rollup from the serve_source composition.
+	srcRows, err := s.pool.Query(r.Context(), usageBySourceSQL, wsID, days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer srcRows.Close()
+	bySource := map[string]int64{}
+	var total, hits int64
+	for srcRows.Next() {
+		var source string
+		var n int64
+		if err := srcRows.Scan(&source, &n); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		bySource[source] = n
+		total += n
+		if strings.HasPrefix(source, "cache_hit") {
+			hits += n
+		}
+	}
+	if err := srcRows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	hitRate := 0.0
+	if total > 0 {
+		hitRate = float64(hits) / float64(total)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"period_days": days,
+		"models":      models,
+		"cache": map[string]any{
+			"total_requests": total,
+			"cache_hits":     hits,
+			"misses":         total - hits,
+			"hit_rate":       hitRate,
+			"by_source":      bySource,
+		},
 	})
 }
 
