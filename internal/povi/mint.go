@@ -55,18 +55,14 @@ var (
 )
 
 // ProvisionalMintAmountTokens is the µLENS a mint of `outputTokens` WOULD credit
-// (rate × tokens / 1000, rounded DOWN — SEC-2). This is the pricing kernel;
+// (rate × tokens / 1000, rounded DOWN — SEC-2). It is the ONLY amount helper:
 // MintFromReceipt feeds it the gateway-MEASURED token count, never a node claim.
+// There is deliberately NO Receipt-taking variant — a helper that computes an
+// amount from a node's unverified r.OutputTokens is the exact shape of the bug
+// this layer closes, and a "for display only" comment is not a real guard. Any
+// "would mint X" readout must call this over a MEASURED count.
 func ProvisionalMintAmountTokens(outputTokens int) int64 {
 	return mining.MulFloor(ReceiptMineRate, float64(outputTokens)/1000.0)
-}
-
-// ProvisionalMintAmount is a NOMINAL display of what a receipt's CLAIMED
-// OutputTokens would price at — for a "would mint X" status readout ONLY. It is
-// NOT the mint basis: MintFromReceipt prices on the gateway measurement
-// (ProvisionalMintAmountTokens over the MEASURED count), never on r.OutputTokens.
-func ProvisionalMintAmount(r Receipt) int64 {
-	return ProvisionalMintAmountTokens(r.OutputTokens)
 }
 
 // MintFromReceipt is the GATED, provisional receipt→LENS mint, priced on Lens's
