@@ -106,6 +106,8 @@ func TestProcess_ValidReceipt_MintingOn_ProvisionalMint(t *testing.T) {
 	pub, priv, _ := GenerateNodeKey()
 	m := &fakeMinter{}
 	p := NewProcessor(NewStore(nil), m, staticLookup(pub), alwaysEligible, true)
+	// Minting ON now REQUIRES a gateway measurement bound to the serving node.
+	p.SetMeasurementLookup(measuredAs("req-1", "node-1", 1000))
 
 	r := sampleReceipt()
 	r.WorkspaceID = "ws-owner"
@@ -150,6 +152,7 @@ func TestProcess_ReplayedReceipt_MintsExactlyOnce(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 
 	p := NewProcessor(newStore(pool), m, staticLookup(pub), alwaysEligible, true)
+	p.SetMeasurementLookup(measuredAs("req-1", "node-1", 1000)) // measured mint on first arrival
 
 	res1, err := p.Process(context.Background(), signed)
 	if err != nil {
