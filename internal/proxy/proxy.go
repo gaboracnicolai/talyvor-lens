@@ -116,6 +116,11 @@ type Proxy struct {
 	nodeRouter           *localrouter.Router
 	lensChallengePriv    ed25519.PrivateKey
 	nodeHTTPClient       *http.Client
+	// servedMeasure records Lens's OWN measurement of each node-served request
+	// (request_id → node_id + measured output tokens), the basis the PoVI receipt
+	// mint prices on (migration 0099). nil ⇒ no measurement recorded, so any
+	// enabled receipt mint fails closed. *povi.MeasurementStore satisfies it.
+	servedMeasure servedMeasurementRecorder
 
 	injectionDetector *injection.Detector
 	budgetEnforcer    *budget.Enforcer
@@ -363,6 +368,19 @@ func (p *Proxy) SetNodeRouter(r *localrouter.Router, lensPriv ed25519.PrivateKey
 	p.nodeHTTPClient = client
 	p.nodeAutoRouteEnabled = enabled
 }
+
+// servedMeasurementRecorder persists Lens's OWN measurement of a node-served
+// request (request_id → node_id + measured output tokens) — the basis the PoVI
+// receipt mint prices on and binds to the serving node (migration 0099).
+// *povi.MeasurementStore satisfies it.
+type servedMeasurementRecorder interface {
+	Record(ctx context.Context, requestID, nodeID, workspaceID string, outputTokens int) error
+}
+
+// SetServedMeasurementRecorder wires the mint-basis measurement writer. Setter so
+// proxy.New's signature stays put; when unset (nil) node-served requests record no
+// measurement, so any enabled receipt mint fails closed (mints nothing).
+func (p *Proxy) SetServedMeasurementRecorder(r servedMeasurementRecorder) { p.servedMeasure = r }
 
 // royaltySink is the Phase-2 Stage 2.1 Pool-B royalty surface: one call per
 // SERVED cross-tenant pooled hit. *poolroyalty.Minter satisfies it; exactly-
@@ -1631,6 +1649,21 @@ func (p *Proxy) tryNodeRouting(
 	if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
 		slog.Warn("node-autoroute: decode failed, falling through", slog.String("err", err.Error()))
 		return false
+	}
+	// Mint-basis gate (migration 0099): record Lens's OWN measurement of this
+	// served request BEFORE flushing the response, so it is committed before the
+	// node (which echoed X-Request-ID) submits its receipt. The PoVI mint prices
+	// on THIS measured output-token count and requires node_id == ep.ID — never the
+	// node's claimed nr.OutputTokens. len(text)/4 is the same house token
+	// approximation billing uses, bounded by what the node actually produced and
+	// Lens actually forwarded. Best-effort: on failure the row is absent and the
+	// mint fails closed (mints nothing) — never over-mints, never fails the serve.
+	if p.servedMeasure != nil {
+		measuredOut := len(nr.Text) / 4
+		if err := p.servedMeasure.Record(ctx, requestID, ep.ID, wsID, measuredOut); err != nil {
+			slog.Warn("node-autoroute: served-measurement record failed (mint will fail closed)",
+				slog.String("node", ep.ID), slog.String("request_id", requestID), slog.String("err", err.Error()))
+		}
 	}
 	out, err := json.Marshal(nodeOpenAIEnvelope(model, nr))
 	if err != nil {

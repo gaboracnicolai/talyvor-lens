@@ -80,6 +80,8 @@ func poviNodeHarness(t *testing.T) *nodeHarness {
 			merkle_root TEXT NOT NULL, verified BOOLEAN NOT NULL, timestamp BIGINT NOT NULL,
 			leaf_count INTEGER NOT NULL DEFAULT 0, leaf_kind TEXT NOT NULL DEFAULT 'rune',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE served_request_measurements (request_id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
+			workspace_id TEXT NOT NULL, output_tokens INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`, // 0099 (gateway mint-basis)
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -135,6 +137,16 @@ func (h *nodeHarness) bootstrapStake(t *testing.T, ctx context.Context, ws, node
 	}
 	if _, err := h.stakeMgr.Stake(ctx, nodeID, 100); err != nil {
 		t.Fatalf("Stake (via StakeManager): %v", err)
+	}
+}
+
+// recordMeasurement writes Lens's OWN gateway measurement for a served request
+// (migration 0099) — the mint basis the receipt→LENS mint prices on and binds to
+// the serving node. In production proxy.tryNodeRouting writes this at dispatch.
+func (h *nodeHarness) recordMeasurement(t *testing.T, ctx context.Context, requestID, nodeID, ws string, outputTokens int) {
+	t.Helper()
+	if err := povi.NewMeasurementStore(h.pool).Record(ctx, requestID, nodeID, ws, outputTokens); err != nil {
+		t.Fatalf("recordMeasurement: %v", err)
 	}
 }
 
@@ -229,24 +241,27 @@ func TestPoVINode_WouldMint_FloorContrast_Integration(t *testing.T) {
 	h := poviNodeHarness(t)
 	ctx := context.Background()
 	procOn := povi.NewProcessor(povi.NewStore(h.pool), h.ledger, h.lookup, h.stakeMgr.IsEligible, true) // in-process only
+	procOn.SetMeasurementLookup(povi.NewMeasurementStore(h.pool))                                       // mint-basis gate (0099)
 
-	// VOUCHED + staked → mints.
+	// VOUCHED + staked + MEASURED → mints.
 	wsV := "vouched-ws"
 	nodeV, privV, _ := h.registerNode(t, wsV)
 	h.vouch(t, wsV)
 	h.bootstrapStake(t, ctx, wsV, nodeV)
+	h.recordMeasurement(t, ctx, "req-"+nodeV, nodeV, wsV, 50) // Lens measured this served request
 	resV, err := procOn.Process(ctx, signedReceipt(privV, nodeV, wsV))
 	if err != nil {
 		t.Fatalf("Process vouched: %v", err)
 	}
 	if !resV.Verified || !resV.StakeEligible || !resV.Minted || resV.Amount <= 0 {
-		t.Fatalf("vouched + staked node must MINT > 0 with minting ON; got %+v", resV)
+		t.Fatalf("vouched + staked + measured node must MINT > 0 with minting ON; got %+v", resV)
 	}
 
-	// UNVOUCHED + staked → the U6 floor gates the mint; receipt verifies + records, mints nothing.
+	// UNVOUCHED + staked + MEASURED → the U6 floor gates the mint; receipt verifies + records, mints nothing.
 	wsU := "unvouched-ws"
 	nodeU, privU, _ := h.registerNode(t, wsU)
-	h.bootstrapStake(t, ctx, wsU, nodeU) // staked + eligible, but NEVER earn_verified
+	h.bootstrapStake(t, ctx, wsU, nodeU)                      // staked + eligible, but NEVER earn_verified
+	h.recordMeasurement(t, ctx, "req-"+nodeU, nodeU, wsU, 50) // measured, so the mint reaches the U6 floor
 	resU, err := procOn.Process(ctx, signedReceipt(privU, nodeU, wsU))
 	if !errors.Is(err, mining.ErrEarnNotVerified) {
 		t.Fatalf("unvouched mint must be gated by the U6 floor (ErrEarnNotVerified); got res=%+v err=%v", resU, err)
@@ -256,5 +271,98 @@ func TestPoVINode_WouldMint_FloorContrast_Integration(t *testing.T) {
 	}
 	if resU.Minted {
 		t.Errorf("unvouched node MUST NOT mint (U6 floor); got Minted=%v Amount=%v", resU.Minted, resU.Amount)
+	}
+}
+
+// THE MONEY PROPERTY, end-to-end on real PG: a receipt claiming 10,000,000 output
+// tokens against a request Lens MEASURED at 500 mints the amount for 500 — and
+// the lens_token_ledger row's AMOUNT proves it (priced on measurement, not claim).
+func TestPoVINode_MintPricedOnMeasurement_NotClaim_Integration(t *testing.T) {
+	h := poviNodeHarness(t)
+	ctx := context.Background()
+	ws := "measured-ws"
+
+	nodeID, priv, _ := h.registerNode(t, ws)
+	h.vouch(t, ws)
+	h.bootstrapStake(t, ctx, ws, nodeID)
+
+	// Lens's OWN measurement of the served request: 500 output tokens.
+	const measured = 500
+	h.recordMeasurement(t, ctx, "req-inflated", nodeID, ws, measured)
+
+	// The node signs a receipt CLAIMING 10,000,000 output tokens for that request.
+	claim := povi.SignReceipt(priv, povi.Receipt{
+		RequestID: "req-inflated", NodeID: nodeID, WorkspaceID: ws, Model: "test-model",
+		InputTokens: 100, OutputTokens: 10_000_000, Timestamp: 1700000000, LeafCount: 50,
+	})
+
+	procOn := povi.NewProcessor(povi.NewStore(h.pool), h.ledger, h.lookup, h.stakeMgr.IsEligible, true)
+	procOn.SetMeasurementLookup(povi.NewMeasurementStore(h.pool))
+	res, err := procOn.Process(ctx, claim)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	wantMeasured := povi.ProvisionalMintAmountTokens(measured) // 25_000 µLENS
+	wantClaim := povi.ProvisionalMintAmountTokens(10_000_000)  // 500_000_000 µLENS
+	if !res.Minted || res.Amount != wantMeasured {
+		t.Fatalf("Minted=%v Amount=%v, want minted with amount=%v (the MEASURED price)", res.Minted, res.Amount, wantMeasured)
+	}
+
+	// ON THE MONEY: the single receipt_mine_provisional ledger row is priced on
+	// the MEASUREMENT (25_000), NOT the claim (500_000_000).
+	var rows int
+	var amount int64
+	if err := h.pool.QueryRow(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(amount),0) FROM lens_token_ledger
+		 WHERE workspace_id=$1 AND type='receipt_mine_provisional'`, ws).Scan(&rows, &amount); err != nil {
+		t.Fatalf("ledger read: %v", err)
+	}
+	if rows != 1 || amount != wantMeasured {
+		t.Fatalf("ledger receipt_mine_provisional: rows=%d amount=%d, want 1 row of %d (measured)", rows, amount, wantMeasured)
+	}
+	if amount == wantClaim {
+		t.Fatalf("ledger amount == %d == the CLAIM price — node OutputTokens reached the money", wantClaim)
+	}
+}
+
+// FAIL CLOSED, end-to-end on real PG: a verified, staked, vouched receipt for a
+// request Lens has NO measurement of mints NOTHING — asserted on the ABSENCE of
+// any receipt_mine_provisional ledger row — while the receipt is still recorded.
+func TestPoVINode_NoMeasurement_MintsNothing_Integration(t *testing.T) {
+	h := poviNodeHarness(t)
+	ctx := context.Background()
+	ws := "unmeasured-ws"
+
+	nodeID, priv, _ := h.registerNode(t, ws)
+	h.vouch(t, ws)
+	h.bootstrapStake(t, ctx, ws, nodeID)
+	// Deliberately record NO measurement for this request.
+
+	procOn := povi.NewProcessor(povi.NewStore(h.pool), h.ledger, h.lookup, h.stakeMgr.IsEligible, true)
+	procOn.SetMeasurementLookup(povi.NewMeasurementStore(h.pool))
+	res, err := procOn.Process(ctx, signedReceipt(priv, nodeID, ws))
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.Minted || res.Amount != 0 {
+		t.Errorf("no measurement ⇒ mint nothing; got Minted=%v Amount=%v", res.Minted, res.Amount)
+	}
+
+	// ON THE MONEY: NO receipt_mine_provisional ledger row exists for this workspace.
+	var minted bool
+	if err := h.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM lens_token_ledger WHERE workspace_id=$1 AND type='receipt_mine_provisional')`, ws).
+		Scan(&minted); err != nil {
+		t.Fatalf("ledger read: %v", err)
+	}
+	if minted {
+		t.Error("a receipt with NO gateway measurement must leave NO receipt_mine_provisional ledger row")
+	}
+	// The receipt is still RECORDED for audit even though it minted nothing.
+	var recorded bool
+	_ = h.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM povi_receipts WHERE request_id=$1)`, "req-"+nodeID).Scan(&recorded)
+	if !recorded {
+		t.Error("receipt must be recorded for audit even when unminted")
 	}
 }

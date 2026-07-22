@@ -3,6 +3,7 @@ package povi
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 
 	"github.com/talyvor/lens/internal/metrics"
 )
@@ -30,6 +31,12 @@ type Processor struct {
 	lookup         PubKeyLookup
 	stakeEligible  StakeLookup
 	mintingEnabled bool
+	// measure (mint-basis gate) resolves a receipt's request_id to Lens's OWN
+	// gateway measurement of the served request, so a mint is priced on what Lens
+	// MEASURED and bound to the node that served it — never the node's claimed
+	// OutputTokens. nil ⇒ a mint fails closed (ErrNoServedMeasurement). Wired via
+	// SetMeasurementLookup; never consulted when minting is off (byte-identical default).
+	measure MeasurementLookup
 	// isProbe (P1 #10, optional) is the proof-of-benchmark probe-mint SUPPRESSION: a point existence
 	// check on benchmark_probes.request_id. nil ⇒ no suppression (byte-identical). Wired only when
 	// LENS_PROOF_OF_BENCHMARK_ENABLED is on. SUPPRESSION-ONLY: it can return "this is a probe → don't
@@ -51,6 +58,13 @@ type Processor struct {
 func (p *Processor) SetProbeChecker(fn func(ctx context.Context, requestID string) (bool, error)) {
 	p.isProbe = fn
 }
+
+// SetMeasurementLookup wires the mint-basis gate: a mint is priced on Lens's own
+// gateway measurement for the receipt's request_id and bound to the node that
+// served it. nil (the default) ⇒ any enabled mint fails closed
+// (ErrNoServedMeasurement). A setter so NewProcessor's signature stays put; the
+// lookup is never consulted when minting is off (byte-identical default path).
+func (p *Processor) SetMeasurementLookup(m MeasurementLookup) { p.measure = m }
 
 // NewProcessor wires the audit store, the ledger minter, the node pubkey
 // lookup, the stake-eligibility lookup (Part 2), and the provisional-minting
@@ -139,12 +153,24 @@ func (p *Processor) Process(ctx context.Context, r Receipt) (ProcessResult, erro
 			res.Reason = "probe receipt (verifier-induced measurement) — recorded, not minted"
 		default:
 			// MintFromReceipt is itself gated: it no-ops when mintingEnabled is
-			// false, so this never mints by default.
-			minted, amount, err := MintFromReceipt(ctx, p.minter, r, p.mintingEnabled)
-			if err != nil {
+			// false, so this never mints by default. When enabled it prices on the
+			// gateway MEASUREMENT and fails closed with a distinct sentinel when
+			// Lens has no record of the request (or it was served by another node).
+			// Those two are EXPECTED adversarial/benign conditions — recorded as a
+			// non-mint reason (audit), NOT a 500 — so an honest node isn't spuriously
+			// errored and an attacker just gets Minted=false. All other errors (U6
+			// floor, DB) propagate as before.
+			minted, amount, err := MintFromReceipt(ctx, p.minter, p.measure, r, p.mintingEnabled)
+			switch {
+			case errors.Is(err, ErrNoServedMeasurement):
+				res.Reason = "no gateway measurement for request — recorded, not minted (fail closed)"
+			case errors.Is(err, ErrMeasurementNodeMismatch):
+				res.Reason = "receipt node did not serve the measured request — recorded, not minted"
+			case err != nil:
 				return res, err
+			default:
+				res.Minted, res.Amount = minted, amount
 			}
-			res.Minted, res.Amount = minted, amount
 		}
 	}
 	return res, nil

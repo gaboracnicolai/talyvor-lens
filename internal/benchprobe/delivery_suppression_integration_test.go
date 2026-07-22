@@ -70,6 +70,8 @@ func suppressionHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore, *mini
 			model TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
 			merkle_root TEXT NOT NULL, verified BOOLEAN NOT NULL, timestamp BIGINT NOT NULL,
 			leaf_count INTEGER NOT NULL DEFAULT 0, leaf_kind TEXT NOT NULL DEFAULT 'rune', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE served_request_measurements (request_id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
+			workspace_id TEXT NOT NULL, output_tokens INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`, // 0099 (gateway mint-basis)
 		`CREATE TABLE benchmark_eval_items (id TEXT PRIMARY KEY, input TEXT NOT NULL, expected_output TEXT NOT NULL,
 			eval_method TEXT NOT NULL DEFAULT 'exact', pass_threshold DOUBLE PRECISION NOT NULL DEFAULT 1.0,
 			active BOOLEAN NOT NULL DEFAULT TRUE, content_hash TEXT, status TEXT NOT NULL DEFAULT 'active',
@@ -138,6 +140,7 @@ func newProcessor(pool *pgxpool.Pool, ledger *mining.LedgerStore, miner *mining.
 		return povi.DecodePublicKey(enc)
 	}
 	proc := povi.NewProcessor(povi.NewStore(pool), ledger, lookup, sm.IsEligible, mintingOn)
+	proc.SetMeasurementLookup(povi.NewMeasurementStore(pool)) // mint-basis gate (0099), as production
 	if bench != nil {
 		proc.SetProbeChecker(bench.IsProbe) // P1 #10 suppression
 	}
@@ -229,6 +232,10 @@ func TestNonProbeReceipt_MintsAsToday_Integration(t *testing.T) {
 		RequestID: "real-earning-req-1", NodeID: nodeID, WorkspaceID: ws, Model: model, // NOT in benchmark_probes
 		InputTokens: 10, OutputTokens: 10, Timestamp: 1700000000, LeafCount: 10,
 	})
+	// Lens's own measurement for this real (non-probe) served request — the mint basis.
+	if err := povi.NewMeasurementStore(pool).Record(ctx, "real-earning-req-1", nodeID, ws, 10); err != nil {
+		t.Fatalf("record measurement: %v", err)
+	}
 	res, err := newProcessor(pool, ledger, miner, bench, true).Process(ctx, rec) // suppression wired, but not a probe
 	if err != nil {
 		t.Fatalf("Process: %v", err)

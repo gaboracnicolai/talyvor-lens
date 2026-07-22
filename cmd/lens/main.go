@@ -1067,6 +1067,11 @@ func run() error {
 	// (challenge-and-slash) provides the economic security — that path stays
 	// active and unsecured until then (tracked, not an oversight).
 	poviStore := povi.NewStore(pool)
+	// Mint-basis gate (migration 0099): the proxy WRITES Lens's own measurement of
+	// each node-served request here; the PoVI processor READS it to price the mint
+	// on the measurement (not the node's claim) and bind it to the serving node.
+	// One store, shared: proxy = writer, processor = reader.
+	poviMeasureStore := povi.NewMeasurementStore(pool)
 	poviLookup := func(lookupCtx context.Context, nodeID string) (ed25519.PublicKey, error) {
 		enc, err := computeMiner.NodePubKey(lookupCtx, nodeID)
 		if err != nil {
@@ -1087,6 +1092,10 @@ func run() error {
 	// The mint gate is now verified AND stake-eligible AND minting-enabled
 	// (still OFF by default).
 	poviProcessor := povi.NewProcessor(poviStore, tokenLedger, poviLookup, stakeEligible, cfg.POVIMintingEnabled)
+	// Price the mint on Lens's OWN gateway measurement (never the node's claimed
+	// OutputTokens): resolve the receipt's request_id to the served-measurement
+	// row, require node_id to match, price on the measured tokens. NO ROW ⇒ NO MINT.
+	poviProcessor.SetMeasurementLookup(poviMeasureStore)
 	if cfg.POVIMintingEnabled {
 		logger.Warn("PoVI receipt minting is ENABLED (LENS_POVI_MINTING_ENABLED). Now SAFE only because Parts 1+2+3 are in place (verified receipt + staked node + challenge-and-slash). Ensure LENS_POVI_CHALLENGE_RATE > 0 so cheating is deterred.")
 	}
@@ -1104,6 +1113,9 @@ func run() error {
 	// reuses the EXISTING challenge private key (lensChallengePriv, just loaded above) to sign the
 	// per-request node-auth token. enabled=cfg.NodeAutoRouteEnabled (default false) → fully inert.
 	p.SetNodeRouter(localRouterMulti, lensChallengePriv, newNodeHTTPClient(cfg.NodeTLSSkipVerify, 30*time.Second, nodeCIDRAllow), cfg.NodeAutoRouteEnabled)
+	// When the gateway serves a request from a node, record Lens's own measurement
+	// of it (mint basis, 0099) so the node's later receipt mints against measurement.
+	p.SetServedMeasurementRecorder(poviMeasureStore)
 	poviChallenger := povi.NewChallenger(
 		computeMiner.NodeURL, challengeClient, poviStakeManager, challengeStore,
 		4, cfg.POVISlashFraction)
