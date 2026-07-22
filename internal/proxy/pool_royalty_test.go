@@ -181,24 +181,24 @@ func TestPoolRoyalty_NoMinter_PooledHitServesUnchanged(t *testing.T) {
 	}
 }
 
-// STAGE 2.2 ISOLATION FROM SPEND — the critical safety property: a served
-// pooled hit, with the royalty minter WIRED and minting, writes ZERO rows to
-// token_events. Every customer spend reader (budgets seed/ReconcileSpent,
-// workspace SpendLimitUSD enforcement, alerts.windowSpend circuit breaker,
-// ROI, costanomaly, forecast, anomaly, tenant month-spend, MCP/API summaries,
-// audit export) reads ONLY token_events and sums cost_usd with no row-type
-// filter — so zero token_events writes proves margin cannot leak into ANY of
-// them, and their results are byte-identical to pre-2.2 for the same traffic.
-// Talyvor's (1−s) margin is DERIVED from pool_royalty_mints (the
-// pool_royalty_margin view), never re-recorded as spend.
+// STAGE 2.2 ISOLATION FROM SPEND — the critical safety property, restated for 0099: a served
+// pooled hit, with the royalty minter WIRED and minting, adds exactly ONE token_events row and
+// that row is the cache-tagged (serve_source='cache_hit_pooled') zero-cost visibility row. Every
+// customer spend reader (budgets seed/ReconcileSpent, workspace SpendLimitUSD enforcement,
+// alerts.windowSpend circuit breaker, ROI, costanomaly, forecast, anomaly, tenant month-spend,
+// MCP/API summaries, audit export) reads ONLY token_events and sums cost_usd with no row-type
+// filter — the cache row's SQL-owned cost_usd=0 (pinned against real PG in
+// alerts/cache_serve_realpg_test.go) keeps every one of those sums byte-identical, so margin
+// still cannot leak into ANY of them. Talyvor's (1−s) margin is DERIVED from pool_royalty_mints
+// (the pool_royalty_margin view), never re-recorded as spend.
 //
 // The live-call leg is the positive control: it proves this sink DOES observe
-// token_events writes when they happen, so the zero on the pooled leg is a
-// real measurement, not a broken probe. (The pooled leg fires the RECORDING
+// token_events writes when they happen, so the pooled leg's exactly-one-tagged-row
+// is a real measurement, not a broken probe. (The pooled leg fires the RECORDING
 // minter — the proxy-side contract; the real Minter's write targets are
 // pinned separately in poolroyalty's minter_test via strict pgxmock: claim
 // table + LENS ledger only, never token_events.)
-func TestPoolRoyalty_ServedPooledHit_WritesNoTokenEvents(t *testing.T) {
+func TestPoolRoyalty_ServedPooledHit_WritesOnlyZeroCostCacheRow(t *testing.T) {
 	global := true
 	p, wsm, sink, _, calls := newPoolingProxy(t, &global)
 	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
@@ -215,9 +215,15 @@ func TestPoolRoyalty_ServedPooledHit_WritesNoTokenEvents(t *testing.T) {
 		t.Fatal("positive control failed: a live call must write a token_events spend row — the probe is broken")
 	}
 
-	// THE PROPERTY: a served pooled hit (royalty MINTED — minter recorded it)
-	// adds NO token_events write. Spend-reader inputs are unchanged.
+	// THE PROPERTY (0099 form): a served pooled hit (royalty MINTED — minter recorded it) adds
+	// exactly ONE token_events write, and that write is the cache-tagged zero-cost row (cost_usd=0
+	// owned by the store's SQL, pinned against real PG in alerts/cache_serve_realpg_test.go). The
+	// original invariant survives in its true form: no PRICED upstream row appears, so every
+	// spend reader that SUMs cost_usd is unchanged — margin/royalty still cannot leak into
+	// customer spend accounting. The row itself is deliberate: it is what makes the cache hit
+	// rate countable from token_events.
 	before := atomic.LoadInt64(calls)
+	beforeSpends := len(sink.spends)
 	dispatchWSWithRequestID(t, p, "wsB", "what is 2+2", "req-isolation-1")
 	if atomic.LoadInt64(calls)-before != 0 {
 		t.Fatal("expected a pooled cache hit (no upstream call)")
@@ -227,9 +233,15 @@ func TestPoolRoyalty_ServedPooledHit_WritesNoTokenEvents(t *testing.T) {
 	}
 	sink.mu.Lock()
 	pooledCalls := sink.calls
+	newRows := sink.spends[beforeSpends:]
 	sink.mu.Unlock()
-	if pooledCalls != liveCalls {
-		t.Errorf("a pooled hit must write ZERO token_events rows: spend writes went %d → %d — margin/royalty leaked into customer spend accounting", liveCalls, pooledCalls)
+	if pooledCalls != liveCalls+1 {
+		t.Errorf("a pooled hit must add exactly ONE (cache-tagged) token_events write: spend writes went %d → %d", liveCalls, pooledCalls)
+	}
+	for _, s := range newRows {
+		if s.serveSource != "cache_hit_pooled" {
+			t.Errorf("pooled-hit row serveSource = %q, want cache_hit_pooled — an untagged row would be a priced write leaking margin into customer spend", s.serveSource)
+		}
 	}
 }
 

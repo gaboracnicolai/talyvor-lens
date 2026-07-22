@@ -181,6 +181,45 @@ func (a *AlertManager) RecordSpendWithDistill(ctx context.Context, workspaceID, 
 	return a.recordSpend(ctx, workspaceID, team, sprint, feature, model, inputTokens, outputTokens, prompt, sessionID, requestID, modality, estimated, distillMethod)
 }
 
+// RecordCacheServe writes the token_events row for a CACHE-SERVED request — the row that makes
+// the cache hit rate (the trial's core number) countable from the same table every other spend
+// reader uses. serveSource is the cache layer that produced the bytes (the metric label verbatim:
+// cache_hit_exact / cache_hit_semantic / cache_hit_pooled / cache_hit_pooled_semantic; the 0099
+// CHECK constraint enforces the vocabulary).
+//
+// ⚠ cost_usd = 0 IS TALYVOR'S PROVIDER COST — nothing was bought upstream. It is NOT what the
+// requester paid: the agent-allocator's pre-serve LXC estimate debit (lxc_ledger) stands and is
+// deliberately NOT refunded. A spend view must never render this row as "the request was free".
+//
+// No prompt text is persisted (the streaming spend row precedent — metadata-equivalent), the cost
+// is always flagged estimated (token counts are length-derived, no provider usage exists), and the
+// alert-rule ladder is skipped: rules threshold on SUM(cost_usd) windows, which a zero-cost row
+// cannot move.
+func (a *AlertManager) RecordCacheServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality, serveSource string) error {
+	provider := providerForModel(model)
+	if modality == "" {
+		modality = "text"
+	}
+	if _, err := a.pool.Exec(ctx, insertCacheServeSQL,
+		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, sessionID, requestID, modality, serveSource,
+	); err != nil {
+		return fmt.Errorf("alerts: insert cache-serve token_event: %w", err)
+	}
+	// No rule evaluation: the alert ladder thresholds on SUM(cost_usd) windows,
+	// which a zero-cost row cannot move — skipping avoids two pointless queries
+	// on every cache hit.
+	return nil
+}
+
+// insertCacheServeSQL owns the cache row's money semantics IN THE SQL so they are unmistakable:
+// cost_usd = 0 (Talyvor's provider cost — the requester's LXC debit lives in lxc_ledger),
+// prompt_text = ” (no prompt persisted — the streaming spend row precedent), cost_estimated =
+// TRUE (length-derived tokens), distill_method = ” (a cache serve distills nothing). Column
+// order mirrors insertTokenEventSQL with serve_source appended.
+const insertCacheServeSQL = `INSERT INTO token_events
+  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, TRUE, '', $12)`
+
 func (a *AlertManager) recordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error {
 	cost := costUSD(model, inputTokens, outputTokens)
 	provider := providerForModel(model)

@@ -79,6 +79,11 @@ type alertSink interface {
 	// attribution ("convert" / "vision_ocr"). Used only by the DISTILL request
 	// path; non-distilled traffic keeps using RecordSpend.
 	RecordSpendWithDistill(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error
+	// RecordCacheServe writes the token_events row for a CACHE-SERVED response
+	// (serve_source = the cache-hit layer, cost_usd = 0 — Talyvor's provider
+	// cost; the requester's pre-serve LXC debit is a different ledger). Used
+	// only by the cache serve points; upstream traffic keeps using RecordSpend.
+	RecordCacheServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality, serveSource string) error
 }
 
 // budgetGate is the subset of *budgets.Service the proxy hot path touches.
@@ -941,6 +946,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					// SERVE point: the replay succeeded, so a pooled hit
 					// (if that's what this was) now earns its royalty.
 					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
+					// Cache-serve spend visibility (0099): the served request
+					// becomes a zero-provider-cost token_events row tagged with
+					// its layer, so hit rate is countable next to every miss.
+					p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
 					span.SetAttributes(
 						attribute.Bool("lens.cached", true),
 						attribute.Float64("lens.cost_usd", 0),
@@ -960,6 +969,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				metrics.RecordCacheHit(layer)
 				// SERVE point: the cached body went out on the wire.
 				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
+				// Cache-serve spend visibility (0099): see recordCacheServe.
+				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
 				span.SetAttributes(
 					attribute.Bool("lens.cached", true),
 					attribute.Float64("lens.cost_usd", 0),
@@ -1888,6 +1899,40 @@ func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model, rawPromp
 // Exactly-once enforcement lives in the Minter's request_id claim row; mint
 // failure is logged and never affects the already-served response (the claim
 // rolls back with the credit, so a later retry can still mint).
+// recordCacheServe books the token_events row for a CACHE-SERVED response, so the cache hit rate
+// — the closed trial's core number, the one that prices the BYOK subscription — is countable from
+// the SAME table every other spend reader uses (0099: serve_source). Post-serve, void,
+// best-effort: a failure must never affect the already-served response.
+//
+// ⚠ The row's cost_usd = 0 is TALYVOR'S provider cost (nothing was bought upstream). It is NOT
+// what the requester paid: the agent-allocator's pre-serve LXC estimate debit (agent_allocator.go,
+// lxc_ledger) stands. Moving that debit below the cache lookup — "don't charge for hits" — was
+// CONSIDERED AND REJECTED: it would make cache hits free to the user, i.e. Talyvor would earn
+// nothing from its core value ("our margin is the cache"). The allocator's no-refund invariant is
+// protecting the business model, not an accident. A spend UI must therefore render a cache row as
+// "served from cache — zero provider cost; your workspace's estimate debit stands", never as
+// "this request was free".
+//
+// Gates mirror the upstream recording seam exactly: alertManager wired + the workspace not opted
+// out via LoggingNone (symmetric with recordStreamSpend and the buffered-path seam). Token counts
+// are the same length-derived estimators the miss path uses when a provider reports no usage —
+// a cache serve never has provider usage, so the row is always cost_estimated.
+func (p *Proxy) recordCacheServe(ctx context.Context, wsID, team, sprint, feature, model, prompt string, served []byte, modSet modality.ModalitySet, sessionID, requestID string, loggingPolicy workspace.LoggingPolicy, layer string) {
+	if p.alertManager == nil || loggingPolicy == workspace.LoggingNone {
+		return
+	}
+	inT, outT := len(prompt)/4, len(served)/4
+	if modSet.Multimodal() {
+		inT = modSet.EstimateInputTokens()
+	}
+	if err := p.alertManager.RecordCacheServe(ctx, wsID, team, sprint, feature, model, inT, outT, sessionID, requestID, modSet.Label(), layer); err != nil {
+		slog.Warn("alerts: RecordCacheServe failed",
+			slog.String("layer", layer),
+			slog.String("err", err.Error()),
+		)
+	}
+}
+
 func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHit, prompt string, served []byte, loggingPolicy workspace.LoggingPolicy) {
 	if p.royaltyMinter == nil || hit == nil {
 		return

@@ -224,7 +224,7 @@ func TestSemanticPooling_ContributorRevoked_Blocked(t *testing.T) {
 }
 
 // A pooled semantic hit serves from cache → books NO spend (no ledger write).
-func TestSemanticPooling_NoLedgerWriteOnHit(t *testing.T) {
+func TestSemanticPooling_HitWritesOnlyZeroCostCacheRow(t *testing.T) {
 	global := true
 	p, wsm, sink, m, _ := newSemPoolProxy(t, &global)
 	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
@@ -239,9 +239,19 @@ func TestSemanticPooling_NoLedgerWriteOnHit(t *testing.T) {
 
 	dispatchSem(t, p, "wsA", "what is 2+2")
 	before := sink.calls
+	beforeSpends := len(sink.spends)
 	dispatchSem(t, p, "wsB", "what is 2+2")
-	if sink.calls-before != 0 {
-		t.Errorf("a pooled semantic hit must record NO spend; RecordSpend delta=%d want 0", sink.calls-before)
+	// 0099: the pooled semantic hit writes exactly ONE cache-tagged zero-cost row (hit-rate
+	// visibility); an untagged row here would be a priced upstream write — a margin leak.
+	if sink.calls-before != 1 {
+		t.Errorf("a pooled semantic hit must record exactly ONE spend write (the tagged cache row); delta=%d", sink.calls-before)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for _, s := range sink.spends[beforeSpends:] {
+		if s.serveSource != "cache_hit_pooled_semantic" {
+			t.Errorf("semantic pooled-hit spend row serveSource = %q, want cache_hit_pooled_semantic", s.serveSource)
+		}
 	}
 }
 
