@@ -191,17 +191,30 @@ func TestPooling_PIINeverPooled(t *testing.T) {
 
 // A pooled hit is served from cache and therefore books NO spend (no ledger
 // write) — consistent with every other cache hit.
-func TestPooling_NoLedgerWriteOnPooledHit(t *testing.T) {
+// 0100 UPDATE (cache-serve spend visibility): a pooled hit now writes exactly ONE token_events
+// row — tagged cache_hit_pooled, cost_usd = 0 (the zero is owned by the store's SQL and pinned
+// against real PG in internal/alerts/cache_serve_realpg_test.go) — so hit rate is countable. The
+// PROTECTED invariant is unchanged and asserted here in its true form: no UPSTREAM-priced spend
+// write may appear for a pooled serve (margin/royalty must never leak into customer cost sums).
+func TestPooling_PooledHitWritesOnlyZeroCostCacheRow(t *testing.T) {
 	global := true
 	p, wsm, sink, _, _ := newPoolingProxy(t, &global)
 	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
 	_ = wsm.SetCachePoolable(context.Background(), "wsB", true)
 
-	dispatchWS(t, p, "wsA", "what is 2+2") // real upstream call → 1 spend row
+	dispatchWS(t, p, "wsA", "what is 2+2") // real upstream call → 1 priced spend row
 	before := sink.calls
-	dispatchWS(t, p, "wsB", "what is 2+2") // pooled hit → zero spend
-	if sink.calls-before != 0 {
-		t.Errorf("a pooled cache hit must record NO spend; RecordSpend delta=%d want 0", sink.calls-before)
+	beforeSpends := len(sink.spends)
+	dispatchWS(t, p, "wsB", "what is 2+2") // pooled hit → exactly one cache-tagged row
+	if sink.calls-before != 1 {
+		t.Errorf("a pooled cache hit must record exactly ONE spend write (the tagged cache row); delta=%d", sink.calls-before)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for _, s := range sink.spends[beforeSpends:] {
+		if s.serveSource != "cache_hit_pooled" {
+			t.Errorf("pooled-hit spend row serveSource = %q, want cache_hit_pooled (an untagged row would be a priced upstream write — a margin leak)", s.serveSource)
+		}
 	}
 }
 

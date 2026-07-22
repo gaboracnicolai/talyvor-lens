@@ -638,7 +638,7 @@ const (
 
 // SAME table + SAME tenancy clause (workspace_id + window) as handleSpendBy; keyset-paginated on the unique
 // id. $1=workspace_id $2=days $3=cursor(uuid or NULL) $4=limit.
-const spendByRequestSQL = `SELECT id, request_id, feature, cost_usd, input_tokens, output_tokens, created_at
+const spendByRequestSQL = `SELECT id, request_id, feature, cost_usd, input_tokens, output_tokens, created_at, serve_source
 FROM token_events
 WHERE workspace_id = $1
   AND created_at > NOW() - INTERVAL '1 day' * $2
@@ -698,16 +698,21 @@ func (s *Server) handleSpendByRequest(w http.ResponseWriter, r *http.Request) {
 			cost                   float64
 			inTok, outTok          int64
 			ts                     time.Time
+			serveSource            string
 		)
-		if err := rows.Scan(&id, &requestID, &feature, &cost, &inTok, &outTok, &ts); err != nil {
+		if err := rows.Scan(&id, &requestID, &feature, &cost, &inTok, &outTok, &ts, &serveSource); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		lastID = id
 		out = append(out, map[string]any{
-			"request_id":    requestID,
-			"feature":       feature,
-			"cost_usd":      cost,
+			"request_id": requestID,
+			"feature":    feature,
+			"cost_usd":   cost,
+			// serve_source (0100): 'upstream' or a cache_hit_* layer. cost_usd on a
+			// cache row is TALYVOR'S provider cost (zero) — the requester's LXC debit
+			// lives in lxc_ledger; render cache rows as "served from cache", not "free".
+			"serve_source":  serveSource,
 			"input_tokens":  inTok,
 			"output_tokens": outTok,
 			"ts":            ts,

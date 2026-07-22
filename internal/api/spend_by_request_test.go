@@ -31,9 +31,15 @@ func spendHarness(t *testing.T) *Server {
 	ddl := `CREATE TABLE IF NOT EXISTS token_events (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, request_id TEXT NOT NULL DEFAULT '',
 		feature TEXT, cost_usd FLOAT NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0,
-		output_tokens INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW())`
+		output_tokens INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(),
+		serve_source TEXT NOT NULL DEFAULT 'upstream')`
 	if _, err := pool.Exec(context.Background(), ddl); err != nil {
 		t.Fatalf("schema: %v", err)
+	}
+	// The harness table predates 0100 in long-lived test databases — align it.
+	if _, err := pool.Exec(context.Background(),
+		`ALTER TABLE token_events ADD COLUMN IF NOT EXISTS serve_source TEXT NOT NULL DEFAULT 'upstream'`); err != nil {
+		t.Fatalf("schema align: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(), `TRUNCATE token_events`); err != nil {
 		t.Fatalf("truncate: %v", err)
@@ -194,5 +200,42 @@ func TestSpendByRequest_BoundedCursorWalk(t *testing.T) {
 	}
 	if pages != 3 { // 5 + 5 + 2
 		t.Fatalf("expected 3 pages (5+5+2), got %d", pages)
+	}
+}
+
+// (e) CACHE-SERVE VISIBILITY (0100): every row carries serve_source so the dashboard can compute
+// the cache hit rate from this endpoint alone — hits vs total, no inference. A cache row's
+// cost_usd = 0 is TALYVOR'S provider cost; the requester's LXC debit is a different ledger, so the
+// field lets a UI say "served from cache" instead of mis-rendering the request as free.
+func TestSpendByRequest_ServeSourceSurfaced(t *testing.T) {
+	s := spendHarness(t)
+	seedEvent(t, s, "wsD", "req-up", "chat", 0.05, 100, 50)
+	if _, err := s.pool.Exec(context.Background(),
+		`INSERT INTO token_events (workspace_id, request_id, feature, cost_usd, input_tokens, output_tokens, serve_source, created_at)
+		 VALUES ('wsD','req-hit','chat',0,80,40,'cache_hit_exact', NOW())`); err != nil {
+		t.Fatalf("seed cache row: %v", err)
+	}
+
+	rows, _ := callByRequest(t, s, "wsD", "days=1&limit=10")
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	bySource := map[string]map[string]any{}
+	for _, r := range rows {
+		src, ok := r["serve_source"].(string)
+		if !ok {
+			t.Fatalf("row %v carries no serve_source — the hit rate is uncountable from this endpoint", r)
+		}
+		bySource[src] = r
+	}
+	up, hit := bySource["upstream"], bySource["cache_hit_exact"]
+	if up == nil || hit == nil {
+		t.Fatalf("want one upstream + one cache_hit_exact row, got sources %v", bySource)
+	}
+	if up["request_id"] != "req-up" || hit["request_id"] != "req-hit" {
+		t.Errorf("source↔request mismatch: upstream=%v hit=%v", up["request_id"], hit["request_id"])
+	}
+	if hit["cost_usd"].(float64) != 0 {
+		t.Errorf("cache row cost_usd = %v, want 0", hit["cost_usd"])
 	}
 }

@@ -42,6 +42,10 @@ type recordedSpend struct {
 	modality      string
 	estimated     bool
 	distillMethod string
+	// serveSource is "" for upstream RecordSpend/RecordSpendWithDistill writes and the
+	// cache layer label for RecordCacheServe writes — the sink-level mirror of
+	// token_events.serve_source (the store maps "" → 'upstream' via the column DEFAULT).
+	serveSource string
 }
 
 func (r *recordingAlertSink) IsCircuitOpen(string, string) bool { return false }
@@ -54,6 +58,35 @@ func (r *recordingAlertSink) RecordSpend(ctx context.Context, workspaceID, team,
 
 func (r *recordingAlertSink) RecordSpendWithDistill(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error {
 	return r.record(model, inputTokens, outputTokens, prompt, modality, estimated, distillMethod)
+}
+
+func (r *recordingAlertSink) RecordCacheServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality, serveSource string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	r.lastPrompt = ""
+	r.lastModality = modality
+	r.lastEstimated = true
+	r.lastInput = inputTokens
+	r.lastOutput = outputTokens
+	r.spends = append(r.spends, recordedSpend{
+		model: model, inputTokens: inputTokens, outputTokens: outputTokens,
+		modality: modality, estimated: true, serveSource: serveSource,
+	})
+	return nil
+}
+
+// spendWithServeSource returns the first captured row with the given serve_source
+// (and whether one exists). "" matches upstream RecordSpend rows.
+func (r *recordingAlertSink) spendWithServeSource(source string) (recordedSpend, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.spends {
+		if s.serveSource == source {
+			return s, true
+		}
+	}
+	return recordedSpend{}, false
 }
 
 func (r *recordingAlertSink) record(model string, inputTokens, outputTokens int, prompt, modality string, estimated bool, distillMethod string) error {
