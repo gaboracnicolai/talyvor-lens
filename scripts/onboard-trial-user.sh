@@ -63,12 +63,26 @@ usage() {
   exit 1
 }
 
+# ── the god key, checked FIRST (before args, before any network I/O) ─────────
+# A missing key must not surface later as a 401 from the API — that is a confusing
+# way to learn you skipped the setup step, and the operator has already typed a
+# workspace name by then. Empty is as bad as unset. Refuse to start at all.
+[ -n "${LENS_API_KEY:-}" ] || {
+  printf 'onboard-trial-user: ERROR: LENS_API_KEY is unset or empty — refusing to start.\n' >&2
+  printf '  This script is three admin calls; without the god key each would just 401.\n' >&2
+  printf '  Do the tunnel ritual first (docs/remote-host.md §5 step 0):\n' >&2
+  printf '    on the VM:  set LENS_API_KEY (and LENS_ADMIN_LXC_GRANT_ENABLED=true) in .env,\n' >&2
+  printf '                then:  docker compose up -d lens\n' >&2
+  printf '    locally:    ssh -N -L 8080:127.0.0.1:8080 user@lens.example.com &\n' >&2
+  printf '                export LENS_API_KEY=…   # the same value you set on the VM\n' >&2
+  exit 1
+}
+
 [ $# -ge 1 ] && [ $# -le 3 ] || usage
 WS_ID="$1"
 WS_NAME="${2:-$WS_ID}"
 GRANT_ULXC="${3:-$DEFAULT_GRANT_ULXC}"
 
-: "${LENS_API_KEY:?LENS_API_KEY must be set (admin god key — docs/remote-host.md §4)}"
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 # ── input validation (these values are spliced into JSON bodies — be strict) ──
@@ -125,7 +139,7 @@ req GET "/v1/workspaces/$WS_ID"
 case "$RESP_CODE" in
   (404) : ;; # fresh id — good
   (200) die "workspace '$WS_ID' already exists — refusing to continue (re-create would reset its config via the blind upsert; re-grant would double-fund). Pick a new id, or run the individual curls from docs/remote-host.md §5." ;;
-  (401) die "admin auth rejected (401 admin credentials required) — LENS_API_KEY wrong, or unset on the server (docs/remote-host.md §4)" ;;
+  (401) die "admin auth rejected (401 invalid API key) — LENS_API_KEY wrong, or unset on the server (docs/remote-host.md §4)" ;;
   (*)   die "unexpected HTTP $RESP_CODE probing workspace '$WS_ID': $RESP_BODY" ;;
 esac
 
