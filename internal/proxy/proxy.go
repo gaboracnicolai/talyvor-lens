@@ -84,6 +84,12 @@ type alertSink interface {
 	// cost; the requester's pre-serve LXC debit is a different ledger). Used
 	// only by the cache serve points; upstream traffic keeps using RecordSpend.
 	RecordCacheServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality, serveSource string) error
+	// RecordNodeServe writes the token_events row for a request served by a
+	// REGISTERED INFERENCE NODE (serve_source='node', cost_usd=0 — Talyvor's
+	// provider cost; any LENS owed is lens_token_ledger's number). It makes a node
+	// serve countable as a MISS in the cache hit rate. Used only by the node-serve
+	// point (tryNodeRouting); upstream/cache traffic keeps its own recorders.
+	RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string) error
 }
 
 // budgetGate is the subset of *budgets.Service the proxy hot path touches.
@@ -1692,7 +1698,13 @@ func (p *Proxy) tryNodeRouting(
 	if piiDetected {
 		eventPrompt = redactedPrompt
 	}
-	p.recordTokenEvent(ctx, provider, model, eventPrompt, out, 0, piiDetected) // node-served = free (cost 0)
+	p.recordTokenEvent(ctx, provider, model, eventPrompt, out, 0, piiDetected) // learner store (pattern insights), NOT token_events
+	// Node-serve spend visibility: the token_events row that makes THIS request countable in the cache
+	// hit rate as a MISS (serve_source='node', cost_usd=0 — Talyvor paid no provider; any LENS owed is
+	// lens_token_ledger's number). Without it a node serve is absent from the denominator and the rate
+	// reads HIGH. Output tokens use nr.Text (len/4), matching the mint-basis measurement above. Void,
+	// post-serve, best-effort — never affects the already-flushed response.
+	p.recordNodeServe(ctx, wsID, team, sprint, feature, model, eventPrompt, nr.Text, sessionID, requestID)
 	// DESCRIPTIVE (P3 #6): capture the gateway-measured node latency into the per-(node,cohort) aggregate,
 	// off the serve path via the obsLimiter. Best-effort, void, mint-free — a capture failure never affects
 	// the already-flushed response. Pure additive observation before the early-return.
@@ -1930,6 +1942,32 @@ func (p *Proxy) recordCacheServe(ctx context.Context, wsID, team, sprint, featur
 			slog.String("layer", layer),
 			slog.String("err", err.Error()),
 		)
+	}
+}
+
+// recordNodeServe books the token_events row for a request served by a REGISTERED NODE, so it COUNTS
+// in the cache hit-rate denominator as a MISS (no cache produced the bytes) — closing the node-serve
+// denominator gap. Post-serve, void, mint-free: a failure never affects the already-flushed response.
+// SKIPPED for LoggingNone workspaces, exactly like every other token_events write (upstream RecordSpend,
+// cache recordCacheServe, streamed spend), preserving the privacy invariant — an opt-out workspace
+// persists NOTHING, so its hit rate is computed over an empty set, not a partial one. The logging
+// policy is read the same way the request handler reads it (GetLoggingPolicy, default Metadata).
+// `served` is the node's output text (len/4 output tokens, matching the mint-basis measurement); the
+// prompt is used only for the input-token length — no prompt bytes are persisted (the insert stores ”).
+func (p *Proxy) recordNodeServe(ctx context.Context, wsID, team, sprint, feature, model, prompt, served, sessionID, requestID string) {
+	if p.alertManager == nil {
+		return
+	}
+	logging := workspace.LoggingMetadata
+	if p.workspaceManager != nil {
+		logging = p.workspaceManager.GetLoggingPolicy(wsID)
+	}
+	if logging == workspace.LoggingNone {
+		return
+	}
+	inT, outT := len(prompt)/4, len(served)/4
+	if err := p.alertManager.RecordNodeServe(ctx, wsID, team, sprint, feature, model, inT, outT, sessionID, requestID, "text"); err != nil {
+		slog.Warn("alerts: RecordNodeServe failed", slog.String("request_id", requestID), slog.String("err", err.Error()))
 	}
 }
 

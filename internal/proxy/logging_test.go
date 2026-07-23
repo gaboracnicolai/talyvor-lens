@@ -76,6 +76,10 @@ func (r *recordingAlertSink) RecordCacheServe(ctx context.Context, workspaceID, 
 	return nil
 }
 
+func (r *recordingAlertSink) RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string) error {
+	return r.RecordCacheServe(ctx, workspaceID, team, sprint, feature, model, inputTokens, outputTokens, sessionID, requestID, modality, "node")
+}
+
 // spendWithServeSource returns the first captured row with the given serve_source
 // (and whether one exists). "" matches upstream RecordSpend rows.
 func (r *recordingAlertSink) spendWithServeSource(source string) (recordedSpend, bool) {

@@ -220,6 +220,30 @@ const insertCacheServeSQL = `INSERT INTO token_events
   (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, TRUE, '', $12)`
 
+// RecordNodeServe writes the token_events row for a request served by a REGISTERED INFERENCE NODE —
+// so it COUNTS in the cache hit-rate denominator as a MISS (no cache produced the bytes), closing the
+// node-serve denominator gap. It reuses the zero-provider-cost insert RecordCacheServe established
+// (insertCacheServeSQL), because a node serve — like a cache serve — costs Talyvor NOTHING upstream:
+// the node did the compute, not an API provider.
+//
+// ⚠ cost_usd = 0 IS TALYVOR'S PROVIDER COST. What the node may be OWED is a PoVI LENS mint in
+// lens_token_ledger — a DIFFERENT ledger and a DIFFERENT unit (LENS, not USD). Folding it into
+// cost_usd here would pollute every SUM(cost_usd) provider-spend total and mix units. serve_source is
+// always 'node' (the migration 0101 CHECK enum). The alert ladder is skipped for the same reason as a
+// cache serve — a zero-cost row cannot move a SUM(cost_usd) threshold window.
+func (a *AlertManager) RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string) error {
+	provider := providerForModel(model)
+	if modality == "" {
+		modality = "text"
+	}
+	if _, err := a.pool.Exec(ctx, insertCacheServeSQL,
+		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, sessionID, requestID, modality, "node",
+	); err != nil {
+		return fmt.Errorf("alerts: insert node-serve token_event: %w", err)
+	}
+	return nil
+}
+
 func (a *AlertManager) recordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error {
 	cost := costUSD(model, inputTokens, outputTokens)
 	provider := providerForModel(model)
