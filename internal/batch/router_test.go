@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/pashagolub/pgxmock/v4"
+
+	"github.com/talyvor/lens/internal/alerts"
 )
 
 func newTestRouter(t *testing.T, anthropicURL string) (*BatchRouter, pgxmock.PgxPoolIface) {
@@ -224,4 +226,104 @@ func TestStartPoller_StopsOnContextCancel(t *testing.T) {
 
 	// Silence unused json import if a future edit drops it.
 	_ = json.RawMessage{}
+}
+
+// ─── settle seam (the batch discount made real) ─────────────────────────────
+
+// The batch rate is exported as the single source of truth so the settle path
+// and any client-facing copy derive from it — never a hardcoded "50%" string.
+func TestBatchDiscount_Exported(t *testing.T) {
+	if BatchDiscount != 0.5 {
+		t.Errorf("BatchDiscount = %v, want 0.5 (Anthropic batch price)", BatchDiscount)
+	}
+	if SavingsPercent() != 50 {
+		t.Errorf("SavingsPercent() = %d, want 50 (derived from BatchDiscount)", SavingsPercent())
+	}
+}
+
+// completeSrv returns an httptest server that reports a batch ended and yields a
+// single succeeded JSONL line for requestID.
+func completeSrv(t *testing.T, requestID string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/results") {
+			_, _ = io.WriteString(w, `{"custom_id":"`+requestID+`","result":{"type":"succeeded","message":{"content":[{"type":"text","text":"batch result"}]}}}`+"\n")
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"batch_done","processing_status":"ended"}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// On completion the settle hook fires EXACTLY ONCE with the job carrying its
+// batch-RATED cost — the seam the billing settle path debits (batch never
+// charges a ledger itself). This is what makes the 0.5 discount real rather than
+// a value assigned to a consumer-less field.
+func TestSettleHook_FiresOnceWithRatedCost(t *testing.T) {
+	srv := completeSrv(t, "req-settle")
+	r, _ := newTestRouter(t, srv.URL)
+
+	var calls int
+	var settled *BatchJob
+	r.SetSettleHook(func(_ context.Context, job *BatchJob) {
+		calls++
+		settled = job
+	})
+
+	r.mu.Lock()
+	r.pending["req-settle"] = &BatchJob{
+		ID: "batch_done", RequestID: "req-settle", Provider: "anthropic",
+		Model: "claude-3-opus-20240229", Prompt: "hi", Status: BatchProcessing, CreatedAt: time.Now(),
+	}
+	r.mu.Unlock()
+
+	got, err := r.Poll(context.Background(), "batch_done")
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("settle hook fired %d times, want exactly 1", calls)
+	}
+	if settled != got {
+		t.Fatalf("settle hook got a different job than Poll returned")
+	}
+	// The cost handed to settle is the batch-RATED cost — half the synchronous price.
+	wantRated := alerts.CostUSD("claude-3-opus-20240229", len("hi")/4, len("batch result")/4) * BatchDiscount
+	if got.CostUSD != wantRated {
+		t.Errorf("settled CostUSD = %v, want batch-rated %v", got.CostUSD, wantRated)
+	}
+	if got.Status != BatchComplete {
+		t.Errorf("Status = %q, want %q", got.Status, BatchComplete)
+	}
+}
+
+// A FAILED batch never settles — no charge on failure.
+func TestSettleHook_NotFiredOnFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/results") {
+			_, _ = io.WriteString(w, `{"custom_id":"req-fail","result":{"type":"errored"}}`+"\n")
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"batch_fail","processing_status":"ended"}`)
+	}))
+	t.Cleanup(srv.Close)
+	r, _ := newTestRouter(t, srv.URL)
+
+	var calls int
+	r.SetSettleHook(func(_ context.Context, _ *BatchJob) { calls++ })
+
+	r.mu.Lock()
+	r.pending["req-fail"] = &BatchJob{
+		ID: "batch_fail", RequestID: "req-fail", Provider: "anthropic",
+		Model: "claude-3-opus-20240229", Prompt: "hi", Status: BatchProcessing, CreatedAt: time.Now(),
+	}
+	r.mu.Unlock()
+
+	_, _ = r.Poll(context.Background(), "batch_fail")
+	if calls != 0 {
+		t.Errorf("settle hook fired %d times on a FAILED batch, want 0 (no charge on failure)", calls)
+	}
 }

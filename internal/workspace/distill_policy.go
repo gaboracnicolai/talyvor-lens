@@ -6,14 +6,19 @@ import (
 )
 
 // DistillPolicy controls whether the request-path DISTILL integration converts
-// a document in this workspace's requests. It mirrors LoggingPolicy. The safe
-// default is DistillDisabled: distillation is inert until an admin enables it,
-// so the live request path stays byte-for-byte unchanged for every workspace
-// that has not opted in.
+// a document in this workspace's requests. It mirrors LoggingPolicy.
+//
+// Distill is ON BY DEFAULT (DefaultDistillPolicy = DistillAlways). It is the one
+// savings feature that reaches the CUSTOMER's charge — it shrinks a document to
+// compact Markdown BEFORE the pre-serve cost estimate (proxy.go), so the customer
+// is billed on the smaller prompt — and it degrades safely to today's behaviour:
+// with no worker binary configured a conversion simply fails and the ORIGINAL
+// body is served unchanged (proxy MaybeDistill never fails a request on a
+// conversion error). A workspace turns it off with an explicit DistillDisabled.
 type DistillPolicy string
 
 const (
-	// DistillDisabled (the default) never distills — fully inert.
+	// DistillDisabled never distills — fully inert. An explicit opt-out.
 	DistillDisabled DistillPolicy = "disabled"
 	// DistillOptIn distills a document request ONLY when it also sends the
 	// X-Talyvor-Distill header (per-request opt-in).
@@ -22,12 +27,26 @@ const (
 	DistillAlways DistillPolicy = "always"
 )
 
-// normalizeDistillPolicy maps unknown/empty values to the safe default
-// (disabled) so a misconfigured workspace never silently turns distillation on.
+// DefaultDistillPolicy is what a workspace gets when it sets NO policy — the
+// on-by-default state. Distilling documents is a saving that lowers the
+// customer's bill and degrades harmlessly when unconfigured (see above), so the
+// default is DistillAlways rather than the former inert DistillDisabled.
+const DefaultDistillPolicy = DistillAlways
+
+// normalizeDistillPolicy resolves a stored/supplied policy:
+//   - an explicit valid value (disabled / opt_in / always) is honoured — so an
+//     existing workspace's stored 'disabled' stays off, never flipped by the
+//     default;
+//   - an EMPTY value (unset — the workspace wants the default) resolves to
+//     DefaultDistillPolicy, so a freshly-registered workspace is on by default;
+//   - anything else (a typo / garbage) fails SAFE to DistillDisabled, so a
+//     misconfiguration never silently distills.
 func normalizeDistillPolicy(p DistillPolicy) DistillPolicy {
 	switch p {
 	case DistillDisabled, DistillOptIn, DistillAlways:
 		return p
+	case "":
+		return DefaultDistillPolicy
 	default:
 		return DistillDisabled
 	}

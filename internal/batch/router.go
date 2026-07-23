@@ -24,9 +24,25 @@ const (
 	defaultAnthropicURL = "https://api.anthropic.com"
 	pollInterval        = 5 * time.Minute
 	httpTimeout         = 30 * time.Second
-	// batchDiscount is the published Anthropic batch-pricing reduction.
-	batchDiscount = 0.5
+	// BatchDiscount is the published Anthropic batch-pricing multiplier: a batched
+	// request is billed at HALF the synchronous price. Exported as the SINGLE
+	// source of truth so the settle path (which charges the ledger) and any
+	// client-facing "N% off" copy both derive from it — never a hardcoded string
+	// that can drift from the real rate.
+	BatchDiscount = 0.5
 )
+
+// SavingsPercent is BatchDiscount as a whole-number percentage (50 for a 0.5
+// multiplier), for honest client-facing copy derived from the real rate.
+func SavingsPercent() int { return int((1 - BatchDiscount) * 100) }
+
+// SettleFunc is invoked EXACTLY ONCE per batch job, when it reaches
+// BatchComplete, with the job carrying its final batch-rated CostUSD. It is the
+// seam for the billing settle path: batch computes the rated cost, the billing
+// hook performs the ONE ledger debit. This package deliberately performs NO
+// charge itself (it is read-only w.r.t. the ledger); a nil hook (the default)
+// means today's behaviour — a completed job that debits nothing.
+type SettleFunc func(ctx context.Context, job *BatchJob)
 
 // pgxDB is the subset of *pgxpool.Pool that the batch router needs.
 // nil pool keeps the in-memory pending map alive but skips persistence.
@@ -43,6 +59,15 @@ type BatchRouter struct {
 	anthropicURL string
 	mu           sync.RWMutex
 	pending      map[string]*BatchJob // requestID → job
+	settle       SettleFunc           // billing settle hook; nil = no settlement (today's behaviour)
+}
+
+// SetSettleHook wires the billing settle callback, invoked once per completed
+// job with its batch-rated cost. Idempotent; a nil fn disables settlement.
+func (r *BatchRouter) SetSettleHook(fn SettleFunc) {
+	r.mu.Lock()
+	r.settle = fn
+	r.mu.Unlock()
 }
 
 type BatchJob struct {
@@ -310,14 +335,18 @@ func (r *BatchRouter) fetchResults(ctx context.Context, batchID string, job *Bat
 			break
 		}
 	}
+	// Explicit unlocks (not defer): on success we must RELEASE the mutex before
+	// invoking the settle hook, so the billing callback can never re-enter the
+	// router under our lock. Failure paths return without settling — no charge.
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if matched == nil {
 		job.Status = BatchFailed
+		r.mu.Unlock()
 		return job, fmt.Errorf("batch: no result for request_id %q", job.RequestID)
 	}
 	if matched.Result.Type != "succeeded" {
 		job.Status = BatchFailed
+		r.mu.Unlock()
 		return job, fmt.Errorf("batch: request_id %q result type %q", job.RequestID, matched.Result.Type)
 	}
 
@@ -326,6 +355,7 @@ func (r *BatchRouter) fetchResults(ctx context.Context, batchID string, job *Bat
 	payload := map[string]any{"content": matched.Result.Message.Content}
 	out, err := json.Marshal(payload)
 	if err != nil {
+		r.mu.Unlock()
 		return job, err
 	}
 	now := time.Now().UTC()
@@ -333,12 +363,21 @@ func (r *BatchRouter) fetchResults(ctx context.Context, batchID string, job *Bat
 	job.Response = out
 	job.CompletedAt = &now
 	// Approximate token usage with the len/4 heuristic the rest of the
-	// pipeline uses; price at the 50% batch rate.
+	// pipeline uses; price at the batch rate (half the synchronous price).
 	totalText := ""
 	for _, c := range matched.Result.Message.Content {
 		totalText += c.Text
 	}
-	job.CostUSD = alerts.CostUSD(job.Model, len(job.Prompt)/4, len(totalText)/4) * batchDiscount
+	job.CostUSD = alerts.CostUSD(job.Model, len(job.Prompt)/4, len(totalText)/4) * BatchDiscount
+	settle := r.settle
+	r.mu.Unlock()
+
+	// Settle EXACTLY ONCE, outside the lock: this is where the batch discount
+	// becomes real — the billing hook debits the workspace's ledger at the rated
+	// cost. Nil hook ⇒ no settlement (today's behaviour).
+	if settle != nil {
+		settle(ctx, job)
+	}
 	return job, nil
 }
 
