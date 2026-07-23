@@ -345,8 +345,22 @@ type Config struct {
 	// When false, the sub-budget path is bypassed (today's plain SpendLXC behavior). It is a SPEND bound, not
 	// a mint — deliberately NOT in the economy force-off block (turning it off REMOVES a spend guard, so off
 	// is the less-safe state; it is not a mint gate). Env: LENS_LXC_AGENT_ALLOCATION_ENABLED (default TRUE).
-	LXCAgentAllocationEnabled bool          // LENS_LXC_AGENT_ALLOCATION_ENABLED (default TRUE)
-	DetectorSweepWindow       time.Duration // LENS_DETECTOR_SWEEP_WINDOW (default 24h)
+	LXCAgentAllocationEnabled bool // LENS_LXC_AGENT_ALLOCATION_ENABLED (default TRUE)
+
+	// LXCReservationEnabled turns the agent charge into a HOLD → SETTLE/RELEASE reservation so the customer
+	// is billed what was DELIVERED, not a pre-serve estimate (routing/cache/batch savings reach the bill).
+	// DEFAULT TRUE — the correct billing IS the end state, not a flag someone remembers to flip. When on, the
+	// pre-serve seam RESERVES a conservative hold and the post-serve seam SETTLES the delivered cost (or
+	// RELEASES a cache hit, free). When off, the legacy pre-serve estimate debit (SpendLXCForAgent) runs — the
+	// rollback path. Env: LENS_LXC_RESERVATION_ENABLED (default TRUE).
+	LXCReservationEnabled bool
+	// LXCReservationMaxOutputTokens BOUNDS the conservative hold when a request omits max_tokens. Held output
+	// = explicit max_tokens if set, else THIS cap — deliberately NOT the catalog maximum: holding a model's
+	// full 128k-token output against a request that produces 200 would block legitimate work on a modest
+	// ceiling (a hold so conservative it blocks is its own bug). Env:
+	// LENS_LXC_RESERVATION_MAX_OUTPUT_TOKENS (default 4096).
+	LXCReservationMaxOutputTokens int
+	DetectorSweepWindow           time.Duration // LENS_DETECTOR_SWEEP_WINDOW (default 24h)
 
 	// AntiGaming* gate the Phase-2 AUTO clawback: the leader-elected sweep that detects
 	// self-dealing RINGS (transitive identity closure over held cross-tenant royalty mints)
@@ -1384,6 +1398,19 @@ func Load() (*Config, error) {
 	c.LXCAgentAllocationEnabled = true
 	if os.Getenv("LENS_LXC_AGENT_ALLOCATION_ENABLED") != "" {
 		c.LXCAgentAllocationEnabled = parseBoolEnv("LENS_LXC_AGENT_ALLOCATION_ENABLED")
+	}
+
+	// LXC reservation — DEFAULT-TRUE: the correct billing is the end state. Off = legacy pre-serve estimate.
+	c.LXCReservationEnabled = true
+	if os.Getenv("LENS_LXC_RESERVATION_ENABLED") != "" {
+		c.LXCReservationEnabled = parseBoolEnv("LENS_LXC_RESERVATION_ENABLED")
+	}
+	// Bounded output allowance for the conservative hold when max_tokens is unset. Sane cap, not catalog max.
+	c.LXCReservationMaxOutputTokens = 4096
+	if v := os.Getenv("LENS_LXC_RESERVATION_MAX_OUTPUT_TOKENS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.LXCReservationMaxOutputTokens = n
+		}
 	}
 	c.DetectorSweepInterval = time.Hour
 	if v := os.Getenv("LENS_DETECTOR_SWEEP_INTERVAL"); v != "" {

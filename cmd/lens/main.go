@@ -1294,6 +1294,31 @@ func run() error {
 	// sub-budget (SpendLXCForAgent), gated on LXCAgentAllocationEnabled. Non-agent traffic (empty APIKeyID)
 	// is unaffected. Mints the server-derived debit-key salt on wire.
 	p.SetAgentSpender(dualToken, func() bool { return cfg.LXCAgentAllocationEnabled })
+	// Billing redesign: the reservation path (HOLD → SETTLE/RELEASE) — DEFAULT ON. When on, the pre-serve
+	// seam holds a conservative bounded reservation and the post-serve seam settles the delivered cost;
+	// shadow and settle are mutually exclusive by this flag (no double charge).
+	p.SetReservation(func() bool { return cfg.LXCReservationEnabled }, func() int { return cfg.LXCReservationMaxOutputTokens })
+	// Crash-recovery sweeper: RELEASES (refunds) reservations stranded by a crash between hold and settle.
+	// The normal path settles PROMPTLY at the post-serve seam; this is for crashes ONLY and never auto-settles
+	// (a stranded serve's outcome is unknown, so the safe money move is to refund). Threshold >> any request.
+	if cfg.LXCReservationEnabled {
+		go func() {
+			t := time.NewTicker(2 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if n, err := dualToken.ReleaseStrandedReservations(ctx, 15*time.Minute); err != nil {
+						slog.Warn("billing: stranded-reservation sweep failed", slog.String("err", err.Error()))
+					} else if n > 0 {
+						slog.Info("billing: swept stranded reservations (crash refund)", slog.Int("released", n))
+					}
+				}
+			}
+		}()
+	}
 	// Phase-3 routing-pattern capture — post-serve, void, mint-free producer
 	// for the routing Advisor. Default off; persists observations for opted-in
 	// workspaces only (SQL gate). NEVER reaches ledger.Credit (earning is a

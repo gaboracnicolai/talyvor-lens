@@ -164,6 +164,12 @@ type Proxy struct {
 	agentAllocEnabled func() bool
 	agentDebitSalt    []byte
 
+	// Reservation path (billing redesign) — when reservationEnabled, the pre-serve seam HOLDS and the
+	// post-serve seam SETTLES the delivered cost. reservationMaxOut bounds the conservative hold's output
+	// allowance when a request omits max_tokens. Both nil-safe (reservationActive() checks).
+	reservationEnabled func() bool
+	reservationMaxOut  func() int
+
 	// Routing-pattern capture (Phase-3) — optional, nil-safe post-serve
 	// producer for the routing Advisor. See pattern_capture.go.
 	patternSink           patternCaptureSink
@@ -741,10 +747,24 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// routing work and physically cannot exceed its ceiling. Non-agent traffic (agentKeyID == "") skips this
 	// entirely and is unchanged. agentKeyID is reused below to pick the price-aware routing strategy.
 	agentKeyID := agentKeyIDFromContext(ctx)
-	if agentKeyID != "" && p.agentAllocationBlocks(ctx, agentKeyID, wsID, model, prompt, requestID) {
-		writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
-		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "agent_blocked").Inc()
-		return
+	if agentKeyID != "" {
+		if p.reservationActive() {
+			// Billing redesign: HOLD a conservative (output-aware, BOUNDED) reservation pre-serve — the
+			// ceiling stays enforced against it — and SETTLE the delivered cost post-serve (or RELEASE a
+			// cache hit, free). The hold rides ctx to the post-serve seam.
+			maxOut := boundedMaxOut(extractMaxTokens(body), p.reservationMaxOut)
+			rctx, blocked := p.agentReserveBlocks(ctx, agentKeyID, wsID, model, prompt, requestID, maxOut)
+			if blocked {
+				writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
+				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "agent_blocked").Inc()
+				return
+			}
+			ctx = rctx
+		} else if p.agentAllocationBlocks(ctx, agentKeyID, wsID, model, prompt, requestID) {
+			writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "agent_blocked").Inc()
+			return
+		}
 	}
 
 	// Branch / PR / commit attribution. Extracted up front so we can set
@@ -952,6 +972,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					// SERVE point: the replay succeeded, so a pooled hit
 					// (if that's what this was) now earns its royalty.
 					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
+					// Billing redesign: resolve the pre-serve HOLD — pooled hit bills avoided_COGS, own hit is free.
+					p.resolveCacheReservation(ctx, pooledHit)
 					// Cache-serve spend visibility (0100): the served request
 					// becomes a zero-provider-cost token_events row tagged with
 					// its layer, so hit rate is countable next to every miss.
@@ -975,6 +997,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				metrics.RecordCacheHit(layer)
 				// SERVE point: the cached body went out on the wire.
 				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
+				// Billing redesign: resolve the pre-serve HOLD — pooled hit bills avoided_COGS, own hit is free.
+				p.resolveCacheReservation(ctx, pooledHit)
 				// Cache-serve spend visibility (0100): see recordCacheServe.
 				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
 				span.SetAttributes(
@@ -1457,7 +1481,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// workspace gets neither; symmetric with the streaming seam, which
 			// returns early on LoggingNone). Void, post-serve, same ctx — cannot
 			// affect the response. Inert unless the flag is on AND a sink wired.
-			p.shadowSpendLXC(ctx, wsID, alerts.CostUSD(upstreamModel, inT, outT))
+			// Billing redesign: SETTLE the reservation to the DELIVERED cost (served model, real tokens) — the
+			// customer pays what routing/batch/compression actually produced. shadow and settle are mutually
+			// exclusive by the reservation flag, so no config ever charges twice.
+			if p.reservationActive() {
+				p.settleReservation(ctx, alerts.CostUSD(upstreamModel, inT, outT))
+			} else {
+				p.shadowSpendLXC(ctx, wsID, alerts.CostUSD(upstreamModel, inT, outT))
+			}
 			// Routing-pattern capture (Phase-3) — post-serve, VOID, structurally
 			// mint-free. Same logging gate + post-serve position as the shadow
 			// debit (a LoggingNone workspace gets neither); the opt-in WRITE gate
@@ -1858,7 +1889,11 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	}
 	// Shadow LXC debit on the streaming path — same detached ctx as the
 	// streamed cost_usd write above; void, observational.
-	p.shadowSpendLXC(ctx, sc.wsID, alerts.CostUSD(sc.model, inT, outT))
+	if p.reservationActive() {
+		p.settleReservation(ctx, alerts.CostUSD(sc.model, inT, outT))
+	} else {
+		p.shadowSpendLXC(ctx, sc.wsID, alerts.CostUSD(sc.model, inT, outT))
+	}
 }
 
 func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []byte {
@@ -2644,4 +2679,58 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// SetReservation wires the reservation-billing path: enabled gates HOLD→SETTLE (vs the legacy estimate
+// debit), maxOut supplies the bounded output allowance for the conservative hold when a request omits
+// max_tokens. Read per-call so both stay live. nil-safe (reservationActive / the seam helpers check).
+func (p *Proxy) SetReservation(enabled func() bool, maxOut func() int) {
+	p.reservationEnabled = enabled
+	p.reservationMaxOut = maxOut
+}
+
+// extractMaxTokens returns the request's declared output cap (max_tokens, or OpenAI's newer
+// max_completion_tokens), else 0 when unset. Parse failure ⇒ 0 (the caller falls back to the configured cap).
+func extractMaxTokens(body []byte) int {
+	var m struct {
+		MaxTokens           *int `json:"max_tokens"`
+		MaxCompletionTokens *int `json:"max_completion_tokens"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return 0
+	}
+	if m.MaxTokens != nil && *m.MaxTokens > 0 {
+		return *m.MaxTokens
+	}
+	if m.MaxCompletionTokens != nil && *m.MaxCompletionTokens > 0 {
+		return *m.MaxCompletionTokens
+	}
+	return 0
+}
+
+// boundedMaxOut is the output allowance for the conservative hold: the request's EXPLICIT max_tokens when
+// set (the agent declared it — hold honestly for it), else a sane configured CAP — never the catalog maximum
+// (which would over-hold and block legitimate work on a modest ceiling).
+func boundedMaxOut(explicit int, cap func() int) int {
+	if explicit > 0 {
+		return explicit
+	}
+	if cap != nil {
+		if c := cap(); c > 0 {
+			return c
+		}
+	}
+	return 4096 // last-resort default if the cap fn is unwired
+}
+
+// resolveCacheReservation resolves a held reservation at a CACHE SERVE point. A cross-tenant POOLED hit
+// bills the requester avoided_COGS (the value received — Talyvor keeps its margin, the contributor is
+// minted the SAME avoided_COGS); an OWN cache hit is FREE (no upstream call, no contributor ⇒ full refund).
+// No-op without a reservation on the context (non-agent, or reservation path off).
+func (p *Proxy) resolveCacheReservation(ctx context.Context, pooledHit *poolroyalty.ServedHit) {
+	if pooledHit != nil {
+		p.settleReservation(ctx, pooledHit.AvoidedCOGSUSD)
+		return
+	}
+	p.releaseReservation(ctx, "own cache hit")
 }

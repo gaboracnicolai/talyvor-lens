@@ -63,6 +63,19 @@ func lxcEstimate(model, prompt string) int64 {
 	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
 }
 
+// reserveEstimateLXC is the CONSERVATIVE (output-aware) pre-serve HOLD, in µLXC: input tokens from the
+// prompt PLUS a BOUNDED output allowance (maxOutTokens), priced on the requested model, ceil. Unlike the
+// input-only lxcEstimate (which under-holds against an output-inclusive charge and would leak the ceiling
+// by exactly the output cost), this is a true upper bound on the delivered cost, so the settle only ever
+// refunds. maxOutTokens is BOUNDED by the caller (explicit max_tokens, else a sane cap — never catalog max).
+func reserveEstimateLXC(model, prompt string, maxOutTokens int) int64 {
+	if maxOutTokens < 0 {
+		maxOutTokens = 0
+	}
+	estUSD := alerts.CostUSD(model, len(prompt)/4, maxOutTokens)
+	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
+}
+
 // lxcGateBlocks reports whether the request should be BLOCKED (true) for
 // insufficient LXC. The caller (after the budget gate, before the upstream
 // call) does writeError(402)+return on true, so "upstream never called" is
