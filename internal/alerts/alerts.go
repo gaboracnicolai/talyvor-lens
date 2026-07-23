@@ -107,8 +107,43 @@ func costUSD(model string, inputTokens, outputTokens int) float64 {
 // CostUSD is the exported entry point on the per-million-token price table.
 // Other packages (e.g. the A/B tester) call this so there's a single source
 // of truth for model pricing across the system.
+//
+// This prices EVERY input token at the full input rate — it is blind to prompt
+// caching. That over-states cost when input was served from a provider cache
+// (OpenAI cached tokens are ~0.5x, Anthropic cache reads 0.1x) and misses
+// Anthropic cache-write tokens entirely. It is retained BYTE-IDENTICAL because
+// the in-flight billing arc and ~20 other call sites depend on this exact
+// signature and result; callers move to CostUSDDetailed to get the honest basis.
 func CostUSD(model string, inputTokens, outputTokens int) float64 {
 	return costUSD(model, inputTokens, outputTokens)
+}
+
+// CostUSDDetailed is the cache-aware cost basis: the honest USD Talyvor pays a
+// provider for one response. It prices each class of input token at its own
+// catalog rate —
+//
+//	uncachedInput   at the input rate
+//	cachedInput     at the cache-READ rate  (cheap: Anthropic 0.1x, OpenAI ~0.5x)
+//	cacheWriteInput at the cache-WRITE rate (Anthropic 1.25x; none pre-GPT-5.6)
+//	output          at the output rate
+//
+// It is the ADDITIVE counterpart to CostUSD: with zero cached and zero cache-write
+// tokens it returns EXACTLY CostUSD(model, uncachedInput, output) — the input/output
+// rates are the same catalog values, so the extra terms vanish. That equivalence is
+// proven by TestCostUSDDetailed_EqualsCostUSDAtZeroCached, which is why adding this
+// function cannot perturb any existing CostUSD caller. Unknown models cost 0, as CostUSD.
+//
+// Wire the counts from inference.Usage's normalized breakdown: UncachedInputTokens,
+// CachedInputTokens, CacheWriteInputTokens, OutputTokens.
+func CostUSDDetailed(model string, uncachedInput, cachedInput, cacheWriteInput, output int) float64 {
+	inP, cachedP, writeP, outP, ok := catalog.PriceDetailed(model)
+	if !ok {
+		return 0
+	}
+	return (float64(uncachedInput)*inP +
+		float64(cachedInput)*cachedP +
+		float64(cacheWriteInput)*writeP +
+		float64(output)*outP) / 1_000_000
 }
 
 // providerForModel derives the provider name from the model name. Used so

@@ -35,17 +35,27 @@ type Capabilities struct {
 // tokens — the canonical pricing the cost-attribution moat depends on.
 // ContextTokens/MaxOutput are best-effort informational values (no behavior
 // gates on them today); pricing + capabilities are authoritative.
+//
+// CachedInputPer1M / CacheWritePer1M are the prompt-caching rates (USD per 1M):
+// what a provider charges for input tokens served from its cache (a read) and
+// for tokens written into its cache (a write). They are seeded from published
+// per-provider multipliers on the base input rate (see seed.go withCacheRates)
+// and are what lets the cost basis price a cache-heavy request at what Talyvor
+// actually paid rather than at the full list rate. A zero value means "unset"
+// and PriceDetailed falls it back to the input rate (never free).
 type Model struct {
-	ID            string       `json:"id"`
-	Provider      string       `json:"provider"`
-	DisplayName   string       `json:"display_name"`
-	InputPer1M    float64      `json:"input_per_1m"`
-	OutputPer1M   float64      `json:"output_per_1m"`
-	Capabilities  Capabilities `json:"capabilities"`
-	ContextTokens int          `json:"context_tokens"`
-	MaxOutput     int          `json:"max_output"`
-	Deprecated    bool         `json:"deprecated,omitempty"`
-	Aliases       []string     `json:"aliases,omitempty"` // e.g. dated snapshots → this canonical id
+	ID               string       `json:"id"`
+	Provider         string       `json:"provider"`
+	DisplayName      string       `json:"display_name"`
+	InputPer1M       float64      `json:"input_per_1m"`
+	OutputPer1M      float64      `json:"output_per_1m"`
+	CachedInputPer1M float64      `json:"cached_input_per_1m,omitempty"` // cache READ rate (Anthropic 0.1x input, OpenAI ~0.5x)
+	CacheWritePer1M  float64      `json:"cache_write_per_1m,omitempty"`  // cache WRITE rate (Anthropic 1.25x input)
+	Capabilities     Capabilities `json:"capabilities"`
+	ContextTokens    int          `json:"context_tokens"`
+	MaxOutput        int          `json:"max_output"`
+	Deprecated       bool         `json:"deprecated,omitempty"`
+	Aliases          []string     `json:"aliases,omitempty"` // e.g. dated snapshots → this canonical id
 }
 
 // Registry holds the models keyed by canonical id, with an alias index.
@@ -97,6 +107,35 @@ func (r *Registry) Get(id string) (Model, bool) {
 func (r *Registry) Price(id string) (in, out float64, ok bool) {
 	m, ok := r.Get(id)
 	return m.InputPer1M, m.OutputPer1M, ok
+}
+
+// PriceDetailed returns the full cache-aware per-1M price breakdown:
+//
+//	in         — uncached input rate
+//	cachedIn   — cache-READ rate (input tokens served from the provider's cache)
+//	cacheWrite — cache-WRITE rate (input tokens written into the cache)
+//	out        — output rate
+//
+// in/out are byte-identical to Price for every model (a golden test enforces
+// this), so the existing cost basis is never perturbed. ok=false for unknown
+// models (priced at 0, exactly as Price). When a model carries no explicit
+// cached/write rate — e.g. a runtime Override that set only input/output — those
+// fall back to the input rate: the conservative choice that never bills a cached
+// token at zero and never under-states cost.
+func (r *Registry) PriceDetailed(id string) (in, cachedIn, cacheWrite, out float64, ok bool) {
+	m, ok := r.Get(id)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	in, out = m.InputPer1M, m.OutputPer1M
+	cachedIn, cacheWrite = m.CachedInputPer1M, m.CacheWritePer1M
+	if cachedIn == 0 {
+		cachedIn = in
+	}
+	if cacheWrite == 0 {
+		cacheWrite = in
+	}
+	return in, cachedIn, cacheWrite, out, true
 }
 
 // CapabilitiesOf returns a model's capabilities (zero value = text-only for
@@ -178,6 +217,9 @@ var defaultRegistry = NewRegistry(seedModels())
 
 func Get(id string) (Model, bool)                { return defaultRegistry.Get(id) }
 func Price(id string) (in, out float64, ok bool) { return defaultRegistry.Price(id) }
+func PriceDetailed(id string) (in, cachedIn, cacheWrite, out float64, ok bool) {
+	return defaultRegistry.PriceDetailed(id)
+}
 func CapabilitiesOf(id string) Capabilities      { return defaultRegistry.CapabilitiesOf(id) }
 func Resolve(id string) string                   { return defaultRegistry.Resolve(id) }
 func All() []Model                               { return defaultRegistry.All() }
