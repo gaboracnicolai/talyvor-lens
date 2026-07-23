@@ -13,7 +13,7 @@ import (
 
 // (PR1.a) Per-pair cap DENIES over-cap: 3 relationships for one (owner, requester)
 // pair, cap=2 → exactly 2 mint, the 3rd is a deflationary no-op (no claim row, no
-// credit). The owner's held balance is 2×0.5×2.0, not 3×.
+// credit). The owner's held balance is 2 × 0.5 × $2 × 10 peg = 20 LENS, not 3×.
 func TestDistillMint_PerPairCap_DeniesOverCap_Integration(t *testing.T) {
 	pool, ledger := distillMintHarness(t)
 	ctx := context.Background()
@@ -35,8 +35,8 @@ func TestDistillMint_PerPairCap_DeniesOverCap_Integration(t *testing.T) {
 	if c := mintRowCount(t, pool, "wsA"); c != 2 {
 		t.Fatalf("cap: %d claim rows, want 2 (the 3rd must roll back — no row)", c)
 	}
-	if _, held := balances(t, pool, "wsA"); held != micro(2) {
-		t.Fatalf("held=%v, want 2.0 (exactly 2 mints × 0.5 × 2.0; the capped 3rd added nothing)", held)
+	if _, held := balances(t, pool, "wsA"); held != micro(20) {
+		t.Fatalf("held=%v, want 20 LENS (2 mints × 0.5 × $2 × 10 LENS/$ peg; the capped 3rd added nothing)", held)
 	}
 }
 

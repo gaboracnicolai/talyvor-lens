@@ -55,8 +55,8 @@ func TestDistillRevoke_ClawsBackExactlyOnce_Integration(t *testing.T) {
 		t.Fatalf("seed mint: minted %d err=%v, want 1", n, err)
 	}
 	rid := SHA256Hex([]byte("wsA:wsB:h1"))
-	if _, held := balances(t, pool, "wsA"); held != micro(2) {
-		t.Fatalf("pre-revoke held=%v, want 2.0 (0.5×4.0)", held)
+	if _, held := balances(t, pool, "wsA"); held != micro(20) {
+		t.Fatalf("pre-revoke held=%v, want 20 LENS (0.5 × $4 × 10 LENS/$ peg)", held)
 	}
 
 	rev := NewRevokerForTable(pool, ledger, "distill_royalty_mints")

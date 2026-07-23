@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/economy"
 )
 
 // PR4 — the distill reuse-royalty margin view (margin_usd = avoided_cogs_usd −
@@ -16,7 +18,7 @@ func createDistillMarginView(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), `CREATE OR REPLACE VIEW distill_royalty_margin AS
 SELECT request_id, requester_workspace_id, contributor_workspace_id, content_hash,
-       avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd,
+       avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) * 0.10 AS margin_usd, -- × $0.10/LENS peg (mirrors migration 0103)
        status, created_at FROM distill_royalty_mints`); err != nil {
 		t.Fatalf("create distill_royalty_margin view: %v", err)
 	}
@@ -58,15 +60,16 @@ func TestDistillMargin_RealizedMargin_FinalOnly_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("margin summary: %v", err)
 	}
-	// 2 FINAL mints: avoided 8.0, minted 4.0 (2 × 0.5 × 4.0), margin 4.0. h3 (held) excluded.
-	if s.Mints != 2 || s.AvoidedCOGSUSD != 8.0 || s.MintedLENS != micro(4) || s.MarginUSD != 4.0 {
-		t.Fatalf("summary mints=%d avoided=%v minted=%v margin=%v; want 2/8/4/4 (final only)",
+	// 2 FINAL mints: avoided 8.0, minted 40 LENS (2 × 0.5 × 4.0 × 10 LENS/$ peg),
+	// margin $4.0 (= (1−s) × 8, peg-invariant). h3 (held) excluded.
+	if s.Mints != 2 || s.AvoidedCOGSUSD != 8.0 || s.MintedLENS != micro(40) || s.MarginUSD != 4.0 {
+		t.Fatalf("summary mints=%d avoided=%v minted=%v margin=%v; want 2/8/micro(40)/4 (final only)",
 			s.Mints, s.AvoidedCOGSUSD, s.MintedLENS, s.MarginUSD)
 	}
-	// The margin identity (SEC-2): margin_usd == avoided_cogs_usd − minted_LENS,
-	// where minted is µLENS so it converts to dollars via /1e6.
-	if wantMargin := s.AvoidedCOGSUSD - float64(s.MintedLENS)/1e6; s.MarginUSD != wantMargin {
-		t.Fatalf("margin identity broken: %v != %v − %v/1e6 = %v", s.MarginUSD, s.AvoidedCOGSUSD, s.MintedLENS, wantMargin)
+	// The margin identity at the peg: margin_usd == avoided_cogs_usd − minted_LENS × $0.10,
+	// where minted is µLENS (→ LENS via /1e6, → dollars via × LXCUSDValue).
+	if wantMargin := s.AvoidedCOGSUSD - float64(s.MintedLENS)/1e6*economy.LXCUSDValue; s.MarginUSD != wantMargin {
+		t.Fatalf("margin identity broken: %v != %v − %v/1e6 × $0.10 = %v", s.MarginUSD, s.AvoidedCOGSUSD, s.MintedLENS, wantMargin)
 	}
 
 	// Breakdown by content_hash → 2 buckets (h1, h2).

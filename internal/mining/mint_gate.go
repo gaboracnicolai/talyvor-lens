@@ -3,9 +3,11 @@
 // Every LENS mint funnels through exactly two kernels: applyTx (spendable
 // Credit/CreditTx) and heldInner (CreditHeldTx). The verified-to-earn gate is
 // placed in BOTH, discriminated by the txType against mintTypes, so it covers
-// all seven mint paths at once and a new mint track CANNOT skip it — while
+// all mint paths at once and a new mint track CANNOT skip it — while
 // conservation credits (marketplace_*, *unstake, transfer) and the held
-// finalize/revoke pass through untouched.
+// finalize/revoke pass through untouched. The covered set is mintTypeList below
+// (currently ELEVEN mint-moment types — the SINGLE SOURCE OF TRUTH; do not
+// hand-count it in prose, it drifts: this comment used to say "seven").
 package mining
 
 import (

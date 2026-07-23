@@ -47,7 +47,7 @@ func seedHeldMint(t *testing.T, m *Minter, ctx context.Context, reqID, contribut
 	h := ServedHit{
 		RequestID: reqID, RequesterWorkspace: "wsB", ContributorWorkspace: contributor,
 		Layer: "exact", EntryID: "e", Provider: "openai", Model: "gpt-4o",
-		AvoidedCOGSUSD: amount * 2, // s=0.5 ⇒ minted = amount
+		AvoidedCOGSUSD: amount * 2, // s=0.5 × (amount×2) × 10 LENS/$ peg ⇒ minted = amount × 10 LENS
 		// The answer hash is a KEY input now, so vary it by (reqID, contributor)
 		// to give each seed a distinct server-derived key.
 		AnswerSHA256: SHA256Hex([]byte("a:" + reqID + ":" + contributor)), PromptSHA256: SHA256Hex([]byte("p")),
@@ -73,8 +73,8 @@ func TestRevoker_SingleRevoke_Integration(t *testing.T) {
 	// pre: held=1, spendable=0, earned=0, supply=0 (held mint not counted)
 	var bal, held, earned int64
 	mustScan(t, pool, `SELECT balance, held_balance, lifetime_earned FROM lens_token_balances WHERE workspace_id='wsA'`, &bal, &held, &earned)
-	if bal != 0 || held != micro(1) || earned != 0 {
-		t.Fatalf("pre-revoke: bal=%v held=%v earned=%v, want 0/1/0", bal, held, earned)
+	if bal != 0 || held != micro(10) || earned != 0 {
+		t.Fatalf("pre-revoke: bal=%v held=%v earned=%v, want 0/10/0", bal, held, earned)
 	}
 
 	r := NewRevoker(pool, ledger)
@@ -161,11 +161,11 @@ func TestRevoker_FinalizedNeverRevocable_Integration(t *testing.T) {
 	if revRows != 0 {
 		t.Fatalf("a finalized mint must NEVER burn-revoke; rows=%d", revRows)
 	}
-	// it finalized → spendable=2, held=0
+	// it finalized → spendable=20, held=0
 	var bal, held int64
 	mustScan(t, pool, `SELECT balance, held_balance FROM lens_token_balances WHERE workspace_id='wsA'`, &bal, &held)
-	if bal != micro(2) || held != 0 {
-		t.Fatalf("finalized: bal=%v held=%v, want 2/0", bal, held)
+	if bal != micro(20) || held != 0 {
+		t.Fatalf("finalized: bal=%v held=%v, want 20/0", bal, held)
 	}
 }
 

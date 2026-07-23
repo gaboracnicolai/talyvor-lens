@@ -164,7 +164,7 @@ func TestCapExactness_ConcurrentSamePair_Integration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT balance, held_balance FROM lens_token_balances WHERE workspace_id='wsA'`).Scan(&bal, &held); err != nil {
 		t.Fatal(err)
 	}
-	if want := int64(capK) * micro(1); held != want || bal != 0 {
+	if want := int64(capK) * micro(10); held != want || bal != 0 {
 		t.Fatalf("contributor held=%v balance=%v, want held=%v balance=0 (2.3a: exactly K HELD credits, nothing spendable until finalize)", held, bal, want)
 	}
 }
@@ -234,7 +234,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 		`CREATE OR REPLACE VIEW pool_royalty_margin AS
 		SELECT request_id, requester_workspace_id, contributor_workspace_id, layer,
 		       provider, model, avoided_cogs_usd, minted_amount,
-		       avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd, created_at, status
+		       avoided_cogs_usd - (minted_amount::numeric / 1000000.0) * 0.10 AS margin_usd, created_at, status -- × $0.10/LENS peg (mirrors migration 0103)
 		FROM pool_royalty_mints`,
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
@@ -268,8 +268,8 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT status, finalize_after IS NOT NULL FROM pool_royalty_mints WHERE request_id=$1`, key1).Scan(&status, &hasWindow); err != nil {
 		t.Fatal(err)
 	}
-	if bal != 0 || held != micro(1) || status != "held" || !hasWindow {
-		t.Fatalf("after mint: bal=%v held=%v status=%q window=%v — want 0/1.0/held/true", bal, held, status, hasWindow)
+	if bal != 0 || held != micro(10) || status != "held" || !hasWindow {
+		t.Fatalf("after mint: bal=%v held=%v status=%q window=%v — want 0/10/held/true", bal, held, status, hasWindow)
 	}
 	supply, err := ledger.GetTotalSupply(ctx)
 	if err != nil {
@@ -301,12 +301,12 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT balance, held_balance FROM lens_token_balances WHERE workspace_id='wsA'`).Scan(&bal, &held); err != nil {
 		t.Fatal(err)
 	}
-	if bal != micro(1) || held != 0 {
-		t.Fatalf("after finalize: bal=%v held=%v, want 1.0/0 (held → spendable, conserved)", bal, held)
+	if bal != micro(10) || held != 0 {
+		t.Fatalf("after finalize: bal=%v held=%v, want 10/0 (held → spendable, conserved)", bal, held)
 	}
 	supply, _ = ledger.GetTotalSupply(ctx)
-	if supply != micro(1) {
-		t.Fatalf("finalized mint must count toward supply; got %v want micro(1) µLENS", supply)
+	if supply != micro(10) {
+		t.Fatalf("finalized mint must count toward supply; got %v want micro(10) µLENS", supply)
 	}
 
 	// 4. SWEEPER NOT FLAG-GATED: a committed held row finalizes even with
@@ -347,7 +347,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 	if _, err := tx.Exec(ctx, `UPDATE pool_royalty_mints SET status='revoked' WHERE request_id=$1 AND status='held'`, key3); err != nil {
 		t.Fatal(err)
 	}
-	if err := ledger.RevokeHeldTx(ctx, tx, "wsA", micro(1), "revoked: test", nil); err != nil {
+	if err := ledger.RevokeHeldTx(ctx, tx, "wsA", micro(10), "revoked: test", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {

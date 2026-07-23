@@ -56,8 +56,8 @@ func TestFinalizeSweeper_FailClosed_UnadjudicatedHeldDoesNotSettle_Integration(t
 	if spendable != 0 {
 		t.Fatalf("spendable=%d, want 0 (a mint we could not adjudicate must never become spendable)", spendable)
 	}
-	if held != mining.FloatToMicroFloor(1.0) {
-		t.Fatalf("held=%d, want 1.0 LENS in µLENS (the mint is held, not burned)", held)
+	if held != mining.FloatToMicroFloor(10.0) {
+		t.Fatalf("held=%d, want 10 LENS in µLENS (the mint is held, not burned)", held)
 	}
 }
 
@@ -87,8 +87,8 @@ func TestFinalizeSweeper_FailClosed_ClearedSettles_Integration(t *testing.T) {
 	}
 	var spendable int64
 	mustScan(t, pool, `SELECT balance FROM lens_token_balances WHERE workspace_id='wsA'`, &spendable)
-	if spendable != mining.FloatToMicroFloor(1.0) {
-		t.Fatalf("spendable=%d, want 1.0 LENS in µLENS (a cleared mint settles)", spendable)
+	if spendable != mining.FloatToMicroFloor(10.0) {
+		t.Fatalf("spendable=%d, want 10 LENS in µLENS (a cleared mint settles)", spendable)
 	}
 }
 

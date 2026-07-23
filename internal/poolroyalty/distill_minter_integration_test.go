@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/earnverify"
+	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/mining"
 )
 
@@ -166,8 +167,8 @@ func TestDistillMint_VerifiedOwner_ExactAmount_HeldNotSupply_Integration(t *test
 		t.Fatalf("RunOnce: n=%d err=%v, want 1/nil", n, err)
 	}
 
-	// minted_amount EXACTLY = s × pinned basis (0.5 × 2.0 = 1.0), traced to the
-	// stored basis snapshot — assert minted == 0.5 × basis.avoided_cogs_usd.
+	// minted_amount EXACTLY = s × pinned basis × peg (0.5 × $2 × 10 LENS/$ = 10 LENS),
+	// traced to the stored basis snapshot — assert minted == 0.5 × basis.avoided_cogs_usd × LENSPerUSD.
 	var minted int64
 	var basisCogs float64
 	var status, reqID string
@@ -178,11 +179,11 @@ func TestDistillMint_VerifiedOwner_ExactAmount_HeldNotSupply_Integration(t *test
 		 WHERE m.contributor_workspace_id='wsA'`).Scan(&minted, &status, &reqID, &basisCogs); err != nil {
 		t.Fatal(err)
 	}
-	if minted != microFloorLENS(0.5*basisCogs) {
-		t.Fatalf("minted_amount = %v, want exactly 0.5 × pinned basis %v = %v", minted, basisCogs, 0.5*basisCogs)
+	if minted != microFloorLENS(0.5*basisCogs*economy.LENSPerUSD) {
+		t.Fatalf("minted_amount = %v, want exactly 0.5 × pinned basis $%v × peg = %v", minted, basisCogs, microFloorLENS(0.5*basisCogs*economy.LENSPerUSD))
 	}
-	if minted != micro(1) {
-		t.Fatalf("minted_amount = %v, want 1.0", minted)
+	if minted != micro(10) {
+		t.Fatalf("minted_amount = %v, want 10 LENS ($1 of value at the peg)", minted)
 	}
 	if status != "held" {
 		t.Fatalf("status = %q, want held", status)
@@ -192,7 +193,7 @@ func TestDistillMint_VerifiedOwner_ExactAmount_HeldNotSupply_Integration(t *test
 	}
 	// Credit is HELD, not spendable.
 	bal, held := balances(t, pool, "wsA")
-	if bal != 0 || held != micro(1) {
+	if bal != 0 || held != micro(10) {
 		t.Fatalf("after mint: bal=%v held=%v, want 0/1.0 (held, not spendable)", bal, held)
 	}
 	// Supply UNCHANGED while held (counts only at finalize).
@@ -224,8 +225,8 @@ func TestDistillMint_ExactlyOnce_Integration(t *testing.T) {
 	if c := mintRowCount(t, pool, "wsA"); c != 1 {
 		t.Fatalf("exactly-once: %d claim rows, want 1", c)
 	}
-	if _, held := balances(t, pool, "wsA"); held != micro(1) {
-		t.Fatalf("exactly-once: held=%v, want 1.0 (a conflict must NOT credit a second time)", held)
+	if _, held := balances(t, pool, "wsA"); held != micro(10) {
+		t.Fatalf("exactly-once: held=%v, want 10 LENS (a conflict must NOT credit a second time)", held)
 	}
 }
 
@@ -259,8 +260,8 @@ func TestDistillMint_UnverifiedOwner_ZeroThenReeligible_Integration(t *testing.T
 	if c := mintRowCount(t, pool, "wsA"); c != 1 {
 		t.Fatalf("after verify: %d claim rows, want 1", c)
 	}
-	if _, held := balances(t, pool, "wsA"); held != micro(1) {
-		t.Fatalf("after verify: held=%v, want 1.0 (floor delayed, did not forfeit)", held)
+	if _, held := balances(t, pool, "wsA"); held != micro(10) {
+		t.Fatalf("after verify: held=%v, want 10 LENS (floor delayed, did not forfeit)", held)
 	}
 }
 
@@ -317,8 +318,8 @@ func TestDistillMint_FinalizeCountsSupplyAtFinalize_Integration(t *testing.T) {
 	}
 	// held→spendable, status final.
 	bal, held := balances(t, pool, "wsA")
-	if bal != micro(1) || held != 0 {
-		t.Fatalf("after finalize: bal=%v held=%v, want 1.0/0 (spendable)", bal, held)
+	if bal != micro(10) || held != 0 {
+		t.Fatalf("after finalize: bal=%v held=%v, want 10/0 (spendable)", bal, held)
 	}
 	var status string
 	if err := pool.QueryRow(ctx, `SELECT status FROM distill_royalty_mints WHERE contributor_workspace_id='wsA'`).Scan(&status); err != nil {
@@ -328,7 +329,7 @@ func TestDistillMint_FinalizeCountsSupplyAtFinalize_Integration(t *testing.T) {
 		t.Fatalf("status = %q, want final", status)
 	}
 	// Supply INCREASES at finalize (the counted TypePoolRoyalty row).
-	if supply, _ := ledger.GetTotalSupply(ctx); supply != supplyBefore+micro(1) {
-		t.Fatalf("supply must increase by micro(1) at FINALIZE: before=%v after=%v", supplyBefore, supply)
+	if supply, _ := ledger.GetTotalSupply(ctx); supply != supplyBefore+micro(10) {
+		t.Fatalf("supply must increase by micro(10) at FINALIZE: before=%v after=%v", supplyBefore, supply)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/poolroyalty"
 )
 
@@ -39,7 +40,7 @@ func distillObsHarness(t *testing.T) *pgxpool.Pool {
 		`DROP VIEW IF EXISTS distill_royalty_margin`,
 		`DROP TABLE IF EXISTS distill_royalty_mints`,
 		`CREATE TABLE distill_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, contributor_workspace_id TEXT NOT NULL, requester_workspace_id TEXT NOT NULL, content_hash TEXT NOT NULL, avoided_cogs_usd DOUBLE PRECISION NOT NULL, minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE VIEW distill_royalty_margin AS SELECT request_id, requester_workspace_id, contributor_workspace_id, content_hash, avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd, status, created_at FROM distill_royalty_mints`,
+		`CREATE VIEW distill_royalty_margin AS SELECT request_id, requester_workspace_id, contributor_workspace_id, content_hash, avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) * 0.10 AS margin_usd, status, created_at FROM distill_royalty_mints`, // × $0.10/LENS peg (mirrors migration 0103)
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -145,21 +146,24 @@ func TestDistillRoyaltyMargin_Integration(t *testing.T) {
 	pool := distillObsHarness(t)
 	h := newDistillRoyaltyMarginHandler(poolroyalty.NewDistillMarginReader(pool))
 
-	distillMintSeed{req: "f1", contrib: "wsA", requester: "wsB", content: "d1", status: "final", avoided: 8, minted: 4_000_000}.insert(t, pool)
-	distillMintSeed{req: "f2", contrib: "wsC", requester: "wsD", content: "d2", status: "final", avoided: 4, minted: 2_000_000}.insert(t, pool)
+	// minted = s × avoided × 10 LENS/$ peg (f1: 0.5×$8×10 = 40 LENS = 40_000_000 µLENS).
+	distillMintSeed{req: "f1", contrib: "wsA", requester: "wsB", content: "d1", status: "final", avoided: 8, minted: 40_000_000}.insert(t, pool)
+	distillMintSeed{req: "f2", contrib: "wsC", requester: "wsD", content: "d2", status: "final", avoided: 4, minted: 20_000_000}.insert(t, pool)
 	// EXCLUDED:
-	distillMintSeed{req: "hX", contrib: "wsA", requester: "wsB", content: "d3", status: "held", avoided: 100, minted: 50_000_000}.insert(t, pool)
-	distillMintSeed{req: "rX", contrib: "wsA", requester: "wsB", content: "d4", status: "revoked", avoided: 100, minted: 50_000_000}.insert(t, pool)
+	distillMintSeed{req: "hX", contrib: "wsA", requester: "wsB", content: "d3", status: "held", avoided: 100, minted: 500_000_000}.insert(t, pool)
+	distillMintSeed{req: "rX", contrib: "wsA", requester: "wsB", content: "d4", status: "revoked", avoided: 100, minted: 500_000_000}.insert(t, pool)
 
 	var resp marginResponse
 	if code := callJSON(t, h, "/v1/admin/distill-royalty/margin", &resp); code != http.StatusOK {
 		t.Fatalf("margin: code %d", code)
 	}
-	if resp.Summary.Mints != 2 || resp.Summary.AvoidedCOGSUSD != 12 || resp.Summary.MintedLENS != 6_000_000 || resp.Summary.MarginUSD != 6 {
-		t.Errorf("summary mints=%d avoided=%v minted=%v margin=%v want 2/12/6/6 (final only)",
+	// Realized (FINAL only): avoided $12, minted 60 LENS, margin $6 = (1−s)×avoided — the DOLLAR
+	// margin is peg-invariant (unchanged from the pre-peg 6/6); only the LENS count moved 10×.
+	if resp.Summary.Mints != 2 || resp.Summary.AvoidedCOGSUSD != 12 || resp.Summary.MintedLENS != 60_000_000 || resp.Summary.MarginUSD != 6 {
+		t.Errorf("summary mints=%d avoided=%v minted=%v margin=%v want 2/12/60_000_000/6 (final only)",
 			resp.Summary.Mints, resp.Summary.AvoidedCOGSUSD, resp.Summary.MintedLENS, resp.Summary.MarginUSD)
 	}
-	if resp.Summary.MarginUSD != resp.Summary.AvoidedCOGSUSD-float64(resp.Summary.MintedLENS)/1e6 {
+	if resp.Summary.MarginUSD != resp.Summary.AvoidedCOGSUSD-float64(resp.Summary.MintedLENS)/1e6*economy.LXCUSDValue {
 		t.Error("margin identity broken")
 	}
 

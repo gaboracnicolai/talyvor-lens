@@ -60,8 +60,8 @@ func TestPhase4a_LiveEconomy_Acceptance(t *testing.T) {
 	if n, err := sweeper.RunOnce(ctx); err != nil || n != 1 {
 		t.Fatalf("finalize: n=%d err=%v, want 1 (the honest examined-clean mint settles)", n, err)
 	}
-	if got := spendable("opA"); got != micro(1.0) { // s=0.5 × avoided_COGS(2.0) = 1.0 LENS
-		t.Fatalf("honest contributor spendable=%d, want %d µLENS (real settled royalty)", got, micro(1.0))
+	if got := spendable("opA"); got != micro(10.0) { // s=0.5 × avoided_COGS($2) × 10 LENS/$ peg = 10 LENS
+		t.Fatalf("honest contributor spendable=%d, want %d µLENS (real settled royalty)", got, micro(10.0))
 	}
 	_ = honest
 
