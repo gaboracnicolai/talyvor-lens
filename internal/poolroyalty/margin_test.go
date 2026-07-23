@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/pashagolub/pgxmock/v4"
+
+	"github.com/talyvor/lens/internal/economy"
 )
 
 // MARGIN DERIVATION: the summary reads the pool_royalty_margin view (the
 // Stage-2.2 read surface) and returns the realized totals. margin_usd is
-// derived in SQL as avoided_cogs_usd − minted_amount — the MARGIN-IDENTITY —
-// never re-recorded anywhere.
+// derived in SQL as avoided_cogs_usd − minted_LENS × $0.10-peg — the
+// MARGIN-IDENTITY at the published peg — never re-recorded anywhere.
 func TestMarginSummary_ReadsDerivedMargin(t *testing.T) {
 	pool := newMockPool(t)
 	r := NewMarginReader(pool)
@@ -103,9 +105,11 @@ func TestMarginReader_InertAndNilSafe(t *testing.T) {
 }
 
 // THE (1−s) IDENTITY, end to end at the claim-args level: the minter writes
-// minted_amount = s × avoided per claim row, so the view's per-row
-// margin_usd = avoided − minted = (1−s) × avoided, and the summary equals
-// (1−s) × Σavoided. Verified against the SAME arguments MintServedHit binds.
+// minted_amount = s × avoided × LENSPerUSD (LENS) per claim row, so the view's
+// per-row margin_usd = avoided − minted_LENS × $0.10 = (1−s) × avoided IN
+// DOLLARS, and the summary equals (1−s) × Σavoided. The DOLLAR identity is
+// peg-invariant; only the stored LENS amount carries the peg factor. Verified
+// against the SAME arguments MintServedHit binds.
 func TestMarginIdentity_MatchesShareArithmetic(t *testing.T) {
 	const share = 0.3
 	pool := newMockPool(t)
@@ -113,19 +117,20 @@ func TestMarginIdentity_MatchesShareArithmetic(t *testing.T) {
 	m := NewMinter(pool, ledger, share, enabledOn)
 
 	avoideds := []float64{2.0, 5.0, 0.5}
-	var sumAvoided, sumMinted float64
+	var sumAvoided, sumMintedUSD float64
 	for i, a := range avoideds {
 		h := sampleHit()
 		h.RequestID = h.RequestID + "-" + string(rune('a'+i))
 		h.AvoidedCOGSUSD = a
-		minted := share * a
+		mintedUSD := share * a                            // the contributor's share IN DOLLARS
+		mintedLENS := mintedUSD * economy.LENSPerUSD      // …stored as LENS at the $0.10 peg
 		sumAvoided += a
-		sumMinted += minted
+		sumMintedUSD += mintedUSD
 
 		pool.ExpectBegin()
 		pool.ExpectExec(`INSERT INTO pool_royalty_mints`).
 			WithArgs(pgxmock.AnyArg(), h.RequesterWorkspace, h.ContributorWorkspace, h.Layer,
-				h.EntryID, h.Provider, h.Model, h.Similarity, a, microFloorLENS(minted), // AnyArg: derived key (SEC-11); minted_amount is µLENS (SEC-2)
+				h.EntryID, h.Provider, h.Model, h.Similarity, a, microFloorLENS(mintedLENS), // AnyArg: derived key (SEC-11); minted_amount is µLENS at the peg (SEC-2)
 				h.AnswerSHA256, h.PromptSHA256, (72 * time.Hour).Microseconds()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 		pool.ExpectCommit()
@@ -135,11 +140,11 @@ func TestMarginIdentity_MatchesShareArithmetic(t *testing.T) {
 		}
 	}
 
-	// margin = Σ(avoided − minted) = (1−s) × Σavoided
-	margin := sumAvoided - sumMinted
+	// margin = Σ(avoided − mintedUSD) = (1−s) × Σavoided (in dollars, peg-invariant)
+	margin := sumAvoided - sumMintedUSD
 	want := (1 - share) * sumAvoided
 	if math.Abs(margin-want) > 1e-9 {
-		t.Errorf("margin identity: Σ(avoided−minted)=%v, (1−s)×Σavoided=%v — must be equal", margin, want)
+		t.Errorf("margin identity: Σ(avoided−mintedUSD)=%v, (1−s)×Σavoided=%v — must be equal", margin, want)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet: %v", err)

@@ -624,16 +624,19 @@ type Config struct {
 	RoutingPredictionMintingEnabled bool
 
 	// EvalContributionRatePerPoint is the LENS-per-discrimination-point rate for the proof-of-eval-
-	// contribution mint (amount = rate × clamp01(discrimination)). DEFAULT 0 ⇒ INERT: NewHeldBenchmarkAnchor
-	// refuses a non-positive rate, so the minter's anchor is nil and RunOnce is a total no-op even with
-	// both flags on. The rate is a deliberate later flip, set only when the economy goes live. Env:
+	// contribution mint (amount = rate × clamp01(discrimination)). DEFAULT 0.05 (DefaultEvalContributionRatePerPoint,
+	// NOT 0). The mint is nonetheless INERT by default because it also requires BOTH earning flags
+	// (EvalContributionMintingEnabled AND ProofOfImprovementEnabled, default off) — a nonzero rate alone
+	// mints nothing. A rate of 0 (env override) additionally makes the anchor nil (NewHeldBenchmarkAnchor
+	// refuses a non-positive rate → RunOnce is a total no-op even with both flags on). Env:
 	// LENS_EVAL_CONTRIBUTION_RATE_PER_POINT.
 	EvalContributionRatePerPoint float64
 
 	// RoutingPredictionRatePerPoint is the LENS-per-skill-margin-point rate for the proof-of-routing-
-	// prediction mint (amount = rate × clamp01(skill_margin)). DEFAULT 0 ⇒ INERT: NewHeldBenchmarkAnchor
-	// refuses a non-positive rate, so the minter's anchor is nil and RunOnce is a total no-op even with both
-	// flags on. A deliberate later flip, set only when the economy goes live. Env:
+	// prediction mint (amount = rate × clamp01(skill_margin)). DEFAULT 0.02 (DefaultRoutingPredictionRatePerPoint,
+	// NOT 0). INERT by default via the earning flags (RoutingPredictionMintingEnabled AND
+	// ProofOfImprovementEnabled, default off), not via the rate; a rate of 0 (env override) additionally
+	// nils the anchor (NewHeldBenchmarkAnchor refuses a non-positive rate). Env:
 	// LENS_ROUTING_PREDICTION_RATE_PER_POINT.
 	RoutingPredictionRatePerPoint float64
 
@@ -1112,9 +1115,9 @@ func Load() (*Config, error) {
 		}
 		c.POVIMinStake = f
 	}
-	// EvalContributionRatePerPoint: LENS per discrimination-point. Default 0 ⇒ INERT (the held-benchmark
-	// anchor refuses a non-positive rate → the eval-contribution minter is a total no-op).
-	// Set 0.05 LENS/discrimination-point: amount = 0.05 × clamp01(discrimination), so a max-
+	// EvalContributionRatePerPoint: LENS per discrimination-point. Default 0.05 (NOT 0) — inert by the
+	// earning flags (default off), not by the rate; a 0 env override would nil the anchor.
+	// At 0.05 LENS/discrimination-point: amount = 0.05 × clamp01(discrimination), so a max-
 	// discriminating eval pays ≤ 0.05 LENS ($0.005 @ $0.10 peg) ONCE per item, and only after
 	// ≥3 INDEPENDENT graders actually scored it (usage-anchored) — far below the value of the
 	// accurate model-scoring that eval enables across the fleet. (Minting still gated by the

@@ -1,6 +1,14 @@
 package poolroyalty
 
-import "math"
+import (
+	"math"
+
+	// economy is imported ONLY for the published LENS/USD peg constant
+	// (economy.LENSPerUSD). It is a fixed pure constant, not a score this anchor
+	// prices — so the NO-LOOP / pure-valuation posture holds (TestAnchor_NoLedgerNoMint_ImportGuard
+	// forbids ledger/DB/score-producer imports; a currency peg is none of those).
+	"github.com/talyvor/lens/internal/economy"
+)
 
 // Proof-of-Improvement rail, piece 1 — the pluggable reward ANCHOR.
 //
@@ -10,12 +18,17 @@ import "math"
 // reputation bond + 1000-LENS/24h rate cap), so the U6 guarantees are unchanged regardless of which
 // anchor priced the gain. An anchor returns a NON-NEGATIVE amount; 0 means "mint nothing."
 //
+// UNITS ARE LENS. Every anchor returns LENS, because the minter converts the result to µLENS with
+// FloatToMicroFloor and credits it verbatim. An anchor whose SOURCE is dollars (CostAnchor) MUST
+// therefore convert to LENS at the published peg — returning raw dollars silently underpays 10× (the
+// pre-peg bug: a $5-of-value mint credited 5 LENS = $0.50 at the $0.10 peg instead of 50 LENS).
+//
 // Two anchors today:
-//   - CostAnchor (the proof-of-savings #2 anchor): value = Share × avoided_COGS$ — a DOLLAR anchor,
-//     anchored to the catalog price table. This is the existing, default, byte-identical path.
-//   - HeldBenchmarkAnchor (the #10 eval-pool pattern): value = RatePerPoint × clamp01(score) — a score
-//     vs verifier-HELD ground truth. BUILT + unit-tested but wired to nothing live this PR (no
-//     reachable selection, no new mint surface).
+//   - CostAnchor (the proof-of-savings #2 anchor): value = Share × avoided_COGS$ × LENSPerUSD — a
+//     DOLLAR source converted to LENS at the peg, anchored to the catalog price table.
+//   - HeldBenchmarkAnchor (the #10 eval-pool pattern): value = RatePerPoint × clamp01(score). Its rate
+//     is ALREADY denominated in LENS-per-point (config: "LENS per discrimination-point"), so it needs
+//     NO peg conversion — it is not a dollar source. BUILT + unit-tested; wired to the four P-o-I mints.
 type Anchor interface {
 	// Value returns the LENS amount a measured improvement is worth (≥ 0; 0 ⇒ mint nothing).
 	Value(g GainInput) float64
@@ -31,15 +44,25 @@ type GainInput struct {
 	HeldScore      float64 // held-benchmark anchor: a quality score ∈ [0,1] vs verifier-held ground truth
 }
 
-// CostAnchor is the proof-of-savings anchor: Value = clamp01(Share) × AvoidedCOGSUSD.
+// CostAnchor is the proof-of-savings anchor: Value = clamp01(Share) × AvoidedCOGSUSD × LENSPerUSD —
+// the contributor's share of the avoided COGS, expressed IN VALUE (LENS) at the published $0.10 peg
+// (economy.LENSPerUSD = 10 LENS/$). So a $10 avoided at s=0.5 is $5 of value = 50 LENS (not 5 — that
+// raw-dollar reading was the 10× underpay).
 //
-// THE BILLING INVARIANT, structural: the customer is charged avoided_COGS for a cross-tenant hit, and the
-// contributor is minted this anchor's Value from the SAME avoided_COGS. Clamping Share to [0,1] HERE — at
-// the valuation point, not only in NewMinter — guarantees Value ≤ AvoidedCOGSUSD unconditionally, so a
-// royalty can NEVER exceed what the consumer paid for that request, even for a CostAnchor built directly
-// with a misconfigured Share>1 (bypassing NewMinter's clamp). One V, two derivations that cannot drift.
+// THE BILLING INVARIANT, structural, SURVIVES THE PEG: the customer is charged avoided_COGS for a
+// cross-tenant hit, and the contributor is minted this anchor's Value from the SAME avoided_COGS.
+// clamp01(Share) HERE — at the valuation point, not only in NewMinter — bounds the royalty's DOLLAR
+// worth (Value × LXCUSDValue = clamp01(Share) × AvoidedCOGSUSD) to ≤ AvoidedCOGSUSD unconditionally,
+// so a royalty can NEVER exceed what the consumer paid — even for a CostAnchor built directly with a
+// misconfigured Share>1 (bypassing NewMinter's clamp). The peg is a UNIT conversion (dollars→LENS),
+// not an amplifier: it scales the VALUE and its dollar-worth ceiling identically. One V, two
+// derivations that cannot drift.
 type CostAnchor struct{ Share float64 }
 
+// Value clamps Share to [0,1] AND converts the dollar avoided-COGS to LENS at the peg (economy.LENSPerUSD
+// = 10 LENS/$). BOTH happen HERE, at the single valuation point where the dollar→LENS unit crosses over —
+// so the mint amount, the held credit, and the margin view all agree on 1 LENS = $0.10, and Value's
+// dollar-worth stays ≤ avoided_COGS for any Share (the billing invariant above).
 func (a CostAnchor) Value(g GainInput) float64 {
 	s := a.Share
 	if math.IsNaN(s) || s < 0 {
@@ -47,7 +70,7 @@ func (a CostAnchor) Value(g GainInput) float64 {
 	} else if s > 1 {
 		s = 1 // royalty is a SHARE of avoided_COGS — never more than the consumer was charged
 	}
-	return s * g.AvoidedCOGSUSD
+	return s * g.AvoidedCOGSUSD * economy.LENSPerUSD
 }
 func (a CostAnchor) Kind() string { return "cost" }
 

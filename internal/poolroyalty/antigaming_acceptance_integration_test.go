@@ -38,14 +38,14 @@ func TestAntiGaming_Acceptance_RingClawedBackBeforeSettlement(t *testing.T) {
 	linkExec(t, pool, `INSERT INTO workspace_owner_links (workspace_id, owner_key) VALUES
 		('wsA','acc-k1'), ('wsB','acc-k1'), ('wsB','acc-k2'), ('wsC','acc-k2')`)
 
-	// Pre: each contributor holds 1 LENS held, nothing spendable.
+	// Pre: each contributor holds 10 LENS held (0.5 × $2 avoided × 10 LENS/$ peg), nothing spendable.
 	for _, ws := range []string{"wsA", "wsB", "wsC", "wsP"} {
 		var held, bal int64
 		if err := pool.QueryRow(ctx, `SELECT held_balance, balance FROM lens_token_balances WHERE workspace_id=$1`, ws).Scan(&held, &bal); err != nil {
 			t.Fatal(err)
 		}
-		if held != micro(1) || bal != 0 {
-			t.Fatalf("pre %s: held=%v bal=%v, want 1/0", ws, held, bal)
+		if held != micro(10) || bal != 0 {
+			t.Fatalf("pre %s: held=%v bal=%v, want 10/0", ws, held, bal)
 		}
 	}
 
@@ -105,8 +105,8 @@ func TestAntiGaming_Acceptance_RingClawedBackBeforeSettlement(t *testing.T) {
 	// The honest contributor now has spendable LENS; the ring operator has NONE.
 	var pHeld, pBal int64
 	mustScan(t, pool, `SELECT held_balance, balance FROM lens_token_balances WHERE workspace_id='wsP'`, &pHeld, &pBal)
-	if pHeld != 0 || pBal != micro(1) {
-		t.Errorf("honest wsP after settle: held=%v bal=%v, want 0/1 (settled)", pHeld, pBal)
+	if pHeld != 0 || pBal != micro(10) {
+		t.Errorf("honest wsP after settle: held=%v bal=%v, want 0/10 (settled)", pHeld, pBal)
 	}
 	for _, ws := range []string{"wsA", "wsB", "wsC"} {
 		var bal int64
@@ -119,7 +119,7 @@ func TestAntiGaming_Acceptance_RingClawedBackBeforeSettlement(t *testing.T) {
 	}
 	// Supply counts ONLY the honest mint.
 	supply, _ := ledger.GetTotalSupply(ctx)
-	if supply != micro(1) {
-		t.Errorf("total supply=%v, want 1 LENS (only the honest mint entered supply)", supply)
+	if supply != micro(10) {
+		t.Errorf("total supply=%v, want 10 LENS (only the honest mint entered supply)", supply)
 	}
 }

@@ -9,19 +9,39 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/talyvor/lens/internal/economy"
 )
 
-// CostAnchor reproduces today's #2 math EXACTLY: Value = Share × AvoidedCOGSUSD.
-func TestCostAnchor_IsShareTimesAvoidedCOGS(t *testing.T) {
+// CostAnchor pays the contributor s × avoided_COGS IN VALUE, converting the
+// avoided-COGS DOLLARS to LENS at the published peg (economy.LENSPerUSD = 10
+// LENS/$, i.e. 1 LENS = $0.10). A $10 avoided at s=0.5 is $5 of value = 50 LENS.
+//
+// We assert the DOLLAR VALUE at the peg (LENS × LXCUSDValue), NEVER the raw LENS
+// count — the raw count is exactly what hid the historic 10× underpay (the mint
+// paid $5-of-value's worth as 5 LENS = $0.50).
+func TestCostAnchor_ValuesShareOfAvoidedCOGS_AtPeg(t *testing.T) {
 	for _, c := range []struct {
-		share, cogs, want float64
+		share, cogs, wantUSD float64
 	}{
-		{0.5, 1.0, 0.5}, {0.5, 0, 0}, {1.0, 2.5, 2.5}, {0.0, 9.9, 0},
+		{0.5, 10.0, 5.0}, // the canonical case: 50% of $10 avoided = $5 of value
+		{0.5, 2.0, 1.0},  // the sampleHit basis: 50% of $2 = $1 of value
+		{1.0, 2.5, 2.5},  // full share
+		{0.0, 9.9, 0},    // zero share mints nothing
+		{0.5, 0, 0},      // zero avoided mints nothing
 	} {
 		a := CostAnchor{Share: c.share}
-		if got := a.Value(GainInput{AvoidedCOGSUSD: c.cogs}); got != c.want {
-			t.Errorf("CostAnchor{%v}.Value(cogs %v) = %v, want %v", c.share, c.cogs, got, c.want)
+		gotLENS := a.Value(GainInput{AvoidedCOGSUSD: c.cogs})
+		gotUSD := gotLENS * economy.LXCUSDValue // LENS → dollars at the peg
+		if math.Abs(gotUSD-c.wantUSD) > 1e-9 {
+			t.Errorf("CostAnchor{%v}.Value(cogs $%v) = %v LENS = $%v at the peg, want $%v (s × avoided_COGS in VALUE)",
+				c.share, c.cogs, gotLENS, gotUSD, c.wantUSD)
 		}
+	}
+	// The concrete LENS count for the canonical hit, hand-verified: $5 of value at
+	// the $0.10 peg is 50 LENS (not 5 — that was the bug).
+	if got := (CostAnchor{Share: 0.5}).Value(GainInput{AvoidedCOGSUSD: 10}); got != 50.0 {
+		t.Errorf("CostAnchor{0.5}.Value($10) = %v LENS, want 50 LENS (= $5 at the $0.10 peg)", got)
 	}
 	if (CostAnchor{}).Kind() != "cost" {
 		t.Error("CostAnchor.Kind must be \"cost\"")

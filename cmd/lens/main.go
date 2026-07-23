@@ -1178,13 +1178,17 @@ func run() error {
 		localRouterMulti.StartPriceSync(lctx, 30*time.Second)
 	})
 
-	// Embedding mining (Batch 2 Item 3). Shares the ledger;
-	// proxy wires RecordEmbeddingsServed in the semantic-cache
-	// path in a follow-up.
+	// Embedding mining (Batch 2 Item 3). Shares the ledger. The node-management
+	// surface IS live and used below — RegisterNode, ListNodes,
+	// ListAvailableNodes, DeactivateEmbeddingNode, GetStats are all wired to
+	// routes. What is NOT wired is the embedding MINT: RecordEmbeddingsServed has
+	// no caller (the semantic-cache serve path does not credit embedding LENS), so
+	// — exactly like the compute node mint — the earning half is dormant until the
+	// embedding node network lands. Constructed here and consumed by the routes;
+	// there is no dead `_ =` handle (an earlier one falsely signalled "parked").
 	embeddingMiner := mining.NewEmbeddingMiner(tokenLedger, pool)
 	embeddingMiner.SetHTTPClient(newNodeHTTPClient(cfg.NodeTLSSkipVerify, 5*time.Second, nodeCIDRAllow))
 	embeddingMiner.SetHoldbackWindow(cfg.PoolHoldbackWindow) // Phase-3 Item 1: node mint lands HELD, finalizes after this window (mirrors cache/royalty)
-	_ = embeddingMiner
 
 	// Annotation mining (Batch 2 Item 4). Proof-of-useful-work
 	// — annotators stake LENS, review pairs of responses, and

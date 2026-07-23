@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/mining"
 )
 
@@ -114,8 +115,8 @@ func TestMintKey_TwoContributorSuppression_Integration(t *testing.T) {
 		t.Fatalf("claim rows=%d, want 2 (A and B each mint despite the shared client header)", rows)
 	}
 	for _, ws := range []string{"wsA", "wsB"} {
-		if held := heldOf(t, pool, ws); held != micro(0.5*2.0) {
-			t.Fatalf("%s held=%v, want %v µLENS (each contributor keeps its own royalty)", ws, held, micro(0.5*2.0))
+		if held := heldOf(t, pool, ws); held != micro(0.5*2.0*economy.LENSPerUSD) {
+			t.Fatalf("%s held=%v, want %v µLENS (each contributor keeps its own royalty)", ws, held, micro(0.5*2.0*economy.LENSPerUSD))
 		}
 	}
 }
@@ -159,8 +160,8 @@ func TestMintKey_ExactlyOnceIgnoresHeader_Integration(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("rows=%d, want 1 (the repeat took no new claim)", rows)
 	}
-	if held := heldOf(t, pool, "wsA"); held != micro(0.5*2.0) {
-		t.Fatalf("wsA held=%v, want %v µLENS (credited exactly once)", held, micro(0.5*2.0))
+	if held := heldOf(t, pool, "wsA"); held != micro(0.5*2.0*economy.LENSPerUSD) {
+		t.Fatalf("wsA held=%v, want %v µLENS (credited exactly once)", held, micro(0.5*2.0*economy.LENSPerUSD))
 	}
 }
 
@@ -272,8 +273,8 @@ func TestMintKey_SweeperAndRevokerCAS_DerivedKey_Integration(t *testing.T) {
 	if err != nil || n != 2 {
 		t.Fatalf("sweeper finalized n=%d err=%v, want 2 (wsA+wsB; revoked wsC excluded)", n, err)
 	}
-	if bal := balanceOf(t, pool, "wsA"); bal != micro(1.0) {
-		t.Fatalf("wsA spendable after finalize=%v, want %v µLENS (held→spendable via CAS on the derived key)", bal, micro(1.0))
+	if bal := balanceOf(t, pool, "wsA"); bal != micro(10.0) {
+		t.Fatalf("wsA spendable after finalize=%v, want %v µLENS (held→spendable via CAS on the derived key)", bal, micro(10.0))
 	}
 	if held := heldOf(t, pool, "wsA"); held != 0 {
 		t.Fatalf("wsA held after finalize=%v, want 0", held)
@@ -300,7 +301,7 @@ func TestMintKey_EmptyClientHeaderStillMints_Integration(t *testing.T) {
 	if res.RequestID == "" {
 		t.Fatal("Result.RequestID must be the derived key even when the client header is empty")
 	}
-	if held := heldOf(t, pool, "wsA"); held != micro(1.0) {
-		t.Fatalf("wsA held=%v, want %v µLENS", held, micro(1.0))
+	if held := heldOf(t, pool, "wsA"); held != micro(10.0) {
+		t.Fatalf("wsA held=%v, want %v µLENS", held, micro(10.0))
 	}
 }

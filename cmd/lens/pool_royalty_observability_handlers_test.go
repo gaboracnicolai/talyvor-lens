@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/poolroyalty"
 )
 
@@ -45,7 +46,7 @@ func obsHarness(t *testing.T) *pgxpool.Pool {
 		`DROP VIEW IF EXISTS pool_royalty_margin`,
 		`DROP TABLE IF EXISTS pool_royalty_mints`,
 		`CREATE TABLE pool_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, requester_workspace_id TEXT NOT NULL, contributor_workspace_id TEXT NOT NULL, layer TEXT NOT NULL, entry_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', similarity DOUBLE PRECISION NOT NULL DEFAULT 0, avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount BIGINT NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '', prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'final', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE VIEW pool_royalty_margin AS SELECT request_id, requester_workspace_id, contributor_workspace_id, layer, provider, model, avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) AS margin_usd, status, created_at FROM pool_royalty_mints`,
+		`CREATE VIEW pool_royalty_margin AS SELECT request_id, requester_workspace_id, contributor_workspace_id, layer, provider, model, avoided_cogs_usd, minted_amount, avoided_cogs_usd - (minted_amount::numeric / 1000000.0) * 0.10 AS margin_usd, status, created_at FROM pool_royalty_mints`, // × $0.10/LENS peg (mirrors migration 0103)
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -214,22 +215,25 @@ func TestPoolRoyaltyMargin_Integration(t *testing.T) {
 	pool := obsHarness(t)
 	h := newPoolRoyaltyMarginHandler(poolroyalty.NewMarginReader(pool))
 
-	mintSeed{req: "f1", contrib: "wsA", requester: "wsB", entry: "E1", status: "final", avoided: 10, minted: 5_000_000}.insert(t, pool)
-	mintSeed{req: "f2", contrib: "wsC", requester: "wsD", entry: "E2", status: "final", avoided: 6, minted: 3_000_000}.insert(t, pool)
+	// minted = s × avoided × 10 LENS/$ peg (f1: 0.5×$10×10 = 50 LENS = 50_000_000 µLENS).
+	mintSeed{req: "f1", contrib: "wsA", requester: "wsB", entry: "E1", status: "final", avoided: 10, minted: 50_000_000}.insert(t, pool)
+	mintSeed{req: "f2", contrib: "wsC", requester: "wsD", entry: "E2", status: "final", avoided: 6, minted: 30_000_000}.insert(t, pool)
 	// EXCLUDED from realized margin:
-	mintSeed{req: "hX", contrib: "wsA", requester: "wsB", entry: "E3", status: "held", avoided: 100, minted: 50_000_000}.insert(t, pool)
-	mintSeed{req: "rX", contrib: "wsA", requester: "wsB", entry: "E4", status: "revoked", avoided: 100, minted: 50_000_000}.insert(t, pool)
+	mintSeed{req: "hX", contrib: "wsA", requester: "wsB", entry: "E3", status: "held", avoided: 100, minted: 500_000_000}.insert(t, pool)
+	mintSeed{req: "rX", contrib: "wsA", requester: "wsB", entry: "E4", status: "revoked", avoided: 100, minted: 500_000_000}.insert(t, pool)
 
 	var resp marginResponse
 	if code := callJSON(t, h, "/v1/admin/pool-royalty/margin", &resp); code != http.StatusOK {
 		t.Fatalf("margin: code %d", code)
 	}
-	if resp.Summary.Mints != 2 || resp.Summary.AvoidedCOGSUSD != 16 || resp.Summary.MintedLENS != 8_000_000 || resp.Summary.MarginUSD != 8 {
-		t.Errorf("summary mints=%d avoided=%v minted=%v margin=%v want 2/16/8/8 (final only)",
+	// Realized (FINAL only): avoided $16, minted 80 LENS, margin $8 = (1−s)×avoided — the DOLLAR
+	// margin is peg-invariant (unchanged from the pre-peg 8/8); only the LENS count moved 10×.
+	if resp.Summary.Mints != 2 || resp.Summary.AvoidedCOGSUSD != 16 || resp.Summary.MintedLENS != 80_000_000 || resp.Summary.MarginUSD != 8 {
+		t.Errorf("summary mints=%d avoided=%v minted=%v margin=%v want 2/16/80_000_000/8 (final only)",
 			resp.Summary.Mints, resp.Summary.AvoidedCOGSUSD, resp.Summary.MintedLENS, resp.Summary.MarginUSD)
 	}
-	if resp.Summary.MarginUSD != resp.Summary.AvoidedCOGSUSD-float64(resp.Summary.MintedLENS)/1e6 {
-		t.Errorf("margin identity broken: %v != %v − %v", resp.Summary.MarginUSD, resp.Summary.AvoidedCOGSUSD, resp.Summary.MintedLENS)
+	if resp.Summary.MarginUSD != resp.Summary.AvoidedCOGSUSD-float64(resp.Summary.MintedLENS)/1e6*economy.LXCUSDValue {
+		t.Errorf("margin identity broken: %v != %v − %v/1e6 × $0.10", resp.Summary.MarginUSD, resp.Summary.AvoidedCOGSUSD, resp.Summary.MintedLENS)
 	}
 
 	var byResp marginResponse
@@ -248,7 +252,7 @@ func TestPoolRoyaltyMargin_Integration(t *testing.T) {
 func TestPoolRoyaltyObs_AdminGate(t *testing.T) {
 	pool := obsHarness(t)
 	// Seed a row so the data path WOULD return content if the gate ever let it through.
-	mintSeed{req: "g1", contrib: "wsA", requester: "wsB", entry: "E1", status: "final", avoided: 10, minted: 5_000_000}.insert(t, pool)
+	mintSeed{req: "g1", contrib: "wsA", requester: "wsB", entry: "E1", status: "final", avoided: 10, minted: 50_000_000}.insert(t, pool)
 
 	endpoints := []struct {
 		name, target string
