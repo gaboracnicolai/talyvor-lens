@@ -92,6 +92,16 @@ type alertSink interface {
 	RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string) error
 }
 
+// learnerRecorder is the minimal surface the proxy uses to feed the routing
+// learner (*learner.Learner satisfies it). Kept as an interface so a test can
+// inject a double and ASSERT ON WHAT THE LEARNER RECEIVED: the learner persists
+// the raw prompt+response to a 30-day NATS stream, so the logging-policy gate
+// must be provable by observing that a none/metadata workspace's content never
+// reaches it — not merely by a status code.
+type learnerRecorder interface {
+	Record(ctx context.Context, event learner.TokenEvent) error
+}
+
 // budgetGate is the subset of *budgets.Service the proxy hot path touches.
 // Defined locally so the proxy can be exercised without a DB-backed
 // service. CheckBudget is the spend gate (most-restrictive across the
@@ -229,7 +239,7 @@ type Proxy struct {
 	openAIKey          string
 	anthropicKey       string
 	googleKey          string
-	learner            *learner.Learner
+	learner            learnerRecorder
 
 	// Upstream URLs are unexported and defaulted so tests can swap them
 	// for an httptest server without leaking config to callers.
@@ -319,7 +329,10 @@ func New(
 		groqURL:           "https://api.groq.com",
 		// vllmURL stays empty by default — operator-supplied.
 	}
-	if len(learners) > 0 {
+	// Guard the typed-nil interface trap (as with alertManager below): assign
+	// only a non-nil concrete pointer so the `p.learner == nil` fast-path in
+	// recordTokenEvent keeps working when no learner is wired.
+	if len(learners) > 0 && learners[0] != nil {
 		p.learner = learners[0]
 	}
 	// Guard the typed-nil interface trap: assign the concrete pointer
@@ -956,7 +969,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// Record the session turn first so the headers below reflect
 			// the count + cost AFTER this turn lands. Cache hits have
 			// zero cost.
-			if sess != nil {
+			// LoggingNone skips the turn write entirely (privacy mode): the
+			// turn's Prompt/Response are held in memory, so a none workspace
+			// must not retain them — exactly like the upstream turn write
+			// (~1390), which already gates on None. This cache-hit path did not.
+			if sess != nil && loggingPolicy != workspace.LoggingNone {
 				p.recordSessionTurn(ctx, sessionID, prompt, string(cached), model, 0, true)
 				setSessionHeaders(w, p, sessionID)
 			}
@@ -1432,7 +1449,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 		if loggingPolicy == workspace.LoggingFull {
 			// Learner publishes to NATS — too verbose for metadata mode.
-			p.recordTokenEvent(ctx, cfg.ProviderName(), model, eventPrompt, upstreamBody, savingsPct, piiDetected)
+			p.recordTokenEvent(ctx, cfg.ProviderName(), model, eventPrompt, upstreamBody, savingsPct, piiDetected, wsID)
 		}
 		// RecordSpend prices the model that was actually billed by the
 		// LLM (the upstream model, after any router or circuit override).
@@ -1729,7 +1746,7 @@ func (p *Proxy) tryNodeRouting(
 	if piiDetected {
 		eventPrompt = redactedPrompt
 	}
-	p.recordTokenEvent(ctx, provider, model, eventPrompt, out, 0, piiDetected) // learner store (pattern insights), NOT token_events
+	p.recordTokenEvent(ctx, provider, model, eventPrompt, out, 0, piiDetected, wsID) // learner store (pattern insights), NOT token_events — gated on the logging policy inside
 	// Node-serve spend visibility: the token_events row that makes THIS request countable in the cache
 	// hit rate as a MISS (serve_source='node', cost_usd=0 — Talyvor paid no provider; any LENS owed is
 	// lens_token_ledger's number). Without it a node serve is absent from the denominator and the rate
@@ -1822,9 +1839,18 @@ func (p *Proxy) tryLocalRouting(
 	// Local runs are free, so the cost recorded by RecordSpend is 0
 	// (the model isn't in the price table). recordTokenEvent stores
 	// the local model name so usage analytics distinguish local from
-	// cloud traffic.
-	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected)
-	if p.alertManager != nil {
+	// cloud traffic (gated on the logging policy inside — full only).
+	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected, wsID)
+	// Honour the logging policy for the token_events write, exactly like the
+	// upstream (~1459) and node (recordNodeServe) paths: none persists NOTHING
+	// (skip the row entirely), metadata strips prompt_text, full keeps it.
+	// Without this a none/metadata local serve leaked the prompt to token_events
+	// — the same shape as the ungated learner call above.
+	if logging := p.loggingPolicyFor(wsID); p.alertManager != nil && logging != workspace.LoggingNone {
+		spendPrompt := eventPrompt
+		if logging == workspace.LoggingMetadata {
+			spendPrompt = ""
+		}
 		// Local routing is text-only (multimodal skips it upstream). The token
 		// counts here are ESTIMATED (len/4) — a deliberate, known asymmetry
 		// with the cloud paths, which now meter on the provider's reported
@@ -1836,14 +1862,37 @@ func (p *Proxy) tryLocalRouting(
 		// the row is marked not-estimated because the cost itself is exact (0).
 		// Fold real usage in here only if/when local routing exposes a
 		// per-request usage object.
-		_ = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, decision.Model, len(prompt)/4, len(formatted)/4, eventPrompt, sessionID, requestID, "text", false)
+		_ = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, decision.Model, len(prompt)/4, len(formatted)/4, spendPrompt, sessionID, requestID, "text", false)
 	}
 	metrics.RequestsTotal.WithLabelValues(provider, "local").Inc()
 	return true
 }
 
-func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte, savingsPct float64, piiDetected bool) {
+// loggingPolicyFor reads a workspace's logging policy the single canonical way
+// (default Metadata when there is no manager or the workspace is unknown), so
+// every content-persistence gate — the learner and the local-path RecordSpend
+// below — decides on ONE value: the same one serve() resolved at request entry
+// and recordNodeServe re-reads.
+func (p *Proxy) loggingPolicyFor(wsID string) workspace.LoggingPolicy {
+	if p.workspaceManager == nil {
+		return workspace.LoggingMetadata
+	}
+	return p.workspaceManager.GetLoggingPolicy(wsID)
+}
+
+func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt string, response []byte, savingsPct float64, piiDetected bool, wsID string) {
 	if p.learner == nil {
+		return
+	}
+	// Honour the workspace logging policy at the CHOKEPOINT. The learner
+	// persists the raw prompt+response to a 30-day NATS stream, so it fires ONLY
+	// on LoggingFull — exactly like the upstream path (~1435). none (the privacy
+	// escape hatch, every DB+NATS sink bypassed) AND metadata (cost/tokens only,
+	// prompt_text stripped) both opt out of content persistence, so neither may
+	// reach the learner. Gating here — not per call site — closes the class of
+	// bug: the node-serve and local-routing callers were missed once; any future
+	// caller is gated by construction.
+	if p.loggingPolicyFor(wsID) != workspace.LoggingFull {
 		return
 	}
 	// len/4 is the same token approximation the router and compressor use.

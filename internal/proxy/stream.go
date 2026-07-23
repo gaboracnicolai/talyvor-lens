@@ -397,7 +397,10 @@ func (s *StreamHandler) serve(
 	if piiDetected && s.proxy.piiDetector != nil {
 		eventPrompt = s.proxy.piiDetector.Detect(prompt).Redacted
 	}
-	s.proxy.recordTokenEvent(storeCtx, provider, model, eventPrompt, cached, 0, piiDetected)
+	// Gated on the logging policy inside recordTokenEvent (full only) — sc.wsID
+	// is the same workspace recordStreamSpend below reads its policy from, so a
+	// none/metadata streamed request feeds neither the learner nor the spend row.
+	s.proxy.recordTokenEvent(storeCtx, provider, model, eventPrompt, cached, 0, piiDetected, sc.wsID)
 	// Close the streamed-spend gap: bill on the captured provider usage when
 	// present, else the len/4 estimate. A streamed request must never again
 	// be invisible to budgets/alerts.
