@@ -741,7 +741,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// routing work and physically cannot exceed its ceiling. Non-agent traffic (agentKeyID == "") skips this
 	// entirely and is unchanged. agentKeyID is reused below to pick the price-aware routing strategy.
 	agentKeyID := agentKeyIDFromContext(ctx)
-	if agentKeyID != "" && p.agentAllocationBlocks(ctx, agentKeyID, wsID, model, prompt) {
+	if agentKeyID != "" && p.agentAllocationBlocks(ctx, agentKeyID, wsID, model, prompt, requestID) {
 		writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "agent_blocked").Inc()
 		return

@@ -54,7 +54,7 @@ func TestAgentSpend_SyntheticMidTxCrash_NoOrphanClaim(t *testing.T) {
 	// claim INSERT + ceiling check, BEFORE tx.Commit. Simulates a crash mid-debit.
 	sf := &DualTokenStore{pool: &faultyPool{pgxDB: s.pool, failOnSQL: "UPDATE lxc_balances"}}
 
-	err := sf.SpendLXCForAgent(ctx, "keyX", "wsX", "req-crash", 10*uLXC, "t")
+	err := sf.SpendLXCForAgent(ctx, "keyX", "wsX", "req-crash", 10*uLXC, "t", AgentDebitMeta{})
 	if err == nil {
 		t.Fatal("the injected mid-tx fault must surface as an error (the debit failed)")
 	}
@@ -72,7 +72,7 @@ func TestAgentSpend_SyntheticMidTxCrash_NoOrphanClaim(t *testing.T) {
 
 	// (4) THE KEY ASSERTION: the request_id was NOT burned — a legitimate retry (real, non-faulty pool)
 	// SUCCEEDS and debits exactly once. An orphan claim would have made this wrongly no-op.
-	if err := s.SpendLXCForAgent(ctx, "keyX", "wsX", "req-crash", 10*uLXC, "t"); err != nil {
+	if err := s.SpendLXCForAgent(ctx, "keyX", "wsX", "req-crash", 10*uLXC, "t", AgentDebitMeta{}); err != nil {
 		t.Fatalf("retry of the SAME request_id after a rolled-back crash must SUCCEED (id not burned), got %v", err)
 	}
 	if bal, spent, claims := agentState(t, s, "wsX", "keyX"); bal != 90*uLXC || spent != 10*uLXC || claims != 1 {
