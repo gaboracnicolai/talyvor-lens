@@ -1951,14 +1951,19 @@ func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model, rawPromp
 // the SAME table every other spend reader uses (0100: serve_source). Post-serve, void,
 // best-effort: a failure must never affect the already-served response.
 //
-// ⚠ The row's cost_usd = 0 is TALYVOR'S provider cost (nothing was bought upstream). It is NOT
-// what the requester paid: the agent-allocator's pre-serve LXC estimate debit (agent_allocator.go,
-// lxc_ledger) stands. Moving that debit below the cache lookup — "don't charge for hits" — was
-// CONSIDERED AND REJECTED: it would make cache hits free to the user, i.e. Talyvor would earn
-// nothing from its core value ("our margin is the cache"). The allocator's no-refund invariant is
-// protecting the business model, not an accident. A spend UI must therefore render a cache row as
-// "served from cache — zero provider cost; your workspace's estimate debit stands", never as
-// "this request was free".
+// ⚠ The row's cost_usd = 0 is TALYVOR'S provider cost (nothing was bought upstream). What the
+// REQUESTER pays is decided by the reservation seam, not this row (billing redesign):
+//   - OWN cache hit: FREE. No upstream call, no contributor, so the pre-serve hold is RELEASED in
+//     full (resolveCacheReservation → releaseReservation). The customer's balance is unchanged; a
+//     spend UI renders it "served from cache — free". Charging a self-hit would be pure extraction.
+//   - CROSS-TENANT (pooled) hit: the requester is billed avoided_COGS — the value received — and the
+//     CONTRIBUTOR is minted s·avoided_COGS (s=0.5) from the SAME number; Talyvor keeps (1−s). This is
+//     the ONE case Talyvor earns from a cache hit, and it earns by paying the contributor, never by
+//     charging a user for their own repeat.
+//
+// (The prior comment here claimed the estimate debit "stands" on a hit and that "our margin is the
+// cache" — that was the wrong model and is deleted: every bill reduction is the customer's; Talyvor's
+// margin is the cross-tenant royalty split, not an un-refunded charge for a self-serve hit.)
 //
 // Gates mirror the upstream recording seam exactly: alertManager wired + the workspace not opted
 // out via LoggingNone (symmetric with recordStreamSpend and the buffered-path seam). Token counts
