@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"math"
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
@@ -30,6 +31,10 @@ import (
 // interface so the proxy doesn't hard-depend on economy internals.
 type agentSpender interface {
 	SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string, meta economy.AgentDebitMeta) error
+	// Reservation lifecycle (billing redesign) — satisfied by *economy.DualTokenStore.
+	ReserveLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, reservationID string, heldLXC int64, meta economy.AgentDebitMeta) error
+	SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta economy.AgentDebitMeta) error
+	ReleaseLXCReservation(ctx context.Context, reservationID, reason string) error
 }
 
 // SetAgentSpender wires the agent-allocation debit + its enable flag, and mints the process-start salt used
@@ -117,4 +122,96 @@ func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model
 		slog.Warn("economy: agent debit failed (failing closed)", slog.String("agent", apiKeyID), slog.String("err", err.Error()))
 	}
 	return true // ErrSubBudgetExceeded / ErrInsufficientLXC / any error ⇒ block (402)
+}
+
+// ─── Reservation seam (billing redesign) ────────────────────────────────────
+//
+// When LXCReservationEnabled, the pre-serve seam RESERVES a conservative (output-aware) hold instead of
+// permanently debiting an estimate; the post-serve seam SETTLES the DELIVERED cost or RELEASES a cache hit
+// (free). The reservation id is the same server-derived debit key; it rides the request context from the
+// hold to the settle/release so no serve-path plumbing threads it by hand.
+
+type reservationCtxKey struct{}
+
+// reservationHandle is what the pre-serve hold parks on the context for the post-serve seam to resolve.
+type reservationHandle struct {
+	reservationID string
+	requestID     string // token_events join, stamped on the settle's delivered-charge row
+}
+
+func withReservation(ctx context.Context, h reservationHandle) context.Context {
+	return context.WithValue(ctx, reservationCtxKey{}, h)
+}
+
+func reservationFrom(ctx context.Context) (reservationHandle, bool) {
+	h, ok := ctx.Value(reservationCtxKey{}).(reservationHandle)
+	return h, ok
+}
+
+// reservationActive reports whether the reservation path is on AND wired.
+func (p *Proxy) reservationActive() bool {
+	return p.reservationEnabled != nil && p.reservationEnabled() && p.agentSpender != nil && p.agentAllocEnabled != nil && p.agentAllocEnabled()
+}
+
+// agentReserveBlocks performs the PRE-SERVE HOLD and reports whether the request must be BLOCKED (402). On a
+// successful hold it returns a context carrying the reservation handle (for settle/release) and false. Inert
+// (returns ctx, false — no hold) for a non-agent request or a zero estimate. Fail-CLOSED: any hold error
+// blocks (a bounded agent must not serve on an unverifiable budget). maxOut is the caller-BOUNDED output
+// allowance (explicit max_tokens else the configured cap) so the hold is a conservative upper bound.
+func (p *Proxy) agentReserveBlocks(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string, maxOut int) (context.Context, bool) {
+	if apiKeyID == "" || p.agentSpender == nil {
+		return ctx, false
+	}
+	heldLXC := reserveEstimateLXC(model, prompt, maxOut)
+	if heldLXC <= 0 {
+		return ctx, false // unknown model / empty → allow, like the old estimate path
+	}
+	reservationID, err := deriveAgentDebitKey(p.agentDebitSalt, apiKeyID)
+	if err != nil {
+		slog.Error("economy: reservation key derivation failed (failing closed)", slog.String("err", err.Error()))
+		return ctx, true
+	}
+	err = p.agentSpender.ReserveLXCForAgent(ctx, apiKeyID, wsID, reservationID, heldLXC,
+		economy.AgentDebitMeta{RequestedModel: model, RequestID: requestID})
+	if err != nil {
+		if !errors.Is(err, economy.ErrSubBudgetExceeded) && !errors.Is(err, economy.ErrInsufficientLXC) {
+			slog.Warn("economy: reservation hold failed (failing closed)", slog.String("agent", apiKeyID), slog.String("err", err.Error()))
+		}
+		return ctx, true // ceiling / insufficient / any error ⇒ block (402)
+	}
+	return withReservation(ctx, reservationHandle{reservationID: reservationID, requestID: requestID}), false
+}
+
+// settleReservation SETTLES the held reservation (if any) to the DELIVERED cost — called at the post-serve
+// seam so the hold is released PROMPTLY, not on a timer (the sweeper is for crashes only). No-op if there is
+// no reservation on the context (non-agent request, or reservation path off). deliveredUSD is converted to
+// µLXC (ceil); the primitive clamps to [0, held] so a mis-estimate cannot over-bill.
+func (p *Proxy) settleReservation(ctx context.Context, deliveredUSD float64) {
+	h, ok := reservationFrom(ctx)
+	if !ok || p.agentSpender == nil {
+		return
+	}
+	finalLXC := int64(0)
+	if deliveredUSD > 0 {
+		finalLXC = int64(math.Ceil(deliveredUSD / economy.LXCUSDValue * 1e6))
+	}
+	if err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC, economy.AgentDebitMeta{RequestID: h.requestID}); err != nil {
+		// Logged-and-swallowed — the response is already served. A failed settle leaves the hold, which the
+		// stranded sweeper later REFUNDS (never over-charges): the customer is protected on the error path.
+		slog.Warn("economy: reservation settle failed (hold will be swept/refunded)",
+			slog.String("reservation", h.reservationID), slog.String("err", err.Error()))
+	}
+}
+
+// releaseReservation REFUNDS the held reservation in full (if any) — an own-cache hit (no upstream call, no
+// contributor ⇒ free) or a serve that delivered nothing. No-op without a reservation on the context.
+func (p *Proxy) releaseReservation(ctx context.Context, reason string) {
+	h, ok := reservationFrom(ctx)
+	if !ok || p.agentSpender == nil {
+		return
+	}
+	if err := p.agentSpender.ReleaseLXCReservation(ctx, h.reservationID, reason); err != nil {
+		slog.Warn("economy: reservation release failed (hold will be swept/refunded)",
+			slog.String("reservation", h.reservationID), slog.String("err", err.Error()))
+	}
 }

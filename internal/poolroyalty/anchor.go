@@ -31,12 +31,25 @@ type GainInput struct {
 	HeldScore      float64 // held-benchmark anchor: a quality score ∈ [0,1] vs verifier-held ground truth
 }
 
-// CostAnchor is the proof-of-savings anchor: Value = Share × AvoidedCOGSUSD — EXACTLY today's math.
-// NaN/negative Share is forced to 0 by NewMinter's clamp before the anchor is built.
+// CostAnchor is the proof-of-savings anchor: Value = clamp01(Share) × AvoidedCOGSUSD.
+//
+// THE BILLING INVARIANT, structural: the customer is charged avoided_COGS for a cross-tenant hit, and the
+// contributor is minted this anchor's Value from the SAME avoided_COGS. Clamping Share to [0,1] HERE — at
+// the valuation point, not only in NewMinter — guarantees Value ≤ AvoidedCOGSUSD unconditionally, so a
+// royalty can NEVER exceed what the consumer paid for that request, even for a CostAnchor built directly
+// with a misconfigured Share>1 (bypassing NewMinter's clamp). One V, two derivations that cannot drift.
 type CostAnchor struct{ Share float64 }
 
-func (a CostAnchor) Value(g GainInput) float64 { return a.Share * g.AvoidedCOGSUSD }
-func (a CostAnchor) Kind() string              { return "cost" }
+func (a CostAnchor) Value(g GainInput) float64 {
+	s := a.Share
+	if math.IsNaN(s) || s < 0 {
+		s = 0
+	} else if s > 1 {
+		s = 1 // royalty is a SHARE of avoided_COGS — never more than the consumer was charged
+	}
+	return s * g.AvoidedCOGSUSD
+}
+func (a CostAnchor) Kind() string { return "cost" }
 
 // HeldBenchmarkAnchor prices a held-benchmark improvement: Value = RatePerPoint × clamp01(HeldScore),
 // where HeldScore is measured against verifier-private ground truth (the #10 eval pool) and supplied

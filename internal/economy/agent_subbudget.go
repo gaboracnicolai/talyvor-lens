@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // agent_subbudget.go — F4-capstone step A: the per-scoped-key LXC sub-budget + the EXACTLY-ONCE agent debit.
@@ -155,4 +158,283 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	}
 
 	return tx.Commit(ctx)
+}
+
+// ─── RESERVATION lifecycle (billing redesign) ───────────────────────────────
+//
+// The permanent pre-serve debit (SpendLXCForAgent, above) is replaced by a HOLD → SETTLE/RELEASE pair so
+// the customer is billed what was actually DELIVERED, not a pre-serve estimate — while the CEILING stays
+// enforced pre-serve against a CONSERVATIVE (output-aware) hold. Every balance move is a NEW lxc_ledger
+// row (0055 forbids UPDATE/DELETE on the ledger); only the mutable lifecycle status lives in
+// lxc_reservations. Exactly-once: the HOLD is gated by the reservation_id PRIMARY KEY (ON CONFLICT DO
+// NOTHING); the resolution is a SELECT ... FOR UPDATE status-CAS (only the first caller to find 'held'
+// resolves it, so a settle+release race or a replay is a no-op).
+
+const (
+	// LXCTypeReservationHold marks the pre-serve HOLD debit — a bound, NOT a bill. Revenue readers
+	// (sum type='spend') MUST exclude it; it nets to zero against its release.
+	LXCTypeReservationHold = "reservation_hold"
+	// LXCTypeReservationRelease marks the compensating CREDIT that undoes a hold (on settle: refund the
+	// unused reservation; on release: refund the whole hold). Append-only-safe (a new row, never an edit).
+	LXCTypeReservationRelease = "reservation_release"
+)
+
+// ReserveLXCForAgent HOLDS heldLXC of the workspace's LXC against the agent's sub-budget, EXACTLY ONCE per
+// reservationID, only within the remaining ceiling. It is the pre-serve gate: the caller BLOCKS the request
+// unless this returns nil (mirrors the old SpendLXCForAgent block). heldLXC must be the CONSERVATIVE
+// (output-aware) estimate so it is an upper bound on the delivered cost — the ceiling stays airtight. The
+// hold is later reconciled by SettleLXCReservation (bill the delivered cost, refund the rest) or refunded in
+// full by ReleaseLXCReservation. Returns ErrSubBudgetExceeded / ErrInsufficientLXC on a rejected hold (whole
+// tx rolls back — no orphan reservation, retriable); nil on a fresh hold AND on an idempotent replay.
+func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, reservationID string, heldLXC int64, meta AgentDebitMeta) error {
+	if heldLXC <= 0 {
+		return errors.New("economy: reservation hold amount must be positive")
+	}
+	if scopedKeyID == "" || workspaceID == "" || reservationID == "" {
+		return errors.New("economy: reserve requires scoped_key_id, workspace_id, reservation_id")
+	}
+	if s == nil || s.pool == nil {
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: begin reserve: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// (1) EXACTLY-ONCE hold claim — reservation_id PK. 0 rows ⇒ this id already holds ⇒ idempotent replay.
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO lxc_reservations (reservation_id, scoped_key_id, workspace_id, held_ulxc, status, requested_model, request_id)
+		 VALUES ($1, $2, $3, $4, 'held', $5, $6) ON CONFLICT (reservation_id) DO NOTHING`,
+		reservationID, scopedKeyID, workspaceID, heldLXC, nullIfEmpty(meta.RequestedModel), nullIfEmpty(meta.RequestID))
+	if err != nil {
+		return fmt.Errorf("economy: reservation claim: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // idempotent replay — already held under this reservation_id
+	}
+
+	// (2) Ceiling — ensure + LOCK the sub-budget (FOR UPDATE serializes concurrent holds for this agent).
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO agent_lxc_subbudgets (scoped_key_id, workspace_id, ceiling_lxc, spent_lxc)
+		 VALUES ($1, $2, $3, 0) ON CONFLICT (scoped_key_id) DO NOTHING`,
+		scopedKeyID, workspaceID, DefaultAgentCeilingLXC); err != nil {
+		return fmt.Errorf("economy: ensure sub-budget: %w", err)
+	}
+	var ceiling, spent int64
+	if err := tx.QueryRow(ctx,
+		`SELECT ceiling_lxc, spent_lxc FROM agent_lxc_subbudgets WHERE scoped_key_id = $1 FOR UPDATE`,
+		scopedKeyID).Scan(&ceiling, &spent); err != nil {
+		return fmt.Errorf("economy: read sub-budget: %w", err)
+	}
+	if ceiling-spent < heldLXC {
+		return ErrSubBudgetExceeded // rollback ⇒ no orphan reservation
+	}
+
+	// (3) Debit the workspace LXC for the hold (an immutable lxc_ledger row + balance decrement). The row
+	// type is LXCTypeReservationHold — a BOUND, excluded from revenue; the metadata joins to token_events.
+	bal, minted, wsSpent, err := readLXCBalance(ctx, tx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if bal < heldLXC {
+		return ErrInsufficientLXC // rollback ⇒ no orphan reservation; retriable after funding
+	}
+	newBal := bal - heldLXC
+	if err := insertLXCLedger(ctx, tx, workspaceID, -heldLXC, newBal, LXCTypeReservationHold, "reservation hold (pre-serve)", meta.toMap()); err != nil {
+		return err
+	}
+	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, wsSpent+heldLXC); err != nil {
+		return err
+	}
+	// (4) Bump spent_lxc by the HELD amount — the ceiling counts the conservative reservation. Settle
+	// reclaims the unused difference back into the budget.
+	if _, err := tx.Exec(ctx,
+		`UPDATE agent_lxc_subbudgets SET spent_lxc = spent_lxc + $2, updated_at = now() WHERE scoped_key_id = $1`,
+		scopedKeyID, heldLXC); err != nil {
+		return fmt.Errorf("economy: bump spent (hold): %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// SettleLXCReservation reconciles a held reservation to the DELIVERED charge finalLXC: it credits back the
+// unused reservation (refund = held − final) and books final as the real bill. final is CLAMPED to [0, held]
+// — the conservative hold is an upper bound, and the customer is NEVER charged more than was reserved (belt
+// and braces: even a mis-estimated hold cannot over-bill). Two immutable ledger rows in one tx: a
+// LXCTypeReservationRelease credit of +held (undo the hold) and a LXCTypeSpend debit of −final (THE bill,
+// joined to token_events by request_id) — net balance move +refund. The agent's spent_lxc drops by refund so
+// the reserved-but-unspent headroom returns to its budget. Idempotent via the status-CAS: a second settle, or
+// a settle racing a release, finds status≠'held' and is a no-op. A settle of an unknown reservation is an
+// error (a bug — you cannot bill what you never held).
+func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) error {
+	if reservationID == "" {
+		return errors.New("economy: settle requires reservation_id")
+	}
+	if finalLXC < 0 {
+		finalLXC = 0
+	}
+	if s == nil || s.pool == nil {
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: begin settle: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var scopedKeyID, workspaceID, status string
+	var heldLXC int64
+	err = tx.QueryRow(ctx,
+		`SELECT scoped_key_id, workspace_id, held_ulxc, status FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
+		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("economy: settle unknown reservation %q", reservationID)
+	}
+	if err != nil {
+		return fmt.Errorf("economy: read reservation: %w", err)
+	}
+	if status != "held" {
+		return nil // already settled or released — idempotent no-op
+	}
+	if finalLXC > heldLXC {
+		finalLXC = heldLXC // never bill above the conservative hold
+	}
+	refund := heldLXC - finalLXC // ≥ 0
+
+	// Two compensating rows: release the whole hold (+held), then book the delivered charge (−final). Net
+	// balance move = +refund. Both are INSERTs — 0055-safe. lifetime_spent nets to +final (was +held at hold).
+	bal, minted, wsSpent, err := readLXCBalance(ctx, tx, workspaceID)
+	if err != nil {
+		return err
+	}
+	afterRelease := bal + heldLXC
+	if err := insertLXCLedger(ctx, tx, workspaceID, heldLXC, afterRelease, LXCTypeReservationRelease, "reservation settle: release hold", meta.toMap()); err != nil {
+		return err
+	}
+	afterSpend := afterRelease - finalLXC
+	if finalLXC > 0 {
+		if err := insertLXCLedger(ctx, tx, workspaceID, -finalLXC, afterSpend, LXCTypeSpend, "reservation settle: delivered charge", meta.toMap()); err != nil {
+			return err
+		}
+	}
+	if err := writeLXCBalance(ctx, tx, workspaceID, afterSpend, minted, wsSpent-refund); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE agent_lxc_subbudgets SET spent_lxc = spent_lxc - $2, updated_at = now() WHERE scoped_key_id = $1`,
+		scopedKeyID, refund); err != nil {
+		return fmt.Errorf("economy: reclaim spent (settle): %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE lxc_reservations SET status = 'settled', settled_ulxc = $2, resolved_at = now() WHERE reservation_id = $1`,
+		reservationID, finalLXC); err != nil {
+		return fmt.Errorf("economy: mark settled: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// ReleaseLXCReservation refunds a held reservation IN FULL (final charge 0): a self-cache hit (no upstream
+// call, no contributor ⇒ free), or a serve that never delivered (crash/failure ⇒ the customer must not pay).
+// One compensating LXCTypeReservationRelease credit of +held; spent_lxc drops by the whole held. Idempotent
+// via the status-CAS. A release of an unknown reservation is a no-op (a stranded-sweeper double-run is safe).
+func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationID, reason string) error {
+	if reservationID == "" {
+		return errors.New("economy: release requires reservation_id")
+	}
+	if s == nil || s.pool == nil {
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: begin release: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var scopedKeyID, workspaceID, status string
+	var heldLXC int64
+	err = tx.QueryRow(ctx,
+		`SELECT scoped_key_id, workspace_id, held_ulxc, status FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
+		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // nothing to release — a double-sweep or a never-held id is a safe no-op
+	}
+	if err != nil {
+		return fmt.Errorf("economy: read reservation: %w", err)
+	}
+	if status != "held" {
+		return nil // already resolved — idempotent
+	}
+
+	bal, minted, wsSpent, err := readLXCBalance(ctx, tx, workspaceID)
+	if err != nil {
+		return err
+	}
+	afterRelease := bal + heldLXC
+	desc := "reservation release (full refund)"
+	if reason != "" {
+		desc = "reservation release: " + reason
+	}
+	if err := insertLXCLedger(ctx, tx, workspaceID, heldLXC, afterRelease, LXCTypeReservationRelease, desc, nil); err != nil {
+		return err
+	}
+	if err := writeLXCBalance(ctx, tx, workspaceID, afterRelease, minted, wsSpent-heldLXC); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE agent_lxc_subbudgets SET spent_lxc = spent_lxc - $2, updated_at = now() WHERE scoped_key_id = $1`,
+		scopedKeyID, heldLXC); err != nil {
+		return fmt.Errorf("economy: reclaim spent (release): %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE lxc_reservations SET status = 'released', settled_ulxc = 0, resolved_at = now() WHERE reservation_id = $1`,
+		reservationID); err != nil {
+		return fmt.Errorf("economy: mark released: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// ReleaseStrandedReservations REFUNDS every hold older than olderThan (a crash between reserve and settle).
+// It only ever RELEASES (never settles): a stranded hold's serve outcome is unknown, so the safe money move
+// is to give the customer their LXC back. Returns the count released. Idempotent per row via the status-CAS.
+func (s *DualTokenStore) ReleaseStrandedReservations(ctx context.Context, olderThan time.Duration) (int, error) {
+	if s == nil || s.pool == nil {
+		return 0, nil
+	}
+	cutoff := time.Now().UTC().Add(-olderThan)
+	rows, err := s.pool.Query(ctx,
+		`SELECT reservation_id FROM lxc_reservations WHERE status = 'held' AND created_at < $1`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("economy: scan stranded reservations: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, id := range ids {
+		if err := s.ReleaseLXCReservation(ctx, id, "stranded hold swept (crash refund)"); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+func nullIfEmpty(str string) interface{} {
+	if str == "" {
+		return nil
+	}
+	return str
 }
