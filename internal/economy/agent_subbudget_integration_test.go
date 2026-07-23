@@ -69,10 +69,10 @@ func TestAgentSpend_Idempotent_And_Concurrent(t *testing.T) {
 	fund(t, s, "wsA", 100*uLXC)
 
 	// same request_id twice (sequential retry) ⇒ one debit of 10.
-	if err := s.SpendLXCForAgent(ctx, "keyA", "wsA", "req-1", 10*uLXC, "task"); err != nil {
+	if err := s.SpendLXCForAgent(ctx, "keyA", "wsA", "req-1", 10*uLXC, "task", AgentDebitMeta{}); err != nil {
 		t.Fatalf("first spend: %v", err)
 	}
-	if err := s.SpendLXCForAgent(ctx, "keyA", "wsA", "req-1", 10*uLXC, "task"); err != nil {
+	if err := s.SpendLXCForAgent(ctx, "keyA", "wsA", "req-1", 10*uLXC, "task", AgentDebitMeta{}); err != nil {
 		t.Fatalf("idempotent replay must be nil, got %v", err)
 	}
 	if bal, spent, claims := agentState(t, s, "wsA", "keyA"); bal != 90*uLXC || spent != 10*uLXC || claims != 1 {
@@ -83,7 +83,7 @@ func TestAgentSpend_Idempotent_And_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _ = s.SpendLXCForAgent(ctx, "keyA", "wsA", "req-2", 5*uLXC, "task") }()
+		go func() { defer wg.Done(); _ = s.SpendLXCForAgent(ctx, "keyA", "wsA", "req-2", 5*uLXC, "task", AgentDebitMeta{}) }()
 	}
 	wg.Wait()
 	if bal, spent, _ := agentState(t, s, "wsA", "keyA"); bal != 85*uLXC || spent != 15*uLXC {
@@ -105,19 +105,19 @@ func TestAgentSpend_CeilingDepletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	// spend 20 + 20 = 40 (ok), then 20 would exceed (40+20>50) ⇒ REJECT; then 10 (40+10=50) ok; then any ⇒ reject.
-	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b1", 20*uLXC, "t"); err != nil {
+	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b1", 20*uLXC, "t", AgentDebitMeta{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b2", 20*uLXC, "t"); err != nil {
+	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b2", 20*uLXC, "t", AgentDebitMeta{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b3", 20*uLXC, "t"); err != ErrSubBudgetExceeded {
+	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b3", 20*uLXC, "t", AgentDebitMeta{}); err != ErrSubBudgetExceeded {
 		t.Fatalf("over-ceiling debit must be ErrSubBudgetExceeded, got %v", err)
 	}
-	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b4", 10*uLXC, "t"); err != nil { // exactly to 50
+	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b4", 10*uLXC, "t", AgentDebitMeta{}); err != nil { // exactly to 50
 		t.Fatalf("spend to exactly the ceiling must succeed, got %v", err)
 	}
-	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b5", uLXC/100, "t"); err != ErrSubBudgetExceeded {
+	if err := s.SpendLXCForAgent(ctx, "keyB", "wsB", "b5", uLXC/100, "t", AgentDebitMeta{}); err != ErrSubBudgetExceeded {
 		t.Fatalf("any spend past the ceiling must reject, got %v", err)
 	}
 	_, spent, _ := agentState(t, s, "wsB", "keyB")
@@ -133,7 +133,7 @@ func TestAgentSpend_Atomicity_NoOrphan(t *testing.T) {
 	fund(t, s, "wsC", 100*uLXC)
 	_ = s.SetAgentCeiling(ctx, "keyC", "wsC", 5*uLXC) // tiny ceiling
 
-	err := s.SpendLXCForAgent(ctx, "keyC", "wsC", "c1", 10*uLXC, "t") // exceeds ceiling 5
+	err := s.SpendLXCForAgent(ctx, "keyC", "wsC", "c1", 10*uLXC, "t", AgentDebitMeta{}) // exceeds ceiling 5
 	if err != ErrSubBudgetExceeded {
 		t.Fatalf("want ErrSubBudgetExceeded, got %v", err)
 	}
@@ -148,7 +148,7 @@ func TestAgentSpend_ZeroBalance_SafeWhenOn(t *testing.T) {
 	s := agentHarness(t)
 	ctx := context.Background()
 	_ = s.SetAgentCeiling(ctx, "keyD", "wsD", 50*uLXC) // ceiling set, but NO funding
-	err := s.SpendLXCForAgent(ctx, "keyD", "wsD", "d1", 10*uLXC, "t")
+	err := s.SpendLXCForAgent(ctx, "keyD", "wsD", "d1", 10*uLXC, "t", AgentDebitMeta{})
 	if err != ErrInsufficientLXC {
 		t.Fatalf("zero-balance spend must be ErrInsufficientLXC, got %v", err)
 	}

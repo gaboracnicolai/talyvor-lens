@@ -42,15 +42,46 @@ func (s *DualTokenStore) SetAgentCeiling(ctx context.Context, scopedKeyID, works
 	return nil
 }
 
+// AgentDebitMeta is the NON-CONTENT metadata stamped on an agent-allocator lxc_ledger debit row. It
+// exists so the ledger is READABLE (per-model spend derivable) and a money row JOINS to its usage row —
+// without lxc_ledger, an append-only + immutable financial record (migration 0055), ever becoming a
+// content record. It carries EXACTLY two scalars and structurally cannot carry prompt text, a hash, or an
+// embedding (there is no field for content):
+//
+//   - RequestedModel: the model the charge was ESTIMATED on. The debit is PRE-SERVE / PRE-ROUTING, so this
+//     is the REQUESTED model, NOT necessarily the one that served (token_events records the served model).
+//     Named "requested_model" on the row so a UI cannot imply it was the serving model.
+//   - RequestID: the token_events request_id, so the money row joins to its usage row (model served, real
+//     token counts) instead of duplicating any of that here.
+type AgentDebitMeta struct {
+	RequestedModel string
+	RequestID      string
+}
+
+// toMap renders the two scalars as the lxc_ledger metadata document, OMITTING an empty scalar so a row
+// carries no empty-string noise. The economy layer owns this shape: a caller supplies only these two typed
+// strings, never a free-form map, so no content can be injected into a money row.
+func (m AgentDebitMeta) toMap() map[string]interface{} {
+	out := map[string]interface{}{}
+	if m.RequestedModel != "" {
+		out["requested_model"] = m.RequestedModel
+	}
+	if m.RequestID != "" {
+		out["request_id"] = m.RequestID
+	}
+	return out
+}
+
 // SpendLXCForAgent debits lxcAmount from the workspace's LXC balance on behalf of a scoped key (the "agent"),
 // EXACTLY ONCE per requestID and only within the agent's remaining sub-budget. All of {claim, ceiling check,
 // balance debit, spent bump} happen in ONE transaction — a claim without a debit, or a debit without a
-// claim, is the double-spend bug this method exists to prevent.
+// claim, is the double-spend bug this method exists to prevent. `meta` stamps the debit row with the
+// requested model + token_events request_id (non-content; see AgentDebitMeta) so the ledger is readable.
 //
 // Returns nil on a fresh successful debit AND on an idempotent replay (a requestID already claimed ⇒ nothing
 // debited). Returns ErrSubBudgetExceeded (ceiling) or ErrInsufficientLXC (balance) on a rejected debit —
 // both roll the whole tx back (no orphan claim, retriable).
-func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string) error {
+func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string, meta AgentDebitMeta) error {
 	if lxcAmount <= 0 {
 		return errors.New("economy: agent spend amount must be positive")
 	}
@@ -107,7 +138,9 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 		return ErrInsufficientLXC // rollback ⇒ no orphan claim; retriable after funding
 	}
 	newBal := bal - lxcAmount // exact integer µLXC
-	if err := insertLXCLedger(ctx, tx, workspaceID, -lxcAmount, newBal, LXCTypeSpend, description, nil); err != nil {
+	// Stamp the non-content metadata (requested model + token_events request_id) so the ledger is readable
+	// and joins to token_events. meta.toMap() carries ONLY those two scalars — never content (0055 immutable).
+	if err := insertLXCLedger(ctx, tx, workspaceID, -lxcAmount, newBal, LXCTypeSpend, description, meta.toMap()); err != nil {
 		return err
 	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, wsSpent+lxcAmount); err != nil {

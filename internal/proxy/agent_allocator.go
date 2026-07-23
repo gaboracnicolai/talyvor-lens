@@ -29,7 +29,7 @@ import (
 // agentSpender is the minimal debit surface (economy.DualTokenStore.SpendLXCForAgent satisfies it). An
 // interface so the proxy doesn't hard-depend on economy internals.
 type agentSpender interface {
-	SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string) error
+	SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string, meta economy.AgentDebitMeta) error
 }
 
 // SetAgentSpender wires the agent-allocation debit + its enable flag, and mints the process-start salt used
@@ -89,7 +89,10 @@ func (p *Proxy) agentStrategy(apiKeyID string) localrouter.RoutingStrategy {
 // SpendLXCForAgent, keyed on a server-derived request id, and BLOCKS unless the debit succeeded — so the
 // serve path is entered IFF a debit was booked (airtight ceiling). Fail-CLOSED: any debit error blocks (a
 // bounded agent must not serve on an unverifiable budget).
-func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model, prompt string) bool {
+// requestID is the token_events request id (the handler's per-request id), stamped onto the debit row's
+// metadata so the money row joins to its usage row. `model` is the REQUESTED model — this debit precedes
+// routing, so it is what the charge was estimated on, not necessarily the model that served.
+func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string) bool {
 	if apiKeyID == "" || p.agentSpender == nil || p.agentAllocEnabled == nil || !p.agentAllocEnabled() {
 		return false // non-agent / inert → no debit, no block (today's behavior)
 	}
@@ -102,7 +105,10 @@ func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model
 		slog.Error("economy: agent debit key derivation failed (failing closed)", slog.String("err", err.Error()))
 		return true // fail closed — cannot mint a safe key ⇒ do not serve
 	}
-	err = p.agentSpender.SpendLXCForAgent(ctx, apiKeyID, wsID, debitKey, estLXC, "proof-of-agent-allocation: pre-serve estimate debit")
+	// The debit row carries the REQUESTED model + token_events request_id (non-content — AgentDebitMeta),
+	// so the ledger is readable and joins to token_events. NEVER prompt text/hash/embedding (0055 immutable).
+	err = p.agentSpender.SpendLXCForAgent(ctx, apiKeyID, wsID, debitKey, estLXC, "proof-of-agent-allocation: pre-serve estimate debit",
+		economy.AgentDebitMeta{RequestedModel: model, RequestID: requestID})
 	if err == nil {
 		return false // debited ⇒ allow (serve)
 	}

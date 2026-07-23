@@ -88,7 +88,7 @@ func TestAgentAllocator_AdversarialOverBudget(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// mirrors the handler: gate BEFORE serve — the "upstream" (served) runs iff not blocked.
-			if p.agentAllocationBlocks(ctx, "keyAgent", "wsAgent", agentTestModel, prompt) {
+			if p.agentAllocationBlocks(ctx, "keyAgent", "wsAgent", agentTestModel, prompt, "req-test") {
 				atomic.AddInt64(&blocked, 1)
 				return
 			}
@@ -135,10 +135,10 @@ func TestAgentAllocator_ServerDerivedKey_NoDodge(t *testing.T) {
 	}
 
 	// Two allocations for the SAME agent (as if the same client request-id was replayed) ⇒ two debits.
-	if p.agentAllocationBlocks(ctx, "keyD", "wsD", agentTestModel, prompt) {
+	if p.agentAllocationBlocks(ctx, "keyD", "wsD", agentTestModel, prompt, "req-test") {
 		t.Fatal("first allocation should succeed")
 	}
-	if p.agentAllocationBlocks(ctx, "keyD", "wsD", agentTestModel, prompt) {
+	if p.agentAllocationBlocks(ctx, "keyD", "wsD", agentTestModel, prompt, "req-test") {
 		t.Fatal("second allocation should ALSO succeed (fresh key — no idempotent dodge)")
 	}
 	if spent := agentSpent(t, pool, "keyD"); spent != 2*e {
@@ -156,7 +156,7 @@ func TestAgentAllocator_BlockIsPreServe(t *testing.T) {
 	_ = store.SetAgentCeiling(ctx, "keyP", "wsP", e/2) // ceiling below one request → always blocks
 
 	served := 0
-	if !p.agentAllocationBlocks(ctx, "keyP", "wsP", agentTestModel, prompt) {
+	if !p.agentAllocationBlocks(ctx, "keyP", "wsP", agentTestModel, prompt, "req-test") {
 		served++ // would serve
 	}
 	if served != 0 {
@@ -174,7 +174,7 @@ func TestAgentAllocator_NonAgentSkipped(t *testing.T) {
 	const prompt = "non agent prompt padded so the estimate would be positive were the path even entered here"
 	_, _ = store.CreditLXC(ctx, "wsN", micro(1000), "fund", nil)
 	// empty apiKeyID (JWT/admin/anon) ⇒ never blocks, never debits.
-	if p.agentAllocationBlocks(ctx, "", "wsN", agentTestModel, prompt) {
+	if p.agentAllocationBlocks(ctx, "", "wsN", agentTestModel, prompt, "req-test") {
 		t.Fatal("non-agent (empty APIKeyID) must NOT be blocked by the agent path")
 	}
 	if spent := agentSpent(t, pool, ""); spent != 0 {
@@ -190,11 +190,50 @@ func TestAgentAllocator_FlagOffSkips(t *testing.T) {
 	const prompt = "flag off prompt padded so the estimate would be positive were the path entered at all now"
 	_, _ = store.CreditLXC(ctx, "wsF", micro(1000), "fund", nil)
 	_ = store.SetAgentCeiling(ctx, "keyF", "wsF", micro(0.0001)) // tiny ceiling — would block IF the path ran
-	if p.agentAllocationBlocks(ctx, "keyF", "wsF", agentTestModel, prompt) {
+	if p.agentAllocationBlocks(ctx, "keyF", "wsF", agentTestModel, prompt, "req-test") {
 		t.Fatal("flag OFF ⇒ agent path must be skipped (no block) even for an API-key request")
 	}
 	if spent := agentSpent(t, pool, "keyF"); spent != 0 {
 		t.Fatalf("flag OFF must debit nothing, spent=%d", spent)
+	}
+}
+
+// (proof 6) THE ROW IS READABLE, END TO END: a served agent debit stamps the
+// REQUESTED model and the token_events request_id onto its lxc_ledger row — so
+// per-model spend is derivable and the money row joins to token_events. Proves
+// the values thread from the allocator (where they live) through to the row.
+func TestAgentAllocator_StampsModelAndRequestID(t *testing.T) {
+	p, store, pool := agentAllocHarness(t)
+	ctx := context.Background()
+	const prompt = "readable ledger prompt padded so the input estimate is a clean strictly positive debit here now"
+	e := lxcEstimate(agentTestModel, prompt)
+	if e <= 0 {
+		t.Fatal("estimate must be > 0")
+	}
+	_, _ = store.CreditLXC(ctx, "wsRow", micro(1000), "fund", nil)
+	_ = store.SetAgentCeiling(ctx, "keyRow", "wsRow", 100*e)
+
+	const reqID = "req-tok-e2e-1" // the token_events request_id (NOT the server-derived debit key)
+	if p.agentAllocationBlocks(ctx, "keyRow", "wsRow", agentTestModel, prompt, reqID) {
+		t.Fatal("funded agent request should be served (not blocked)")
+	}
+
+	var gotModel, gotReqID, gotType string
+	var gotAmount int64
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(metadata->>'requested_model',''), COALESCE(metadata->>'request_id',''), type, amount
+		FROM lxc_ledger WHERE workspace_id='wsRow' AND type='spend'`).
+		Scan(&gotModel, &gotReqID, &gotType, &gotAmount); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if gotModel != agentTestModel {
+		t.Errorf("requested_model = %q, want %q (the REQUESTED model — the debit precedes routing)", gotModel, agentTestModel)
+	}
+	if gotReqID != reqID {
+		t.Errorf("request_id = %q, want %q (must be the token_events id, not the server debit key)", gotReqID, reqID)
+	}
+	if gotType != "spend" || gotAmount != -e {
+		t.Errorf("money columns disturbed: type=%q amount=%d, want spend/%d", gotType, gotAmount, -e)
 	}
 }
 
