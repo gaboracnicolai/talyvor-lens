@@ -508,11 +508,15 @@ func (s *Server) handleAnomaliesScan(w http.ResponseWriter, r *http.Request) {
 // Spend analytics
 // -------------------------------------------------------------------------
 
+// cache_hit_rate is measured from serve_source (migration 0100), NOT the `cached`
+// boolean: nothing writes cached=true, so the old FILTER (WHERE cached) was a
+// structural 0 — an unmeasured zero reported as measured. serve_source LIKE
+// 'cache_hit%' is the real signal (same as handleUsage).
 const spendSummarySQL = `SELECT COALESCE(SUM(cost_usd), 0),
   COALESCE(SUM(input_tokens), 0),
   COALESCE(SUM(output_tokens), 0),
   COUNT(*),
-  COUNT(*) FILTER (WHERE cached)
+  COUNT(*) FILTER (WHERE serve_source LIKE 'cache_hit%')
 FROM token_events
 WHERE workspace_id = $1
   AND created_at > NOW() - INTERVAL '1 day' * $2`
@@ -738,9 +742,17 @@ func (s *Server) handleSpendByRequest(w http.ResponseWriter, r *http.Request) {
 // Cache analytics
 // -------------------------------------------------------------------------
 
+// cacheStatsSQL — hit rates from serve_source (migration 0100), NOT the dead `cached`
+// boolean (never written true → the old rates were a structural 0). exact vs semantic
+// is a real split now: an EXACT match is cache_hit_exact or its pooled twin
+// cache_hit_pooled; a SEMANTIC match is cache_hit_semantic or cache_hit_pooled_semantic
+// (own-cache + cross-tenant pool of the same match type). uncached cost is the spend on
+// rows that were NOT cache hits.
 const cacheStatsSQL = `SELECT COUNT(*),
-  COUNT(*) FILTER (WHERE cached),
-  COALESCE(SUM(cost_usd) FILTER (WHERE NOT cached), 0)
+  COUNT(*) FILTER (WHERE serve_source LIKE 'cache_hit%'),
+  COUNT(*) FILTER (WHERE serve_source IN ('cache_hit_exact','cache_hit_pooled')),
+  COUNT(*) FILTER (WHERE serve_source IN ('cache_hit_semantic','cache_hit_pooled_semantic')),
+  COALESCE(SUM(cost_usd) FILTER (WHERE serve_source NOT LIKE 'cache_hit%'), 0)
 FROM token_events
 WHERE workspace_id = $1`
 
@@ -757,9 +769,9 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var total, cached int64
+	var total, cacheHits, exactHits, semanticHits int64
 	var uncachedCost float64
-	if err := s.pool.QueryRow(r.Context(), cacheStatsSQL, wsID).Scan(&total, &cached, &uncachedCost); err != nil {
+	if err := s.pool.QueryRow(r.Context(), cacheStatsSQL, wsID).Scan(&total, &cacheHits, &exactHits, &semanticHits, &uncachedCost); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -768,18 +780,19 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	totalRate := 0.0
-	savings := 0.0
+	// All rates are now real (serve_source, migration 0100). exact/semantic are a true
+	// split by match type; estimated_savings_usd approximates the provider spend avoided
+	// by the hits (uncached avg cost × hit rate) — a heuristic, but on real hits now.
+	var totalRate, exactRate, semanticRate, savings float64
 	if total > 0 {
-		totalRate = float64(cached) / float64(total)
-		savings = uncachedCost * (float64(cached) / float64(total))
+		totalRate = float64(cacheHits) / float64(total)
+		exactRate = float64(exactHits) / float64(total)
+		semanticRate = float64(semanticHits) / float64(total)
+		savings = uncachedCost * totalRate
 	}
-	// We don't track exact-vs-semantic split in token_events yet, so we
-	// surface the same number on both fields. A future migration can add
-	// the cache_layer column and split this honestly.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"exact_hit_rate":        totalRate,
-		"semantic_hit_rate":     totalRate,
+		"exact_hit_rate":        exactRate,
+		"semantic_hit_rate":     semanticRate,
 		"total_hit_rate":        totalRate,
 		"entries_count":         entries,
 		"estimated_savings_usd": savings,

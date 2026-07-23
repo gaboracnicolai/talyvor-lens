@@ -142,13 +142,14 @@ func TestAPI_CacheStats_CalculatesHitRate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// total=100, cached=60, total_cost_uncached=$50 → savings = 50 * (60/100) = $30
+	// Repointed to serve_source (migration 0100): total=100, cache_hits=60 (exact=40, semantic=20),
+	// uncached_cost=$50 → total_hit_rate 0.6, exact 0.4, semantic 0.2, savings = 50 * 0.6 = $30.
 	pool.ExpectQuery(`COUNT\(\*\)`).
 		WithArgs("default").
 		WillReturnRows(
 			pgxmock.NewRows([]string{
-				"total", "cached", "uncached_cost",
-			}).AddRow(int64(100), int64(60), float64(50.0)),
+				"total", "cache_hits", "exact_hits", "semantic_hits", "uncached_cost",
+			}).AddRow(int64(100), int64(60), int64(40), int64(20), float64(50.0)),
 		)
 	pool.ExpectQuery(`COUNT\(\*\) FROM prompt_embeddings`).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(15420)))
@@ -159,6 +160,15 @@ func TestAPI_CacheStats_CalculatesHitRate(t *testing.T) {
 
 	if got["total_hit_rate"].(float64) != 0.6 {
 		t.Errorf("total_hit_rate = %v, want 0.6", got["total_hit_rate"])
+	}
+	if got["exact_hit_rate"].(float64) != 0.4 {
+		t.Errorf("exact_hit_rate = %v, want 0.4", got["exact_hit_rate"])
+	}
+	if got["semantic_hit_rate"].(float64) != 0.2 {
+		t.Errorf("semantic_hit_rate = %v, want 0.2", got["semantic_hit_rate"])
+	}
+	if got["estimated_savings_usd"].(float64) != 30.0 {
+		t.Errorf("estimated_savings_usd = %v, want 30", got["estimated_savings_usd"])
 	}
 	if int(got["entries_count"].(float64)) != 15420 {
 		t.Errorf("entries_count = %v, want 15420", got["entries_count"])

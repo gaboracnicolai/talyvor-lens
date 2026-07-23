@@ -54,6 +54,9 @@ func usageHarness(t *testing.T) *Server {
 			output_tokens INTEGER NOT NULL DEFAULT 0, cost_usd FLOAT NOT NULL DEFAULT 0,
 			cached BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMPTZ DEFAULT NOW(),
 			serve_source TEXT NOT NULL DEFAULT 'upstream')`,
+		// handleCacheStats also counts prompt_embeddings (cacheEntriesSQL); a private-schema
+		// harness needs it present (empty is fine).
+		`CREATE TABLE prompt_embeddings (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
 	} {
 		if _, err := pool.Exec(context.Background(), stmt); err != nil {
 			t.Fatalf("schema: %v", err)
@@ -197,5 +200,104 @@ func TestUsage_NoWorkspaceIdentity_Forbidden(t *testing.T) {
 	s.handleUsage(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("no identity must be 403, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── Dead-field repoint: cache_hit_rate (summary) + total_hit_rate (cache/stats) ──────────────
+// Both used to FILTER on the `cached` boolean, which nothing writes true — a structural 0.0
+// reported as a measurement. Repointed to serve_source (migration 0100). These prove a cache-served
+// request moves the number OFF zero, and that the rate reads serve_source, NOT the dead boolean.
+
+func callSummary(t *testing.T, s *Server, ws string) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/api/spend/summary?days=1", nil)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), &auth.AuthContext{WorkspaceID: ws}))
+	rec := httptest.NewRecorder()
+	s.handleSpendSummary(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("summary status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return m
+}
+
+func callCacheStats(t *testing.T, s *Server, ws string) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/api/cache/stats", nil)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), &auth.AuthContext{WorkspaceID: ws}))
+	rec := httptest.NewRecorder()
+	s.handleCacheStats(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cache/stats status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return m
+}
+
+// (6) THE REPOINT: a cache-served request moves cache_hit_rate (summary) and total_hit_rate
+// (cache/stats) OFF zero — and the exact/semantic split is real. Every row here has cached=false,
+// so a non-zero rate can ONLY come from serve_source.
+func TestHitRate_RepointedToServeSource_MovesOffZero(t *testing.T) {
+	s := usageHarness(t)
+	seedUsage(t, s, "wsR", "m", 10, 5, 0.10, "upstream", false)
+	seedUsage(t, s, "wsR", "m", 10, 5, 0.10, "upstream", false)
+	seedUsage(t, s, "wsR", "m", 10, 5, 0.00, "cache_hit_exact", false)    // exact hit
+	seedUsage(t, s, "wsR", "m", 10, 5, 0.00, "cache_hit_semantic", false) // semantic hit
+
+	sum := callSummary(t, s, "wsR")
+	if got := sum["cache_hit_rate"].(float64); !approx(got, 0.5) {
+		t.Fatalf("summary cache_hit_rate = %v, want 0.5 (2 hits / 4) — the dead zero is gone", got)
+	}
+
+	cs := callCacheStats(t, s, "wsR")
+	if got := cs["total_hit_rate"].(float64); !approx(got, 0.5) {
+		t.Fatalf("cache/stats total_hit_rate = %v, want 0.5", got)
+	}
+	if got := cs["exact_hit_rate"].(float64); !approx(got, 0.25) {
+		t.Fatalf("exact_hit_rate = %v, want 0.25 (1 exact / 4)", got)
+	}
+	if got := cs["semantic_hit_rate"].(float64); !approx(got, 0.25) {
+		t.Fatalf("semantic_hit_rate = %v, want 0.25 (1 semantic / 4)", got)
+	}
+}
+
+// (7) NOT the `cached` boolean: a row with cached=TRUE but serve_source='upstream' must NOT count as
+// a hit (it would have, under the old filter); a cache_hit_* row with cached=FALSE DOES. This is the
+// exact inversion of the old dead behavior.
+func TestHitRate_IgnoresCachedBoolean(t *testing.T) {
+	s := usageHarness(t)
+	seedUsage(t, s, "wsI", "m", 1, 1, 0.05, "upstream", true)          // cached=true but NOT a hit
+	seedUsage(t, s, "wsI", "m", 1, 1, 0.00, "cache_hit_pooled", false) // cached=false but IS a hit
+
+	sum := callSummary(t, s, "wsI")
+	if got := sum["cache_hit_rate"].(float64); !approx(got, 0.5) {
+		t.Fatalf("cache_hit_rate = %v, want 0.5 — must read serve_source, not cached", got)
+	}
+	cs := callCacheStats(t, s, "wsI")
+	// cache_hit_pooled is an EXACT-family match.
+	if got := cs["exact_hit_rate"].(float64); !approx(got, 0.5) {
+		t.Fatalf("exact_hit_rate = %v, want 0.5 (pooled is exact-family)", got)
+	}
+	if got := cs["semantic_hit_rate"].(float64); !approx(got, 0) {
+		t.Fatalf("semantic_hit_rate = %v, want 0", got)
+	}
+}
+
+// (8) HONEST ZERO: a workspace with only upstream serves reads 0.0 — because it truly had no cache
+// hits, not because the field is structurally dead.
+func TestHitRate_HonestZeroWhenNoHits(t *testing.T) {
+	s := usageHarness(t)
+	seedUsage(t, s, "wsZ", "m", 1, 1, 0.05, "upstream", false)
+	if got := callSummary(t, s, "wsZ")["cache_hit_rate"].(float64); got != 0 {
+		t.Fatalf("cache_hit_rate = %v, want 0 (a real zero: no hits)", got)
+	}
+	if got := callCacheStats(t, s, "wsZ")["total_hit_rate"].(float64); got != 0 {
+		t.Fatalf("total_hit_rate = %v, want 0", got)
 	}
 }
