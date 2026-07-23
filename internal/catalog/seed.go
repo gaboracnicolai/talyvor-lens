@@ -14,7 +14,7 @@ func seedModels() []Model {
 	visionDoc := Capabilities{Vision: true, Document: true}
 	visionAudioDoc := Capabilities{Vision: true, Audio: true, Document: true}
 
-	return []Model{
+	return withCacheRates([]Model{
 		// ─── OpenAI (vision) ───
 		{ID: "gpt-4o", Provider: "openai", DisplayName: "GPT-4o", InputPer1M: 2.50, OutputPer1M: 10.00, Capabilities: vision, ContextTokens: 128000, MaxOutput: 16384, Aliases: []string{"gpt-4o-2024-11-20", "gpt-4o-2024-08-06"}},
 		{ID: "gpt-4o-mini", Provider: "openai", DisplayName: "GPT-4o mini", InputPer1M: 0.15, OutputPer1M: 0.60, Capabilities: vision, ContextTokens: 128000, MaxOutput: 16384, Aliases: []string{"gpt-4o-mini-2024-07-18"}},
@@ -63,5 +63,46 @@ func seedModels() []Model {
 		{ID: "llama-3.1-8b-instant", Provider: "groq", DisplayName: "Llama 3.1 8B Instant (Groq)", InputPer1M: 0.05, OutputPer1M: 0.08, ContextTokens: 128000, MaxOutput: 8192},
 		{ID: "mixtral-8x7b-32768", Provider: "groq", DisplayName: "Mixtral 8x7B (Groq)", InputPer1M: 0.24, OutputPer1M: 0.24, ContextTokens: 32768, MaxOutput: 8192},
 		{ID: "gemma2-9b-it", Provider: "groq", DisplayName: "Gemma 2 9B (Groq)", InputPer1M: 0.20, OutputPer1M: 0.20, ContextTokens: 8192, MaxOutput: 8192},
+	})
+}
+
+// withCacheRates fills each model's prompt-caching rates (CachedInputPer1M,
+// CacheWritePer1M) from its provider's PUBLISHED multiplier on the base input
+// rate, leaving InputPer1M/OutputPer1M byte-for-byte untouched (the price-parity
+// gate). Rates as verified against the live provider docs on 2026-07-24:
+//
+//   - anthropic / bedrock (Claude economics — platform.claude.com prompt-caching):
+//     cache READ = 0.1x input; 5-minute cache WRITE = 1.25x input. (A 1-hour
+//     write is 2x, but the aggregate cache_creation_input_tokens field can't be
+//     split by TTL, so we price at the default-TTL 1.25x; a 1-hour-cached write
+//     is therefore slightly under-priced — the safe direction for a savings claim.)
+//   - openai (developers.openai.com prompt-caching): cache READ ~0.5x input for
+//     the GPT-4o generation. (GPT-4.1-gen is actually 0.25x, so 0.5x UNDER-states
+//     the discount — deliberately conservative so we never over-claim savings.)
+//     No separate write charge before GPT-5.6, and no catalog model is 5.6+.
+//   - everything else (google/mistral/groq): prompt caching is not billed through
+//     this cost path (and our usage parser reads no cache counts for them), so we
+//     apply NO discount — cache read == input rate. Never under-bills.
+//
+// A model may still override these by carrying explicit non-zero values.
+func withCacheRates(models []Model) []Model {
+	for i := range models {
+		m := &models[i]
+		var cachedMult, writeMult float64
+		switch m.Provider {
+		case "anthropic", "bedrock":
+			cachedMult, writeMult = 0.10, 1.25
+		case "openai":
+			cachedMult, writeMult = 0.50, 1.00
+		default:
+			cachedMult, writeMult = 1.00, 1.00
+		}
+		if m.CachedInputPer1M == 0 {
+			m.CachedInputPer1M = m.InputPer1M * cachedMult
+		}
+		if m.CacheWritePer1M == 0 {
+			m.CacheWritePer1M = m.InputPer1M * writeMult
+		}
 	}
+	return models
 }
