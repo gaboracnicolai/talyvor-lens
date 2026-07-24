@@ -172,7 +172,7 @@ func TestFundingInvariant_Charged10_MintsAtMost5_Integration(t *testing.T) {
 		t.Fatalf("hold did not debit: balance %d", balAfterHold)
 	}
 
-	funded := p.settleReservation(rctx, 10.0) // the consumer is charged exactly $10 for this request
+	funded := p.settleReservation(rctx, 10.0, "gpt-4o") // the consumer is charged exactly $10 for this request
 	if funded != 10.0 {
 		t.Fatalf("settled charge = $%v, want $10 (the delivered value, hold was larger)", funded)
 	}
