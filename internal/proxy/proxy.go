@@ -1466,12 +1466,24 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		inT, outT := len(prompt)/4, len(upstreamBody)/4
 		costEstimated := true
 		spendSource := "estimated"
+		// servedCostUSD is the ONE cost basis for this response — fed to the reservation SETTLE (the
+		// customer's actual bill), the shadow debit, the in-memory budget feed, telemetry, and attribution
+		// below. When the provider reports usage we price it CACHE-AWARE (CostUSDDetailed): cache reads and
+		// writes at their OWN catalog rate, not the flat input rate. Without provider usage there is no cache
+		// breakdown, so it stays the flat estimate — byte-identical to CostUSD(upstreamModel, inT, outT),
+		// today's behaviour (CostUSDDetailed with zero cached/write equals CostUSD by construction anyway).
+		var servedCostUSD float64
 		if u, ok := cfg.ExtractUsage(upstreamBody); ok {
 			inT, outT = u.InputTokens, u.OutputTokens
 			costEstimated = false
 			spendSource = "provider_usage"
+			servedCostUSD = alerts.CostUSDDetailed(upstreamModel, u.UncachedInputTokens, u.CachedInputTokens, u.CacheWriteInputTokens, u.OutputTokens)
 		} else if modSet.Multimodal() {
 			inT = modSet.EstimateInputTokens()
+		}
+		if costEstimated {
+			// No provider usage → no cache breakdown exists; the flat estimate IS today's basis.
+			servedCostUSD = alerts.CostUSD(upstreamModel, inT, outT)
 		}
 		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
 			// spendPrompt is "" in metadata mode (no prompt text persisted)
@@ -1502,9 +1514,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// customer pays what routing/batch/compression actually produced. shadow and settle are mutually
 			// exclusive by the reservation flag, so no config ever charges twice.
 			if p.reservationActive() {
-				p.settleReservation(ctx, alerts.CostUSD(upstreamModel, inT, outT))
+				p.settleReservation(ctx, servedCostUSD)
 			} else {
-				p.shadowSpendLXC(ctx, wsID, alerts.CostUSD(upstreamModel, inT, outT))
+				p.shadowSpendLXC(ctx, wsID, servedCostUSD)
 			}
 			// Routing-pattern capture (Phase-3) — post-serve, VOID, structurally
 			// mint-free. Same logging gate + post-serve position as the shadow
@@ -1594,19 +1606,22 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// a memory update (+ threshold checks), not a second hot-path DB
 		// write — token_events above is the durable record.
 		if p.budgetService != nil {
-			p.budgetService.RecordSpend(ctx, wsID, team, sprint, alerts.CostUSD(upstreamModel, inT, outT))
+			p.budgetService.RecordSpend(ctx, wsID, team, sprint, servedCostUSD)
 		}
 		// (The legacy branch_spend double-write was retired in #157 — it had no
 		// reader since #158. request_attribution below is the sole attribution
 		// write now; attr/willAttribute still drive the X-Talyvor-Branch echo.)
-		// Upgraded per-request attribution. Always fired (the
-		// store handles the empty-workspace case by skipping the
-		// insert) and always async so a slow Postgres can't slow
-		// the response. Cost + token figures are the same numbers
-		// the alerts pipeline records, keeping the dashboard
-		// reconciliation honest.
+		// Upgraded per-request attribution. Always fired (the store
+		// handles the empty-workspace case by skipping the insert) and
+		// always async so a slow Postgres can't slow the response. Token
+		// figures match the alerts pipeline; the cost is now the cache-aware
+		// served basis (servedCostUSD — the same basis the reservation settles
+		// on). NOTE: token_events.cost_usd is still computed inside RecordSpend
+		// from raw tokens (flat, cache-blind), so it over-states cached requests
+		// until that sink takes the breakdown — a known follow-up, out of the
+		// proxy.go/stream.go scope. The customer's BILL (the settle) is correct.
 		if p.attrStore != nil && loggingPolicy != workspace.LoggingNone {
-			cost := alerts.CostUSD(upstreamModel, inT, outT)
+			cost := servedCostUSD
 			p.attrStore.RecordAsync(
 				attribution.ExtractFromRequest(r),
 				inT, outT, cost,
@@ -1617,7 +1632,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "forwarded").Inc()
 		span.SetAttributes(
 			attribute.Bool("lens.cached", false),
-			attribute.Float64("lens.cost_usd", alerts.CostUSD(upstreamModel, inT, outT)),
+			attribute.Float64("lens.cost_usd", servedCostUSD),
 		)
 		span.SetStatus(codes.Ok, "")
 	} else {
