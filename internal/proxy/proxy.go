@@ -1550,8 +1550,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// Billing redesign: SETTLE the reservation to the DELIVERED cost (served model, real tokens) — the
 			// customer pays what routing/batch/compression actually produced. shadow and settle are mutually
 			// exclusive by the reservation flag, so no config ever charges twice.
+			// settledChargeUSD = what the consumer ACTUALLY paid for this request. settleReservation RETURNS
+			// the settled amount, which it CLAMPS to the hold (never bills above it) — so this is the real
+			// charge, not the (possibly larger) delivered servedCostUSD. It funds the distill royalty below.
+			// 0 when reservations are off (no settle) ⇒ the distill handoff writes a row the sweeper skips.
+			settledChargeUSD := 0.0
 			if p.reservationActive() {
-				p.settleReservation(ctx, servedCostUSD)
+				settledChargeUSD = p.settleReservation(ctx, servedCostUSD)
 			} else {
 				p.shadowSpendLXC(ctx, wsID, servedCostUSD)
 			}
@@ -1612,7 +1617,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// Post-flush, void, detached, swallowed (mirrors capturePattern);
 			// self-serve already skipped upstream, LoggingNone suppressed in the
 			// sink. Inert unless an attribution sink is wired.
-			p.recordDistillServes(ctx, wsID, loggingPolicy, distillFacts)
+			p.recordDistillServes(ctx, wsID, loggingPolicy, distillFacts, settledChargeUSD)
 			// The vision-OCR sub-call's cost is its OWN row, tagged 'vision_ocr',
 			// priced on the vision model, flagged estimated — a COST, never a
 			// saving, NEVER blended into the 'convert' row above. The durable

@@ -45,11 +45,13 @@ type distillServeFact struct {
 // NO credit/earn method (cannot mint by construction).
 type distillAttributionSink interface {
 	RecordDistillServe(ctx context.Context, owner, requester, contentHash string) error
-	// RecordRoyaltyBasis records the avoided-COGS basis for ONE cross-tenant OCR
-	// reuse relationship, once (ON CONFLICT DO NOTHING). It is a descriptive money
-	// FIGURE, NOT a credit/earn method — *distillattrib.Store satisfies it with a
-	// ledger-free INSERT, so this sink still cannot mint by construction.
-	RecordRoyaltyBasis(ctx context.Context, owner, requester, contentHash string, avoidedCOGS float64, visionModel string, inTokens, outTokens int) error
+	// RecordRoyaltyBasisFunded records the avoided-COGS basis PLUS the consumer's SETTLED charge for ONE
+	// cross-tenant OCR reuse relationship, once (ON CONFLICT DO NOTHING). settledChargeUSD is the USD the
+	// reuser ACTUALLY paid for the request (the clamped reservation settle) — the funding basis the async
+	// DistillMinter mints s × of, skipping any row whose charge is ≤ 0. It is a descriptive money FIGURE,
+	// NOT a credit/earn method — *distillattrib.Store satisfies it with a ledger-free INSERT, so this sink
+	// still cannot mint by construction.
+	RecordRoyaltyBasisFunded(ctx context.Context, owner, requester, contentHash string, avoidedCOGS, settledChargeUSD float64, visionModel string, inTokens, outTokens int) error
 }
 
 // recordDistillServes writes S1 attribution rows for the consented cross-tenant
@@ -61,7 +63,11 @@ type distillAttributionSink interface {
 // same no-logging posture as the spend/capture writes. Empty-owner facts are
 // skipped defensively (a pre-feature pooled entry with no owner stamp — though
 // the consent gate already refuses to serve those cross-tenant).
-func (p *Proxy) recordDistillServes(ctx context.Context, requester string, loggingPolicy workspace.LoggingPolicy, facts []distillServeFact) {
+// settledChargeUSD is what the consumer ACTUALLY paid for this reuse request (the clamped reservation
+// settle from proxy.go — never the larger delivered cost). It is stamped onto the OCR basis so the async
+// DistillMinter mints s × the CHARGE; 0 (reservations off / no settle) writes a row the sweeper skips —
+// fail-closed, we never fund a royalty we cannot prove the consumer paid.
+func (p *Proxy) recordDistillServes(ctx context.Context, requester string, loggingPolicy workspace.LoggingPolicy, facts []distillServeFact, settledChargeUSD float64) {
 	if p == nil || p.distillAttribSink == nil || len(facts) == 0 {
 		return
 	}
@@ -85,8 +91,8 @@ func (p *Proxy) recordDistillServes(ctx context.Context, requester string, loggi
 		// Conversion serves carry no basis. Still descriptive — the sink has no
 		// credit/earn method, so this records a figure, never a mint.
 		if f.visionModel != "" {
-			if err := p.distillAttribSink.RecordRoyaltyBasis(dctx, f.owner, requester, f.hash,
-				f.avoidedCOGSUSD, f.visionModel, f.visionInputTokens, f.visionOutputTokens); err != nil {
+			if err := p.distillAttribSink.RecordRoyaltyBasisFunded(dctx, f.owner, requester, f.hash,
+				f.avoidedCOGSUSD, settledChargeUSD, f.visionModel, f.visionInputTokens, f.visionOutputTokens); err != nil {
 				slog.Warn("distill royalty basis: write failed (observational; serve unaffected)",
 					slog.String("owner", f.owner),
 					slog.String("requester", requester),

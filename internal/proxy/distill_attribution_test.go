@@ -8,16 +8,16 @@ import (
 	"github.com/talyvor/lens/internal/workspace"
 )
 
-// fakeAttribSink records RecordDistillServe + RecordRoyaltyBasis calls.
+// fakeAttribSink records RecordDistillServe + RecordRoyaltyBasisFunded calls.
 type fakeAttribSink struct {
 	calls      [][3]string // RecordDistillServe (owner, requester, hash)
-	basisCalls []basisCall // RecordRoyaltyBasis (the avoided-COGS basis)
+	basisCalls []basisCall // RecordRoyaltyBasisFunded (avoided-COGS + settled charge basis)
 	err        error
 }
 
 type basisCall struct {
 	owner, requester, hash string
-	cogs                   float64
+	cogs, charge           float64
 	model                  string
 	in, out                int
 }
@@ -27,8 +27,8 @@ func (f *fakeAttribSink) RecordDistillServe(_ context.Context, owner, requester,
 	return f.err
 }
 
-func (f *fakeAttribSink) RecordRoyaltyBasis(_ context.Context, owner, requester, hash string, cogs float64, model string, in, out int) error {
-	f.basisCalls = append(f.basisCalls, basisCall{owner, requester, hash, cogs, model, in, out})
+func (f *fakeAttribSink) RecordRoyaltyBasisFunded(_ context.Context, owner, requester, hash string, cogs, charge float64, model string, in, out int) error {
+	f.basisCalls = append(f.basisCalls, basisCall{owner, requester, hash, cogs, charge, model, in, out})
 	return f.err
 }
 
@@ -115,7 +115,7 @@ func TestRecordDistillServes_Gating(t *testing.T) {
 	t.Run("normal → written once", func(t *testing.T) {
 		sink := &fakeAttribSink{}
 		p := &Proxy{distillAttribSink: sink}
-		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, facts)
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, facts, 0)
 		if len(sink.calls) != 1 || sink.calls[0] != [3]string{"wsA", "wsB", "h1"} {
 			t.Fatalf("calls=%v, want one (wsA, wsB, h1)", sink.calls)
 		}
@@ -123,7 +123,7 @@ func TestRecordDistillServes_Gating(t *testing.T) {
 	t.Run("LoggingNone → suppressed (the row records a content hash)", func(t *testing.T) {
 		sink := &fakeAttribSink{}
 		p := &Proxy{distillAttribSink: sink}
-		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingNone, facts)
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingNone, facts, 0)
 		if len(sink.calls) != 0 {
 			t.Fatalf("LoggingNone wrote %v, want none", sink.calls)
 		}
@@ -131,18 +131,18 @@ func TestRecordDistillServes_Gating(t *testing.T) {
 	t.Run("empty owner → skipped (no owner stamp)", func(t *testing.T) {
 		sink := &fakeAttribSink{}
 		p := &Proxy{distillAttribSink: sink}
-		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, []distillServeFact{{owner: "", hash: "h"}})
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, []distillServeFact{{owner: "", hash: "h"}}, 0)
 		if len(sink.calls) != 0 {
 			t.Fatalf("empty-owner wrote %v, want none", sink.calls)
 		}
 	})
 	t.Run("nil sink → no-op (inert)", func(t *testing.T) {
-		(&Proxy{}).recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, facts) // must not panic
+		(&Proxy{}).recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, facts, 0) // must not panic
 	})
 	t.Run("sink error → swallowed (void, serve unaffected)", func(t *testing.T) {
 		sink := &fakeAttribSink{err: errors.New("db down")}
 		p := &Proxy{distillAttribSink: sink}
-		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, facts) // must not panic/propagate
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, facts, 0) // must not panic/propagate
 	})
 }
 
@@ -153,24 +153,25 @@ func TestRecordDistillServes_BasisRouting(t *testing.T) {
 	ocrFact := distillServeFact{owner: "wsA", hash: "h1", avoidedCOGSUSD: 0.0009, visionModel: "gpt-4o-mini", visionInputTokens: 500, visionOutputTokens: 20}
 	convFact := distillServeFact{owner: "wsX", hash: "h2"} // conversion → no basis
 
-	t.Run("OCR fact → attribution + basis (faithful args)", func(t *testing.T) {
+	t.Run("OCR fact → attribution + FUNDED basis (settled charge threaded)", func(t *testing.T) {
 		sink := &fakeAttribSink{}
 		p := &Proxy{distillAttribSink: sink}
-		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, []distillServeFact{ocrFact})
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, []distillServeFact{ocrFact}, 3.5)
 		if len(sink.calls) != 1 {
 			t.Fatalf("serve_count calls=%v, want 1", sink.calls)
 		}
 		if len(sink.basisCalls) != 1 {
 			t.Fatalf("basis calls=%v, want exactly 1", sink.basisCalls)
 		}
-		if got, want := sink.basisCalls[0], (basisCall{"wsA", "wsB", "h1", 0.0009, "gpt-4o-mini", 500, 20}); got != want {
+		// The settled charge ($3.5) is threaded onto the funded basis alongside the avoided-COGS provenance.
+		if got, want := sink.basisCalls[0], (basisCall{"wsA", "wsB", "h1", 0.0009, 3.5, "gpt-4o-mini", 500, 20}); got != want {
 			t.Fatalf("basis args = %+v, want %+v", got, want)
 		}
 	})
 	t.Run("conversion fact → attribution only, NO basis", func(t *testing.T) {
 		sink := &fakeAttribSink{}
 		p := &Proxy{distillAttribSink: sink}
-		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, []distillServeFact{convFact})
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingMetadata, []distillServeFact{convFact}, 0)
 		if len(sink.calls) != 1 {
 			t.Fatalf("serve_count calls=%v, want 1", sink.calls)
 		}
@@ -181,7 +182,7 @@ func TestRecordDistillServes_BasisRouting(t *testing.T) {
 	t.Run("LoggingNone → neither attribution nor basis", func(t *testing.T) {
 		sink := &fakeAttribSink{}
 		p := &Proxy{distillAttribSink: sink}
-		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingNone, []distillServeFact{ocrFact})
+		p.recordDistillServes(context.Background(), "wsB", workspace.LoggingNone, []distillServeFact{ocrFact}, 0)
 		if len(sink.calls) != 0 || len(sink.basisCalls) != 0 {
 			t.Fatalf("LoggingNone wrote serve=%v basis=%v, want none", sink.calls, sink.basisCalls)
 		}
