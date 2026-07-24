@@ -6,16 +6,14 @@ import (
 	"testing"
 )
 
-// Private-by-default: an unregistered or unset workspace is never poolable, so
-// cross-tenant cache pooling can never turn on implicitly.
-func TestCachePoolable_DefaultFalse(t *testing.T) {
+// The hot-path Get fails SAFE: an unregistered/unknown workspace is never
+// poolable, so pooling can never turn on for a workspace Lens has no record of.
+// (A REGISTERED workspace now defaults poolable=true — see
+// TestRegisterWorkspace_NewWorkspaceDefaultsPoolable in cache_poolable_default_test.go.)
+func TestCachePoolable_UnknownWorkspaceFalse(t *testing.T) {
 	m := New(nil)
 	if m.GetCachePoolable("unknown") {
-		t.Error("an unregistered workspace must be non-poolable (private by default)")
-	}
-	_ = m.RegisterWorkspace(context.Background(), Workspace{ID: "w", Name: "W", Active: true})
-	if m.GetCachePoolable("w") {
-		t.Error("a workspace with no flag set must default to non-poolable")
+		t.Error("an unregistered workspace must be non-poolable (fail safe)")
 	}
 }
 
