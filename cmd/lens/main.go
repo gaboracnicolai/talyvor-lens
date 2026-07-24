@@ -1431,7 +1431,7 @@ func run() error {
 		otelhttp.WithPropagators(otel.GetTextMapPropagator()),
 	))
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(clientIPMiddleware())
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
