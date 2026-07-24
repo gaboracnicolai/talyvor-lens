@@ -1551,7 +1551,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// customer pays what routing/batch/compression actually produced. shadow and settle are mutually
 			// exclusive by the reservation flag, so no config ever charges twice.
 			if p.reservationActive() {
-				p.settleReservation(ctx, servedCostUSD)
+				p.settleReservation(ctx, servedCostUSD, upstreamModel)
 			} else {
 				p.shadowSpendLXC(ctx, wsID, servedCostUSD)
 			}
@@ -2000,7 +2000,7 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	// on storeCtx = WithoutCancel(r.Context()) (stream.go), which now carries the reservation handle, so the
 	// streamed settle happens in-band instead of stranding the hold for the sweeper to refund.
 	if p.reservationActive() {
-		p.settleReservation(ctx, servedCostUSD)
+		p.settleReservation(ctx, servedCostUSD, sc.model)
 	} else {
 		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
 	}
@@ -2866,7 +2866,7 @@ func boundedMaxOut(explicit int, cap func() int) int {
 func (p *Proxy) resolveCacheReservation(ctx context.Context, pooledHit *poolroyalty.ServedHit, prompt string, served []byte) float64 {
 	if pooledHit != nil {
 		avoided := alerts.CostUSD(pooledHit.Model, len(prompt)/4, len(served)/4)
-		return p.settleReservation(ctx, avoided)
+		return p.settleReservation(ctx, avoided, pooledHit.Model)
 	}
 	p.releaseReservation(ctx, "own cache hit")
 	return 0
