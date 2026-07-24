@@ -5,16 +5,21 @@ import (
 	"testing"
 )
 
-// DistillPolicy mirrors LoggingPolicy: default-OFF so the request-path
-// distillation is inert until an admin enables a workspace.
-func TestDistillPolicy_DefaultDisabled(t *testing.T) {
+// Distill is ON by default (DefaultDistillPolicy = DistillAlways): a registered
+// workspace that sets no policy distills its documents. It is the one saving that
+// reaches the customer's charge (it shrinks the document BEFORE the pre-serve
+// estimate) and it degrades safely to today's behaviour when no worker binary is
+// configured (a conversion failure never fails a request — proxy MaybeDistill).
+// An UNKNOWN (unregistered) workspace and a stale read still fail SAFE to
+// DistillDisabled — only a real, registered, unconfigured workspace opts in.
+func TestDistillPolicy_DefaultAlways(t *testing.T) {
 	m := New(nil)
 	if got := m.GetDistillPolicy("unknown-ws"); got != DistillDisabled {
-		t.Errorf("unknown workspace must be DistillDisabled (inert); got %q", got)
+		t.Errorf("unknown workspace must fail safe to DistillDisabled (inert); got %q", got)
 	}
 	_ = m.RegisterWorkspace(context.Background(), Workspace{ID: "w", Name: "W", Active: true})
-	if got := m.GetDistillPolicy("w"); got != DistillDisabled {
-		t.Errorf("a workspace with no policy set must default to DistillDisabled; got %q", got)
+	if got := m.GetDistillPolicy("w"); got != DistillAlways {
+		t.Errorf("a registered workspace with no policy must default to DistillAlways (on by default); got %q", got)
 	}
 }
 
@@ -24,8 +29,24 @@ func TestNormalizeDistillPolicy(t *testing.T) {
 			t.Errorf("valid %q should pass through", p)
 		}
 	}
-	if normalizeDistillPolicy("") != DistillDisabled || normalizeDistillPolicy("bogus") != DistillDisabled {
-		t.Error("unknown/empty must normalize to DistillDisabled (safe/off)")
+	// EMPTY (unset — the workspace wants the default) resolves to the on-by-default
+	// policy; GARBAGE (a typo) still fails SAFE to disabled so a misconfiguration
+	// never silently distills.
+	if got := normalizeDistillPolicy(""); got != DefaultDistillPolicy {
+		t.Errorf("empty/unset must resolve to DefaultDistillPolicy (%q); got %q", DefaultDistillPolicy, got)
+	}
+	if got := normalizeDistillPolicy("bogus"); got != DistillDisabled {
+		t.Errorf("garbage must fail SAFE to DistillDisabled; got %q", got)
+	}
+}
+
+// An explicit opt-OUT (DistillDisabled) is honoured, never flipped by the new
+// default — the guarantee that existing workspaces (stored 'disabled') stay off.
+func TestDistillPolicy_ExplicitDisabledHonoured(t *testing.T) {
+	m := New(nil)
+	_ = m.RegisterWorkspace(context.Background(), Workspace{ID: "w", Name: "W", Active: true, DistillPolicy: DistillDisabled})
+	if got := m.GetDistillPolicy("w"); got != DistillDisabled {
+		t.Errorf("an explicit DistillDisabled must be preserved (existing workspaces stay off); got %q", got)
 	}
 }
 
