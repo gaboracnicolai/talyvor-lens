@@ -42,19 +42,36 @@ import (
 // batch is logged.
 const distillSweepBatchLimit = 500
 
-// distillScanSQL finds un-minted reuse relationships: basis rows (0061) with NO
-// claim row yet, via a LEFT JOIN on the relationship key. Leaves
-// distill_royalty_basis untouched — the mint state lives entirely in
-// distill_royalty_mints (a rolled-back / never-attempted relationship has no
-// claim row, so it re-appears here until it actually commits a mint).
-var distillScanSQL = fmt.Sprintf(`SELECT b.owner_workspace_id, b.requester_workspace_id, b.content_hash, b.avoided_cogs_usd
+// distillScanSQL finds un-minted, FUNDED reuse relationships: basis rows (0061) with NO claim row yet
+// (LEFT JOIN on the relationship key) AND a recorded consumer charge (settled_charge_usd > 0, migration
+// 0105). The FUNDING FILTER is the invariant, fail-closed: a basis whose reuse the consumer paid nothing
+// for — a plain key, an unmetered lane, a failed settle, or a historical row from before 0105 (NULL
+// charge) — is EXCLUDED from the mint scan, so it mints nothing. It stays out of the scan permanently (the
+// basis is written once), which is correct: we never mint a royalty we cannot prove the consumer funded.
+// Leaves distill_royalty_basis untouched — mint state lives entirely in distill_royalty_mints.
+var distillScanSQL = fmt.Sprintf(`SELECT b.owner_workspace_id, b.requester_workspace_id, b.content_hash, b.avoided_cogs_usd, b.settled_charge_usd
 FROM distill_royalty_basis b
 LEFT JOIN distill_royalty_mints m
        ON m.contributor_workspace_id = b.owner_workspace_id
       AND m.requester_workspace_id   = b.requester_workspace_id
       AND m.content_hash             = b.content_hash
 WHERE m.request_id IS NULL
+  AND b.settled_charge_usd IS NOT NULL
+  AND b.settled_charge_usd > 0
 LIMIT %d`, distillSweepBatchLimit)
+
+// distillUnfundedCountSQL counts un-minted basis rows with NO recorded consumer charge — the reuses the
+// funding filter excludes. Logged once per tick (not per row) so a contributor's absence of pay is
+// EXPLAINED — these need the serve-side charge handoff (RecordRoyaltyBasisFunded) to ever mint — rather
+// than silently vanishing. Zero when every basis carries a charge.
+const distillUnfundedCountSQL = `SELECT count(*)
+FROM distill_royalty_basis b
+LEFT JOIN distill_royalty_mints m
+       ON m.contributor_workspace_id = b.owner_workspace_id
+      AND m.requester_workspace_id   = b.requester_workspace_id
+      AND m.content_hash             = b.content_hash
+WHERE m.request_id IS NULL
+  AND (b.settled_charge_usd IS NULL OR b.settled_charge_usd <= 0)`
 
 // distillInsertClaimSQL claims one relationship. ON CONFLICT (request_id) DO
 // NOTHING + the caller's RowsAffected check is the exactly-once guard (the
@@ -88,6 +105,7 @@ WHERE content_hash = $1
 type distillMinterDB interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // DistillMinter is the flag-gated distill reuse-royalty mint sweeper. The
@@ -180,10 +198,11 @@ func (m *DistillMinter) SetContentCap(perContent int, window time.Duration) {
 }
 
 type distillRelationship struct {
-	owner          string
-	requester      string
-	contentHash    string
-	avoidedCOGSUSD float64
+	owner            string
+	requester        string
+	contentHash      string
+	avoidedCOGSUSD   float64 // provenance: what the reuser AVOIDED (kept for audit; NOT the mint basis)
+	settledChargeUSD float64 // what the reuser was CHARGED for this reuse — the funding basis of the mint
 }
 
 // RunOnce mints every currently un-minted relationship, each in its OWN
@@ -202,7 +221,7 @@ func (m *DistillMinter) RunOnce(ctx context.Context) (int, error) {
 	rels := make([]distillRelationship, 0, 16)
 	for rows.Next() {
 		var r distillRelationship
-		if err := rows.Scan(&r.owner, &r.requester, &r.contentHash, &r.avoidedCOGSUSD); err != nil {
+		if err := rows.Scan(&r.owner, &r.requester, &r.contentHash, &r.avoidedCOGSUSD, &r.settledChargeUSD); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -230,6 +249,15 @@ func (m *DistillMinter) RunOnce(ctx context.Context) (int, error) {
 		slog.Info("poolroyalty: distill mint sweep hit batch limit — more relationships mint next tick",
 			slog.Int("batch", distillSweepBatchLimit))
 	}
+	// FUNDING INVARIANT visibility: count the un-minted basis rows with NO recorded consumer charge. They
+	// are excluded from the mint scan above (fail-closed) — so a contributor's absence of pay is EXPLAINED
+	// here, not mysterious. They need the serve-side charge handoff (RecordRoyaltyBasisFunded) to ever mint.
+	var unfunded int64
+	if err := m.db.QueryRow(ctx, distillUnfundedCountSQL).Scan(&unfunded); err == nil && unfunded > 0 {
+		slog.Info("poolroyalty: distill reuse relationships UNFUNDED — no recorded consumer charge, not minted",
+			slog.Int64("unfunded", unfunded),
+			slog.String("remedy", "record settled_charge_usd at serve time (RecordRoyaltyBasisFunded)"))
+	}
 	return minted, nil
 }
 
@@ -245,7 +273,13 @@ func (m *DistillMinter) mintOne(ctx context.Context, r distillRelationship) (boo
 	if r.owner == "" || r.requester == "" || r.owner == r.requester {
 		return false, nil
 	}
-	valuation := m.anchor.Value(GainInput{AvoidedCOGSUSD: r.avoidedCOGSUSD}) // default CostAnchor ⇒ share × avoided_COGS (Tier-2/3 float LENS)
+	// FUNDING INVARIANT: value the mint off what the reuser was CHARGED (settled_charge), NEVER off what
+	// they AVOIDED — so mint = s × charge and can never exceed the payment. The scan already excludes
+	// unfunded rows; this guard is defense in depth (a charge that slipped through as ≤ 0 mints nothing).
+	if r.settledChargeUSD <= 0 {
+		return false, nil
+	}
+	valuation := m.anchor.Value(GainInput{AvoidedCOGSUSD: r.settledChargeUSD}) // CostAnchor ⇒ share × charge × peg (LENS)
 	if math.IsNaN(valuation) || math.IsInf(valuation, 0) || valuation <= 0 {
 		return false, nil
 	}
@@ -276,8 +310,10 @@ func (m *DistillMinter) mintOne(ctx context.Context, r distillRelationship) (boo
 
 	// (1) Claim the relationship. ON CONFLICT DO NOTHING + RowsAffected is the
 	//     exactly-once guard: a re-run / leader race / retry inserts ZERO rows.
+	// The claim's avoided_cogs_usd column carries the FUNDING basis (the settled charge, ≤ what was
+	// avoided) — so distill_royalty_margin computes (1−s) × charge, Talyvor's real margin on the payment.
 	tag, err := tx.Exec(ctx, distillInsertClaimSQL,
-		requestID, r.owner, r.requester, r.contentHash, r.avoidedCOGSUSD, amount, m.holdWindow.Microseconds())
+		requestID, r.owner, r.requester, r.contentHash, r.settledChargeUSD, amount, m.holdWindow.Microseconds())
 	if err != nil {
 		return false, fmt.Errorf("poolroyalty: distill insert claim: %w", err)
 	}
@@ -296,11 +332,12 @@ func (m *DistillMinter) mintOne(ctx context.Context, r distillRelationship) (boo
 	//     counterparty there would leak cross-tenant identity); it stays in the
 	//     admin-only claim row above.
 	meta := map[string]interface{}{
-		"request_id":       requestID,
-		"source":           "distill_ocr_reuse",
-		"content_hash":     r.contentHash,
-		"avoided_cogs_usd": r.avoidedCOGSUSD,
-		"royalty_share":    m.share,
+		"request_id":                  requestID,
+		"source":                      "distill_ocr_reuse",
+		"content_hash":                r.contentHash,
+		"settled_charge_usd":          r.settledChargeUSD, // the funding basis (what the reuser paid)
+		"provenance_avoided_cogs_usd": r.avoidedCOGSUSD,   // audit: what the reuser avoided
+		"royalty_share":               m.share,
 	}
 	if err := m.ledger.CreditHeldTx(ctx, tx, r.owner, amount, TypePoolRoyaltyHeld,
 		"distill reuse royalty: cross-tenant OCR transcription served", meta); err != nil {

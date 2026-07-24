@@ -180,3 +180,60 @@ func TestRecordRoyaltyBasis_ValueProvenancePinned_Integration(t *testing.T) {
 		t.Fatalf("a new requester must be a separate row: rows=%d, want 2", rows)
 	}
 }
+
+// TestRecordRoyaltyBasisFunded_WritesSettledCharge_Integration — the distill funding invariant at the write
+// side: RecordRoyaltyBasisFunded stores the reuser's settled_charge_usd (what the async DistillMinter mints
+// off), while the legacy RecordRoyaltyBasis leaves it NULL — the FAIL-CLOSED default that mints nothing
+// until the serve-side handoff records a real charge. Gated on LENS_TEST_DATABASE_URL.
+func TestRecordRoyaltyBasisFunded_WritesSettledCharge_Integration(t *testing.T) {
+	url := os.Getenv("LENS_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set LENS_TEST_DATABASE_URL for the real-PG funded-basis test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatalf("pgxpool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	for _, ddl := range []string{
+		`DROP TABLE IF EXISTS distill_royalty_basis`,
+		`CREATE TABLE distill_royalty_basis (
+			owner_workspace_id TEXT NOT NULL, requester_workspace_id TEXT NOT NULL,
+			content_hash TEXT NOT NULL, avoided_cogs_usd DOUBLE PRECISION NOT NULL,
+			settled_charge_usd DOUBLE PRECISION,
+			vision_model TEXT NOT NULL, vision_input_tokens INTEGER NOT NULL, vision_output_tokens INTEGER NOT NULL,
+			captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (owner_workspace_id, requester_workspace_id, content_hash))`,
+	} {
+		if _, err := pool.Exec(ctx, ddl); err != nil {
+			t.Fatalf("ddl: %v", err)
+		}
+	}
+	s := NewStore(pool)
+
+	// FUNDED write: settled_charge_usd is stored (the mint basis).
+	if err := s.RecordRoyaltyBasisFunded(ctx, "wsA", "wsB", "h1", 4.0, 2.5, "gpt-4o-mini", 500, 20); err != nil {
+		t.Fatal(err)
+	}
+	var avoided float64
+	var charge *float64
+	if err := pool.QueryRow(ctx, `SELECT avoided_cogs_usd, settled_charge_usd FROM distill_royalty_basis WHERE content_hash='h1'`).Scan(&avoided, &charge); err != nil {
+		t.Fatal(err)
+	}
+	if avoided != 4.0 || charge == nil || *charge != 2.5 {
+		t.Fatalf("funded basis: avoided=%v charge=%v, want 4.0 / 2.5", avoided, charge)
+	}
+
+	// LEGACY write (fail-closed): settled_charge_usd stays NULL → the sweeper mints nothing for this row.
+	if err := s.RecordRoyaltyBasis(ctx, "wsA", "wsC", "h2", 4.0, "gpt-4o-mini", 500, 20); err != nil {
+		t.Fatal(err)
+	}
+	var charge2 *float64
+	if err := pool.QueryRow(ctx, `SELECT settled_charge_usd FROM distill_royalty_basis WHERE content_hash='h2'`).Scan(&charge2); err != nil {
+		t.Fatal(err)
+	}
+	if charge2 != nil {
+		t.Fatalf("legacy RecordRoyaltyBasis must leave settled_charge NULL (fail-closed), got %v", *charge2)
+	}
+}

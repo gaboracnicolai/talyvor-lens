@@ -91,3 +91,28 @@ func (s *Store) RecordRoyaltyBasis(ctx context.Context, owner, requester, conten
 	_, err := s.db.Exec(ctx, basisInsertSQL, owner, requester, contentHash, avoidedCOGS, visionModel, inTokens, outTokens)
 	return err
 }
+
+// basisInsertFundedSQL is RecordRoyaltyBasis PLUS the settled_charge_usd (0105) — what the reuser was
+// ACTUALLY charged for this reuse. Same ON CONFLICT DO NOTHING pinning: the first serve fixes the funding.
+const basisInsertFundedSQL = `INSERT INTO distill_royalty_basis
+  (owner_workspace_id, requester_workspace_id, content_hash,
+   avoided_cogs_usd, settled_charge_usd, vision_model, vision_input_tokens, vision_output_tokens)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (owner_workspace_id, requester_workspace_id, content_hash) DO NOTHING`
+
+// RecordRoyaltyBasisFunded records the basis WITH the consumer's settled charge — THE distill funding
+// invariant (mirror of pool royalty #351). settledChargeUSD is the USD the reuser was actually billed for
+// this reuse (the settled reservation, which resolveCacheReservation returns since #351). The async
+// DistillMinter mints s × settled_charge and skips any basis whose charge is absent/≤0, so a royalty is
+// funded by a real payment and an unfunded reuse mints nothing.
+//
+// THE SERVE-SIDE HANDOFF: recordDistillServes (internal/proxy) must call THIS instead of RecordRoyaltyBasis,
+// passing the settled charge for the reuse request. Until it does, basis rows carry NULL charge and mint
+// nothing — the fail-closed default (no mint we cannot prove was funded). Nil-safe.
+func (s *Store) RecordRoyaltyBasisFunded(ctx context.Context, owner, requester, contentHash string, avoidedCOGS, settledChargeUSD float64, visionModel string, inTokens, outTokens int) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, basisInsertFundedSQL, owner, requester, contentHash, avoidedCOGS, settledChargeUSD, visionModel, inTokens, outTokens)
+	return err
+}

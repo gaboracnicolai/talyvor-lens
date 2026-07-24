@@ -67,6 +67,7 @@ func distillMintHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 		`CREATE TABLE distill_royalty_basis (
 			owner_workspace_id TEXT NOT NULL, requester_workspace_id TEXT NOT NULL,
 			content_hash TEXT NOT NULL, avoided_cogs_usd DOUBLE PRECISION NOT NULL,
+			settled_charge_usd DOUBLE PRECISION,
 			vision_model TEXT NOT NULL, vision_input_tokens INTEGER NOT NULL,
 			vision_output_tokens INTEGER NOT NULL, captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (owner_workspace_id, requester_workspace_id, content_hash))`,
@@ -88,14 +89,16 @@ func distillMintHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 	return pool, ledger
 }
 
-// seedBasis inserts one pinned avoided-COGS basis row (the PR2 record the mint
-// reads). avoided is the PINNED snapshot; minted must be share × this.
+// seedBasis inserts one pinned basis row for a FUNDED reuse — the consumer was charged the full avoided
+// COGS (settled_charge_usd = avoided, the no-clamp case), so the funded mint is share × avoided as before.
+// The distill funding invariant (settled_charge > 0) is thereby satisfied; the unfunded/clamped cases are
+// exercised by seedBasisWithCharge in distill_funding_invariant_test.go.
 func seedBasis(t *testing.T, pool *pgxpool.Pool, owner, requester, hash string, avoided float64) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO distill_royalty_basis
-		   (owner_workspace_id, requester_workspace_id, content_hash, avoided_cogs_usd, vision_model, vision_input_tokens, vision_output_tokens)
-		 VALUES ($1,$2,$3,$4,'gpt-4o-mini',500,20)`, owner, requester, hash, avoided); err != nil {
+		   (owner_workspace_id, requester_workspace_id, content_hash, avoided_cogs_usd, settled_charge_usd, vision_model, vision_input_tokens, vision_output_tokens)
+		 VALUES ($1,$2,$3,$4,$4,'gpt-4o-mini',500,20)`, owner, requester, hash, avoided); err != nil {
 		t.Fatalf("seed basis: %v", err)
 	}
 }
