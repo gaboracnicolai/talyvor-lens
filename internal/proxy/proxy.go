@@ -788,6 +788,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				return
 			}
 			ctx = rctx
+			// The reservation handle rides `ctx` to the buffered post-serve settle. The STREAMING seam runs
+			// on a disconnect-immune context DERIVED FROM r (context.WithoutCancel(r.Context()) — so a
+			// mid-flight client disconnect can't abort the bill), NOT this local ctx. Carry the handle onto r
+			// too, or the streaming settle can't find it and the hold is stranded (swept + refunded → the
+			// streaming request bills nothing). Values only; r's cancellation is unchanged.
+			r = r.WithContext(ctx)
 		} else if p.agentAllocationBlocks(ctx, agentKeyID, wsID, model, prompt, requestID) {
 			writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
 			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "agent_blocked").Inc()
@@ -1970,24 +1976,33 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	inT, outT := sc.estInputTokens, len(outputText)/4
 	estimated := true
 	source := "estimated"
+	// servedCostUSD: the ONE cost basis for the streamed response — the reservation SETTLE (the customer's
+	// bill), the budget feed, and the shadow debit. Cache-aware (CostUSDDetailed) when the provider reports
+	// usage; the flat estimate otherwise (byte-identical to before). Mirrors the buffered path exactly.
+	var servedCostUSD float64
 	if u.present {
 		inT, outT = u.inputTokens, u.outputTokens
 		estimated = false
 		source = "provider_usage"
+		servedCostUSD = alerts.CostUSDDetailed(sc.model, u.uncachedInputTokens, u.cachedInputTokens, u.cacheWriteInputTokens, u.outputTokens)
+	}
+	if estimated {
+		servedCostUSD = alerts.CostUSD(sc.model, inT, outT)
 	}
 	metrics.SpendRecord(source)
 	if err := p.alertManager.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated); err != nil {
 		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", err.Error()))
 	}
 	if p.budgetService != nil {
-		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, alerts.CostUSD(sc.model, inT, outT))
+		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, servedCostUSD)
 	}
-	// Shadow LXC debit on the streaming path — same detached ctx as the
-	// streamed cost_usd write above; void, observational.
+	// Reservation SETTLE (the customer's bill) or the shadow debit, mutually exclusive by the flag. Fires
+	// on storeCtx = WithoutCancel(r.Context()) (stream.go), which now carries the reservation handle, so the
+	// streamed settle happens in-band instead of stranding the hold for the sweeper to refund.
 	if p.reservationActive() {
-		p.settleReservation(ctx, alerts.CostUSD(sc.model, inT, outT))
+		p.settleReservation(ctx, servedCostUSD)
 	} else {
-		p.shadowSpendLXC(ctx, sc.wsID, alerts.CostUSD(sc.model, inT, outT))
+		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
 	}
 }
 

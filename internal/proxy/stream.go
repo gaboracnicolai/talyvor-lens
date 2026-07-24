@@ -25,7 +25,13 @@ import (
 type streamUsage struct {
 	inputTokens  int
 	outputTokens int
-	present      bool
+	// Cache-aware breakdown (mirrors inference.Usage), populated by extractUsage so the streamed settle
+	// prices cache reads/writes at their own rate like the buffered path. Zero when the provider reports
+	// no caching → uncachedInputTokens == inputTokens and the basis is flat, identical to before.
+	uncachedInputTokens   int
+	cachedInputTokens     int
+	cacheWriteInputTokens int
+	present               bool
 }
 
 // streamSpend carries the per-request billing context into the stream
@@ -156,15 +162,30 @@ func (openAIStreamOps) extractUsage(line []byte, u *streamUsage) {
 	}
 	var chunk struct {
 		Usage *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokensDetails *struct {
+				CachedTokens     int `json:"cached_tokens"`
+				CacheWriteTokens int `json:"cache_write_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(payload, &chunk) != nil || chunk.Usage == nil {
 		return
 	}
-	u.inputTokens = chunk.Usage.PromptTokens
+	cached, write := 0, 0
+	if d := chunk.Usage.PromptTokensDetails; d != nil {
+		cached, write = d.CachedTokens, d.CacheWriteTokens
+	}
+	uncached := chunk.Usage.PromptTokens - cached - write // cached/write are a subset of prompt_tokens
+	if uncached < 0 {
+		uncached = 0
+	}
+	u.inputTokens = chunk.Usage.PromptTokens // legacy total (incl cached) — unchanged
 	u.outputTokens = chunk.Usage.CompletionTokens
+	u.uncachedInputTokens = uncached
+	u.cachedInputTokens = cached
+	u.cacheWriteInputTokens = write
 	u.present = true
 }
 
@@ -230,12 +251,18 @@ func (anthropicStreamOps) extractUsage(line []byte, u *streamUsage) {
 		Type    string `json:"type"`
 		Message struct {
 			Usage struct {
-				InputTokens int `json:"input_tokens"`
+				InputTokens              int `json:"input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 		} `json:"message"`
 	}
 	if json.Unmarshal(payload, &ev) == nil && ev.Type == "message_start" && ev.Message.Usage.InputTokens > 0 {
-		u.inputTokens = ev.Message.Usage.InputTokens
+		un := ev.Message.Usage
+		u.inputTokens = un.InputTokens // legacy: uncached only (cache read/write are disjoint) — unchanged
+		u.uncachedInputTokens = un.InputTokens
+		u.cachedInputTokens = un.CacheReadInputTokens
+		u.cacheWriteInputTokens = un.CacheCreationInputTokens
 		u.present = true
 	}
 }
@@ -373,10 +400,12 @@ func (s *StreamHandler) serve(
 		return err
 	}
 
-	// Cache the assembled response and notify the learner. Use a fresh
-	// context so a client-cancelled request doesn't abort the cache write —
-	// we already paid for the upstream call, no reason to drop the result.
-	storeCtx := context.Background()
+	// Post-serve seam (cache write, learner, streamed spend + reservation SETTLE). Detach from the
+	// request's cancellation so a client that disconnects after the stream completes can't abort the
+	// bill — we already paid the provider. WithoutCancel (NOT Background) keeps r's VALUES, including
+	// the reservation handle threaded onto r in serve(), so the streamed settle actually FIRES in-band
+	// instead of stranding the hold for the sweeper to refund (which made streaming requests free).
+	storeCtx := context.WithoutCancel(r.Context())
 	cached := ops.synthesizeCachePayload(accumulated.String())
 	shouldCache := !piiDetected
 	if shouldCache && s.proxy.scorer != nil {
