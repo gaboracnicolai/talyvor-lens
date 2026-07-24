@@ -178,6 +178,19 @@ type Config struct {
 	// must AND with per-workspace opt-in for earnings to fire.
 	PatternMiningEnabled bool
 
+	// AnnotationMintingEnabled gates the annotation MINT (data-labelling reward).
+	// DEFAULT FALSE and intentionally so: unlike the pattern held mint (held →
+	// examined by the single-party clearer → settled after 72h) the annotation
+	// reward is credited SPENDABLE-IMMEDIATELY (CreditTx), with no holdback and no
+	// examiner, so a gaming pattern cannot be clawed back before it is spendable.
+	// It is a protocol-issuance mint (labelling labour), bounded by the earn-verify
+	// floor + the 1000-LENS/24h rate cap + the annotator stake + consensus, but it
+	// must be an EXPLICIT opt-in, not armed by the bare economy master switch — so
+	// the GA on-by-default set is only the two sound, funded mints (pattern held +
+	// pool royalty). ANDed with EconomyEnabled at the mint gate in main.go; force-
+	// off'd below. Env: LENS_ANNOTATION_MINTING_ENABLED.
+	AnnotationMintingEnabled bool
+
 	// POVIMintingEnabled gates PROVISIONAL receipt-based LENS minting
 	// (Token Economy Phase 1, Part 1). DEFAULT FALSE and intentionally so:
 	// minting from a signed receipt is UNSAFE on receipt-alone — a node can
@@ -927,6 +940,8 @@ func Load() (*Config, error) {
 		DistillPoolableEnabled: parseBoolEnv("LENS_DISTILL_POOLABLE_ENABLED"),
 		PatternMiningEnabled:   parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
 		POVIMintingEnabled:     parseBoolEnv("LENS_POVI_MINTING_ENABLED"),
+
+		AnnotationMintingEnabled: parseBoolEnv("LENS_ANNOTATION_MINTING_ENABLED"), // spendable-immediate mint → explicit opt-in (default off)
 
 		PoolRoyaltyMintingEnabled: parseBoolEnv("LENS_POOL_ROYALTY_MINTING_ENABLED"),
 		LXCShadowSpendEnabled:     parseBoolEnv("LENS_LXC_SHADOW_SPEND_ENABLED"),
@@ -1726,6 +1741,7 @@ func Load() (*Config, error) {
 		c.PatternEarningEnabled = false
 		c.PoolRoyaltyMintingEnabled = false
 		c.POVIMintingEnabled = false
+		c.AnnotationMintingEnabled = false // the annotation mint credits LENS — force-off with the economy master switch
 		c.TrustfulComputeMintEnabled = false // U6: now defaults false; still force-off'd if an operator opted in
 		c.CacheSharingEnabled = false
 		c.CachePoolableEnabled = false

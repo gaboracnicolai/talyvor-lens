@@ -1196,8 +1196,12 @@ func run() error {
 	annotationMiner := mining.NewAnnotationMiner(tokenLedger, pool)
 	// Phase-0 Item C: gate the annotation MINT on the economy master switch at the
 	// source, so EconomyEnabled=false stops it too (its submit route is unconditional,
-	// so route-gating alone previously missed it). Reads the flag live.
-	annotationMiner.SetEconomyGate(func() bool { return cfg.EconomyEnabled })
+	// so route-gating alone previously missed it). Reads the flags live.
+	// GA activation: AND with the dedicated AnnotationMintingEnabled (default OFF) —
+	// the annotation reward is spendable-immediate (no held→examine→settle path), so
+	// it is an explicit opt-in and is NOT in the GA on-by-default mint set (which is
+	// only the two sound, funded mints: pattern held + pool royalty).
+	annotationMiner.SetEconomyGate(func() bool { return cfg.EconomyEnabled && cfg.AnnotationMintingEnabled })
 
 	// Annotation reputation SWEEP — ONE scheduled job that per tick (a) RESOLVES TTL-expired
 	// tasks into agreement_outcome events from the FINAL consensus, and (b) DECAYS dormant
