@@ -1001,11 +1001,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				if err := replayAsSSE(w, cfg.ProviderName(), cached); err == nil {
 					metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), layer).Inc()
 					metrics.RecordCacheHit(layer)
-					// SERVE point: the replay succeeded, so a pooled hit
-					// (if that's what this was) now earns its royalty.
-					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
-					// Billing redesign: resolve the pre-serve HOLD — pooled hit bills avoided_COGS, own hit is free.
-					p.resolveCacheReservation(ctx, pooledHit)
+					// SERVE point. FUNDING INVARIANT (settle-then-mint): resolve the pre-serve HOLD FIRST — a
+					// pooled hit bills the consumer avoided_COGS (returned), an own hit is free — then mint a
+					// royalty funded by what the consumer ACTUALLY paid ($0 charge ⇒ $0 mint).
+					funded := p.resolveCacheReservation(ctx, pooledHit, prompt, cached)
+					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
 					// Cache-serve spend visibility (0100): the served request
 					// becomes a zero-provider-cost token_events row tagged with
 					// its layer, so hit rate is countable next to every miss.
@@ -1027,10 +1027,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				writeBytes(w, http.StatusOK, cached)
 				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), layer).Inc()
 				metrics.RecordCacheHit(layer)
-				// SERVE point: the cached body went out on the wire.
-				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, loggingPolicy)
-				// Billing redesign: resolve the pre-serve HOLD — pooled hit bills avoided_COGS, own hit is free.
-				p.resolveCacheReservation(ctx, pooledHit)
+				// SERVE point. FUNDING INVARIANT (settle-then-mint): resolve the pre-serve HOLD FIRST — a
+				// pooled hit bills the consumer avoided_COGS (returned), an own hit is free — then mint a
+				// royalty funded by what the consumer ACTUALLY paid ($0 charge ⇒ $0 mint).
+				funded := p.resolveCacheReservation(ctx, pooledHit, prompt, cached)
+				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
 				// Cache-serve spend visibility (0100): see recordCacheServe.
 				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
 				span.SetAttributes(
@@ -2105,8 +2106,21 @@ func (p *Proxy) recordNodeServe(ctx context.Context, wsID, team, sprint, feature
 	}
 }
 
-func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHit, prompt string, served []byte, loggingPolicy workspace.LoggingPolicy) {
+func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHit, prompt string, served []byte, fundedUSD float64, loggingPolicy workspace.LoggingPolicy) {
 	if p.royaltyMinter == nil || hit == nil {
+		return
+	}
+	// THE FUNDING INVARIANT: a cross-tenant royalty is funded by the consumer's ACTUAL charge for this
+	// request — fundedUSD, the settled reservation from resolveCacheReservation. If the consumer paid
+	// NOTHING (a plain key that never reserved, an unmetered lane, a released/own-cache hit, or a settle
+	// that failed) mint NOTHING: an unfunded royalty mints value from nowhere and would let royalties-out
+	// exceed payments-in. Refuse it and record WHY, so the contributor's absence of pay is explained and
+	// not mysterious — the real remedy for free traffic is METERING THE CONSUMER, not minting regardless.
+	if fundedUSD <= 0 {
+		slog.Info("poolroyalty: mint skipped — consumer paid $0 for this request (unmetered/plain-key/own-cache/failed-settle); royalty UNFUNDED, not minted",
+			slog.String("request_id", hit.RequestID),
+			slog.String("contributor", hit.ContributorWorkspace),
+		)
 		return
 	}
 	// Stage 2.3.0 — NO HASH -> NO MINT (the privacy-coherence gate): a
@@ -2134,7 +2148,10 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 	// workspace out of digests, at the cost of its pooled serves not minting.
 	hit.AnswerSHA256 = poolroyalty.SHA256Hex(served)
 	hit.PromptSHA256 = poolroyalty.SHA256Hex([]byte(prompt))
-	hit.AvoidedCOGSUSD = alerts.CostUSD(hit.Model, len(prompt)/4, len(served)/4)
+	// The mint BASIS is what the consumer ACTUALLY paid for this request (fundedUSD = the settled charge,
+	// ≤ avoided_COGS and ≤ the hold), NEVER an independently computed avoided_COGS that could exceed the
+	// bill. So mint = s × fundedUSD and Talyvor's margin = (1−s) × fundedUSD — both bounded by the payment.
+	hit.AvoidedCOGSUSD = fundedUSD
 	// The serve already happened — a client disconnect after receiving the
 	// response must not cancel the contributor's royalty mid-transaction.
 	// WithoutCancel keeps the request's values (trace) but detaches its
@@ -2822,14 +2839,20 @@ func boundedMaxOut(explicit int, cap func() int) int {
 	return 4096 // last-resort default if the cap fn is unwired
 }
 
-// resolveCacheReservation resolves a held reservation at a CACHE SERVE point. A cross-tenant POOLED hit
-// bills the requester avoided_COGS (the value received — Talyvor keeps its margin, the contributor is
-// minted the SAME avoided_COGS); an OWN cache hit is FREE (no upstream call, no contributor ⇒ full refund).
-// No-op without a reservation on the context (non-agent, or reservation path off).
-func (p *Proxy) resolveCacheReservation(ctx context.Context, pooledHit *poolroyalty.ServedHit) {
+// resolveCacheReservation resolves a held reservation at a CACHE SERVE point and RETURNS the USD the
+// consumer was ACTUALLY charged for this request. A cross-tenant POOLED hit bills the requester
+// avoided_COGS (the value received — Talyvor keeps its margin); an OWN cache hit is FREE (no upstream call,
+// no contributor ⇒ full refund → $0). Returns 0 without a reservation on the context (non-agent / plain
+// key / reservation path off) — a plain-key cache hit is NOT metered and so funds NO royalty.
+//
+// THE FUNDING TIE: the caller feeds this return into mintPooledRoyalty as the royalty's funding basis, so
+// the contributor is minted a share of what the consumer REALLY paid — never an independently computed
+// avoided_COGS that could exceed the bill, and never anything at all when the consumer paid $0.
+func (p *Proxy) resolveCacheReservation(ctx context.Context, pooledHit *poolroyalty.ServedHit, prompt string, served []byte) float64 {
 	if pooledHit != nil {
-		p.settleReservation(ctx, pooledHit.AvoidedCOGSUSD)
-		return
+		avoided := alerts.CostUSD(pooledHit.Model, len(prompt)/4, len(served)/4)
+		return p.settleReservation(ctx, avoided)
 	}
 	p.releaseReservation(ctx, "own cache hit")
+	return 0
 }

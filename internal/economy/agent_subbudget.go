@@ -267,20 +267,25 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 // the reserved-but-unspent headroom returns to its budget. Idempotent via the status-CAS: a second settle, or
 // a settle racing a release, finds status≠'held' and is a no-op. A settle of an unknown reservation is an
 // error (a bug — you cannot bill what you never held).
-func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) error {
+//
+// RETURNS the µLXC ACTUALLY charged (finalLXC after the [0, held] clamp) so the caller can tie a downstream
+// action — a cross-tenant royalty mint — to what the consumer REALLY paid. The idempotent no-op and every
+// error path return 0 (this call charged nothing new): a royalty funded on a 0 return mints nothing, which
+// is the deflationary-safe direction.
+func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) (settledULXC int64, err error) {
 	if reservationID == "" {
-		return errors.New("economy: settle requires reservation_id")
+		return 0, errors.New("economy: settle requires reservation_id")
 	}
 	if finalLXC < 0 {
 		finalLXC = 0
 	}
 	if s == nil || s.pool == nil {
-		return nil
+		return 0, nil
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("economy: begin settle: %w", err)
+		return 0, fmt.Errorf("economy: begin settle: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -290,13 +295,13 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		`SELECT scoped_key_id, workspace_id, held_ulxc, status FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
 		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("economy: settle unknown reservation %q", reservationID)
+		return 0, fmt.Errorf("economy: settle unknown reservation %q", reservationID)
 	}
 	if err != nil {
-		return fmt.Errorf("economy: read reservation: %w", err)
+		return 0, fmt.Errorf("economy: read reservation: %w", err)
 	}
 	if status != "held" {
-		return nil // already settled or released — idempotent no-op
+		return 0, nil // already settled or released — idempotent no-op (charged nothing new)
 	}
 	if finalLXC > heldLXC {
 		finalLXC = heldLXC // never bill above the conservative hold
@@ -307,32 +312,35 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 	// balance move = +refund. Both are INSERTs — 0055-safe. lifetime_spent nets to +final (was +held at hold).
 	bal, minted, wsSpent, err := readLXCBalance(ctx, tx, workspaceID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	afterRelease := bal + heldLXC
 	if err := insertLXCLedger(ctx, tx, workspaceID, heldLXC, afterRelease, LXCTypeReservationRelease, "reservation settle: release hold", meta.toMap()); err != nil {
-		return err
+		return 0, err
 	}
 	afterSpend := afterRelease - finalLXC
 	if finalLXC > 0 {
 		if err := insertLXCLedger(ctx, tx, workspaceID, -finalLXC, afterSpend, LXCTypeSpend, "reservation settle: delivered charge", meta.toMap()); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, afterSpend, minted, wsSpent-refund); err != nil {
-		return err
+		return 0, err
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE agent_lxc_subbudgets SET spent_lxc = spent_lxc - $2, updated_at = now() WHERE scoped_key_id = $1`,
 		scopedKeyID, refund); err != nil {
-		return fmt.Errorf("economy: reclaim spent (settle): %w", err)
+		return 0, fmt.Errorf("economy: reclaim spent (settle): %w", err)
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE lxc_reservations SET status = 'settled', settled_ulxc = $2, resolved_at = now() WHERE reservation_id = $1`,
 		reservationID, finalLXC); err != nil {
-		return fmt.Errorf("economy: mark settled: %w", err)
+		return 0, fmt.Errorf("economy: mark settled: %w", err)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("economy: commit settle: %w", err)
+	}
+	return finalLXC, nil
 }
 
 // ReleaseLXCReservation refunds a held reservation IN FULL (final charge 0): a self-cache hit (no upstream

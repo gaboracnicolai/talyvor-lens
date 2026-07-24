@@ -31,9 +31,10 @@ import (
 // interface so the proxy doesn't hard-depend on economy internals.
 type agentSpender interface {
 	SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string, meta economy.AgentDebitMeta) error
-	// Reservation lifecycle (billing redesign) — satisfied by *economy.DualTokenStore.
+	// Reservation lifecycle (billing redesign) — satisfied by *economy.DualTokenStore. Settle returns the
+	// µLXC ACTUALLY charged (clamped to the hold) so the caller can fund a royalty on the real payment.
 	ReserveLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, reservationID string, heldLXC int64, meta economy.AgentDebitMeta) error
-	SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta economy.AgentDebitMeta) error
+	SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta economy.AgentDebitMeta) (int64, error)
 	ReleaseLXCReservation(ctx context.Context, reservationID, reason string) error
 }
 
@@ -183,24 +184,31 @@ func (p *Proxy) agentReserveBlocks(ctx context.Context, apiKeyID, wsID, model, p
 }
 
 // settleReservation SETTLES the held reservation (if any) to the DELIVERED cost — called at the post-serve
-// seam so the hold is released PROMPTLY, not on a timer (the sweeper is for crashes only). No-op if there is
-// no reservation on the context (non-agent request, or reservation path off). deliveredUSD is converted to
-// µLXC (ceil); the primitive clamps to [0, held] so a mis-estimate cannot over-bill.
-func (p *Proxy) settleReservation(ctx context.Context, deliveredUSD float64) {
+// seam so the hold is released PROMPTLY, not on a timer (the sweeper is for crashes only). deliveredUSD is
+// converted to µLXC (ceil); the primitive clamps to [0, held] so a mis-estimate cannot over-bill.
+//
+// RETURNS the USD the consumer was ACTUALLY charged for this request (0 when there is NO reservation — a
+// non-agent/plain-key request, or the reservation path off — and 0 on a settle error). The cross-tenant
+// royalty seam reads this: a royalty is funded ONLY by what the consumer really paid, so a 0 here mints 0.
+func (p *Proxy) settleReservation(ctx context.Context, deliveredUSD float64) float64 {
 	h, ok := reservationFrom(ctx)
 	if !ok || p.agentSpender == nil {
-		return
+		return 0 // no reservation on this request ⇒ the consumer was charged nothing (plain key / path off)
 	}
 	finalLXC := int64(0)
 	if deliveredUSD > 0 {
 		finalLXC = int64(math.Ceil(deliveredUSD / economy.LXCUSDValue * 1e6))
 	}
-	if err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC, economy.AgentDebitMeta{RequestID: h.requestID}); err != nil {
+	settledLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC, economy.AgentDebitMeta{RequestID: h.requestID})
+	if err != nil {
 		// Logged-and-swallowed — the response is already served. A failed settle leaves the hold, which the
 		// stranded sweeper later REFUNDS (never over-charges): the customer is protected on the error path.
-		slog.Warn("economy: reservation settle failed (hold will be swept/refunded)",
+		// Return 0 charge ⇒ the royalty seam treats it as unfunded (deflationary; never mint on a failed bill).
+		slog.Warn("economy: reservation settle failed (hold will be swept/refunded; royalty treated as unfunded)",
 			slog.String("reservation", h.reservationID), slog.String("err", err.Error()))
+		return 0
 	}
+	return float64(settledLXC) * economy.LXCUSDValue / 1e6 // the USD the consumer ACTUALLY paid
 }
 
 // releaseReservation REFUNDS the held reservation in full (if any) — an own-cache hit (no upstream call, no

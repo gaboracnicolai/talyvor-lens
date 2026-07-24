@@ -132,7 +132,7 @@ func TestSettleBillsDeliveredRefundsRest(t *testing.T) {
 	ctx := context.Background()
 	resFund(t, s, "ws", 1_000_000)
 	_ = s.ReserveLXCForAgent(ctx, "agent", "ws", "res1", 300_000, AgentDebitMeta{RequestID: "rq1"})
-	if err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{RequestID: "rq1"}); err != nil {
+	if _, err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{RequestID: "rq1"}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	if b := resBalance(t, s, "ws"); b != 880_000 {
@@ -202,7 +202,7 @@ func TestExactlyOnce(t *testing.T) {
 		t.Fatalf("balance after 3x hold(same id) = %d, want 700000 (once)", b)
 	}
 	for i := 0; i < 3; i++ { // replay the settle
-		if err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{}); err != nil {
+		if _, err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{}); err != nil {
 			t.Fatalf("settle replay %d: %v", i, err)
 		}
 	}
