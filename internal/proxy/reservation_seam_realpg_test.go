@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"context"
+	"math"
 	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/poolroyalty"
 )
@@ -112,22 +114,30 @@ func TestOwnCacheHitIsFree(t *testing.T) {
 	ctx := context.Background()
 	seamFund(t, pool, "ws", 100_000_000)
 	rctx, _ := p.agentReserveBlocks(ctx, "agent", "ws", "gpt-4o", "prompt", "rq1", 4096)
-	p.resolveCacheReservation(rctx, nil) // own hit → release
+	if funded := p.resolveCacheReservation(rctx, nil, "", nil); funded != 0 { // own hit → release → $0
+		t.Fatalf("own cache hit funded=$%v, want 0 (free)", funded)
+	}
 	if b := seamBalance(t, store, "ws"); b != 100_000_000 {
 		t.Fatalf("balance after own cache hit = %d, want 100000000 (FREE)", b)
 	}
 }
 
 // TestCrossTenantHitChargesAvoidedCOGS: a pooled (cross-tenant) hit bills the requester avoided_COGS — the
-// value received. (The contributor's matching mint is COMMIT 3.)
+// value received, derived from the served content — and resolve RETURNS that charge for the royalty seam.
 func TestCrossTenantHitChargesAvoidedCOGS(t *testing.T) {
 	p, store, pool := seamProxy(t)
 	ctx := context.Background()
 	seamFund(t, pool, "ws", 100_000_000)
 	rctx, _ := p.agentReserveBlocks(ctx, "agent", "ws", "gpt-4o", "prompt", "rq1", 4096)
-	p.resolveCacheReservation(rctx, &poolroyalty.ServedHit{AvoidedCOGSUSD: 0.005})
-	if b := seamBalance(t, store, "ws"); b != 100_000_000-usdToULXC(0.005) {
-		t.Fatalf("balance after cross-tenant hit = %d, want %d (charged avoided_COGS)", b, 100_000_000-usdToULXC(0.005))
+	prompt, served := "a requester prompt", []byte("a served cross-tenant cached response body")
+	avoided := alerts.CostUSD("gpt-4o", len(prompt)/4, len(served)/4)
+	wantCharge := int64(math.Ceil(avoided / economy.LXCUSDValue * 1e6)) // the exact conversion settleReservation uses
+	funded := p.resolveCacheReservation(rctx, &poolroyalty.ServedHit{Model: "gpt-4o"}, prompt, served)
+	if funded <= 0 {
+		t.Fatalf("cross-tenant resolve must return the positive settled charge, got $%v", funded)
+	}
+	if b := seamBalance(t, store, "ws"); b != 100_000_000-wantCharge {
+		t.Fatalf("balance after cross-tenant hit = %d, want %d (charged avoided_COGS $%v)", b, 100_000_000-wantCharge, avoided)
 	}
 }
 

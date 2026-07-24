@@ -8,9 +8,53 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/workspace"
 )
+
+// fundingSpender is a minimal agentSpender that FUNDS the reservation seam in-test: Reserve always allows,
+// Settle books the delivered charge (funding the royalty). It lets an HTTP-dispatched pooled hit be METERED
+// so the funding invariant (fundedUSD > 0 ⇒ mint) is satisfied and the mint wiring stays observable — a
+// plain-key pooled hit is unfunded and, by that invariant, mints nothing.
+type fundingSpender struct{}
+
+func (fundingSpender) SpendLXCForAgent(context.Context, string, string, string, int64, string, economy.AgentDebitMeta) error {
+	return nil
+}
+func (fundingSpender) ReserveLXCForAgent(context.Context, string, string, string, int64, economy.AgentDebitMeta) error {
+	return nil
+}
+func (fundingSpender) SettleLXCReservation(_ context.Context, _ string, finalLXC int64, _ economy.AgentDebitMeta) (int64, error) {
+	return finalLXC, nil // book the delivered charge → funds the royalty
+}
+func (fundingSpender) ReleaseLXCReservation(context.Context, string, string) error { return nil }
+
+// wireFunding turns the reservation seam on so an agent-key dispatch is METERED (a real charge exists to
+// fund the royalty).
+func wireFunding(p *Proxy) {
+	p.SetAgentSpender(fundingSpender{}, func() bool { return true })
+	p.SetReservation(func() bool { return true }, func() int { return 4096 })
+}
+
+// dispatchAgentWS is dispatchWSWithRequestID for a METERED agent request: it stamps an APIKeyID on the auth
+// context so the reservation seam engages (the consumer is charged), which funds the cross-tenant royalty.
+func dispatchAgentWS(t *testing.T, p *Proxy, wsID, content, requestID string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"` + content + `"}]}`
+	req := httptest.NewRequest("POST", "/v1/proxy/openai/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Talyvor-Workspace", wsID)
+	req.Header.Set("X-Talyvor-Request-ID", requestID)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), &auth.AuthContext{WorkspaceID: wsID, APIKeyID: "agent-" + wsID}))
+	w := httptest.NewRecorder()
+	p.HandleOpenAI(w, req)
+	if w.Code != 200 {
+		t.Fatalf("ws=%s status=%d body=%s", wsID, w.Code, w.Body.String())
+	}
+	return w
+}
 
 // recordingRoyaltyMinter records every ServedHit the proxy reports. The
 // exactly-once guarantee itself lives in poolroyalty.Minter's DB claim (tested
@@ -65,6 +109,7 @@ func TestPoolRoyalty_ServedPooledHit_FiresMintKeyedOnRequestID(t *testing.T) {
 	_ = wsm.SetCachePoolable(context.Background(), "wsB", true)
 	rec := &recordingRoyaltyMinter{}
 	p.SetRoyaltyMinter(rec)
+	wireFunding(p) // METER the consumer so the pooled hit is FUNDED (else the invariant mints nothing)
 
 	dispatchWS(t, p, "wsA", "what is 2+2") // upstream #1: caches + pooled write (contributor wsA)
 	if got := rec.recorded(); len(got) != 0 {
@@ -72,7 +117,7 @@ func TestPoolRoyalty_ServedPooledHit_FiresMintKeyedOnRequestID(t *testing.T) {
 	}
 
 	before := atomic.LoadInt64(calls)
-	dispatchWSWithRequestID(t, p, "wsB", "what is 2+2", "req-royalty-1") // pooled HIT, served
+	dispatchAgentWS(t, p, "wsB", "what is 2+2", "req-royalty-1") // pooled HIT, served (metered agent request)
 	if atomic.LoadInt64(calls)-before != 0 {
 		t.Fatal("expected a pooled cache hit (no upstream call)")
 	}
@@ -103,7 +148,7 @@ func TestPoolRoyalty_ServedPooledHit_FiresMintKeyedOnRequestID(t *testing.T) {
 
 	// Client retry with the SAME request id: the proxy reports the same key —
 	// the DB UNIQUE(request_id) claim is what collapses it to one mint.
-	dispatchWSWithRequestID(t, p, "wsB", "what is 2+2", "req-royalty-1")
+	dispatchAgentWS(t, p, "wsB", "what is 2+2", "req-royalty-1")
 	hits = rec.recorded()
 	if len(hits) != 2 {
 		t.Fatalf("retry must also be reported (DB dedups); hits=%d", len(hits))
@@ -205,6 +250,7 @@ func TestPoolRoyalty_ServedPooledHit_WritesOnlyZeroCostCacheRow(t *testing.T) {
 	_ = wsm.SetCachePoolable(context.Background(), "wsB", true)
 	rec := &recordingRoyaltyMinter{}
 	p.SetRoyaltyMinter(rec)
+	wireFunding(p) // METER the consumer so the pooled hit is FUNDED
 
 	// POSITIVE CONTROL: a live (miss) call must record spend via the sink.
 	dispatchWS(t, p, "wsA", "what is 2+2")
@@ -224,7 +270,7 @@ func TestPoolRoyalty_ServedPooledHit_WritesOnlyZeroCostCacheRow(t *testing.T) {
 	// rate countable from token_events.
 	before := atomic.LoadInt64(calls)
 	beforeSpends := len(sink.spends)
-	dispatchWSWithRequestID(t, p, "wsB", "what is 2+2", "req-isolation-1")
+	dispatchAgentWS(t, p, "wsB", "what is 2+2", "req-isolation-1")
 	if atomic.LoadInt64(calls)-before != 0 {
 		t.Fatal("expected a pooled cache hit (no upstream call)")
 	}
@@ -257,10 +303,11 @@ func TestPoolRoyalty_ServedHit_CarriesUnsaltedEvidenceHashes(t *testing.T) {
 	_ = wsm.SetCachePoolable(context.Background(), "wsB", true)
 	rec := &recordingRoyaltyMinter{}
 	p.SetRoyaltyMinter(rec)
+	wireFunding(p) // METER the consumer so the pooled hit is FUNDED
 
 	dispatchWS(t, p, "wsA", "what is 2+2") // live: caches + pooled write of okResp
 	before := atomic.LoadInt64(calls)
-	dispatchWSWithRequestID(t, p, "wsB", "what is 2+2", "req-hash-1")
+	dispatchAgentWS(t, p, "wsB", "what is 2+2", "req-hash-1")
 	if atomic.LoadInt64(calls)-before != 0 {
 		t.Fatal("expected a pooled cache hit")
 	}
