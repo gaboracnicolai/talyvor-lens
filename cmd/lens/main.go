@@ -3554,6 +3554,32 @@ func run() error {
 			})
 		})
 
+		// Per-workspace CONSENT to cost-optimised routing on concrete (named)
+		// models. Default false: an explicitly named model is HONOURED exactly —
+		// never downgraded — unless the workspace opts in here (the founder's rule:
+		// quality shall not be compromised without consent). The "auto" pseudo-model
+		// and the X-Talyvor-Auto-Route header route regardless of this flag. Same
+		// auth + workspace-isolation middleware as the /cache-poolable route.
+		authed.Put("/v1/workspaces/{wsID}/cost-optimize-routing", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				CostOptimizeRouting bool `json:"cost_optimize_routing"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := wsManager.SetCostOptimizeRouting(req.Context(), wsID, in.CostOptimizeRouting); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			ws, _ := wsManager.GetWorkspace(wsID)
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"ok":                    true,
+				"cost_optimize_routing": ws.CostOptimizeRouting,
+			})
+		})
+
 		// Per-workspace opt-in for cross-tenant DISTILL-cache sharing (S0). A
 		// separate consent from cache-poolable — distill artifacts are
 		// document-derived. Default false (private); cross-tenant serving also
