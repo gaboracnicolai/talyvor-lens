@@ -145,7 +145,9 @@ func TestPooling_RequesterNotOptedIn_Blocked(t *testing.T) {
 	global := true
 	p, wsm, _, _, calls := newPoolingProxy(t, &global)
 	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
-	// wsB left non-poolable.
+	// New workspaces now DEFAULT to poolable, so opt wsB OUT explicitly to exercise the
+	// "requester not opted in" path (this was previously the registration default).
+	_ = wsm.SetCachePoolable(context.Background(), "wsB", false)
 
 	dispatchWS(t, p, "wsA", "what is 2+2")
 	before := atomic.LoadInt64(calls)

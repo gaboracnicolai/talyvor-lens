@@ -137,10 +137,15 @@ ON CONFLICT (id) DO UPDATE SET
   active                 = EXCLUDED.active,
   logging_policy         = EXCLUDED.logging_policy,
   distill_policy         = EXCLUDED.distill_policy,
-  cache_poolable         = EXCLUDED.cache_poolable,
+  -- cache_poolable is DELIBERATELY not updated on conflict: a re-registration must
+  -- never change a workspace's cross-tenant pooling consent (symmetric flag; can't
+  -- be granted/revoked retroactively). The stored value is preserved across the
+  -- upsert; SetCachePoolable is the only path that changes it. This also guards a
+  -- replica whose in-memory cache doesn't yet hold the row from re-defaulting it.
   distill_poolable       = EXCLUDED.distill_poolable,
   cost_optimize_routing  = EXCLUDED.cost_optimize_routing,
-  updated_at             = NOW()`
+  updated_at             = NOW()
+RETURNING cache_poolable`
 
 const updateLoggingPolicySQL = `UPDATE workspaces
 SET logging_policy = $2, updated_at = NOW()
@@ -180,19 +185,48 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	ws.LoggingPolicy = normalizeLoggingPolicy(ws.LoggingPolicy)
 	ws.DistillPolicy = normalizeDistillPolicy(ws.DistillPolicy)
 
+	// Cross-tenant cache pooling (cache_poolable) defaults ON for a NEW workspace,
+	// but its consent is NEVER changed retroactively. The flag is SYMMETRIC — one
+	// column gates both benefiting from and contributing to the shared cache — so a
+	// blind re-POST must not silently (re-)pool an existing tenant's content. A new
+	// workspace gets true (mirroring the 0106 column DEFAULT, since this INSERT
+	// always supplies the column); an existing one keeps whatever it already had.
+	// (bool can't distinguish an omitted body field from an explicit false, so an
+	// at-registration opt-out isn't expressible here — a new workspace that wants
+	// privacy opts out afterward via SetCachePoolable. The DB upsert preserves the
+	// existing value too, guarding a replica whose cache doesn't yet hold the row.)
 	stored := ws
 	m.mu.Lock()
+	if existing, ok := m.workspaces[ws.ID]; ok {
+		stored.CachePoolable = existing.CachePoolable
+	} else {
+		stored.CachePoolable = true
+	}
 	m.workspaces[ws.ID] = &stored
 	m.mu.Unlock()
 
 	if m.pool != nil {
-		if _, err := m.pool.Exec(ctx, insertWorkspaceSQL,
+		// RETURNING gives back the cache_poolable the DB actually kept. On a new row that
+		// is the new-workspace default (true); on a conflict it is the PRESERVED existing
+		// value (the ON CONFLICT clause never overwrites it). Reconcile the in-memory flag
+		// to it so a re-registration on a replica whose cache didn't hold the row — which
+		// would otherwise apply the new default in memory — cannot re-pool an opted-out
+		// workspace even transiently. The persisted opt-out boundary holds in memory too.
+		var dbPoolable bool
+		if err := m.pool.QueryRow(ctx, insertWorkspaceSQL,
 			stored.ID, stored.Name, stored.CachePrefix, stored.SpendLimitUSD,
 			stored.AllowedModels, stored.AllowedProviders, stored.MaxTokensPerRequest,
 			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active, string(stored.LoggingPolicy),
 			string(stored.DistillPolicy), stored.CachePoolable, stored.DistillPoolable, stored.CostOptimizeRouting,
-		); err != nil {
+		).Scan(&dbPoolable); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
+		}
+		if dbPoolable != stored.CachePoolable {
+			m.mu.Lock()
+			if cur, ok := m.workspaces[ws.ID]; ok {
+				cur.CachePoolable = dbPoolable
+			}
+			m.mu.Unlock()
 		}
 	}
 	return nil
