@@ -190,7 +190,11 @@ func (p *Proxy) agentReserveBlocks(ctx context.Context, apiKeyID, wsID, model, p
 // RETURNS the USD the consumer was ACTUALLY charged for this request (0 when there is NO reservation — a
 // non-agent/plain-key request, or the reservation path off — and 0 on a settle error). The cross-tenant
 // royalty seam reads this: a royalty is funded ONLY by what the consumer really paid, so a 0 here mints 0.
-func (p *Proxy) settleReservation(ctx context.Context, deliveredUSD float64) float64 {
+// servedModel is the model that ACTUALLY served this request (post-route) — stamped on the delivered-charge
+// spend row so the money row reads "requested X, served Y, charged Z". requested_model + request_id are
+// sourced from the reservation row inside the primitive (the hold wrote them), so only the served model,
+// known here and nowhere in the row, is passed through.
+func (p *Proxy) settleReservation(ctx context.Context, deliveredUSD float64, servedModel string) float64 {
 	h, ok := reservationFrom(ctx)
 	if !ok || p.agentSpender == nil {
 		return 0 // no reservation on this request ⇒ the consumer was charged nothing (plain key / path off)
@@ -199,7 +203,7 @@ func (p *Proxy) settleReservation(ctx context.Context, deliveredUSD float64) flo
 	if deliveredUSD > 0 {
 		finalLXC = int64(math.Ceil(deliveredUSD / economy.LXCUSDValue * 1e6))
 	}
-	settledLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC, economy.AgentDebitMeta{RequestID: h.requestID})
+	settledLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC, economy.AgentDebitMeta{ServedModel: servedModel})
 	if err != nil {
 		// Logged-and-swallowed — the response is already served. A failed settle leaves the hold, which the
 		// stranded sweeper later REFUNDS (never over-charges): the customer is protected on the error path.
