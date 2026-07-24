@@ -488,6 +488,21 @@ func isAutoRoute(r *http.Request, model string) bool {
 	return false
 }
 
+// routingDelegated reports whether the customer has CEDED model choice — so the
+// base router may downgrade the requested model. Two consented paths:
+//   - per-request delegation: the "auto" pseudo-model or the X-Talyvor-Auto-Route
+//     header (isAutoRoute) — the customer asked Lens to pick;
+//   - per-workspace consent: the workspace opted in to cost-optimised routing on
+//     concrete models (cost_optimize_routing, default OFF).
+// An explicitly named model on a non-consenting workspace returns FALSE and is
+// HONOURED exactly — never downgraded. This is the founder's rule in one predicate.
+func (p *Proxy) routingDelegated(r *http.Request, wsID, model string) bool {
+	if isAutoRoute(r, model) {
+		return true
+	}
+	return p.workspaceManager != nil && p.workspaceManager.GetCostOptimizeRouting(wsID)
+}
+
 // providerConfig holds the per-provider knobs HandleOpenAI/HandleAnthropic/
 // HandleGoogle differ on. Everything else is shared in serve(). The URL
 // is a function of the model so Gemini's path-style routing fits cleanly.
@@ -1179,13 +1194,28 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		if res.fallback {
 			metrics.RoutingFallback()
 		}
-	} else if p.router != nil {
+	} else if p.router != nil && p.routingDelegated(r, wsID, model) {
+		// DELEGATED path ONLY — an "auto"/X-Talyvor-Auto-Route request, or a workspace
+		// that opted in to cost-optimised routing. An explicitly NAMED model on a
+		// non-consenting workspace is HONOURED: it never enters this branch, so the
+		// base router can never silently downgrade it. The customer chose the model;
+		// quality is theirs to decide (the founder's rule). The capability redirect
+		// below is untouched — a correctness substitution, not a cost one.
 		decision := p.router.Route(ctx, cfg.ProviderName(), model, compressedPrompt)
 		if p.router.ShouldOverride(model, decision) {
 			upstreamModel = decision.Model
 			overrideModel = decision.Model
 			overrideReason = decision.Reason
 		}
+	}
+
+	// Transparency: when routing (on the delegated path) substituted a different
+	// model than the caller named, ANNOUNCE it — mirroring X-Talyvor-Vision-Redirect.
+	// A pinned/honoured model reaches here unchanged, so this fires only for auto /
+	// opted-in traffic. The capability redirect and circuit breaker below set their
+	// own headers for their own (correctness/safety) substitutions.
+	if upstreamModel != model {
+		w.Header().Set("X-Talyvor-Routed", model+"→"+upstreamModel)
 	}
 
 	// Routing Brain (H8.1) — OFFLINE-computed recommendation read as a cheap in-memory
