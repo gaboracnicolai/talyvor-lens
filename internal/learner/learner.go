@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	streamName    = "LENS_EVENTS"
-	streamSubject = "lens.events.>"
-	eventSubject  = "lens.events.token"
+	streamName      = "LENS_EVENTS"
+	streamSubject   = "lens.events.>"
+	eventSubject    = "lens.events.token"
 	analyseInterval = time.Hour
 )
 

@@ -161,7 +161,7 @@ func TestDetect_ReturnsUnusualWhenZBetweenTwoAndThree(t *testing.T) {
 
 func TestDetect_ReturnsTrendWhen24hAvgExceedsBaselineByFiftyPercent(t *testing.T) {
 	weekCosts := makeWeekCosts(48, 1.0, 0.5)
-	dayCosts := makeWeekCosts(24, 2.0, 0.1) // last 24h mean = 2.0, baseline = 1.0 → 2x
+	dayCosts := makeWeekCosts(24, 2.0, 0.1)          // last 24h mean = 2.0, baseline = 1.0 → 2x
 	pool := detectMocks(t, weekCosts, dayCosts, 1.0) // current hour is normal
 	d := newDetector(pool)
 

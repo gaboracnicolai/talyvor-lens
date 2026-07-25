@@ -220,9 +220,9 @@ func Price(id string) (in, out float64, ok bool) { return defaultRegistry.Price(
 func PriceDetailed(id string) (in, cachedIn, cacheWrite, out float64, ok bool) {
 	return defaultRegistry.PriceDetailed(id)
 }
-func CapabilitiesOf(id string) Capabilities      { return defaultRegistry.CapabilitiesOf(id) }
-func Resolve(id string) string                   { return defaultRegistry.Resolve(id) }
-func All() []Model                               { return defaultRegistry.All() }
-func ByProvider(provider string) []Model         { return defaultRegistry.ByProvider(provider) }
-func Override(m Model)                           { defaultRegistry.Override(m) }
-func LoadOverrides(models []Model)               { defaultRegistry.LoadOverrides(models) }
+func CapabilitiesOf(id string) Capabilities { return defaultRegistry.CapabilitiesOf(id) }
+func Resolve(id string) string              { return defaultRegistry.Resolve(id) }
+func All() []Model                          { return defaultRegistry.All() }
+func ByProvider(provider string) []Model    { return defaultRegistry.ByProvider(provider) }
+func Override(m Model)                      { defaultRegistry.Override(m) }
+func LoadOverrides(models []Model)          { defaultRegistry.LoadOverrides(models) }

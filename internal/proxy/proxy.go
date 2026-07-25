@@ -494,6 +494,7 @@ func isAutoRoute(r *http.Request, model string) bool {
 //     header (isAutoRoute) — the customer asked Lens to pick;
 //   - per-workspace consent: the workspace opted in to cost-optimised routing on
 //     concrete models (cost_optimize_routing, default OFF).
+//
 // An explicitly named model on a non-consenting workspace returns FALSE and is
 // HONOURED exactly — never downgraded. This is the founder's rule in one predicate.
 func (p *Proxy) routingDelegated(r *http.Request, wsID, model string) bool {

@@ -306,4 +306,3 @@ func TestCacheServer_ServesOverTLS(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
-

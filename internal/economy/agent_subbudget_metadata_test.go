@@ -19,8 +19,8 @@ func TestAgentSpend_StampsRequestedModelAndRequestID(t *testing.T) {
 	ctx := context.Background()
 	fund(t, s, "wsM", 100*uLXC)
 
-	const model = "claude-sonnet-5"    // the REQUESTED model — the debit precedes routing
-	const reqID = "req-tok-abc123"     // the token_events request_id, for the join
+	const model = "claude-sonnet-5" // the REQUESTED model — the debit precedes routing
+	const reqID = "req-tok-abc123"  // the token_events request_id, for the join
 	const desc = "proof-of-agent-allocation: pre-serve estimate debit"
 	if err := s.SpendLXCForAgent(ctx, "keyM", "wsM", "debit-key-1", 10*uLXC, desc,
 		AgentDebitMeta{RequestedModel: model, RequestID: reqID}); err != nil {

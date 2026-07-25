@@ -143,7 +143,7 @@ func TestDistill_PooledDenied_OwnerOptOut(t *testing.T) {
 	ctx := context.Background()
 	doc := docBlockBytes("doc")
 	_, _, _, _ = d.tryConvertBlock(ctx, doc, nil, "wsA") // wsA publishes pooled
-	poolable["wsA"] = false                           // wsA revokes its consent
+	poolable["wsA"] = false                              // wsA revokes its consent
 	mdB, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
 	if !ok || mdB != "converted-2" {
 		t.Fatalf("owner opt-out must deny the pooled serve; ok=%v md=%q", ok, mdB)

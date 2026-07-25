@@ -161,9 +161,9 @@ func (s *StatusPage) Check(ctx context.Context) StatusResponse {
 	// Run every probe in its own goroutine. Each returns its result via
 	// a slot in a fixed-size slice so we can preserve display order.
 	var (
-		wg            sync.WaitGroup
-		components    = make([]Component, 4)
-		providers     = make([]ProviderStatus, 4)
+		wg         sync.WaitGroup
+		components = make([]Component, 4)
+		providers  = make([]ProviderStatus, 4)
 	)
 
 	wg.Add(8)

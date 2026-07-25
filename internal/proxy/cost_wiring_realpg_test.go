@@ -110,7 +110,7 @@ func TestCostWiring_BufferedSettle_CacheAware(t *testing.T) {
 
 	detailedULXC := settleULXC(alerts.CostUSDDetailed("gpt-4o", 1000, 9000, 0, 100))
 	fullULXC := settleULXC(alerts.CostUSD("gpt-4o", 10000, 100)) // the flat basis the OLD wiring charged
-	if detailedULXC*10 >= fullULXC*6 { // detailed must be < 60% of the flat basis (dramatic)
+	if detailedULXC*10 >= fullULXC*6 {                           // detailed must be < 60% of the flat basis (dramatic)
 		t.Fatalf("precondition: detailed %d not dramatically < full %d", detailedULXC, fullULXC)
 	}
 

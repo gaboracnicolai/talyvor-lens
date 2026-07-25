@@ -45,14 +45,14 @@ func NewLensClient(baseURL, apiKey string) *LensClient {
 // the Lens registration response; the rest are convenience
 // fields the status command echoes back.
 type NodeState struct {
-	NodeID      string    `json:"node_id"`
-	NodeSecret  string    `json:"node_secret"`
-	WorkspaceID string    `json:"workspace_id"`
-	LensURL     string    `json:"lens_url"`
-	NodeURL     string    `json:"node_url"`
-	Provider    string    `json:"provider"`
-	GPUType     string    `json:"gpu_type"`
-	Models      []string  `json:"models"`
+	NodeID      string   `json:"node_id"`
+	NodeSecret  string   `json:"node_secret"`
+	WorkspaceID string   `json:"workspace_id"`
+	LensURL     string   `json:"lens_url"`
+	NodeURL     string   `json:"node_url"`
+	Provider    string   `json:"provider"`
+	GPUType     string   `json:"gpu_type"`
+	Models      []string `json:"models"`
 	// Ed25519Priv is the node's ed25519 PRIVATE key (base64) for signing PoVI
 	// receipts (Token Economy Phase 1, Part 1). Sensitive — the state file is
 	// 0600. The matching public key is registered with Lens.
@@ -136,14 +136,14 @@ func (c *LensClient) Register(ctx context.Context, cfg NodeConfig) (NodeState, e
 		return NodeState{}, fmt.Errorf("node: generate signing key: %w", keyErr)
 	}
 	payload := map[string]any{
-		"url":             cfg.NodeURL,
-		"provider":        cfg.Provider,
-		"models":          cfg.Models,
-		"gpu_type":        cfg.GPUType,
-		"max_concurrent":  cfg.MaxConcurrent,
-		"node_secret":     secret, // Lens stores the hash and discards the plaintext
-		"workspace_id":    cfg.WorkspaceID,
-		"ed25519_pubkey":  povi.EncodePublicKey(pub), // PoVI receipt-verification key
+		"url":            cfg.NodeURL,
+		"provider":       cfg.Provider,
+		"models":         cfg.Models,
+		"gpu_type":       cfg.GPUType,
+		"max_concurrent": cfg.MaxConcurrent,
+		"node_secret":    secret, // Lens stores the hash and discards the plaintext
+		"workspace_id":   cfg.WorkspaceID,
+		"ed25519_pubkey": povi.EncodePublicKey(pub), // PoVI receipt-verification key
 	}
 	resp, err := c.do(ctx, http.MethodPost,
 		fmt.Sprintf("/v1/workspaces/%s/nodes", cfg.WorkspaceID), payload)

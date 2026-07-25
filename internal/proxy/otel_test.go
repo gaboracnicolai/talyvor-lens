@@ -65,8 +65,9 @@ func newProxyWithMockUpstream(t *testing.T, srvURL string, primeCache func(c *ca
 // cacheForTest is a thin wrapper to give the test helper room to seed
 // the cache before constructing the proxy.
 type cacheForTest struct {
-	exact interface{ /* seeded outside */ }
-	mr    interface{}
+	exact interface { /* seeded outside */
+	}
+	mr interface{}
 }
 
 func TestOTel_XTalyvorTraceIDHeaderSetOnResponse(t *testing.T) {

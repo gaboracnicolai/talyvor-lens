@@ -54,7 +54,7 @@ func TestMarkStaleInactive_UpdatesAllThreeTables(t *testing.T) {
 	store, mock := newMockStore(t)
 	secs := int(StaleThreshold.Seconds())
 	for _, table := range []string{"inference_nodes", "cache_nodes", "embedding_nodes"} {
-		mock.ExpectExec("UPDATE "+table).
+		mock.ExpectExec("UPDATE " + table).
 			WithArgs(secs).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 	}
@@ -83,7 +83,7 @@ func TestMarkStaleInactive_ZeroRowsWhenAllAlive(t *testing.T) {
 	store, mock := newMockStore(t)
 	secs := int(StaleThreshold.Seconds())
 	for _, table := range []string{"inference_nodes", "cache_nodes", "embedding_nodes"} {
-		mock.ExpectExec("UPDATE "+table).
+		mock.ExpectExec("UPDATE " + table).
 			WithArgs(secs).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	}

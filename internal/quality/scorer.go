@@ -53,18 +53,18 @@ func newScorer(pool pgxDB) *Scorer {
 
 // Tunables — keep at file scope so heuristic changes are visible in one place.
 const (
-	cacheThreshold     = 0.6
-	evictThreshold     = 0.4
-	shortRatio         = 0.1
-	shortAbsoluteMax   = 50
-	truncationMinLen   = 100
-	repetitionTrigger  = 2 // sentence appearing > N times penalises
-	maxErrorPenalty    = 0.6
-	perErrorPenalty    = 0.3
-	lengthPenalty      = 0.2
-	truncationPenalty  = 0.2
-	repetitionPenalty  = 0.2
-	structureBonus     = 0.1
+	cacheThreshold    = 0.6
+	evictThreshold    = 0.4
+	shortRatio        = 0.1
+	shortAbsoluteMax  = 50
+	truncationMinLen  = 100
+	repetitionTrigger = 2 // sentence appearing > N times penalises
+	maxErrorPenalty   = 0.6
+	perErrorPenalty   = 0.3
+	lengthPenalty     = 0.2
+	truncationPenalty = 0.2
+	repetitionPenalty = 0.2
+	structureBonus    = 0.1
 )
 
 // errorIndicators are the phrases that signal a refusal/error. Each is

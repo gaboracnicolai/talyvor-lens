@@ -260,13 +260,13 @@ func TestInferenceServer_HealthReportsActiveCount(t *testing.T) {
 
 func TestFormatEarnings_ContainsExpectedFields(t *testing.T) {
 	state := NodeState{
-		NodeID:      "node-abc123",
-		WorkspaceID: "ws_x",
-		GPUType:     "rtx4090",
-		Provider:    "ollama",
-		Models:      []string{"llama3"},
-		LensURL:     "http://lens",
-		NodeURL:     "http://node",
+		NodeID:       "node-abc123",
+		WorkspaceID:  "ws_x",
+		GPUType:      "rtx4090",
+		Provider:     "ollama",
+		Models:       []string{"llama3"},
+		LensURL:      "http://lens",
+		NodeURL:      "http://node",
 		RegisteredAt: time.Now(),
 	}
 	earnings := map[string]any{
@@ -393,4 +393,3 @@ func TestInferenceServer_ServesOverTLS(t *testing.T) {
 		t.Fatalf("expected healthy, got %v", out["status"])
 	}
 }
-

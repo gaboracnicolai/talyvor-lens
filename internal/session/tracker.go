@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	defaultAgent     = "default"
-	sessionMaxAge    = 24 * time.Hour
-	cleanupInterval  = 1 * time.Hour
-	activeWindow     = 1 * time.Hour
+	defaultAgent    = "default"
+	sessionMaxAge   = 24 * time.Hour
+	cleanupInterval = 1 * time.Hour
+	activeWindow    = 1 * time.Hour
 )
 
 // pgxDB is the subset of *pgxpool.Pool the tracker needs. nil pool is

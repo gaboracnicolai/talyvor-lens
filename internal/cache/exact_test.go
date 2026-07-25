@@ -77,7 +77,7 @@ func TestExactCache_DifferentInputsProduceDifferentKeys(t *testing.T) {
 	c, _ := newTestExactCache(t, time.Minute)
 
 	cases := []struct {
-		name       string
+		name string
 		a, b [3]string
 	}{
 		{"different prompt", [3]string{"openai", "gpt-4", "hello"}, [3]string{"openai", "gpt-4", "world"}},

@@ -1741,7 +1741,7 @@ func Load() (*Config, error) {
 		c.PatternEarningEnabled = false
 		c.PoolRoyaltyMintingEnabled = false
 		c.POVIMintingEnabled = false
-		c.AnnotationMintingEnabled = false // the annotation mint credits LENS — force-off with the economy master switch
+		c.AnnotationMintingEnabled = false   // the annotation mint credits LENS — force-off with the economy master switch
 		c.TrustfulComputeMintEnabled = false // U6: now defaults false; still force-off'd if an operator opted in
 		c.CacheSharingEnabled = false
 		c.CachePoolableEnabled = false

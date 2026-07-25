@@ -110,7 +110,7 @@ func TestAdvisor_Advise_ReproducesShape1Semantics(t *testing.T) {
 		{"size edge not small", 1000, 1, false, false, false, false, false},
 		{"large+simple", 50000, 1, false, false, false, false, false},
 		{"large+complex", 50000, 5, false, false, false, false, false},
-		{"pii small-simple", 999, 1, true, false, false, true, true},   // downgrade-eligible BUT opts out
+		{"pii small-simple", 999, 1, true, false, false, true, true}, // downgrade-eligible BUT opts out
 		{"guardrail small-simple", 999, 1, false, true, false, true, true},
 		{"restricted small-simple", 999, 1, false, false, true, true, true},
 		{"restricted large-complex", 50000, 5, false, false, true, false, true},

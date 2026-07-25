@@ -224,9 +224,9 @@ func (r *LocalRouter) FormatAsOpenAI(ollama []byte, model string) ([]byte, error
 	}
 
 	out := map[string]any{
-		"id":      "local-" + uuid.NewString(),
-		"object":  "chat.completion",
-		"model":   model,
+		"id":     "local-" + uuid.NewString(),
+		"object": "chat.completion",
+		"model":  model,
 		"choices": []map[string]any{{
 			"message": map[string]any{
 				"role":    "assistant",
@@ -256,4 +256,3 @@ func (r *LocalRouter) Models() []LocalModel {
 	defer r.mu.RUnlock()
 	return append([]LocalModel(nil), r.models...)
 }
-

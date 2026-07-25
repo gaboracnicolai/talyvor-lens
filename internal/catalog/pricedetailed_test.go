@@ -24,7 +24,7 @@ func TestPriceDetailed_CacheAwareRates(t *testing.T) {
 	}{
 		{"claude-sonnet-4-5", 3.00, 0.30, 3.75, 15.00, true}, // 0.1x read, 1.25x write
 		{"claude-opus-4-5", 15.00, 1.50, 18.75, 75.00, true},
-		{"gpt-4o", 2.50, 1.25, 2.50, 10.00, true}, // 0.5x read, 1.0x (no write charge)
+		{"gpt-4o", 2.50, 1.25, 2.50, 10.00, true},         // 0.5x read, 1.0x (no write charge)
 		{"gemini-2.5-pro", 1.25, 1.25, 1.25, 10.00, true}, // no discount (not billed here)
 		{"unknown-model", 0, 0, 0, 0, false},
 	}

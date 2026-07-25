@@ -23,12 +23,12 @@ import (
 // better-maintained MuPDF/PDFium bindings; the one maintained pure-Go fork
 // (dslipak/pdf) regresses text quality (drops the Td positioning operator, so
 // Td-laid-out lines run together). The risk is CONTROLLED, not ignored:
-//   1. blast radius — every parse runs in a killable subprocess with a memory
-//      ceiling + wall-clock kill (cmd/distill-worker + isolator.go); a zlib
-//      bomb or cyclic-graph hang kills the worker, never the gateway;
-//   2. version — pinned in go.mod (see the require-line note);
-//   3. monitoring — the govulncheck CI gate fails the build on any future CVE
-//      in this dep, so "unmaintained" cannot silently become "vulnerable".
+//  1. blast radius — every parse runs in a killable subprocess with a memory
+//     ceiling + wall-clock kill (cmd/distill-worker + isolator.go); a zlib
+//     bomb or cyclic-graph hang kills the worker, never the gateway;
+//  2. version — pinned in go.mod (see the require-line note);
+//  3. monitoring — the govulncheck CI gate fails the build on any future CVE
+//     in this dep, so "unmaintained" cannot silently become "vulnerable".
 //
 // TEXT-LESS handling is the load-bearing behavior: a scanned/image-only PDF
 // has no text operators, so extraction yields empty text. Both empty output
