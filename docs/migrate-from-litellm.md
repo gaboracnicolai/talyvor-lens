@@ -65,7 +65,7 @@ Notes: LiteLLM "RPS struggles past ~2,000" and "memory under load can exceed 8 G
 1. **Stand up Lens** in parallel. The container image is single-process; no Python build chain required.
 2. **Issue a Talyvor key** via `POST /v1/api/keys`.
 3. **Verify connectivity** — `curl http://your-lens:8080/status.json`. Components panel should show every dep operational.
-4. **Flip `base_url`** for one client. Send one request. Confirm it appears in `/dashboard`.
+4. **Flip `base_url`** for one client. Send one request. Confirm it appears in `/v1/api/usage` (or in the dashboard app).
 5. **Roll out** to remaining clients.
 6. **Decommission LiteLLM** — Lens runs on a fraction of the memory budget.
 

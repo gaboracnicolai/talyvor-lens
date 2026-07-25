@@ -57,6 +57,16 @@ func TestPageSaysItIsAnAPINotAUI(t *testing.T) {
 	}
 }
 
+// TestPagePointsAtTheDetailedStatusPage: /status is a SEPARATE, pre-existing and
+// fully working public page (internal/status) — per-component health, provider
+// latencies, all unauthenticated and all real. A page whose job is to point
+// onward must not omit the most useful destination on its own host.
+func TestPagePointsAtTheDetailedStatusPage(t *testing.T) {
+	if !strings.Contains(render(t), "/status") {
+		t.Error("the page must link to /status, the detailed public health page on this same host")
+	}
+}
+
 func TestPagePointsAtTheDashboardAndTheDocs(t *testing.T) {
 	body := render(t)
 	if !strings.Contains(body, "app.talyvor.com") {

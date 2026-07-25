@@ -4,7 +4,7 @@
 
 Drop-in replacement for OpenAI, Anthropic, Google Gemini, AWS Bedrock, Mistral, Groq, and vLLM. Change one URL. Get caching, routing, attribution, guardrails, audit, and fallback.
 
-Lens is an API. The dashboard is a separate app ([app.talyvor.com](https://app.talyvor.com), or self-host `talyvor-suite`); the Lens host itself serves only a small status page at `/`.
+Lens is an API. The dashboard is a separate app ([app.talyvor.com](https://app.talyvor.com), or self-host `talyvor-suite`); the Lens host itself serves only a small service page at `/` and component health at `/status`.
 
 ## Why Talyvor Lens?
 
@@ -47,8 +47,12 @@ Lens is now running at `http://localhost:8080`.
 > or build locally from a checkout (`docker compose build`, which the
 > compose file supports out of the box).
 
-Open the dashboard at `http://localhost:8080/dashboard`.
-Check status at `http://localhost:8080/status`.
+Open `http://localhost:8080/` for the service page (what this host is, live health,
+where to go next), or `http://localhost:8080/status` for per-component health.
+
+The dashboard is a separate app — [app.talyvor.com](https://app.talyvor.com), or
+self-host [`talyvor-suite`](https://github.com/gaboracnicolai/talyvor-suite). Lens
+itself is an API and serves no account UI.
 
 For a step-by-step walkthrough including issuing your first API key and making your first request, see [docs/quickstart.md](docs/quickstart.md).
 
@@ -90,17 +94,24 @@ See [`sdk/python/README.md`](sdk/python/README.md) and [`sdk/typescript/README.m
 | vLLM | `/v1/proxy/vllm/chat/completions` |
 | Helicone-compat | `/oai/v1/chat/completions`, `/anthropic/v1/messages` |
 
-## Dashboard
+## Seeing your data
 
-`http://localhost:8080/dashboard` surfaces:
+Lens is an API: it serves no account UI of its own. These reads are all authenticated
+API endpoints — point the dashboard app at them, or call them directly:
 
-- Real-time spend by model + workspace
-- Cache hit rate (exact + semantic)
-- Top cached prompt patterns
-- Circuit-breaker status per team/feature
-- Local model availability
-- Workspace logging policy (full / metadata / none)
-- Live cost anomalies (`>3σ` z-score)
+| | |
+|---|---|
+| Spend by model / workspace | `/v1/api/spend/summary`, `/v1/api/spend/by-model` |
+| Cache hit rate + top patterns | `/v1/api/cache/stats`, `/v1/api/cache/top-patterns` |
+| Per-model usage + serve source | `/v1/api/usage` |
+| Circuit-breaker status | `/v1/api/alerts/circuits` |
+| Local model availability | `/v1/api/local/status` |
+| Live cost anomalies (`>3σ`) | `/v1/api/anomalies/scan` |
+
+The dashboard is [app.talyvor.com](https://app.talyvor.com) (or self-hosted
+[`talyvor-suite`](https://github.com/gaboracnicolai/talyvor-suite)), which holds your
+key server-side and calls these for you. Unauthenticated, this host serves only `/`
+(service page) and `/status` (component health).
 
 ## Migrating from another gateway
 
@@ -219,14 +230,14 @@ export EMBED_NODE_DIMENSIONS=768
 ./bin/talyvor-embednode start
 ```
 
-### Dashboard
+### Reading the economy
 
-The Lens dashboard at `/dashboard` includes per-workspace token views:
+There are no built-in browser pages for these; the reads are API endpoints:
 
-- `/dashboard/tokens` — balance, mining activity, staking, marketplace
-- `/dashboard/nodes` — your registered inference + embedding nodes
-- `/dashboard/oracle` — quality-oracle queue + annotation UI
-- `/dashboard/economy` — global supply, circulation, listings
+- `/v1/workspaces/{ws}/tokens/balance`, `.../tokens/mining/*` — balance and mining (authenticated)
+- `/v1/workspaces/{ws}/tokens/stakes`, `/v1/marketplace/listings` — staking and listings
+- `/v1/economy/stats`, `/v1/tokens/rates`, `/v1/oracle/stats` — global supply, rates and the
+  oracle queue (public, present only when the economy is enabled)
 
 ## License
 

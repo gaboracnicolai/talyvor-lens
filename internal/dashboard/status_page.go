@@ -116,6 +116,14 @@ footer{margin-top:12px; text-align:center; font-size:12px; color:var(--faint)}
          workspace, usage and billing live in the app.</p>
     </div>
 
+    <a class="row" href="/status">
+      <div>
+        <div class="label">Service status</div>
+        <div class="hint">Per-component health and provider latency</div>
+      </div>
+      <span class="go" aria-hidden="true">&rsaquo;</span>
+    </a>
+
     <a class="row" href="https://app.talyvor.com">
       <div>
         <div class="label">Dashboard</div>
