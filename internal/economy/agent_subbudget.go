@@ -48,26 +48,34 @@ func (s *DualTokenStore) SetAgentCeiling(ctx context.Context, scopedKeyID, works
 // AgentDebitMeta is the NON-CONTENT metadata stamped on an agent-allocator lxc_ledger debit row. It
 // exists so the ledger is READABLE (per-model spend derivable) and a money row JOINS to its usage row —
 // without lxc_ledger, an append-only + immutable financial record (migration 0055), ever becoming a
-// content record. It carries EXACTLY two scalars and structurally cannot carry prompt text, a hash, or an
-// embedding (there is no field for content):
+// content record. It carries EXACTLY three model/id SCALARS and structurally cannot carry prompt text, a
+// hash, or an embedding (there is no field for content):
 //
-//   - RequestedModel: the model the charge was ESTIMATED on. The debit is PRE-SERVE / PRE-ROUTING, so this
-//     is the REQUESTED model, NOT necessarily the one that served (token_events records the served model).
-//     Named "requested_model" on the row so a UI cannot imply it was the serving model.
-//   - RequestID: the token_events request_id, so the money row joins to its usage row (model served, real
-//     token counts) instead of duplicating any of that here.
+//   - RequestedModel: the model the charge was ESTIMATED on. The hold is PRE-SERVE / PRE-ROUTING, so this
+//     is the REQUESTED model, NOT necessarily the one that served. Named "requested_model" on the row so a
+//     UI cannot imply it was the serving model.
+//   - ServedModel: the model that ACTUALLY served, known only post-route at settle time (empty on the
+//     pre-serve hold and on a full refund/release, where nothing served). Stamped as "served_model" on the
+//     delivered-charge SPEND row so that row is self-describing — "requested X, served Y, charged Z" —
+//     without a token_events join. A model name, never content.
+//   - RequestID: the token_events request_id, so the money row still joins to its usage row (real token
+//     counts) instead of duplicating any of that here.
 type AgentDebitMeta struct {
 	RequestedModel string
+	ServedModel    string
 	RequestID      string
 }
 
-// toMap renders the two scalars as the lxc_ledger metadata document, OMITTING an empty scalar so a row
-// carries no empty-string noise. The economy layer owns this shape: a caller supplies only these two typed
+// toMap renders the scalars as the lxc_ledger metadata document, OMITTING an empty scalar so a row carries
+// no empty-string noise. The economy layer owns this shape: a caller supplies only these typed model/id
 // strings, never a free-form map, so no content can be injected into a money row.
 func (m AgentDebitMeta) toMap() map[string]interface{} {
 	out := map[string]interface{}{}
 	if m.RequestedModel != "" {
 		out["requested_model"] = m.RequestedModel
+	}
+	if m.ServedModel != "" {
+		out["served_model"] = m.ServedModel
 	}
 	if m.RequestID != "" {
 		out["request_id"] = m.RequestID
@@ -289,11 +297,14 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var scopedKeyID, workspaceID, status string
+	var scopedKeyID, workspaceID, status, reqModel, reqID string
 	var heldLXC int64
+	// requested_model + request_id come from the reservation ROW — the SINGLE source the hold wrote, so the
+	// settle's rows stamp exactly what the hold row shows (never a second in-memory copy that could drift).
 	err = tx.QueryRow(ctx,
-		`SELECT scoped_key_id, workspace_id, held_ulxc, status FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
-		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status)
+		`SELECT scoped_key_id, workspace_id, held_ulxc, status, COALESCE(requested_model, ''), COALESCE(request_id, '')
+		   FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
+		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status, &reqModel, &reqID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("economy: settle unknown reservation %q", reservationID)
 	}
@@ -315,12 +326,17 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		return 0, err
 	}
 	afterRelease := bal + heldLXC
-	if err := insertLXCLedger(ctx, tx, workspaceID, heldLXC, afterRelease, LXCTypeReservationRelease, "reservation settle: release hold", meta.toMap()); err != nil {
+	// The release (undo the hold) is a refund — nothing served, so requested_model + request_id only.
+	if err := insertLXCLedger(ctx, tx, workspaceID, heldLXC, afterRelease, LXCTypeReservationRelease, "reservation settle: release hold",
+		AgentDebitMeta{RequestedModel: reqModel, RequestID: reqID}.toMap()); err != nil {
 		return 0, err
 	}
 	afterSpend := afterRelease - finalLXC
 	if finalLXC > 0 {
-		if err := insertLXCLedger(ctx, tx, workspaceID, -finalLXC, afterSpend, LXCTypeSpend, "reservation settle: delivered charge", meta.toMap()); err != nil {
+		// The delivered-charge spend row is self-describing: the model the customer REQUESTED (from the row)
+		// AND the model that actually SERVED (from the caller, known only post-route), plus the request_id join.
+		if err := insertLXCLedger(ctx, tx, workspaceID, -finalLXC, afterSpend, LXCTypeSpend, "reservation settle: delivered charge",
+			AgentDebitMeta{RequestedModel: reqModel, ServedModel: meta.ServedModel, RequestID: reqID}.toMap()); err != nil {
 			return 0, err
 		}
 	}
@@ -361,11 +377,14 @@ func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationI
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var scopedKeyID, workspaceID, status string
+	var scopedKeyID, workspaceID, status, reqModel, reqID string
 	var heldLXC int64
+	// requested_model + request_id from the reservation ROW so the release row (in-band OR stranded-swept —
+	// both flow through here) stamps the same model/id the hold recorded. A refund serves nothing → no served_model.
 	err = tx.QueryRow(ctx,
-		`SELECT scoped_key_id, workspace_id, held_ulxc, status FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
-		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status)
+		`SELECT scoped_key_id, workspace_id, held_ulxc, status, COALESCE(requested_model, ''), COALESCE(request_id, '')
+		   FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
+		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status, &reqModel, &reqID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // nothing to release — a double-sweep or a never-held id is a safe no-op
 	}
@@ -385,7 +404,8 @@ func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationI
 	if reason != "" {
 		desc = "reservation release: " + reason
 	}
-	if err := insertLXCLedger(ctx, tx, workspaceID, heldLXC, afterRelease, LXCTypeReservationRelease, desc, nil); err != nil {
+	if err := insertLXCLedger(ctx, tx, workspaceID, heldLXC, afterRelease, LXCTypeReservationRelease, desc,
+		AgentDebitMeta{RequestedModel: reqModel, RequestID: reqID}.toMap()); err != nil {
 		return err
 	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, afterRelease, minted, wsSpent-heldLXC); err != nil {

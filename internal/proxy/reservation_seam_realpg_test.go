@@ -86,7 +86,7 @@ func TestSettleChargesDeliveredNotHeld(t *testing.T) {
 	if b := seamBalance(t, store, "ws"); b >= 100_000_000 {
 		t.Fatalf("hold did not debit: balance %d", b)
 	}
-	p.settleReservation(rctx, 0.012) // delivered $0.012
+	p.settleReservation(rctx, 0.012, "gpt-4o") // delivered $0.012
 	if b := seamBalance(t, store, "ws"); b != 100_000_000-usdToULXC(0.012) {
 		t.Fatalf("balance after settle = %d, want %d (charged the DELIVERED 0.012, not the hold)", b, 100_000_000-usdToULXC(0.012))
 	}
@@ -101,7 +101,7 @@ func TestCheapRouteChargesCheapCost(t *testing.T) {
 	rctx, _ := p.agentReserveBlocks(ctx, "agent", "ws", "gpt-4o", "prompt", "rq1", 4096)
 	// Served by gpt-4o-mini at, say, 1000 in / 500 out — its ACTUAL cost.
 	served := 0.15*1000/1e6 + 0.60*500/1e6 // gpt-4o-mini pricing
-	p.settleReservation(rctx, served)
+	p.settleReservation(rctx, served, "gpt-4o-mini")
 	if b := seamBalance(t, store, "ws"); b != 100_000_000-usdToULXC(served) {
 		t.Fatalf("balance = %d, want %d (charged the cheap served cost)", b, 100_000_000-usdToULXC(served))
 	}
@@ -182,8 +182,8 @@ func TestAndrewBug_ServedCostDissolvesPromptVariance(t *testing.T) {
 	}
 	// Same DELIVERED cost → identical charge.
 	const delivered = 0.003
-	p.settleReservation(rA, delivered)
-	p.settleReservation(rB, delivered)
+	p.settleReservation(rA, delivered, "gpt-4o")
+	p.settleReservation(rB, delivered, "gpt-4o")
 	bA, bB := seamBalance(t, store, "wsA"), seamBalance(t, store, "wsB")
 	if bA != bB {
 		t.Fatalf("byte-different pre-serve prompts, SAME served cost → charges differ: wsA=%d wsB=%d", bA, bB)
