@@ -151,7 +151,33 @@ const updateLoggingPolicySQL = `UPDATE workspaces
 SET logging_policy = $2, updated_at = NOW()
 WHERE id = $1`
 
-func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
+// RegisterOption customises RegisterWorkspace. It is variadic so the existing call sites — which
+// express no pooling preference and want the default — keep compiling and keep their behaviour.
+type RegisterOption func(*registerOptions)
+
+type registerOptions struct {
+	// cachePoolable is the caller's EXPLICIT cross-tenant-pooling choice, or nil when the caller
+	// said nothing at all. nil and false are deliberately distinct: a plain bool cannot tell an
+	// omitted body field from a declined one, which is exactly why declining at creation used to be
+	// inexpressible (the zero value was indistinguishable from silence, so the default won).
+	cachePoolable *bool
+}
+
+// WithCachePoolableChoice records an EXPLICIT cross-tenant-pooling choice made at registration.
+//
+// It applies ONLY when the workspace is NEW. An existing workspace's consent is never changed by
+// registration — not by an omitted field, and not by an explicit true. cache_poolable is SYMMETRIC
+// (participating donates this tenant's responses to others), so consent is granted at creation or
+// deliberately via SetCachePoolable, never re-granted by a blind re-POST.
+func WithCachePoolableChoice(poolable bool) RegisterOption {
+	return func(o *registerOptions) { o.cachePoolable = &poolable }
+}
+
+func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...RegisterOption) error {
+	var o registerOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if ws.ID == "" {
 		return errors.New("workspace: ID required")
 	}
@@ -188,17 +214,22 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	// Cross-tenant cache pooling (cache_poolable) defaults ON for a NEW workspace,
 	// but its consent is NEVER changed retroactively. The flag is SYMMETRIC — one
 	// column gates both benefiting from and contributing to the shared cache — so a
-	// blind re-POST must not silently (re-)pool an existing tenant's content. A new
-	// workspace gets true (mirroring the 0106 column DEFAULT, since this INSERT
-	// always supplies the column); an existing one keeps whatever it already had.
-	// (bool can't distinguish an omitted body field from an explicit false, so an
-	// at-registration opt-out isn't expressible here — a new workspace that wants
-	// privacy opts out afterward via SetCachePoolable. The DB upsert preserves the
-	// existing value too, guarding a replica whose cache doesn't yet hold the row.)
+	// blind re-POST must not silently (re-)pool an existing tenant's content.
+	//
+	// Precedence, in order:
+	//   EXISTING workspace -> whatever it already had, always. Neither an omitted field nor an
+	//     explicit true re-grants consent; the ON CONFLICT clause enforces the same thing in the DB.
+	//   NEW + explicit choice (WithCachePoolableChoice) -> honour it, including a DECLINE. This is
+	//     what lets a privacy-conscious tenant say no AT creation rather than discovering the
+	//     default afterwards and calling SetCachePoolable.
+	//   NEW + silence -> true, mirroring the 0106 column DEFAULT (this INSERT always supplies the
+	//     column, so the app default and the catalog default must agree).
 	stored := ws
 	m.mu.Lock()
 	if existing, ok := m.workspaces[ws.ID]; ok {
 		stored.CachePoolable = existing.CachePoolable
+	} else if o.cachePoolable != nil {
+		stored.CachePoolable = *o.cachePoolable
 	} else {
 		stored.CachePoolable = true
 	}
