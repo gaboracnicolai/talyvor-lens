@@ -137,21 +137,52 @@ ON CONFLICT (id) DO UPDATE SET
   active                 = EXCLUDED.active,
   logging_policy         = EXCLUDED.logging_policy,
   distill_policy         = EXCLUDED.distill_policy,
-  -- cache_poolable is DELIBERATELY not updated on conflict: a re-registration must
-  -- never change a workspace's cross-tenant pooling consent (symmetric flag; can't
-  -- be granted/revoked retroactively). The stored value is preserved across the
-  -- upsert; SetCachePoolable is the only path that changes it. This also guards a
-  -- replica whose in-memory cache doesn't yet hold the row from re-defaulting it.
-  distill_poolable       = EXCLUDED.distill_poolable,
-  cost_optimize_routing  = EXCLUDED.cost_optimize_routing,
+  -- The three CONSENT columns — cache_poolable, distill_poolable, cost_optimize_routing
+  -- — are DELIBERATELY absent from this list. Registration CREATES consent; it never
+  -- CHANGES it. Leaving them here moved them in BOTH directions on a blind re-POST:
+  -- an omitted body field decodes to Go's zero value and SILENTLY REVOKED an opt-in,
+  -- and an explicit true RETROACTIVELY GRANTED consent the tenant never gave. Neither
+  -- is the caller's to do: cache_poolable and distill_poolable share this tenant's
+  -- content with OTHER tenants (distill_poolable covers document-derived artifacts,
+  -- the more sensitive disclosure), and cost_optimize_routing is permission to serve
+  -- a cheaper model than the one asked for. The dedicated setters — SetCachePoolable,
+  -- SetDistillPoolable, SetCostOptimizeRouting — are the only paths that change them.
+  -- Preserving them here also guards a replica whose in-memory cache doesn't yet hold
+  -- the row from writing a default over consent it never knew about.
   updated_at             = NOW()
-RETURNING cache_poolable`
+RETURNING cache_poolable, distill_poolable, cost_optimize_routing`
 
 const updateLoggingPolicySQL = `UPDATE workspaces
 SET logging_policy = $2, updated_at = NOW()
 WHERE id = $1`
 
-func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
+// RegisterOption customises RegisterWorkspace. It is variadic so the existing call sites — which
+// express no pooling preference and want the default — keep compiling and keep their behaviour.
+type RegisterOption func(*registerOptions)
+
+type registerOptions struct {
+	// cachePoolable is the caller's EXPLICIT cross-tenant-pooling choice, or nil when the caller
+	// said nothing at all. nil and false are deliberately distinct: a plain bool cannot tell an
+	// omitted body field from a declined one, which is exactly why declining at creation used to be
+	// inexpressible (the zero value was indistinguishable from silence, so the default won).
+	cachePoolable *bool
+}
+
+// WithCachePoolableChoice records an EXPLICIT cross-tenant-pooling choice made at registration.
+//
+// It applies ONLY when the workspace is NEW. An existing workspace's consent is never changed by
+// registration — not by an omitted field, and not by an explicit true. cache_poolable is SYMMETRIC
+// (participating donates this tenant's responses to others), so consent is granted at creation or
+// deliberately via SetCachePoolable, never re-granted by a blind re-POST.
+func WithCachePoolableChoice(poolable bool) RegisterOption {
+	return func(o *registerOptions) { o.cachePoolable = &poolable }
+}
+
+func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...RegisterOption) error {
+	var o registerOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if ws.ID == "" {
 		return errors.New("workspace: ID required")
 	}
@@ -188,43 +219,60 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace) error {
 	// Cross-tenant cache pooling (cache_poolable) defaults ON for a NEW workspace,
 	// but its consent is NEVER changed retroactively. The flag is SYMMETRIC — one
 	// column gates both benefiting from and contributing to the shared cache — so a
-	// blind re-POST must not silently (re-)pool an existing tenant's content. A new
-	// workspace gets true (mirroring the 0106 column DEFAULT, since this INSERT
-	// always supplies the column); an existing one keeps whatever it already had.
-	// (bool can't distinguish an omitted body field from an explicit false, so an
-	// at-registration opt-out isn't expressible here — a new workspace that wants
-	// privacy opts out afterward via SetCachePoolable. The DB upsert preserves the
-	// existing value too, guarding a replica whose cache doesn't yet hold the row.)
+	// blind re-POST must not silently (re-)pool an existing tenant's content.
+	//
+	// Precedence, in order:
+	//   EXISTING workspace -> whatever it already had, for ALL THREE consent flags. Neither an
+	//     omitted field nor an explicit value changes them; the ON CONFLICT clause enforces the
+	//     same thing in the DB, and RETURNING reconciles this cache to it below.
+	//   NEW + explicit choice (WithCachePoolableChoice) -> honour it, including a DECLINE. This is
+	//     what lets a privacy-conscious tenant say no AT creation rather than discovering the
+	//     default afterwards and calling SetCachePoolable.
+	//   NEW + silence -> true, mirroring the 0106 column DEFAULT (this INSERT always supplies the
+	//     column, so the app default and the catalog default must agree).
 	stored := ws
 	m.mu.Lock()
 	if existing, ok := m.workspaces[ws.ID]; ok {
 		stored.CachePoolable = existing.CachePoolable
+		stored.DistillPoolable = existing.DistillPoolable
+		stored.CostOptimizeRouting = existing.CostOptimizeRouting
+	} else if o.cachePoolable != nil {
+		stored.CachePoolable = *o.cachePoolable
 	} else {
 		stored.CachePoolable = true
 	}
+	// A NEW workspace's distill_poolable / cost_optimize_routing need no equivalent of the
+	// WithCachePoolableChoice dance: both default to FALSE, which coincides with Go's zero value, so
+	// the decoded body value already expresses the whole choice — silence and an explicit false mean
+	// the same thing and both are correct. Only cache_poolable, whose default is TRUE, has to tell
+	// silence from a decline.
 	m.workspaces[ws.ID] = &stored
 	m.mu.Unlock()
 
 	if m.pool != nil {
-		// RETURNING gives back the cache_poolable the DB actually kept. On a new row that
-		// is the new-workspace default (true); on a conflict it is the PRESERVED existing
-		// value (the ON CONFLICT clause never overwrites it). Reconcile the in-memory flag
-		// to it so a re-registration on a replica whose cache didn't hold the row — which
-		// would otherwise apply the new default in memory — cannot re-pool an opted-out
-		// workspace even transiently. The persisted opt-out boundary holds in memory too.
-		var dbPoolable bool
+		// RETURNING gives back the consent the DB actually kept. On a new row those are the values
+		// just inserted; on a conflict they are the PRESERVED existing ones (the ON CONFLICT clause
+		// never overwrites any of the three). Reconcile the in-memory flags to them so a
+		// re-registration on a replica whose cache didn't hold the row — which would otherwise write
+		// the body's values into memory — cannot change consent even transiently. The persisted
+		// boundary holds in memory too.
+		var dbPoolable, dbDistillPoolable, dbCostOptimizeRouting bool
 		if err := m.pool.QueryRow(ctx, insertWorkspaceSQL,
 			stored.ID, stored.Name, stored.CachePrefix, stored.SpendLimitUSD,
 			stored.AllowedModels, stored.AllowedProviders, stored.MaxTokensPerRequest,
 			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active, string(stored.LoggingPolicy),
 			string(stored.DistillPolicy), stored.CachePoolable, stored.DistillPoolable, stored.CostOptimizeRouting,
-		).Scan(&dbPoolable); err != nil {
+		).Scan(&dbPoolable, &dbDistillPoolable, &dbCostOptimizeRouting); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
 		}
-		if dbPoolable != stored.CachePoolable {
+		if dbPoolable != stored.CachePoolable ||
+			dbDistillPoolable != stored.DistillPoolable ||
+			dbCostOptimizeRouting != stored.CostOptimizeRouting {
 			m.mu.Lock()
 			if cur, ok := m.workspaces[ws.ID]; ok {
 				cur.CachePoolable = dbPoolable
+				cur.DistillPoolable = dbDistillPoolable
+				cur.CostOptimizeRouting = dbCostOptimizeRouting
 			}
 			m.mu.Unlock()
 		}

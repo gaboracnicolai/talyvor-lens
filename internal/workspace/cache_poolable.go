@@ -33,6 +33,25 @@ func (m *Manager) GetCachePoolable(wsID string) bool {
 	return false
 }
 
+// CachePoolableConsent reports the pooling consent RECORDED for a workspace, and whether the
+// workspace is known here at all.
+//
+// It is deliberately NOT GetCachePoolable. That one is the hot-path serve gate and fails closed to
+// false while the cache is stale, so it answers "is pooling active right now" — the wrong question
+// when reporting what we recorded for a tenant. Answering a registration with the stale-clamped
+// value would tell the caller "not pooling" for a workspace whose stored consent is true, and
+// pooling would then switch on silently once staleness cleared — the exact silence this reporting
+// exists to remove.
+func (m *Manager) CachePoolableConsent(wsID string) (poolable bool, known bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ws, ok := m.workspaces[wsID]
+	if !ok {
+		return false, false
+	}
+	return ws.CachePoolable, true
+}
+
 // SetCachePoolable updates the in-memory flag and the DB row; the change takes
 // effect on the very next request. Errors when the workspace isn't registered.
 func (m *Manager) SetCachePoolable(ctx context.Context, wsID string, poolable bool) error {
