@@ -44,7 +44,23 @@ Most of the time we're in different code and won't collide. Collisions happen at
 
 4. **`internal/auth` — NEW SEAM.** Collaborator touched auth code as part of JWT/security hardening (#53, #64–#66). **Sync before either side next edits internal/auth, internal/auth/manager.go, or internal/auth/middleware.go.**
 
-5. **`internal/dashboard` — NEW SEAM.** Collaborator hardened XSS sinks in dashboard code (#49, #66) as part of ISO 27001 A.14 work. **Sync before Nicolai next edits internal/dashboard/ui.go or token_dashboard.go.**
+5. **`internal/dashboard` — SEAM CLOSED (the files it named no longer exist).** The seam
+   guarded `internal/dashboard/ui.go` and `token_dashboard.go`, which the collaborator had
+   XSS-hardened. **Both files were deleted** when the built-in dashboard was retired for a
+   single static status page — the pages fetched authenticated endpoints with no credential
+   attached and no way to supply one, so on any deployment they rendered 401s as em-dashes.
+   The hardening is preserved in history and is not regressed: deleting a render path is
+   strictly stronger than escaping into it, and the surviving page interpolates exactly one
+   value (the build version, escaped).
+
+   For the record, since the attribution here was imprecise: the dashboard XSS work was
+   `f7cb9ba` (#49, `escapeHTML` in the `apply*` render functions — `ui.go` only) and
+   `4e5d16a` ("Security hardening: XSS, check constraints, input length caps" — `ui.go` **and**
+   `token_dashboard.go`). `db42f01` (#66) hardened XSS elsewhere (mining, `main.go`) and
+   **never touched `internal/dashboard`**.
+
+   Nothing to sync before editing `internal/dashboard` now; it is three small files
+   (`handler.go`, `status_page.go`, `status_test.go`) with no shared history in flight.
 
 6. **`internal/distill` — existing seam (since #45).** Still applies: sync before building in it.
 

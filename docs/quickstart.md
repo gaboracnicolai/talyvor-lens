@@ -151,16 +151,24 @@ curl http://localhost:8080/v1/proxy/openai/v1/chat/completions \
 
 Lens forwards the request to OpenAI using `LENS_OPENAI_API_KEY` from your `.env`, caches the response, scores it, and records the cost. The response is OpenAI-format unchanged.
 
-## Step 6 — View your dashboard
+## Step 6 — See what it recorded
 
-Open `http://localhost:8080/dashboard` in a browser. You'll see:
+Lens is an API and serves no account UI, so read it with your key:
 
-- Spend summary (your one test request)
-- Cache hit rate (currently 0% — one request, one miss)
-- Workspace activity
-- Anomaly scan (empty — no anomalies yet)
+```bash
+curl -H "Authorization: Bearer $LENS_KEY" \
+  http://localhost:8080/v1/api/usage
+```
 
-Send the same request again. Refresh the dashboard. Cache hit rate jumps to 50% — the second request was served from the exact cache, no upstream API call.
+You'll see one request, and a cache hit rate of 0% — one request, one miss.
+
+Send the same request again and re-run the command: the hit rate jumps to 50%, because
+the second request was served from the exact cache with no upstream API call.
+
+For a browser view, run the dashboard app ([app.talyvor.com](https://app.talyvor.com), or
+self-host `talyvor-suite`) — it holds your key server-side and calls these endpoints for
+you. `http://localhost:8080/` serves only a small service page, and `/status` component
+health.
 
 ## Step 7 — Check your savings
 

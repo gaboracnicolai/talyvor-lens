@@ -83,7 +83,7 @@ The `/oai/*` and `/anthropic/*` paths are first-class routes — they're not a d
 | Helicone-User-Id | `X-Talyvor-Session` |
 | Helicone-Cache-Enabled | On by default |
 | Helicone-Retry-Enabled | On by default with exponential backoff |
-| Cost tracking dashboard | `/v1/api/spend/summary`, `/dashboard` |
+| Cost tracking dashboard | `/v1/api/spend/summary` (browser view: the dashboard app) |
 | Request logs export | `/v1/audit/export?format=json\|csv\|ndjson` |
 | Custom properties | `X-Talyvor-Feature`, `X-Talyvor-Team` |
 | Rate limiting | Per-key + per-workspace via `/v1/api/keys/pool` |
@@ -110,7 +110,7 @@ The `/oai/*` and `/anthropic/*` paths are first-class routes — they're not a d
 1. **Stand up Lens** alongside Helicone (no traffic yet). See the [main README](../README.md) for `docker compose up` or systemd setup.
 2. **Issue a Talyvor key** via `POST /v1/api/keys`.
 3. **Flip one client's `base_url`** to the Lens-compatible `/oai/v1` path. Leave the `Helicone-Auth` header — the compat layer handles it.
-4. **Verify** the request appears in `/dashboard` → Spend.
+4. **Verify** the request appears in `/v1/api/spend/summary`.
 5. **Roll out** the URL flip to remaining clients.
 6. **Optional** — over time, switch to the native `LensClient` SDK or the `/v1/proxy/openai/*` URLs to drop the compat overhead (it's microseconds, but the headers get cleaner).
 

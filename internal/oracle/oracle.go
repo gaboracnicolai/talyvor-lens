@@ -8,7 +8,7 @@
 //   - CreateTaskFromRequest: deterministic 1% sampler the proxy
 //     calls after each request to feed the annotation queue.
 //   - GetOracleStats: the per-tenant + global rollup that the
-//     /dashboard/oracle page renders.
+//     the public /v1/oracle/stats endpoint returns.
 package oracle
 
 import (
@@ -42,7 +42,8 @@ type pgxDB interface {
 
 // ─── types ───────────────────────────────────────
 
-// OracleStats backs the /dashboard/oracle page.
+// OracleStats backs the public /v1/oracle/stats endpoint. (It used to back a
+// /dashboard/oracle browser page; that page was retired — see internal/dashboard.)
 type OracleStats struct {
 	PendingTasks      int     `json:"pending_tasks"`
 	CompletedTasks    int     `json:"completed_tasks"`
@@ -146,7 +147,7 @@ func (o *Oracle) shouldSample(requestID string) bool {
 // ─── GetOracleStats ──────────────────────────────
 
 // GetOracleStats reads the global oracle queue + earnings
-// rollup. The /dashboard/oracle page calls this on load to
+// rollup. The public /v1/oracle/stats endpoint calls this to
 // render the dashboard counters.
 func (o *Oracle) GetOracleStats(ctx context.Context) (*OracleStats, error) {
 	stats := &OracleStats{}
