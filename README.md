@@ -1,6 +1,11 @@
 # Talyvor Lens
 
-**AI token intelligence proxy — cut your LLM costs 60–80% by sitting between your app and the providers you already use.**
+**AI token intelligence proxy — sit between your app and the providers you already use, and pay for fewer provider calls.**
+
+Lens cuts spend by not making calls: an exact and semantic response cache, cross-tenant
+reuse of cached answers, cross-provider routing, and document distillation. **We do not
+publish a headline savings percentage, because we have not finished measuring one** — see
+[What we can and cannot tell you about savings](#what-we-can-and-cannot-tell-you-about-savings).
 
 Drop-in replacement for OpenAI, Anthropic, Google Gemini, AWS Bedrock, Mistral, Groq, and vLLM. Change one URL. Get caching, routing, attribution, guardrails, audit, and fallback.
 
@@ -25,7 +30,61 @@ Lens is an API. The dashboard is a separate app ([app.talyvor.com](https://app.t
 | Cost anomaly detection | ✅ | ❌ | ❌ |
 | AWS Bedrock (SigV4) | ✅ | ✅ | ❌ |
 
-Numbers from public benchmarks and vendor docs. Reproduce with `make bench`.
+Comparison from public benchmarks and vendor docs. `make bench` reproduces the *latency and
+allocation* figures on this page (it benchmarks the proxy against a mocked upstream); it does
+not measure cost.
+
+## What we can and cannot tell you about savings
+
+Every gateway in this category advertises a savings range. Ours used to say 60–80%. Nothing in
+this repository computes that number, so it is gone rather than restated.
+
+**The mechanisms are real and you can inspect each one:**
+
+| Mechanism | What it avoids | Where |
+|---|---|---|
+| Exact cache (Redis) | The whole call, on a repeat request | `internal/cache` |
+| Semantic cache (pgvector) | The whole call, on a near-duplicate | `internal/cache/semantic.go` |
+| Cross-tenant pooled reuse | The whole call, using another workspace's cached answer (opt-in, both sides) | `internal/cache_pooling` |
+| Cross-provider routing | The price difference between a model you asked for and a cheaper one that measured equal on your traffic (opt-in per workspace) | `internal/routing` |
+| Document distillation | Re-sending the same document as raw tokens | `internal/distill` |
+
+**What we will not do is multiply a cache-hit rate by your bill and call it a saving.** How much
+you actually save depends on how repetitive your traffic is and how well you were already
+choosing models — and for a workload that is already tightly specified, the honest answer for
+some of these mechanisms is close to zero.
+
+### The baseline has to be an already-optimised one
+
+This is the part most savings claims get wrong, including ours. **Providers now discount cached
+input by roughly 90%** (Anthropic bills a cache read at 0.1× input; OpenAI at roughly 0.5× for
+the GPT-4o generation). That discount is free — you get it whether or not Lens is in the path.
+
+A percentage measured against naive, full-price, no-caching spend therefore **counts a discount
+you already had as if we produced it**. Any figure we eventually publish will be measured against
+a baseline that already includes provider-side caching.
+
+Lens's own cost basis already works this way: `alerts.CostUSDDetailed` prices cached-input and
+cache-write tokens at the provider's real multipliers (`catalog.withCacheRates`), and the rates
+are deliberately set on the conservative side — where a provider's discount is steeper than we
+model, we under-state it, so a savings figure derived from this basis errs low.
+
+### Measuring it on your own traffic
+
+The routing path records a per-request counterfactual: what the call cost, and what the model you
+originally asked for would have cost. Admins can read the aggregate:
+
+```
+GET /v1/admin/routing-decisions/summary
+```
+
+It returns request volume, how often routing overrode your model choice, and the estimated cost
+delta. **It is an estimate, not money** — the counterfactual call never happened, so its price is
+modelled, not billed. Treat it as the shape of the effect on your traffic, not as an invoice.
+
+A measured, published figure — against an already-optimised baseline, on real customer workloads
+— is intended. It is not in this README because it does not exist yet, and the point of this
+section is that a number nobody computed should not be the first thing you read.
 
 ## Quick start (2 commands)
 
@@ -139,25 +198,75 @@ Full index at [`docs/README.md`](docs/README.md). Highlights:
 - [Migration guides](docs/README.md#migration-guides)
 - [Benchmarks](benchmarks/README.md)
 
+## What is on by default
+
+A self-hoster's most reasonable question, and one this README previously answered wrongly.
+
+| Switch | Default | Effect |
+|---|---|---|
+| `LENS_ECONOMY_ENABLED` | **true** | Master economy switch. Registers the economy route surface and permits mint/earn/stake/marketplace state. Set `false` for a pure fiat-SaaS deployment — it then force-offs every economy gate regardless of their own env values. |
+| Pool-royalty / distill / pattern mints | **on** (under the master switch) | The three live traffic mints, default-on for the closed test. |
+| `LENS_ANNOTATION_MINTING_ENABLED` | false | Annotation mint — spendable-immediate, so explicit opt-in. |
+| `LENS_TRUSTFUL_COMPUTE_MINT_ENABLED` | false | Legacy receipt-less compute mint. An unprotected mint path is opt-in, never on by accident. |
+| `LENS_MINT_RATE_CAP_LENS_24H` | 1000 | Per-workspace ceiling on minted LENS across **all** mint types in a rolling 24h. `0` disables. |
+| `LENS_BILLING_ENABLED` | false | Stripe billing / LXC purchase. Off means no one can buy LXC on this deployment. |
+
+**The important consequence:** economy-on does *not* mean a fresh workspace earns anything. Every
+mint-type credit passes the **verified-to-earn** gate below, which requires a completed real-money
+LXC purchase or an admin vouch. A default deployment has the economy *armed* and mints *nothing*
+until a workspace is verified. That is a meaningfully different statement from "off by default",
+and the previous wording obscured it.
+
 ## Architecture
 
 Single Go binary, no Python or Node runtime. PostgreSQL (with pgvector) for state, Redis for the hot exact cache + rate-limit ledger, NATS for the learner / anomaly event bus.
 
-Test coverage: 37 Go packages, all green. Python SDK: 15/15. TypeScript SDK: 15/15.
+Test coverage: 88 of 92 Go packages carry tests, all green in CI (real-Postgres, `-race`). The
+count in this line was stale at 37 for some time — it is now derived from the tree, so treat it
+as accurate at the commit you are reading and re-derive with
+`find . -name '*_test.go' | sed 's|/[^/]*$||' | sort -u | wc -l` if it matters to you.
 
 ## LENS Token Economy
 
-LENS is a compute-backed utility token: **1 LENS = $0.10 of AI compute credit**. You earn LENS by contributing infrastructure to the network and spend it on LLM API calls through Talyvor Lens (with a 20% discount vs. paying fiat).
+LENS is a compute-backed utility token. You earn it by contributing infrastructure to the
+network. There are **two units** and they behave differently — the distinction matters before
+any number below makes sense:
+
+- **LXC** is the billing credit, and its peg is **fixed**: 1 LXC = $0.10 of compute credit,
+  never computed or adjusted (`economy.LXCUSDValue`). This is what inference is billed against.
+- **LENS** is the mined token. `1 LENS = $0.10` is its **published nominal** peg
+  (`marketplace.LENSPerUSD`), but LENS does not convert to LXC at a fixed rate: the conversion
+  runs through a **floating** rate engine (`economy.RateEngine.ComputeFairRate`) derived from
+  supply and backing, plus a 5% spread, bounded to ±10% movement per approval and floored until
+  a live marketplace price exists. **Treat $0.10/LENS as a unit of account, not a redemption
+  guarantee.**
+
+Everything in this section is gated on the economy master switch (see
+[What is on by default](#what-is-on-by-default)), and staking or trading requires a workspace
+that already holds LENS.
 
 ### Mining Types
 
 | # | Track | What you contribute | Earn rate |
 |---|---|---|---|
-| 1 | **Cache mining** | Shared cache hits served to other workspaces | 0.001–0.010 LENS / hit |
+| 1 | **Pool royalty** | A cached answer of yours reused by *another* workspace (opt-in both sides) | `s` × the provider cost that call avoided; `s` = 0.5 by default (`LENS_POOL_ROYALTY_SHARE`) |
 | 2 | **Compute mining** | GPU inference capacity (Ollama / vLLM / llama.cpp) | 0.025–0.150 LENS / 1k tokens (by GPU class) |
 | 3 | **Embedding mining** | CPU-friendly embedding generation | 0.002–0.004 LENS / 1k embeddings |
 | 4 | **Quality oracle** | Stake-gated annotation of LLM responses | 0.100 LENS / annotation + agreement bonus |
-| 5 | **Pattern mining** | Anonymised routing patterns (opt-in) | Rarity-weighted: 0.001 LENS × (1 + rarity × 4) [+ unique bonus] |
+| 5 | **Pattern mining** | Anonymised routing patterns (opt-in) | 0.001 LENS × (1 + rarity × 4), but see the reachable ceiling below |
+
+**Row 1 changed, and the old row was wrong.** This table used to list a *cache-mining* track at
+"0.001–0.010 LENS / hit". That track (`CacheMiner`) was **retired**, not renamed: it duplicated
+pool-royalty at the same serve point (and would have double-minted if both were wired), and its
+one unique path — minting for a hit on your *own* cache — is self-inflation, since no second
+party received anything. The cache moat is real; it is delivered by pool-royalty, which pays only
+when the value actually goes to someone else. The `talyvor-cachenode` binary is unaffected: you
+still contribute cache capacity with it, you now earn through row 1.
+
+**Pattern mining's ceiling is 2×, not 5×.** The formula reads as though rarity 1.0 pays a 5×
+multiplier. It cannot: the anti-gaming corroboration floor caps reachable rarity at 0.25, so the
+reachable ceiling is `1 + 0.25×4 = 2.0`. The public `/v1/tokens/rates` API was corrected to
+advertise the reachable 2× some time ago; this table was not, until now.
 
 ### Node Software
 
@@ -170,17 +279,50 @@ LENS is a compute-backed utility token: **1 LENS = $0.10 of AI compute credit**.
 
 Build all four: `make binaries` (drops them into `./bin/`).
 
-### Token Economics
+### Token Economics — built and wired
 
-- **1 LENS = $0.10 USD** (compute-backed peg)
-- **Burn mechanism**: spend LENS for a 20% discount on AI calls (burned LENS leaves circulation forever)
-- **Staking**: 5% / 12% / 20% APY for 30 / 90 / 180-day locks
-- **Marketplace**: peer-to-peer LENS trading with a 5% platform fee
-- **Quality oracle stake**: 10 LENS minimum to annotate (Sybil-resistant)
+Each of these is implemented, wired to a route, and gated on the economy master switch. All of
+them additionally need a workspace that already holds LENS.
+
+- **Staking**: 5% / 12% / 20% APY for 30 / 90 / 180-day locks. Rates are hardcoded
+  (`economy.APY30/APY90/APY180`) so a misconfigured deployment cannot pay an arbitrary yield;
+  read via `/v1/workspaces/{ws}/tokens/stakes`.
+- **Marketplace**: peer-to-peer LENS trading with a **5% platform fee**
+  (`economy.TalyvorFeeRate = 0.05`) — seller receives 95%. Listings at
+  `/v1/marketplace/listings`.
+- **Quality oracle stake**: **10 LENS** minimum lockup before an annotation is accepted
+  (`mining.StakeRequirement`), Sybil-resistant.
+- **LXC peg**: 1 LXC = $0.10, fixed (see above).
+
+### Token Economics — roadmap, not built
+
+**These are deliberate future work for the agent-service marketplace**, where agents transact in
+LENS with each other directly rather than a human paying a fiat invoice. They are listed here so
+they are not mistaken for shipped features — and so nobody deletes them later as dead weight,
+because the burn primitive is a real, tested part of the eventual design.
+
+- **LENS-burn discount — NOT BUILT.** The intent is that spending LENS on inference costs less
+  than paying fiat, with the burned LENS leaving circulation permanently. **No discount
+  multiplier exists anywhere in the codebase today**; the only trace is a comment in
+  `economy/marketplace.go` naming the future path. Paying with LENS currently gets you no
+  discount, because there is no LENS-payment path for inference at all.
+- **Burn in circulation — PRIMITIVE ONLY.** `mining.LedgerStore.Burn` is implemented and tested,
+  and `GetTotalBurned` is wired into the economy-stats readout — but **it has no production
+  caller**. Nothing in a running Lens ever burns LENS, so total-burned reads zero and will keep
+  reading zero until the discount path above exists. The primitive is kept deliberately: it is
+  the supply-side half of the burn-and-mint design the marketplace needs.
+
+Why they are not simply deleted: the agent marketplace is the reason the token is a token rather
+than a loyalty-points balance. Removing the burn machinery would mean rebuilding it, and the
+tested primitive is the cheap half.
 
 ### Sybil resistance (verified-to-earn)
 
-The token economy ships **dark** (off by default). Before it can be flipped public, the **U6 Sybil floor** ensures value never mints to a free, duplicable identity:
+**Correction:** this section used to say the token economy "ships dark (off by default)". It does
+not. `LENS_ECONOMY_ENABLED` **defaults TRUE** (`config.go`: `c.EconomyEnabled = true`, explicit
+opt-out), and three traffic mints — pool-royalty, distill and pattern — are default-on under it.
+What actually keeps a fresh deployment from minting value is not the master switch but the **U6
+Sybil floor** below, which is wired unconditionally and which the master switch cannot lift:
 
 - **Verified-to-earn gate.** A workspace may mint / accrue royalty only when it is **verified-to-earn**: it has a **completed real-money LXC purchase** (derived at read time) OR an admin-set `earn_verified` flag (the enterprise / self-host vouch). Refunded / anomalous purchases do **not** count (closes the buy→refund→stay-verified loop). The gate is enforced at the **ledger chokepoint** (`applyTx` + `heldInner`): every mint-type credit — cache, compute, embedding, annotation, pattern, PoVI receipt, and the pool-royalty held mint — passes through it; conservation moves (marketplace, unstake, LENS→LXC convert) are never gated. The gate is wired **unconditionally** — a safety restriction the economy master-switch cannot lift.
 - **Idempotent mints.** The previously-unprotected compute / cache / embedding tracks now claim a `(request_id, workspace_id, mint_type)` row before crediting (the pattern track's proven shape). `request_id` must be **server-derived** work-product content; an empty id mints nothing.

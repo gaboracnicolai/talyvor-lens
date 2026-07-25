@@ -71,7 +71,7 @@ Notes: LiteLLM "RPS struggles past ~2,000" and "memory under load can exceed 8 G
 
 ## What you gain on day one
 
-- **Semantic cache hit rate** on FAQ / support-bot workloads typically reaches 60–80%. That's a direct reduction in upstream API spend the first hour Lens is live.
+- **Semantic caching** catches near-duplicate prompts that an exact cache misses, which is a direct reduction in upstream calls on repetitive workloads (FAQ / support-bot shapes benefit most). We do not publish a hit-rate figure: we have not measured one across real customer traffic, and the honest number depends entirely on how repetitive yours is. Read yours off `/v1/api/usage` once you are running.
 - **Quality scoring** stops you serving low-quality responses from cache.
 - **MCP server** opens up agent-framework integrations that LiteLLM doesn't surface.
 - **Audit export** gives SIEM ingestion an obvious answer — `NDJSON` over a long-poll URL — without bolting on a sidecar.

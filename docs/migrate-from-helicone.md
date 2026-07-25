@@ -90,7 +90,7 @@ The `/oai/*` and `/anthropic/*` paths are first-class routes — they're not a d
 
 ## What Talyvor Lens adds vs Helicone
 
-- **Semantic caching** — pgvector-backed similarity matching catches near-duplicate prompts. Typical reduction in upstream API cost: 60–80% for support-bot / FAQ-shaped workloads.
+- **Semantic caching** — pgvector-backed similarity matching catches near-duplicate prompts that an exact cache misses. We do not publish a typical-reduction figure: we have not measured one across real customer traffic, and it depends entirely on how repetitive your traffic is. Read your own hit rate off `/v1/api/usage` once you are running.
 - **Model routing** — `internal/router` picks the cheapest model that can handle the prompt's complexity. Opt-in per workspace.
 - **Prompt compression** — `internal/compressor` removes redundancy from verbose prompts before they hit the LLM.
 - **Quality scoring** — pure-Go heuristics gate cache writes so a low-quality response doesn't get served to the next caller.
