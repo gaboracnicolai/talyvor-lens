@@ -131,9 +131,15 @@ func seedVictim(t *testing.T, reg *workspace.Manager, pool *pgxpool.Pool) {
 		t.Fatalf("clean victim: %v", err)
 	}
 	if err := reg.RegisterWorkspace(context.Background(), workspace.Workspace{
-		ID: wsVictim, Name: "victim", SpendLimitUSD: 100, CachePoolable: false, LoggingPolicy: workspace.LoggingFull,
+		ID: wsVictim, Name: "victim", SpendLimitUSD: 100, LoggingPolicy: workspace.LoggingFull,
 	}); err != nil {
 		t.Fatalf("seed victim: %v", err)
+	}
+	// A new workspace now DEFAULTS to cache_poolable=true (the new-workspace default); the
+	// victim here is an OPTED-OUT tenant, so establish that explicitly via the consent setter.
+	// Its false baseline is the state a cross-tenant overwrite must not be able to trample.
+	if err := reg.SetCachePoolable(context.Background(), wsVictim, false); err != nil {
+		t.Fatalf("opt victim out of pooling: %v", err)
 	}
 	if s, c, l := victimConfig(t, pool); s != 100 || c != false || l != "full" {
 		t.Fatalf("seed precondition: got %v/%v/%q, want 100/false/full", s, c, l)
@@ -167,8 +173,13 @@ func TestWorkspaceRegister_Ungated_CrossTenantOverwriteLands(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("ungated overwrite: status=%d, want 201 (the unguarded route accepts it)", w.Code)
 	}
-	if s, c, l := victimConfig(t, pool); s != 0 || c != true || l != "none" {
-		t.Fatalf("VULN NOT REPRODUCED: victim config = %v/%v/%q, want OVERWRITTEN 0/true/none — the cross-tenant write must land without the gate", s, c, l)
+	// The ungated cross-tenant write still LANDS on spend_limit and logging (the IDOR the admin
+	// gate exists to stop). cache_poolable, however, is now PRESERVED across the re-registration:
+	// a symmetric pooling consent is never flipped by an upsert (workspace.RegisterWorkspace keeps
+	// an existing row's value, and the ON CONFLICT clause does not touch cache_poolable). So the
+	// victim's opt-OUT survives even an ungated overwrite — the attack cannot force it poolable.
+	if s, c, l := victimConfig(t, pool); s != 0 || c != false || l != "none" {
+		t.Fatalf("victim config = %v/%v/%q, want 0/false/none — spend+logging OVERWRITTEN (the IDOR), cache_poolable PRESERVED (pooling consent is not flippable by re-registration)", s, c, l)
 	}
 }
 

@@ -379,6 +379,12 @@ func TestFailClosed_NeverMorePermissive(t *testing.T) {
 	mustRegisterActive(t, mA, Workspace{ID: "ws-fc-floor", Name: "w",
 		CachePoolable: false, DistillPoolable: false,
 		LoggingPolicy: LoggingNone, DistillPolicy: DistillDisabled})
+	// Registration now defaults cache_poolable=true; the "floor" is an OPTED-OUT
+	// workspace, so establish poolable=false via the consent setter (written to the
+	// DB before B loads it) — otherwise B would legitimately load poolable=true.
+	if err := mA.SetCachePoolable(context.Background(), "ws-fc-floor", false); err != nil {
+		t.Fatalf("pin floor cache_poolable=false: %v", err)
+	}
 
 	mB, clk := newFailClosedB(t, pool)
 	clk.advance(fcBound + 50*time.Millisecond) // stale beyond bound

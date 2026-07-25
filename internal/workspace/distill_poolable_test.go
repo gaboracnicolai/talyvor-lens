@@ -45,8 +45,15 @@ func TestSetDistillPoolable_InMemory(t *testing.T) {
 // never move the other.
 func TestDistillPoolable_IndependentOfCachePoolable(t *testing.T) {
 	m := New(nil)
-	_ = m.RegisterWorkspace(context.Background(), Workspace{ID: "w", Name: "W", Active: true})
-	if err := m.SetDistillPoolable(context.Background(), "w", true); err != nil {
+	ctx := context.Background()
+	_ = m.RegisterWorkspace(ctx, Workspace{ID: "w", Name: "W", Active: true})
+	// Registration now defaults cache_poolable=true; pin it to a known FALSE so
+	// this test proves distill_poolable is INDEPENDENT (setting distill must not
+	// move cache), not merely that they share a default.
+	if err := m.SetCachePoolable(ctx, "w", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetDistillPoolable(ctx, "w", true); err != nil {
 		t.Fatal(err)
 	}
 	if m.GetCachePoolable("w") {
