@@ -204,4 +204,5 @@ func TestDistillFunding_Charged10_MintsOffChargeNotAvoided_Integration(t *testin
 	}
 	if mintValueUSD != 5.0 {
 		t.Fatalf("mint value = $%v, want $5 (half of the $10 charge)", mintValueUSD)
-	}}
+	}
+}

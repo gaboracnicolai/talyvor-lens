@@ -95,10 +95,10 @@ type teeReader struct {
 }
 
 // CaptureStream returns a wrapped reader that:
-//   1. Passes every byte through unchanged.
-//   2. Forks a goroutine that scans the same bytes for SSE
-//      events, normalises them, and emits a StreamChunk per
-//      chunk + a final StreamEntry on EOF.
+//  1. Passes every byte through unchanged.
+//  2. Forks a goroutine that scans the same bytes for SSE
+//     events, normalises them, and emits a StreamChunk per
+//     chunk + a final StreamEntry on EOF.
 //
 // onChunk and onComplete may be nil if the caller only wants
 // passthrough (e.g. on a partial cache miss where capture would

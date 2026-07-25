@@ -44,7 +44,7 @@ func TestPhase4a_LiveEconomy_Acceptance(t *testing.T) {
 
 	// ── SCENARIO 1: honest cross-tenant reuse → pool-royalty HELD → examined → cleared → settles ──
 	m := NewMinter(pool, ledger, 0.5, func() bool { return true })
-	m.SetHoldbackWindow(time.Millisecond) // due ~immediately so the fail-closed sweeper can settle after clearing
+	m.SetHoldbackWindow(time.Millisecond)                         // due ~immediately so the fail-closed sweeper can settle after clearing
 	honest := seedHeldFor(t, m, ctx, "acc-honest", "opA", "reqB") // opA≠reqB, no shared identity ⇒ honest
 	if spendable("opA") != 0 {
 		t.Fatalf("honest mint must be HELD, not spendable yet")
@@ -96,7 +96,7 @@ func TestPhase4a_LiveEconomy_Acceptance(t *testing.T) {
 	pm := mining.NewPatternMiner(ledger, pool)
 	pm.SetHoldbackWindow(time.Millisecond)
 	pm.SetEarnCap(0, time.Hour) // disable earn cap so the VELOCITY guard is what withholds (isolate the guard)
-	for i := 0; i < 8; i++ {   // 8 pattern mints in the velocity window = a spike
+	for i := 0; i < 8; i++ {    // 8 pattern mints in the velocity window = a spike
 		if err := pm.RecordPattern(ctx, patternWS(i), acceptancePattern(), true, fmt.Sprintf("acc-pat-farm-%d", i)); err != nil {
 			t.Fatalf("pattern mint: %v", err)
 		}

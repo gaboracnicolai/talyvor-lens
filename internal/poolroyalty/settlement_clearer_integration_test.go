@@ -44,10 +44,10 @@ func TestSettlementClearer_ClearsExaminedCleanDue_HoldsRest_Integration(t *testi
 	pool := revokerTestPool(t)
 	ctx := context.Background()
 
-	insertHeldClaim(t, pool, "a", "wsA", time.Hour)   // examined, clean, DUE
-	insertHeldClaim(t, pool, "b", "wsB", time.Hour)   // examined, FLAGGED, due
-	insertHeldClaim(t, pool, "c", "wsC", time.Hour)   // NOT examined, due
-	insertHeldClaim(t, pool, "d", "wsD", -time.Hour)  // examined, clean, NOT due (future finalize_after)
+	insertHeldClaim(t, pool, "a", "wsA", time.Hour)  // examined, clean, DUE
+	insertHeldClaim(t, pool, "b", "wsB", time.Hour)  // examined, FLAGGED, due
+	insertHeldClaim(t, pool, "c", "wsC", time.Hour)  // NOT examined, due
+	insertHeldClaim(t, pool, "d", "wsD", -time.Hour) // examined, clean, NOT due (future finalize_after)
 
 	det := fakePartition{examined: []string{"a", "b", "d"}, flags: []RingFlag{{RequestID: "b"}}}
 	clearer := NewSettlementClearer(det, pool, "pool_royalty_mints", func() bool { return true }, time.Hour)

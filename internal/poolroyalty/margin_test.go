@@ -122,8 +122,8 @@ func TestMarginIdentity_MatchesShareArithmetic(t *testing.T) {
 		h := sampleHit()
 		h.RequestID = h.RequestID + "-" + string(rune('a'+i))
 		h.AvoidedCOGSUSD = a
-		mintedUSD := share * a                            // the contributor's share IN DOLLARS
-		mintedLENS := mintedUSD * economy.LENSPerUSD      // …stored as LENS at the $0.10 peg
+		mintedUSD := share * a                       // the contributor's share IN DOLLARS
+		mintedLENS := mintedUSD * economy.LENSPerUSD // …stored as LENS at the $0.10 peg
 		sumAvoided += a
 		sumMintedUSD += mintedUSD
 

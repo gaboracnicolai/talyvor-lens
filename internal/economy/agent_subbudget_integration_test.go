@@ -83,7 +83,10 @@ func TestAgentSpend_Idempotent_And_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _ = s.SpendLXCForAgent(ctx, "keyA", "wsA", "req-2", 5*uLXC, "task", AgentDebitMeta{}) }()
+		go func() {
+			defer wg.Done()
+			_ = s.SpendLXCForAgent(ctx, "keyA", "wsA", "req-2", 5*uLXC, "task", AgentDebitMeta{})
+		}()
 	}
 	wg.Wait()
 	if bal, spent, _ := agentState(t, s, "wsA", "keyA"); bal != 85*uLXC || spent != 15*uLXC {

@@ -70,8 +70,8 @@ func TestJob_RunOnce_ComputesFromRealH2AndKeel_RealPG(t *testing.T) {
 
 	store := NewStore(pool)
 	job := NewJob(
-		modelcapability.NewStore(pool),                                  // curveSource (H2)
-		keel.NewReader(pool),                                            // driftSource (Keel)
+		modelcapability.NewStore(pool), // curveSource (H2)
+		keel.NewReader(pool),           // driftSource (Keel)
 		fakeWorkspaces{ws: []WorkspaceModels{{WorkspaceID: "ws1", AllowedModels: []string{"A", "B", "C"}}}},
 		store,
 		func(string) float64 { return 1.0 }, // flat cost

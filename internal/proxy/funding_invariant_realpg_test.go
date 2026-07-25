@@ -127,7 +127,7 @@ func TestFundingInvariant_UnfundedPlainKey_MintsZero_Integration(t *testing.T) {
 	ctx := context.Background()
 	const consumer, contributor = "wsConsumer", "wsContributor"
 	fundLXC(t, pool, consumer, 100_000_000) // consumer HAS LXC, but a plain key never reserves against it
-	earnVerify(t, pool, contributor)         // contributor CAN earn — so a mint is blocked ONLY by the funding gate
+	earnVerify(t, pool, contributor)        // contributor CAN earn — so a mint is blocked ONLY by the funding gate
 
 	hit := pooledHitFor(consumer, contributor)
 	prompt, served := "a cross-tenant prompt", []byte("a shared cached response body")
@@ -155,7 +155,7 @@ func TestFundingInvariant_Charged10_MintsAtMost5_Integration(t *testing.T) {
 	p, store, pool := fundingProxy(t)
 	ctx := context.Background()
 	const consumer, contributor = "wsConsumer", "wsContributor"
-	const initialLXC = int64(1_000_000_000)  // $100 — comfortably covers a large hold
+	const initialLXC = int64(1_000_000_000) // $100 — comfortably covers a large hold
 	fundLXC(t, pool, consumer, initialLXC)
 	earnVerify(t, pool, contributor)
 	if err := store.SetAgentCeiling(ctx, "agent", consumer, initialLXC); err != nil { // raise the sub-budget so a large hold is allowed

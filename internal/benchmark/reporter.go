@@ -22,11 +22,12 @@ type BenchmarkResult struct {
 }
 
 // benchLineRE matches a single benchmark output line. Capture groups:
-//   1: name (with optional -N parallelism suffix)
-//   2: iterations
-//   3: ns/op (may be fractional, e.g. "234.5 ns/op")
-//   4: bytes/op (optional)
-//   5: allocs/op (optional)
+//
+//	1: name (with optional -N parallelism suffix)
+//	2: iterations
+//	3: ns/op (may be fractional, e.g. "234.5 ns/op")
+//	4: bytes/op (optional)
+//	5: allocs/op (optional)
 //
 // The B/op and allocs/op groups can appear in either order in real Go
 // output; we tolerate that by trying the regex once then swapping if

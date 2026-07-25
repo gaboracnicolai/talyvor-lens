@@ -78,19 +78,19 @@ var ValidScopes = map[string]bool{
 // values for the quota fields mean "unlimited" — the proxy
 // treats them as "skip the check entirely".
 type WorkspaceConfig struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
 	APIKeys          []WorkspaceAPIKey `json:"api_keys,omitempty"`
-	SpendingCapUSD   float64   `json:"spending_cap_usd"`
-	MonthlyBudget    float64   `json:"monthly_budget"`
-	RateLimitRPM     int       `json:"rate_limit_rpm"`
-	RateLimitTPM     int       `json:"rate_limit_tpm"`
-	AllowedModels    []string  `json:"allowed_models"`
-	AllowedProviders []string  `json:"allowed_providers"`
-	LogLevel         string    `json:"log_level"`
-	RetentionDays    int       `json:"retention_days"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	SpendingCapUSD   float64           `json:"spending_cap_usd"`
+	MonthlyBudget    float64           `json:"monthly_budget"`
+	RateLimitRPM     int               `json:"rate_limit_rpm"`
+	RateLimitTPM     int               `json:"rate_limit_tpm"`
+	AllowedModels    []string          `json:"allowed_models"`
+	AllowedProviders []string          `json:"allowed_providers"`
+	LogLevel         string            `json:"log_level"`
+	RetentionDays    int               `json:"retention_days"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
 // WorkspaceAPIKey is the persisted view (no plaintext). The
@@ -563,8 +563,8 @@ WHERE workspace_id = $1
 // spend. Refreshed when older than MonthlyCacheTTL or when a
 // RecordSpend call has pushed the cached total past the cap.
 type spendCacheEntry struct {
-	spent    float64
-	fetched  time.Time
+	spent   float64
+	fetched time.Time
 }
 
 // SpendTracker keeps the cached current-month spend per workspace

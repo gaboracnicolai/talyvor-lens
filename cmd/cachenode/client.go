@@ -103,10 +103,10 @@ func ClearState() error {
 func (c *LensClient) Register(ctx context.Context, cfg CacheNodeConfig) (CacheNodeState, error) {
 	secret := generateSecret()
 	payload := map[string]any{
-		"url":          cfg.NodeURL,
-		"max_size_gb":  cfg.MaxCacheGB,
-		"node_secret":  secret,
-		"share":        cfg.ShareEnabled,
+		"url":         cfg.NodeURL,
+		"max_size_gb": cfg.MaxCacheGB,
+		"node_secret": secret,
+		"share":       cfg.ShareEnabled,
 	}
 	resp, err := c.do(ctx, http.MethodPost,
 		fmt.Sprintf("/v1/workspaces/%s/cache-nodes", cfg.WorkspaceID), payload)

@@ -191,4 +191,3 @@ func (c *TrafficSettlementClearer) StartScheduler(ctx context.Context, tick time
 		}
 	}
 }
-

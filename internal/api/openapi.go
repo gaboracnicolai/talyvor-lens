@@ -34,8 +34,8 @@ func OpenAPISpec() map[string]any {
 		"components": map[string]any{
 			"securitySchemes": map[string]any{
 				"ApiKeyAuth": map[string]any{
-					"type":   "http",
-					"scheme": "bearer",
+					"type":        "http",
+					"scheme":      "bearer",
 					"description": "Lens API key — Authorization: Bearer tlv_...",
 				},
 			},
@@ -255,7 +255,7 @@ func openAPIPaths() map[string]any {
 		},
 		"/v1/workspaces/{wsID}/api-keys/{keyID}": map[string]any{
 			"delete": map[string]any{
-				"summary": "Revoke a workspace-scoped API key",
+				"summary":   "Revoke a workspace-scoped API key",
 				"responses": map[string]any{"200": map[string]any{"description": "revoked"}},
 			},
 		},
@@ -297,7 +297,7 @@ func openAPIPaths() map[string]any {
 		},
 		"/v1/local/endpoints/{id}": map[string]any{
 			"delete": map[string]any{
-				"summary": "Remove a local endpoint",
+				"summary":   "Remove a local endpoint",
 				"responses": map[string]any{"200": map[string]any{"description": "removed"}},
 			},
 		},

@@ -54,11 +54,11 @@ type InferRequest struct {
 // root over the generation trace. It is ATTESTATION + TAMPER-EVIDENCE, not
 // proof of honest computation. Present only when the node has a signing key.
 type InferResponse struct {
-	Text         string         `json:"text"`
-	InputTokens  int            `json:"input_tokens"`
-	OutputTokens int            `json:"output_tokens"`
-	LatencyMs    int64          `json:"latency_ms"`
-	Receipt      *povi.Receipt  `json:"receipt,omitempty"`
+	Text         string        `json:"text"`
+	InputTokens  int           `json:"input_tokens"`
+	OutputTokens int           `json:"output_tokens"`
+	LatencyMs    int64         `json:"latency_ms"`
+	Receipt      *povi.Receipt `json:"receipt,omitempty"`
 }
 
 // Provider is the contract — implementations live below. Three
@@ -370,9 +370,9 @@ func (p *llamaCppProvider) Infer(ctx context.Context, req InferRequest) (InferRe
 		return InferResponse{}, fmt.Errorf("llamacpp: /completion returned %d: %s", status, body)
 	}
 	var resp struct {
-		Content   string `json:"content"`
-		TokensPrompt int `json:"tokens_evaluated"`
-		Tokens    int    `json:"tokens_predicted"`
+		Content      string `json:"content"`
+		TokensPrompt int    `json:"tokens_evaluated"`
+		Tokens       int    `json:"tokens_predicted"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return InferResponse{}, fmt.Errorf("llamacpp: decode response: %w", err)

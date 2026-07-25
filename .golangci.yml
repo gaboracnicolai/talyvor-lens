@@ -14,3 +14,35 @@ linters:
     # cleanup are conventionally unactionable. errcheck still checks every other return.
     presets:
       - std-error-handling
+
+# Formatting gate. This block is the reason 37 files were able to drift
+# unformatted behind a green `golangci-lint run` (swept in #360): golangci-lint
+# v2 moved formatters OUT of `linters:` into this separate top-level key, so a
+# config without it checks formatting not at all. `run` reports these as issues
+# and exits nonzero, so no workflow change is needed — the existing
+# `golangci-lint run ./...` CI step enforces it.
+formatters:
+  enable:
+    - gofmt
+  settings:
+    gofmt:
+      # simplify DEFAULTS TO TRUE, which applies `gofmt -s` rewrites (e.g.
+      # s[1:len(s)] -> s[1:]) that plain `gofmt` does NOT. Pinned false so the
+      # gate means exactly "is this `gofmt -w` output?" — the same thing every
+      # editor's format-on-save produces, so the obvious local fix always
+      # satisfies CI. staticcheck (enabled above) already covers the
+      # substantive -s simplifications as real findings.
+      #
+      # The tree satisfies BOTH settings today (`gofmt -s -l .` is also empty),
+      # so flipping this to true later is a one-word, zero-churn change.
+      simplify: false
+
+issues:
+  # gofmt emits one identically-worded issue per file, and max-same-issues
+  # DEFAULTS TO 3: on the pre-sweep tree the gate correctly exited 1 but printed
+  # only 3 of the 37 files. A developer fixes three, re-runs, and gets three
+  # more with no hint that 34 remain. Report the whole set.
+  max-same-issues: 0
+  # Likewise: the default of 50 per linter would silently truncate a larger
+  # drift. No silent caps on a gate whose job is to be exhaustive.
+  max-issues-per-linter: 0

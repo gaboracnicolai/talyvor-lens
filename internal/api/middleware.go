@@ -135,8 +135,8 @@ func APIVersionMiddleware(next http.Handler) http.Handler {
 // untouched, large bodies get gzipped before flush.
 type gzipResponseWriter struct {
 	http.ResponseWriter
-	buf        bytes.Buffer
-	status     int
+	buf         bytes.Buffer
+	status      int
 	wroteStatus bool
 }
 
