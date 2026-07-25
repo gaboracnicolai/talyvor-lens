@@ -137,7 +137,13 @@ var economyManifest = []string{
 	`/v1/workspaces/{wsID}/tokens`, `/v1/workspaces/{wsID}/lxc/convert`, `/v1/workspaces/{wsID}/pattern-mining`,
 	`/v1/workspaces/{wsID}/annotate/stake`, `/v1/workspaces/{wsID}/povi/receipts`,
 	`/v1/povi/`, `/v1/admin/conversion-rate/approve`, `/v1/admin/pool-royalty/adjudicate`,
-	`/v1/admin/distill/attribution`, `/dashboard/tokens`, `/dashboard/oracle`, `/dashboard/economy`,
+	`/v1/admin/distill/attribution`,
+	// The /dashboard/{tokens,oracle,economy} entries were removed with the pages
+	// themselves: those routes no longer exist, so classifying them kept a dead
+	// prefix in the list that DEFINES the economy surface. The surviving browser
+	// page (/dashboard) is not economy — it is gated by dashReg, and it renders
+	// no economy content in any configuration (see
+	// TestEconomyKillSwitch_BrowserPageCarriesNoEconomy).
 }
 
 // bareReg matches a BARE (non-econ) chi registration: router.Verb("/path".
@@ -161,7 +167,12 @@ func TestEconomyKillSwitch_ManifestCoverage(t *testing.T) {
 	// Negative controls: these economy-adjacent routes are deliberately NOT economy.
 	// /lxc/balance is FIAT (U18) — must NOT be classified economy; /lxc/convert IS.
 	for _, keep := range []string{
-		"/v1/admin/distill/preview", "/dashboard/nodes", "/v1/workspaces/{wsID}/lxc/balance",
+		// The browser page is gated by dashReg (LENS_DASHBOARD_ENABLED), never by
+		// econ — whether Lens serves a page to a browser is unrelated to the
+		// economy. "/" is registered unconditionally and must never be classified
+		// economy either, or the root would vanish on a fiat-only deployment.
+		"/dashboard", "/",
+		"/v1/admin/distill/preview", "/v1/workspaces/{wsID}/lxc/balance",
 		// U18b billing is FIAT — never economy (gated by billReg/BillingEnabled, not econ).
 		"/v1/billing/webhook", "/v1/workspaces/{wsID}/billing/checkout", "/v1/admin/billing/purchases",
 	} {
@@ -301,43 +312,36 @@ func TestEconomyKillSwitch_NoDirectEnvReads(t *testing.T) {
 	}
 }
 
-// TestEconomyKillSwitch_DashboardHidesEconomy — master off ⇒ the rendered HTML
-// has no economy nav links and no ECON-marked content, but KEEPS the fiat ROI
-// panel; master on ⇒ economy nav present, markers removed.
-func TestEconomyKillSwitch_DashboardHidesEconomy(t *testing.T) {
-	render := func(on bool) string {
-		h := dashboard.New("t", on)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
-		return rec.Body.String()
-	}
+// TestEconomyKillSwitch_BrowserPageCarriesNoEconomy replaces the former
+// TestEconomyKillSwitch_DashboardHidesEconomy, which asserted that the 41-panel
+// dashboard stripped its economy nav and ECON-marked fragments when the master
+// switch was off.
+//
+// That dashboard is gone (see internal/dashboard/handler.go: ten of its thirteen
+// data panels fetched authenticated endpoints with no credential and rendered
+// permanent em-dashes), and with it the whole conditional-rendering mechanism.
+// The property the old test defended — the economy must not leak into the
+// browser page when the master switch is off — now holds by CONSTRUCTION and is
+// therefore asserted more strongly: the page carries no economy surface in ANY
+// configuration, and dashboard.New no longer accepts the flag at all, so it
+// cannot vary. Identical bytes either way is a stronger guarantee than
+// correctly-stripped bytes.
+func TestEconomyKillSwitch_BrowserPageCarriesNoEconomy(t *testing.T) {
+	rec := httptest.NewRecorder()
+	dashboard.New("t").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	page := rec.Body.String()
 
-	off := render(false)
-	if strings.Contains(off, "Tokens &amp; Mining") || strings.Contains(off, ">Economy</a>") {
-		t.Error("master off: economy nav links must be stripped")
+	// No economy READ can be issued from the page…
+	for _, ep := range []string{"/v1/economy/", "/v1/oracle/", "/v1/tokens/", "/v1/marketplace/"} {
+		if strings.Contains(page, ep) {
+			t.Errorf("the browser page reads %s — it must carry no economy surface at all", ep)
+		}
 	}
-	if strings.Contains(off, "{{ECON}}") {
-		t.Error("master off: no ECON marker comments should remain")
-	}
-	if !strings.Contains(off, `id="roi-panel"`) {
-		t.Error("master off: the fiat ROI panel must still be present")
-	}
-	if !strings.Contains(off, `id="lxc-balance-panel"`) {
-		t.Error("master off: the fiat LXC credit-balance panel must still be present (#182)")
-	}
-
-	on := render(true)
-	if !strings.Contains(on, "Tokens &amp; Mining") || !strings.Contains(on, ">Economy</a>") {
-		t.Error("master on: economy nav links must be present")
-	}
-	if strings.Contains(on, "{{ECON}}") {
-		t.Error("master on: marker comments must be removed (content kept)")
-	}
-	if !strings.Contains(on, `id="roi-panel"`) {
-		t.Error("master on: the ROI panel must be present")
-	}
-	if !strings.Contains(on, `id="lxc-balance-panel"`) {
-		t.Error("master on: the fiat LXC credit-balance panel must be present (#182)")
+	// …and no economy VOCABULARY is rendered, so nothing can be stripped wrongly.
+	for _, w := range []string{"Mining", "Staking", "Marketplace", "Oracle", "Economy"} {
+		if strings.Contains(page, w) {
+			t.Errorf("the browser page renders %q", w)
+		}
 	}
 }
 

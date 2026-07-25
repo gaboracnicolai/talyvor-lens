@@ -2,7 +2,9 @@
 
 **AI token intelligence proxy — cut your LLM costs 60–80% by sitting between your app and the providers you already use.**
 
-Drop-in replacement for OpenAI, Anthropic, Google Gemini, AWS Bedrock, Mistral, Groq, and vLLM. Change one URL. Get caching, routing, attribution, guardrails, audit, fallback, and a dashboard.
+Drop-in replacement for OpenAI, Anthropic, Google Gemini, AWS Bedrock, Mistral, Groq, and vLLM. Change one URL. Get caching, routing, attribution, guardrails, audit, and fallback.
+
+Lens is an API. The dashboard is a separate app ([app.talyvor.com](https://app.talyvor.com), or self-host `talyvor-suite`); the Lens host itself serves only a small status page at `/`.
 
 ## Why Talyvor Lens?
 

@@ -8,8 +8,11 @@
 # The Caddy service terminates TLS on :443 (automatic Let's Encrypt for
 # LENS_DOMAIN) and reverse-proxies to lens over the internal network. Lens
 # itself listens on :8080, published only on 127.0.0.1 (loopback) — the
-# internet reaches it ONLY through Caddy. The dashboard is at /dashboard, the
-# public status page at /status, the OpenAI-compatible proxy at /v1/proxy/*.
+# internet reaches it ONLY through Caddy. `/` serves a small status page (what
+# this host is, live health, where the app and docs are — no account data, since
+# it holds no credential); the OpenAI-compatible proxy is at /v1/proxy/*. The
+# same page is also served at /dashboard when LENS_DASHBOARD_ENABLED is set
+# (default off). The real dashboard is the separate suite app.
 # See docs/remote-host.md to put this on a public host.
 #
 # Image source: defaults to the public registry tag. `docker compose build`

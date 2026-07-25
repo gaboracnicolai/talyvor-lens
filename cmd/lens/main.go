@@ -1699,16 +1699,29 @@ func run() error {
 	r.With(mcpAuth).Post("/mcp", mcpServer.HandleRPC)
 	r.With(mcpAuth).Get("/mcp/sse", mcpServer.HandleSSE)
 
-	// Dashboard is public — same trust model as /healthz. The dashboard
-	// page itself is static; the live numbers come from /v1/api/* XHRs
-	// that the browser sends with the user's own API key.
-	dashHandler := dashboard.New("0.1.0", cfg.EconomyEnabled)
-	r.Get("/dashboard", dashHandler.ServeHTTP)
-	econ.get(r, "/dashboard/tokens", dashHandler.ServeTokens)
-	r.Get("/dashboard/nodes", dashHandler.ServeNodes)
-	econ.get(r, "/dashboard/oracle", dashHandler.ServeOracle)
-	econ.get(r, "/dashboard/economy", dashHandler.ServeEconomy)
-	r.Get("/", dashHandler.RedirectRoot)
+	// THE BROWSER SURFACE. This used to be a 41-panel dashboard; it is now one
+	// static status page, and the reason is in internal/dashboard/handler.go: ten
+	// of its thirteen data panels fetched AUTHENTICATED endpoints with no
+	// credential attached and no way to supply one, so on the deployed host they
+	// answered 401 and rendered em-dashes. The comment that used to sit here —
+	// "the live numbers come from /v1/api/* XHRs that the browser sends with the
+	// user's own API key" — described a mechanism that did not exist.
+	//
+	// GET / is registered UNCONDITIONALLY. A visitor who types the API hostname
+	// must never be met with nothing: a bare 404 is honest but useless, and a
+	// redirect to app.talyvor.com assumes a suite deployment a self-hoster may
+	// not have. The page is static, holds no credential, reads no database and
+	// shows no per-workspace data — there is nothing about it worth gating. (It
+	// no longer 302s to /dashboard: with the dashboard default-off that would
+	// bounce every visitor into a 404.)
+	//
+	// GET /dashboard is gated on cfg.DashboardEnabled (default FALSE) via dashReg,
+	// the same never-registered shape as billReg. It serves the same page, so an
+	// existing link to /dashboard lands somewhere honest on deployments that
+	// still want that path.
+	dashHandler := dashboard.New("0.1.0")
+	r.Get("/", dashHandler.ServeHTTP)
+	dashReg{on: cfg.DashboardEnabled}.get(r, "/dashboard", dashHandler.ServeHTTP)
 
 	// Public oracle + economy endpoints — no auth, no PII, but rate-limited
 	// to prevent scraping / DoS.

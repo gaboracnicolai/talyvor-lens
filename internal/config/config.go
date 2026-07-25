@@ -699,6 +699,17 @@ type Config struct {
 	// main.go does not register the billing routes (unregistered ⇒ 404).
 	BillingEnabled bool
 
+	// DashboardEnabled gates the browser page at /dashboard. Env:
+	// LENS_DASHBOARD_ENABLED, default FALSE — Lens is an API, and serving a UI
+	// from the API host is opt-in. When false the route is not registered
+	// (unregistered ⇒ chi 404), the same shape as BillingEnabled above.
+	//
+	// It does NOT gate `GET /`, which always serves the same static status page:
+	// a visitor who types the API hostname must never be met with nothing, and
+	// that page holds no credential, reads no database and shows no per-workspace
+	// data, so there is nothing about it worth switching off.
+	DashboardEnabled bool
+
 	// StripeSecretKey / StripeWebhookSecret are read ONLY here (the
 	// NoDirectEnvReads invariant extends to them). SECRETS — never logged. If
 	// BillingEnabled is true and either is empty, Load() fails startup.
@@ -978,6 +989,7 @@ func Load() (*Config, error) {
 		RoutingPredictionScoringEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_SCORING_ENABLED"),
 
 		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
+		DashboardEnabled:    parseBoolEnv("LENS_DASHBOARD_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
 		TrackWebhookURL:     os.Getenv("LENS_TRACK_WEBHOOK_URL"),
