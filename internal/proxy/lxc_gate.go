@@ -59,8 +59,27 @@ func (p *Proxy) SetLXCGate(reader lxcBalanceReader, enabled func() bool) {
 // lxcEstimate is the input-only pre-serve LXC cost estimate (output=0),
 // converted at the fixed peg — in µLXC (SEC-2). It gates a CHARGE, so it rounds
 // UP (ceil): a conservative estimate never under-reserves a sub-µLXC.
+//
+// ⚠ IT PRICES VIA CostUSDResolved, NOT CostUSD, for the same reason reserveEstimateLXC does — and this
+// one is easier to miss, because both of its callers treat a zero as PERMISSION:
+//
+//	agentAllocationBlocks — the immediate-DEBIT path taken whenever p.reservationActive() is false
+//	                        (proxy.go:799). `estLXC <= 0` returned false = serve, WITHOUT DEBITING.
+//	                        LENS_LXC_AGENT_ALLOCATION_ENABLED defaults TRUE, so this was live.
+//	lxcGateBlocks         — the balance ADMISSION gate. A zero can never exceed a balance, so an
+//	                        unknown model was never gated, even on a workspace with no credit.
+//
+// PurposeCharge (the FLOOR) is right for both. This debit is immediate and never refunded, so
+// over-charging on a rate we admit is a guess is the indefensible direction; and for the gate a floor
+// starts blocking a zero-balance workspace without over-blocking a paying one.
+//
+// An EMPTY prompt still yields 0, correctly — zero tokens really is zero cost — so the callers' `<= 0`
+// branches remain reachable for that case and only that case.
 func lxcEstimate(model, prompt string) int64 {
-	estUSD := alerts.CostUSD(model, len(prompt)/4, 0)
+	estUSD, prov := alerts.CostUSDResolved(model, catalog.PurposeCharge, len(prompt)/4, 0, 0, 0)
+	if prov == catalog.ProvenanceFallback && len(prompt) > 0 {
+		alerts.WarnUnpricedModel(model, catalog.PurposeCharge, estUSD)
+	}
 	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
 }
 

@@ -27,10 +27,19 @@ import (
 
 // moneyPathFuncs are the functions whose result becomes a hold or a charge. Adding a new one? Add it
 // here, or the guard silently stops covering it.
+// ⚠ THIS LIST WAS TOO SHORT ONCE ALREADY, and the omission was a live free path. `lxcEstimate` was
+// missing, so the guard passed while the immediate-debit fallback (agentAllocationBlocks, taken whenever
+// reservations are inactive and default-ON) served unpriced traffic with NO DEBIT, and the balance gate
+// never blocked it. The guard's name promised coverage it did not have.
+//
+// The rule for this map: if a function's result decides HOW MUCH is charged/held OR WHETHER a request is
+// admitted on balance, it belongs here. "It's only an estimate" is not an exemption — an estimate that
+// gates money is money.
 var moneyPathFuncs = map[string]string{
 	"reserveEstimateLXC":      "computes the pre-serve HOLD",
 	"settleReservationBasis":  "computes the delivered CHARGE",
 	"resolveCacheReservation": "prices a pooled-hit charge",
+	"lxcEstimate":             "prices the immediate agent debit AND the balance admission gate",
 }
 
 // bannedInMoneyPath are the pricing helpers that turn an unknown model into a spendable zero.

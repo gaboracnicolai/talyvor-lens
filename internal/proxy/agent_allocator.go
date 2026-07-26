@@ -104,7 +104,10 @@ func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model
 	}
 	estLXC := lxcEstimate(model, prompt)
 	if estLXC <= 0 {
-		return false // nothing to charge against (unknown model / empty) → allow, like the LXC gate
+		// Empty prompt only: zero TOKENS is genuinely zero cost. An UNKNOWN MODEL no longer lands here —
+		// lxcEstimate prices it on the derived floor — which is the whole point: this branch used to serve
+		// unpriced traffic with no debit at all, and it is the path taken whenever reservations are off.
+		return false
 	}
 	debitKey, err := deriveAgentDebitKey(p.agentDebitSalt, apiKeyID)
 	if err != nil {
