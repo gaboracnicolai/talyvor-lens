@@ -1511,11 +1511,20 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// breakdown, so it stays the flat estimate — byte-identical to CostUSD(upstreamModel, inT, outT),
 		// today's behaviour (CostUSDDetailed with zero cached/write equals CostUSD by construction anyway).
 		var servedCostUSD float64
+		// rdTokens carries the cache breakdown to the post-flush route-decision capture, which prices BOTH the
+		// served and the counterfactual model with it. Hoisted out of the usage block below because that block
+		// scopes `u`, and the capture runs after the response is flushed. ProviderReported=false until proven
+		// otherwise, so a request with no usage report is labelled flat rather than assumed measured.
+		rdTokens := routeTokens{UncachedInput: len(compressedPrompt) / 4, Output: outT}
 		if u, ok := cfg.ExtractUsage(upstreamBody); ok {
 			inT, outT = u.InputTokens, u.OutputTokens
 			costEstimated = false
 			spendSource = "provider_usage"
 			servedCostUSD = alerts.CostUSDDetailed(upstreamModel, u.UncachedInputTokens, u.CachedInputTokens, u.CacheWriteInputTokens, u.OutputTokens)
+			rdTokens = routeTokens{
+				UncachedInput: u.UncachedInputTokens, CachedInput: u.CachedInputTokens,
+				CacheWriteInput: u.CacheWriteInputTokens, Output: u.OutputTokens, ProviderReported: true,
+			}
 		} else if modSet.Multimodal() {
 			inT = modSet.EstimateInputTokens()
 		}
@@ -1601,7 +1610,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// substrate). Cannot affect the already-flushed response. See routedecision_capture.go.
 			if rdRouteWasAuto {
 				p.captureRouteDecision(ctx, wsID, rdBaselineModel, upstreamModel, rdCohortBasis,
-					rdCohortOverrode, rdCohortN, len(compressedPrompt)/4, outT)
+					rdCohortOverrode, rdCohortN, rdTokens)
 				// Routing-PREDICTION live emit — POST-FLUSH, off-path, obsLimiter-shed, mint-free, default-off.
 				// Fires ONLY when the cohort OVERRODE the baseline (rdCohortOverrode = the farm gate): that live
 				// decision becomes a contributor prediction ("cohort C → rdCohortModel") the offline scorer grades

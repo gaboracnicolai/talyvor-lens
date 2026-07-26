@@ -62,7 +62,9 @@ func harnessPool(t *testing.T) *pgxpool.Pool {
 			id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, baseline_model TEXT NOT NULL, actual_model TEXT NOT NULL,
 			cohort_overrode BOOLEAN NOT NULL, cohort_basis TEXT NOT NULL DEFAULT '', cohort_n INTEGER NOT NULL DEFAULT 0,
 			input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, actual_cost_u BIGINT NOT NULL,
-			counterfactual_cost_estimate_u BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
+			counterfactual_cost_estimate_u BIGINT NOT NULL,
+			cost_basis TEXT NOT NULL DEFAULT 'flat',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
 	return pool
@@ -122,12 +124,15 @@ func runMeasurement(t *testing.T, pool *pgxpool.Pool, adv *routing.Advisor, rt *
 				InputTokens: inTok, OutputTokens: outTok,
 				ActualCostU:                 usdToMicroUSD(alerts.CostUSD(served, inTok, outTok)),
 				CounterfactualCostEstimateU: usdToMicroUSD(alerts.CostUSD(base.Model, inTok, outTok)),
+				// This harness measures override RATE, not cost, so flat pricing is fine here — but the rows
+				// must carry the cache-aware label to be counted by the aggregate.
+				CostBasis: routedecision.BasisCacheAware,
 			}); err != nil {
 				t.Fatalf("record: %v", err)
 			}
 		}
 	}
-	s, err := routedecision.NewReader(pool).Summarize(ctx, time.Now().Add(-time.Hour))
+	s, err := routedecision.NewReader(pool).Summarize(ctx, "wsTest", time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("summarize: %v", err)
 	}

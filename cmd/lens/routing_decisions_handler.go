@@ -8,9 +8,12 @@ import (
 	"github.com/talyvor/lens/internal/routedecision"
 )
 
-// routeDecisionSummarizer is the read seam (*routedecision.Reader satisfies it).
+// routeDecisionSummarizer is the read seam for the ADMIN forensic summary (*routedecision.Reader satisfies
+// it). It deliberately names the CROSS-TENANT method: this endpoint aggregates every tenant, which is why it
+// is requireAdmin-gated. A customer-facing surface must use the workspace-scoped Summarize instead — that
+// separation is why the cross-tenant read is named out loud.
 type routeDecisionSummarizer interface {
-	Summarize(ctx context.Context, since time.Time) (routedecision.Summary, error)
+	SummarizeAllTenants(ctx context.Context, since time.Time) (routedecision.Summary, error)
 }
 
 // newRoutingDecisionsSummaryHandler serves GET /v1/admin/routing-decisions/summary — THE go/no-go readout:
@@ -25,7 +28,7 @@ func newRoutingDecisionsSummaryHandler(r routeDecisionSummarizer, now func() tim
 				window = d
 			}
 		}
-		s, err := r.Summarize(req.Context(), now().Add(-window))
+		s, err := r.SummarizeAllTenants(req.Context(), now().Add(-window))
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, "internal error")
 			return
@@ -38,8 +41,13 @@ func newRoutingDecisionsSummaryHandler(r routeDecisionSummarizer, now func() tim
 			"total_actual_cost_u":             s.TotalActualCostU,
 			"total_counterfactual_estimate_u": s.TotalCounterfactualEstimateU,
 			"estimated_cost_delta_u":          s.EstimatedCostDeltaU,
-			"note": "counterfactual + delta are ESTIMATES (baseline priced at the ACTUAL token counts), NOT money; " +
-				"a KE-1 mint would pay strictly less than this, floored at zero (house-favouring).",
+			"excluded_legacy_basis_rows":      s.ExcludedLegacyBasisRows,
+			"scope":                           "ALL TENANTS — admin forensic; never serve this to a customer",
+			"note": "counterfactual + delta are ESTIMATES (baseline priced at the ACTUAL token counts, assuming the " +
+				"baseline would have had the same cache hits), NOT money; a KE-1 mint would pay strictly less than " +
+				"this, floored at zero (house-favouring). DENOMINATOR IS NOT ALL TRAFFIC: auto-routed requests only, " +
+				"and the sample is shed under load. excluded_legacy_basis_rows counts in-window rows priced on the " +
+				"retired flat (cache-blind) basis — they are NOT in these sums and cannot be repriced.",
 		})
 	}
 }

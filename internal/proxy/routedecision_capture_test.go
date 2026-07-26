@@ -26,7 +26,7 @@ func (f *fakeRouteSink) Record(_ context.Context, r routedecision.RouteDecision)
 func TestCaptureRouteDecision_OffPath_SwallowsSinkError(t *testing.T) {
 	sink := &fakeRouteSink{err: errors.New("db down")}
 	p := &Proxy{routeDecisionSink: sink, routeDecisionEnabled: func() bool { return true }}
-	p.captureRouteDecision(context.Background(), "ws1", "big", "small", "cohort", true, 5, 100, 50)
+	p.captureRouteDecision(context.Background(), "ws1", "big", "small", "cohort", true, 5, routeTokens{UncachedInput: 100, Output: 50})
 	if sink.calls != 1 {
 		t.Errorf("sink called %d times, want 1 (error swallowed, not propagated)", sink.calls)
 	}
@@ -36,7 +36,7 @@ func TestCaptureRouteDecision_OffPath_SwallowsSinkError(t *testing.T) {
 func TestCaptureRouteDecision_Disabled_NoOp(t *testing.T) {
 	sink := &fakeRouteSink{}
 	p := &Proxy{routeDecisionSink: sink, routeDecisionEnabled: func() bool { return false }}
-	p.captureRouteDecision(context.Background(), "ws1", "big", "small", "cohort", true, 5, 100, 50)
+	p.captureRouteDecision(context.Background(), "ws1", "big", "small", "cohort", true, 5, routeTokens{UncachedInput: 100, Output: 50})
 	if sink.calls != 0 {
 		t.Errorf("disabled: sink called %d times, want 0", sink.calls)
 	}
@@ -46,7 +46,7 @@ func TestCaptureRouteDecision_Disabled_NoOp(t *testing.T) {
 func TestCaptureRouteDecision_EmptyModels_NoOp(t *testing.T) {
 	sink := &fakeRouteSink{}
 	p := &Proxy{routeDecisionSink: sink, routeDecisionEnabled: func() bool { return true }}
-	p.captureRouteDecision(context.Background(), "ws1", "", "small", "cohort", true, 5, 100, 50)
+	p.captureRouteDecision(context.Background(), "ws1", "", "small", "cohort", true, 5, routeTokens{UncachedInput: 100, Output: 50})
 	if sink.calls != 0 {
 		t.Errorf("empty baseline: sink called %d times, want 0", sink.calls)
 	}
@@ -57,7 +57,7 @@ func TestCaptureRouteDecision_RecordsOverrideFlag(t *testing.T) {
 	for _, overrode := range []bool{true, false} {
 		sink := &fakeRouteSink{}
 		p := &Proxy{routeDecisionSink: sink, routeDecisionEnabled: func() bool { return true }}
-		p.captureRouteDecision(context.Background(), "ws1", "big", "small", "cohort", overrode, 5, 100, 50)
+		p.captureRouteDecision(context.Background(), "ws1", "big", "small", "cohort", overrode, 5, routeTokens{UncachedInput: 100, Output: 50})
 		if sink.last.CohortOverrode != overrode {
 			t.Errorf("recorded CohortOverrode = %v, want %v", sink.last.CohortOverrode, overrode)
 		}
