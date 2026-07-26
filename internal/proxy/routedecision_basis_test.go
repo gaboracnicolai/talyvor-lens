@@ -14,19 +14,31 @@ import (
 // The models below are real catalog entries, so the arithmetic is the shipped arithmetic:
 //
 //	claude-sonnet-4-5 (baseline) $3.00/1M in, $15.00/1M out — anthropic ⇒ cache read 0.30, write 3.75
-//	claude-haiku-4-5  (served)   $0.80/1M in,  $4.00/1M out — anthropic ⇒ cache read 0.08, write 1.00
+//	claude-haiku-4-5  (served)   $1.00/1M in,  $5.00/1M out — anthropic ⇒ cache read 0.10, write 1.25
+//
+// ⚠ THE HAIKU FIGURES CHANGED on 2026-07-26 and this is not a test adjustment — the CATALOG was wrong.
+// It carried 0.80/4.00, which is HAIKU 3.5's rate, left behind when the id was updated to 4.5; the
+// published rate is 1.00/5.00 (https://platform.claude.com/docs/en/about-claude/pricing). The constants
+// below were RE-DERIVED from the published rates arithmetically, not replaced with whatever the code
+// began emitting — the whole reason five wrong rates survived for months is tests that pinned the code's
+// current output as if it were the truth. All four re-derived figures happened to match the new output
+// exactly, which is a real cross-check rather than a coincidence to lean on.
 //
 // One request: 1M uncached input + 1M cached input + 1M output.
 //
-//	FLAT  (the old basis): actual 2.0×0.80 + 4.00 = $5.60 ; baseline 2.0×3.00 + 15.00 = $21.00 ; delta $15.40
-//	CACHE-AWARE (correct): actual 0.80+0.08+4.00 = $4.88 ; baseline 3.00+0.30+15.00 = $18.30 ; delta $13.42
+//	FLAT  (the old basis): actual 2.0×1.00 + 5.00 = $7.00 ; baseline 2.0×3.00 + 15.00 = $21.00 ; delta $14.00
+//	CACHE-AWARE (correct): actual 1.00+0.10+5.00 = $6.10 ; baseline 3.00+0.30+15.00 = $18.30 ; delta $12.20
+//
+// The honesty property below is unaffected by the correction and still holds with room to spare:
+// $12.20 cache-aware < $14.00 flat. Sonnet 4.5's rates were verified against the same page and are
+// unchanged, so the baseline side of both figures is untouched.
 const (
 	basisBaseline = "claude-sonnet-4-5"
 	basisActual   = "claude-haiku-4-5"
 
-	wantActualCacheAwareU         = 4_880_000
+	wantActualCacheAwareU         = 6_100_000
 	wantCounterfactualCacheAwareU = 18_300_000
-	wantFlatActualU               = 5_600_000
+	wantFlatActualU               = 7_000_000
 	wantFlatCounterfactualU       = 21_000_000
 )
 
@@ -44,7 +56,7 @@ func TestCaptureRouteDecision_PricesCacheAware(t *testing.T) {
 		t.Fatalf("sink called %d times, want 1", sink.calls)
 	}
 	if got := sink.last.ActualCostU; got != wantActualCacheAwareU {
-		t.Errorf("actual = %d µUSD, want %d (cache read at 0.08/1M, not the flat 0.80)", got, wantActualCacheAwareU)
+		t.Errorf("actual = %d µUSD, want %d (cache read at 0.10/1M, not the flat 1.00)", got, wantActualCacheAwareU)
 	}
 	if got := sink.last.CounterfactualCostEstimateU; got != wantCounterfactualCacheAwareU {
 		t.Errorf("counterfactual = %d µUSD, want %d (baseline's OWN cache rate 0.30/1M)", got, wantCounterfactualCacheAwareU)
