@@ -1796,6 +1796,21 @@ func run() error {
 	// unconfigured deployment 404s here instead of exposing an unauthenticated provisioning
 	// surface. That is the reason the emptiness check lives inside the mount helper and not in
 	// the handler — a handler-level check would still leave the route reachable.
+	//
+	// AND SAY SO WHEN IT IS OFF. Failing closed and failing silently are the same thing when
+	// nobody looks: a Lens paired with a suite BFF that expects provisioning boots clean, passes
+	// its healthcheck, serves every other route, and 404s every login with nothing anywhere
+	// explaining it. Deliberately a WARN and not a boot refusal — most deployments run Lens with
+	// no BFF and never want provisioning, so a hard requirement would break them for a capability
+	// they never asked for. Deliberately not a healthcheck failure either: healthchecks drive
+	// restarts and load-balancer removal, and "an optional capability is off" is not "this process
+	// cannot serve traffic". A boot log is the surface a person is actually reading at the one
+	// moment this matters — during the deploy.
+	if cfg.ProvisionSecret == "" {
+		logger.Warn("provisioning DISABLED: LENS_PROVISION_SECRET is unset, so POST /v1/provision is not registered",
+			slog.String("effect", "any gateway that provisions per-user workspaces will get 404 on every login"),
+			slog.String("remedy", "set LENS_PROVISION_SECRET here and to the SAME value on the gateway; leave unset if this deployment has no such gateway"))
+	}
 	mountProvisionRoute(r, cfg.ProvisionSecret, wsManager,
 		func(workspaceID, userID string, scopes []string, ttl time.Duration) (string, error) {
 			return auth.GenerateToken(workspaceID, userID, scopes, authManager.PrivateKey(), ttl)
