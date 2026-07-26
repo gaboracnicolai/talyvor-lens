@@ -86,3 +86,10 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 	}
 	return parsed.Data[0].Embedding, nil
 }
+
+// Model reports the embedding model this embedder sends to the API — the same value used in
+// every request body above. The semantic cache records it as the provenance of each stored
+// vector, so it MUST be read from here rather than passed in separately: two copies of this
+// name could drift apart, and a vector labelled with the wrong embedder is compared against
+// vectors from a different space with no error anywhere (see migrations/0110).
+func (e *OpenAIEmbedder) Model() string { return e.model }

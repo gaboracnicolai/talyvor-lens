@@ -27,6 +27,8 @@ import (
 
 type fixedEmbedder struct{}
 
+func (fixedEmbedder) Model() string { return semEmbedder }
+
 func (fixedEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	return []float32{0.1, 0.2, 0.3}, nil
 }
@@ -88,29 +90,35 @@ func dispatchSem(t *testing.T, p *Proxy, wsID, content string) {
 }
 
 // ── expectation builders mirroring serve()'s semantic-query order ──
+//
+// The trailing embedder argument is asserted as a LITERAL, not AnyArg(): these expectations
+// are the only place the proxy path proves that vector provenance (migrations/0110) is
+// actually stamped on writes and required on reads. An AnyArg() here would go green against
+// a nil or empty model and prove nothing.
+const semEmbedder = "text-embedding-3-small"
 
 func expPrivateMiss(m pgxmock.PgxPoolIface) {
-	m.ExpectQuery(`is_poolable = false`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg()).
+	m.ExpectQuery(`is_poolable = false`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), semEmbedder).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 }
 func expPooledMiss(m pgxmock.PgxPoolIface) {
-	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg()).
+	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), semEmbedder).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}))
 }
 func expPooledHit(m pgxmock.PgxPoolIface, contributor string) {
-	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg()).
+	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), semEmbedder).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 			AddRow("row-1", okResp, contributor, 0.99))
 	m.ExpectExec(`UPDATE prompt_embeddings`).WithArgs("row-1").WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 func expPrivateStore(m pgxmock.PgxPoolIface) {
 	m.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), semEmbedder).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 func expPooledStore(m pgxmock.PgxPoolIface, contributor string) {
 	m.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), contributor).
+		WithArgs("openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), contributor, semEmbedder).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 

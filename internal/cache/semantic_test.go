@@ -12,10 +12,16 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
+// testEmbeddingModel is the provenance every mock row is written and read under; the
+// binding (migrations/0110) requires reads and writes to agree on it.
+const testEmbeddingModel = "text-embedding-3-small"
+
 type stubEmbedder struct {
 	vec []float32
 	err error
 }
+
+func (s stubEmbedder) Model() string { return testEmbeddingModel }
 
 func (s stubEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	if s.err != nil {
@@ -31,14 +37,14 @@ func newTestSemanticCache(t *testing.T, embedder Embedder, threshold float64) (*
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(mock.Close)
-	return newSemanticCache(mock, embedder, threshold, time.Hour), mock
+	return NewSemanticCacheWithDB(mock, embedder, threshold, time.Hour), mock
 }
 
 func TestSemanticCache_GetNoRowsReturnsNilNil(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1").
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 
 	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1")
@@ -57,7 +63,7 @@ func TestSemanticCache_GetBelowThresholdReturnsNilNil(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1").
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "similarity"}).
 				AddRow("11111111-1111-1111-1111-111111111111", "cached", 0.5),
@@ -80,7 +86,7 @@ func TestSemanticCache_GetAboveThresholdReturnsResponse(t *testing.T) {
 
 	const id = "11111111-1111-1111-1111-111111111111"
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1").
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "similarity"}).
 				AddRow(id, "cached_payload", 0.95),
@@ -147,7 +153,7 @@ func TestSemanticCache_DeleteStaleDeletesAndReportsCount(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	const retention = 90 * 24 * time.Hour
-	c := newSemanticCache(mock, stubEmbedder{}, 0.9, retention)
+	c := NewSemanticCacheWithDB(mock, stubEmbedder{}, 0.9, retention)
 
 	mock.ExpectExec(`DELETE FROM prompt_embeddings`).
 		WithArgs(cutoffMatcher{retention: retention, slack: time.Minute}).
@@ -173,7 +179,7 @@ func TestSemanticCache_DeleteStaleDisabledIsNoOp(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	// retention <= 0 disables sweeping: DeleteStale must not touch the DB.
-	c := newSemanticCache(mock, stubEmbedder{}, 0.9, 0)
+	c := NewSemanticCacheWithDB(mock, stubEmbedder{}, 0.9, 0)
 
 	n, err := c.DeleteStale(context.Background())
 	if err != nil {
@@ -208,10 +214,10 @@ func TestSemanticCache_GetServeWindowUsesRetentionCutoff(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	const retention = 90 * 24 * time.Hour
-	c := newSemanticCache(mock, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9, retention)
+	c := NewSemanticCacheWithDB(mock, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9, retention)
 
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", cutoffMatcher{retention: retention, slack: time.Minute}, "ws-1").
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", cutoffMatcher{retention: retention, slack: time.Minute}, "ws-1", testEmbeddingModel).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 
 	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1"); err != nil {
@@ -231,10 +237,10 @@ func TestSemanticCache_GetServeWindowDisabledServesAllAges(t *testing.T) {
 	}
 	t.Cleanup(mock.Close)
 
-	c := newSemanticCache(mock, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9, 0)
+	c := NewSemanticCacheWithDB(mock, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9, 0)
 
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", zeroTimeMatcher{}, "ws-1").
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", zeroTimeMatcher{}, "ws-1", testEmbeddingModel).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 
 	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1"); err != nil {
@@ -252,7 +258,7 @@ func TestSemanticCache_SetInsertsWithCorrectArgs(t *testing.T) {
 	wantHash := hex.EncodeToString(sum[:])
 
 	mock.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "response_body", "ws-1").
+		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "response_body", "ws-1", testEmbeddingModel).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	err := c.Set(
@@ -278,7 +284,7 @@ func TestSemanticCache_SetInsertsWithCorrectArgs(t *testing.T) {
 func TestSemanticCache_Get_ScopesByWorkspace(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 	mock.ExpectQuery(`workspace_id = \$5`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "wsB").
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "wsB", testEmbeddingModel).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 
 	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "wsB"); err != nil {

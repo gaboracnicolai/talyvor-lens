@@ -43,17 +43,40 @@ const (
 	// false, regardless of what the environment asked for. Distinct from StateOff, which
 	// means the flag is simply not enabled.
 	StateForcedOff State = "forced_off"
+	// StateForcedOffAtRuntime means the environment asked for this flag and the process is
+	// NOT honouring it, because of a decision taken while running rather than at config load.
+	//
+	// ⚠ WHY THIS IS A SEPARATE STATE. StateForcedOff is derivable from the config struct;
+	// this one is NOT visible there at all. Cross-tenant pooling is held off by a live gate
+	// when the embedding configuration is not the one that passed `lens poolcheck`, and
+	// cfg.CachePoolableEnabled stays TRUE throughout — so reporting from the struct alone
+	// would say "on" about a flag that is doing nothing. That is the precise failure this
+	// package exists to prevent, applied to itself.
+	StateForcedOffAtRuntime State = "forced_off_at_runtime"
 )
 
 // Flag is one observed flag.
 type Flag struct {
-	Name  string `json:"name"`
-	Env   string `json:"env"`
-	Value bool   `json:"value"`
-	State State  `json:"state"`
-	// Note explains a non-obvious state — currently only forced_off, where the configured
-	// value is not the effective one.
+	Name string `json:"name"`
+	Env  string `json:"env"`
+	// Value is the EFFECTIVE value: what the process is doing, not what it was asked to do.
+	Value bool `json:"value"`
+	// Configured appears ONLY when the configured value differs from the effective one, so
+	// its presence is itself the signal that an override is in force.
+	Configured *bool `json:"configured,omitempty"`
+	State      State `json:"state"`
+	// Note explains a non-obvious state: why the configured value is not the effective one.
 	Note string `json:"note,omitempty"`
+}
+
+// Override reports a flag whose EFFECTIVE value differs from its configured value because of a
+// runtime decision the config struct cannot express. Reason must say why, in terms an operator
+// can act on — "pooling off" without a reason is indistinguishable from pooling never having
+// been switched on, which is the confusion this whole package exists to remove.
+type Override struct {
+	Name      string
+	Effective bool
+	Reason    string
 }
 
 // Binary identifies the running binary.
@@ -65,9 +88,10 @@ type Binary struct {
 
 // Groups is the human view: every flag in exactly one bucket.
 type Groups struct {
-	On        []string `json:"on"`
-	Off       []string `json:"off"`
-	ForcedOff []string `json:"forced_off"`
+	On                 []string `json:"on"`
+	Off                []string `json:"off"`
+	ForcedOff          []string `json:"forced_off"`
+	ForcedOffAtRuntime []string `json:"forced_off_at_runtime"`
 }
 
 // Snapshot is the whole readout.
@@ -111,7 +135,7 @@ var forceOff = map[string]bool{
 //
 // binaryVersion is main.lensVersion, passed in rather than imported so this package has no
 // dependency on the command.
-func Report(cfg *config.Config, binaryVersion string) Snapshot {
+func Report(cfg *config.Config, binaryVersion string, overrides ...Override) Snapshot {
 	snap := Snapshot{Binary: describeBinary(binaryVersion)}
 
 	if cfg == nil {
@@ -167,8 +191,31 @@ func Report(cfg *config.Config, binaryVersion string) Snapshot {
 		{"LXCShadowSpendEnabled", "LENS_LXC_SHADOW_SPEND_ENABLED", cfg.LXCShadowSpendEnabled},
 	}
 
+	byName := make(map[string]Override, len(overrides))
+	for _, o := range overrides {
+		byName[o.Name] = o
+	}
+
 	for _, e := range entries {
 		f := Flag{Name: e.name, Env: e.env, Value: e.val}
+		// A runtime override wins over everything derived from the struct, because it IS the
+		// effective behaviour and the struct cannot see it.
+		if o, ok := byName[e.name]; ok && o.Effective != e.val {
+			configured := e.val
+			f.Value, f.Configured, f.Note = o.Effective, &configured, o.Reason
+			if o.Effective {
+				f.State = StateOn
+			} else {
+				f.State = StateForcedOffAtRuntime
+			}
+			snap.Flags = append(snap.Flags, f)
+			if f.State == StateOn {
+				snap.Groups.On = append(snap.Groups.On, f.Name)
+			} else {
+				snap.Groups.ForcedOffAtRuntime = append(snap.Groups.ForcedOffAtRuntime, f.Name)
+			}
+			continue
+		}
 		switch {
 		case e.val:
 			f.State = StateOn
@@ -216,7 +263,10 @@ func describeBinary(v string) Binary {
 //
 // ⚠ MOUNT THIS BEHIND requireAdmin. It describes the money path and is not public. The route
 // registration in cmd/lens/main.go is the only place that decides, and a test there pins it.
-func Handler(cfg *config.Config, binaryVersion string) http.HandlerFunc {
+// overrides, when supplied, is evaluated PER REQUEST rather than captured once: the pooling
+// gate re-reads its attestation on a timer, so a snapshot taken at wiring time would go stale
+// in exactly the situation this reports on.
+func Handler(cfg *config.Config, binaryVersion string, overrides ...func() []Override) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -228,6 +278,12 @@ func Handler(cfg *config.Config, binaryVersion string) http.HandlerFunc {
 		// No-store: this is a point-in-time observation of mutable state. A cached copy read
 		// later would be exactly the stale inference the endpoint replaces.
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(Report(cfg, binaryVersion))
+		var live []Override
+		for _, fn := range overrides {
+			if fn != nil {
+				live = append(live, fn()...)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(Report(cfg, binaryVersion, live...))
 	}
 }

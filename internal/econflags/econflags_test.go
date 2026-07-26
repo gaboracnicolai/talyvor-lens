@@ -1,6 +1,9 @@
 package econflags_test
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -190,4 +193,113 @@ func TestReport_GroupsPartitionEveryFlag(t *testing.T) {
 			t.Errorf("flag %q appears in %d groups; must be exactly 1", n, c)
 		}
 	}
+}
+
+// ── runtime overrides ──
+//
+// The pooling gate holds cross-tenant pooling off when the live embedding configuration is not
+// the one that passed `lens poolcheck`. cfg.CachePoolableEnabled stays TRUE the whole time, so
+// without an override this endpoint reports "on" about a flag that is doing nothing — which is
+// the exact defect the package doc says it exists to prevent, committed by the package itself.
+
+func TestReport_RuntimeOverrideReportsEffectiveNotConfigured(t *testing.T) {
+	cfg := &config.Config{EconomyEnabled: true, CachePoolableEnabled: true}
+	const why = "no pool-safety attestation has ever been recorded for this database"
+
+	snap := econflags.Report(cfg, "abc1234", econflags.Override{
+		Name: "CachePoolableEnabled", Effective: false, Reason: why,
+	})
+
+	f := findFlag(t, snap, "CachePoolableEnabled")
+	if f.Value {
+		t.Fatal("the endpoint reported cross-tenant pooling as ON while the gate is holding it OFF; " +
+			"an operator checking here would conclude the feature is working")
+	}
+	if f.State != econflags.StateForcedOffAtRuntime {
+		t.Errorf("state = %q, want %q — plain \"off\" would be indistinguishable from the flag "+
+			"simply not being set", f.State, econflags.StateForcedOffAtRuntime)
+	}
+	if f.Configured == nil || !*f.Configured {
+		t.Error("the CONFIGURED value is not reported, so the readout hides that the environment " +
+			"asked for pooling and is not being honoured")
+	}
+	if f.Note != why {
+		t.Errorf("note = %q, want the gate's reason; a forced-off state with no reason is the "+
+			"thing this is meant to fix", f.Note)
+	}
+	if !slicesContains(snap.Groups.ForcedOffAtRuntime, "CachePoolableEnabled") {
+		t.Error("the flag is missing from the forced_off_at_runtime group")
+	}
+	if slicesContains(snap.Groups.On, "CachePoolableEnabled") {
+		t.Error("the flag is ALSO listed as on; the groups must partition")
+	}
+}
+
+// When the gate agrees with the config there is no override to report — a note on a flag that
+// is behaving normally reads as a problem.
+func TestReport_OverrideMatchingConfigIsNotReportedAsAnOverride(t *testing.T) {
+	cfg := &config.Config{EconomyEnabled: true, CachePoolableEnabled: true}
+	snap := econflags.Report(cfg, "abc1234", econflags.Override{
+		Name: "CachePoolableEnabled", Effective: true, Reason: "",
+	})
+	f := findFlag(t, snap, "CachePoolableEnabled")
+	if f.State != econflags.StateOn {
+		t.Errorf("state = %q, want on", f.State)
+	}
+	if f.Configured != nil {
+		t.Error("configured was reported for a flag whose effective value matches it; its presence " +
+			"is supposed to BE the signal that an override is in force")
+	}
+	if f.Note != "" {
+		t.Errorf("a normally-behaving flag carries note %q", f.Note)
+	}
+}
+
+// The Handler must evaluate the supplier per request: the gate re-reads on a timer, so a value
+// captured at wiring time goes stale in exactly the situation being reported.
+func TestHandler_EvaluatesOverridesPerRequest(t *testing.T) {
+	cfg := &config.Config{EconomyEnabled: true, CachePoolableEnabled: true}
+	effective := false
+	h := econflags.Handler(cfg, "abc1234", func() []econflags.Override {
+		return []econflags.Override{{Name: "CachePoolableEnabled", Effective: effective, Reason: "r"}}
+	})
+
+	read := func() bool {
+		rr := httptest.NewRecorder()
+		h(rr, httptest.NewRequest(http.MethodGet, "/v1/admin/economy/flags", nil))
+		var snap econflags.Snapshot
+		if err := json.Unmarshal(rr.Body.Bytes(), &snap); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return findFlag(t, snap, "CachePoolableEnabled").Value
+	}
+
+	if read() {
+		t.Fatal("first read reported pooling on while the gate said off")
+	}
+	effective = true // poolcheck runs; the gate flips WITHOUT a restart
+	if !read() {
+		t.Fatal("the gate opened but the endpoint still reports pooling off — the override was " +
+			"captured once instead of evaluated per request, so it can never show recovery")
+	}
+}
+
+func findFlag(t *testing.T, snap econflags.Snapshot, name string) econflags.Flag {
+	t.Helper()
+	for _, f := range snap.Flags {
+		if f.Name == name {
+			return f
+		}
+	}
+	t.Fatalf("flag %q missing from the snapshot", name)
+	return econflags.Flag{}
+}
+
+func slicesContains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

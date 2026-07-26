@@ -7,6 +7,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/poolsafety"
@@ -45,6 +47,33 @@ func runPoolCheck() error {
 	}
 	fmt.Print(rep.String())
 
+	// Record the passing configuration so the gateway can bind to it at boot. Written ONLY
+	// on success, so a stored attestation always means "this exact configuration was
+	// measured safe". A write failure is reported but does not fail the check — the
+	// measurement stood; the consequence is that pooling stays off until it can be recorded,
+	// which is the safe direction.
+	if rep.OK {
+		pool, perr := pgxpool.New(ctx, cfg.DatabaseURL)
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "\nWARNING: check passed but the attestation could not be recorded (db connect: %v).\n"+
+				"Pooling will stay OFF at boot until it is.\n", perr)
+			return nil
+		}
+		defer pool.Close()
+		if rerr := poolsafety.Record(ctx, attestationWriter{pool}, poolsafety.Attestation{
+			EmbeddingModel: cfg.EmbeddingModel,
+			Threshold:      cfg.SemanticThreshold,
+			WorstPair:      rep.Worst.Pair.Name,
+			WorstScore:     rep.Worst.Similarity,
+		}); rerr != nil {
+			fmt.Fprintf(os.Stderr, "\nWARNING: check passed but the attestation could not be recorded (%v).\n"+
+				"Pooling will stay OFF at boot until it is.\n", rerr)
+			return nil
+		}
+		fmt.Printf("\nattested: %s @ threshold %.2f (worst pair %.4f) — pooling permitted at boot\n",
+			cfg.EmbeddingModel, cfg.SemanticThreshold, rep.Worst.Similarity)
+	}
+
 	if !rep.OK {
 		if !cfg.CachePoolableEnabled {
 			fmt.Fprintln(os.Stderr,
@@ -54,4 +83,12 @@ func runPoolCheck() error {
 		return errors.New("pool-safety check FAILED: unrelated prompts reach the pooling threshold")
 	}
 	return nil
+}
+
+// attestationWriter adapts a pgxpool to poolsafety.Writer.
+type attestationWriter struct{ pool *pgxpool.Pool }
+
+func (w attestationWriter) Exec(ctx context.Context, sql string, args ...any) error {
+	_, err := w.pool.Exec(ctx, sql, args...)
+	return err
 }
