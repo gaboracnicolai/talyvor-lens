@@ -11,3 +11,6 @@
 .DS_Store
 /node
 docker-compose.override.yml
+
+# Operator-local env forwarded to the lens container (see lens.env.example).
+lens.env
