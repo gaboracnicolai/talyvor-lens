@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -19,8 +20,16 @@ import (
 
 // Embedder turns a text prompt into an embedding vector.
 // Implemented in other packages (e.g. an OpenAI-backed embedder).
+//
+// Model reports which embedding model produced those vectors, and it is part of this
+// interface DELIBERATELY. Provenance has to come from the thing that made the vector: a
+// model name passed alongside the embedder is a second source of truth that can silently
+// disagree with it, and a disagreement here is unobservable — see migrations/0110. Every
+// implementation is therefore forced by the compiler to state its identity, and no caller
+// can construct a cache that writes vectors of unknown origin.
 type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
+	Model() string
 }
 
 // SemanticDB is the subset of *pgxpool.Pool that SemanticCache needs. Exported
@@ -36,6 +45,11 @@ type SemanticCache struct {
 	pool      SemanticDB
 	embedder  Embedder
 	threshold float64
+	// embeddingModel identifies the embedder that produces this cache's vectors. It is
+	// stamped on every row written and required to match on every row read. Empty means
+	// "unknown", which is treated as not-comparable rather than as a wildcard — see
+	// migrations/0110.
+	embeddingModel string
 	// retention is the single sliding window for a semantic-cache row. It is
 	// BOTH the serve window (freshnessCutoff gates semanticSelectSQL on
 	// updated_at > NOW() − retention) AND the deletion window (DeleteStale
@@ -58,7 +72,21 @@ func NewSemanticCacheWithDB(pool SemanticDB, embedder Embedder, threshold float6
 }
 
 func newSemanticCache(pool SemanticDB, embedder Embedder, threshold float64, retention time.Duration) *SemanticCache {
-	return &SemanticCache{pool: pool, embedder: embedder, threshold: threshold, retention: retention}
+	// Provenance is READ OFF THE EMBEDDER, not accepted as a parameter. There is no call
+	// site that can supply a name disagreeing with the model that actually produced the
+	// vectors, because there is no call site that supplies one at all.
+	m := embedder.Model()
+	if m == "" {
+		// An implementation that will not name itself cannot have its vectors compared
+		// safely. Write NULL rather than a fabricated name, which makes the rows
+		// unservable (see semanticSelectSQL) — the cache degrades to always-miss instead
+		// of silently mixing spaces. Loud, because this is a programming error in an
+		// Embedder implementation, not an operator setting.
+		slog.Error("semantic cache: embedder reports an empty Model(); vectors will be written "+
+			"without provenance and can never be served",
+			"embedder", reflect.TypeOf(embedder).String())
+	}
+	return &SemanticCache{pool: pool, embedder: embedder, threshold: threshold, retention: retention, embeddingModel: m}
 }
 
 // semanticSelectSQL is the PRIVATE (workspace-scoped) lookup. The
@@ -77,12 +105,23 @@ func newSemanticCache(pool SemanticDB, embedder Embedder, threshold float64, ret
 // on the wsID: prefix shifting the embedding past threshold (soft for long
 // prompts). A NULL-workspace row (pre-#142, never re-stamped) matches no caller
 // and is correctly excluded — cold, self-healing.
+// The embedding_model equality is the corruption guard (migrations/0110). It IGNORES rows
+// from a different embedder rather than erroring, because a vector from another model is
+// genuinely NOT A MATCH — filtering it is the correct semantics, not a degradation. The
+// failure mode is a temporary miss that goes upstream, returns the right answer, and
+// re-caches under the current embedder: self-healing, and never a wrong answer. Erroring
+// would take caching out entirely on an ordinary config change and would be treating a
+// legitimate non-match as a fault.
+//
+// `= $N` also excludes legacy NULL rows by construction (NULL = x is never true), which is
+// the intended treatment of unknown provenance.
 const semanticSelectSQL = `SELECT id, response, 1 - (embedding <=> $1) AS similarity
 FROM prompt_embeddings
 WHERE provider = $2 AND model = $3
   AND updated_at > $4
   AND is_poolable = false
   AND workspace_id = $5
+  AND embedding_model = $6
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -94,6 +133,7 @@ LIMIT 1`
 const semanticSelectPooledSQL = `SELECT id, response, COALESCE(contributor_workspace_id, '') AS contributor, 1 - (embedding <=> $1) AS similarity
 FROM prompt_embeddings
 WHERE provider = $2 AND model = $3
+  AND embedding_model = $5
   AND updated_at > $4
   AND is_poolable = true
 ORDER BY embedding <=> $1
@@ -113,25 +153,29 @@ WHERE id = $1`
 const semanticDeleteStaleSQL = `DELETE FROM prompt_embeddings WHERE updated_at < $1`
 
 const semanticUpsertSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, workspace_id)
-VALUES ($1, $2, $3, $4, $5, $6)
+  (provider, model, prompt_hash, embedding, response, workspace_id, embedding_model)
+VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''))
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
   workspace_id = EXCLUDED.workspace_id,
+  embedding_model = EXCLUDED.embedding_model,
   updated_at = NOW()`
 
 // semanticUpsertPooledSQL writes a shared-pool row: contributor stamped,
 // is_poolable=true (a literal). Its prompt_hash is keyed on a NUL-sentinel-
 // prefixed prompt (the caller's job), provably disjoint from any private hash.
 const semanticUpsertPooledSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable)
-VALUES ($1, $2, $3, $4, $5, $6, true)
+  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''))
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
   contributor_workspace_id = EXCLUDED.contributor_workspace_id,
   is_poolable = true,
+  -- The overwriting vector comes from THIS process's embedder, so the provenance must
+  -- follow it. Leaving the old value would label a new-model vector with the old model.
+  embedding_model = EXCLUDED.embedding_model,
   updated_at = NOW()`
 
 // freshnessCutoff is the lower bound a row's updated_at must exceed to remain
@@ -161,7 +205,7 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, worksp
 	)
 	// workspace_id is the HARD tenant filter (#142): a private lookup can only
 	// match the caller's own rows; the embedding ranks within that boundary.
-	err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID).
+	err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel).
 		Scan(&id, &response, &similarity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -192,7 +236,7 @@ func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt string,
 	_, err := c.pool.Exec(
 		ctx,
 		semanticUpsertSQL,
-		provider, model, hash, vectorLiteral(embedding), string(response), workspaceID,
+		provider, model, hash, vectorLiteral(embedding), string(response), workspaceID, c.embeddingModel,
 	)
 	return err
 }
@@ -209,7 +253,7 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 	_, err := c.pool.Exec(
 		ctx,
 		semanticUpsertPooledSQL,
-		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID,
+		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
 	)
 	return err
 }
@@ -235,7 +279,7 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt s
 		contributor string
 		similarity  float64
 	)
-	err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff()).
+	err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel).
 		Scan(&id, &response, &contributor, &similarity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", "", 0, nil

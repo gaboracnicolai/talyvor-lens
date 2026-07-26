@@ -329,6 +329,10 @@ func run() error {
 
 	exactCache := cache.NewExactCache(redisClient, cfg.MaxCacheTTL)
 	openAIEmbedder := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingModel, cfg.EmbeddingBaseURL)
+	// Bound to the EMBEDDER that produces its vectors (migrations/0110). Rows are stamped
+	// with it on write and only compared against rows from the same embedder on read, so a
+	// change to LENS_EMBEDDING_MODEL can no longer make vectors from two different spaces
+	// look comparable.
 	semanticCache := cache.NewSemanticCache(pool, openAIEmbedder, cfg.SemanticThreshold, cfg.SemanticCacheRetention)
 	promptCompressor := compressor.New()
 	modelRouter := router.New()
@@ -496,8 +500,23 @@ func run() error {
 	// reads the global switch + each workspace's cache_poolable opt-in, mutates
 	// nothing. Inert by default — pooling stays off until LENS_CACHE_POOLABLE_ENABLED
 	// is set AND a workspace opts in (PUT /v1/workspaces/{wsID}/cache-poolable).
+	// BOOT BINDING. Cross-tenant pooling is allowed only when the CURRENTLY CONFIGURED
+	// embedding model + threshold are the ones that last PASSED `lens poolcheck`. A change
+	// to either invalidates the measurement that justified pooling, and nothing else would
+	// notice: the preflight runs in the deploy pipeline, and the urgent cost tweak — edit
+	// .env, restart — is precisely the change that skips it.
+	//
+	// ⚠ IT FORCES POOLING OFF RATHER THAN REFUSING TO BOOT, deliberately.
+	// Refusing to boot is the louder action but not the safer one: forcing pooling off
+	// already fails to the safe side (nothing is served across tenants), while refusing
+	// would additionally take down inference for every tenant because an OPTIONAL cache
+	// optimisation could not be verified. That is disproportionate — the gateway's job is
+	// proxying and metering, and neither depends on this. The real objection to the quiet
+	// option is that it goes unnoticed, and the answer to that is observability, not an
+	// outage: the mismatch is logged at ERROR with the specific reason on every boot.
+	poolingAttested := poolSafetyAttested(ctx, pool, cfg)
 	p.SetPoolGate(cache_pooling.New(
-		func() bool { return cfg.CachePoolableEnabled },
+		func() bool { return cfg.CachePoolableEnabled && poolingAttested },
 		wsManager.GetCachePoolable,
 	))
 	// Per-team / per-sprint budget governance (Upgrade 19). Seed the

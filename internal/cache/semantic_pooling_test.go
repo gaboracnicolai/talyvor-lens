@@ -18,7 +18,7 @@ func TestSemanticCache_SetPooled_TagsContributor(t *testing.T) {
 	wantHash := hex.EncodeToString(sum[:])
 
 	mock.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "resp", "wsA").
+		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "resp", "wsA", testEmbeddingModel).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := c.SetPooled(context.Background(), "openai", "gpt-4", "pooledprompt", "wsA", []byte("resp"), []float32{0.1, 0.2}); err != nil {
@@ -37,7 +37,7 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 
 	const id = "11111111-1111-1111-1111-111111111111"
 	mock.ExpectQuery(`is_poolable = true`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 				AddRow(id, "pooled_payload", "wsA", 0.95),
@@ -68,7 +68,7 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 func TestSemanticCache_GetPooled_BelowThreshold(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1}}, 0.9)
 	mock.ExpectQuery(`is_poolable = true`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 				AddRow("id1", "x", "wsA", 0.5),
@@ -87,7 +87,7 @@ func TestSemanticCache_GetPooled_BelowThreshold(t *testing.T) {
 func TestSemanticCache_GetPooled_EmptyContributor(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1}}, 0.9)
 	mock.ExpectQuery(`is_poolable = true`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 				AddRow("id1", "x", "", 0.99),
@@ -112,7 +112,7 @@ func TestSemanticCache_PrivateGet_ExcludesPoolable(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1}}, 0.9)
 	// The regex asserts the private SELECT carries the is_poolable=false filter.
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1").
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", "ws-1"); err != nil {
 		t.Fatal(err)
