@@ -29,8 +29,9 @@ docker compose -f docker-compose.yaml -f docker-compose.trial.yaml -f docker-com
 
 **Billing stays TEST mode**: `LENS_BILLING_ENABLED` is left unset/false and **no live Stripe
 keys** are set. The closed test uses the internal ledger + (optionally) the
-`earn_verified`/test-`lxc_purchase` floor clear — no real money, and live Stripe is blocked by
-the missing UK entity + bank regardless.
+`earn_verified`/test-`lxc_purchase` floor clear — no real money. Live Stripe additionally REQUIRES
+a registered legal entity and a business bank account; that is a standing requirement of Stripe
+activation, not a status of ours.
 
 Boot confirmation (lens logs, observed):
 ```
