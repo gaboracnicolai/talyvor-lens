@@ -13,19 +13,31 @@ import (
 )
 
 type Config struct {
-	ListenAddr        string
-	RedisURL          string
-	DatabaseURL       string
-	NatsURL           string
-	OpenAIAPIKey      string
-	AnthropicAPIKey   string
-	GoogleAPIKey      string
-	EmbeddingModel    string
-	EmbeddingBaseURL  string // LENS_EMBEDDING_BASE_URL override; empty = OpenAI default. Process-env only — no request input can set it (mirrors VLLMBaseURL; offline trial harness).
-	SemanticThreshold float64
-	MaxCacheTTL       time.Duration
-	LogLevel          string
-	OllamaURL         string
+	ListenAddr      string
+	RedisURL        string
+	DatabaseURL     string
+	NatsURL         string
+	OpenAIAPIKey    string
+	AnthropicAPIKey string
+
+	// ModelWatchEnabled runs the catalog-drift poller (internal/modelwatch): asks each provider what it
+	// serves and alerts on anything the catalog cannot price. DETECTION ONLY — it never sets a price,
+	// for the reasons in that package's doc comment (no provider publishes rates in any API).
+	ModelWatchEnabled  bool
+	ModelWatchInterval time.Duration
+	// OperatorAlertWebhookURL/Secret is the sink that makes an operator alert reach a PERSON. Both must
+	// be set or the sink is nil — and a nil sink is an ERROR at boot, not a silent no-op, because an
+	// alert nobody receives is worse than no alert: it reads as covered.
+	// Envs: LENS_OPERATOR_ALERT_WEBHOOK_URL, LENS_OPERATOR_ALERT_WEBHOOK_SECRET.
+	OperatorAlertWebhookURL    string
+	OperatorAlertWebhookSecret string
+	GoogleAPIKey               string
+	EmbeddingModel             string
+	EmbeddingBaseURL           string // LENS_EMBEDDING_BASE_URL override; empty = OpenAI default. Process-env only — no request input can set it (mirrors VLLMBaseURL; offline trial harness).
+	SemanticThreshold          float64
+	MaxCacheTTL                time.Duration
+	LogLevel                   string
+	OllamaURL                  string
 
 	// SemanticCacheRetention is the single sliding window for Postgres
 	// semantic-cache rows (prompt_embeddings). Every cache hit bumps
@@ -1005,10 +1017,16 @@ func Load() (*Config, error) {
 		DashboardEnabled:    parseBoolEnv("LENS_DASHBOARD_ENABLED"),
 		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
-		TrackWebhookURL:     os.Getenv("LENS_TRACK_WEBHOOK_URL"),
-		TrackWebhookSecret:  os.Getenv("LENS_TRACK_WEBHOOK_SECRET"),
-		BillingSuccessURL:   getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
-		BillingCancelURL:    getEnv("LENS_BILLING_CANCEL_URL", "https://app.talyvor.com/billing/cancel"),
+		// Catalog-drift detection (internal/modelwatch). Poller default-ON: it is read-only, costs one
+		// provider GET an hour, and its absence is what let a whole model family be served free. The
+		// SINK is separate and, if unset, reported as a boot-time ERROR rather than silently skipped.
+		ModelWatchEnabled:          parseBoolEnvDefaultTrue("LENS_MODEL_WATCH_ENABLED"),
+		OperatorAlertWebhookURL:    os.Getenv("LENS_OPERATOR_ALERT_WEBHOOK_URL"),
+		OperatorAlertWebhookSecret: os.Getenv("LENS_OPERATOR_ALERT_WEBHOOK_SECRET"),
+		TrackWebhookURL:            os.Getenv("LENS_TRACK_WEBHOOK_URL"),
+		TrackWebhookSecret:         os.Getenv("LENS_TRACK_WEBHOOK_SECRET"),
+		BillingSuccessURL:          getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
+		BillingCancelURL:           getEnv("LENS_BILLING_CANCEL_URL", "https://app.talyvor.com/billing/cancel"),
 
 		LocalEndpoints: os.Getenv("LENS_LOCAL_ENDPOINTS"),
 
@@ -1674,6 +1692,20 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("LENS_AUDIT_EXPORT_INTERVAL must be > 0 (a time.Ticker panics on non-positive): %s", v)
 		}
 		c.AuditExportInterval = d
+	}
+	// Catalog-drift poll cadence — default 1h, MUST be > 0 (a time.Ticker panics otherwise). Hourly is
+	// deliberate: a new model appears once in weeks, so there is nothing to gain from polling a
+	// provider's control plane harder with the same key that serves real traffic.
+	c.ModelWatchInterval = time.Hour
+	if v := os.Getenv("LENS_MODEL_WATCH_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_MODEL_WATCH_INTERVAL (Go duration, e.g. 1h): %w", err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("LENS_MODEL_WATCH_INTERVAL must be > 0 (a time.Ticker panics on non-positive): %s", v)
+		}
+		c.ModelWatchInterval = d
 	}
 	// U14 #187 export-before-prune gate. Default false = age-only (today's behaviour);
 	// on = prune only at/below the export watermark, skip the sweep if export is off.

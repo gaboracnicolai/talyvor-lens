@@ -227,6 +227,23 @@ var (
 		[]string{"model", "purpose"},
 	)
 
+	// ModelWatchUnpricedModels is how many models the providers currently serve that the catalog cannot
+	// price EXACTLY. ⚠ ALERT ON > 0: that traffic is billed on a derived floor, i.e. under-recovered,
+	// until a person adds the published rate. A gauge, not a counter — it is a current condition that
+	// goes back to 0 when the catalog is fixed, so it can be alerted on without rate() windows.
+	ModelWatchUnpricedModels = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "lens_modelwatch_unpriced_models", Help: "Models a provider serves that the catalog cannot price exactly. >0 means under-billing until the catalog is updated."},
+	)
+
+	// ModelWatchSinkConfigured is 1 when catalog-drift alerts have a delivery sink and 0 when they do
+	// not. ⚠ ALERT ON == 0. It exists because an unconfigured webhook is indistinguishable, from inside
+	// the code and from the changelog, from a working alert — the failure the Track spend emitter is in
+	// right now (nil when unset, unset everywhere, so no spend alert has ever been delivered and
+	// nothing says so). This metric makes "nobody is listening" a visible state rather than a silence.
+	ModelWatchSinkConfigured = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "lens_modelwatch_sink_configured", Help: "1 if catalog-drift alerts have a delivery sink, 0 if they can only reach a log. 0 means alerts do not reach a person."},
+	)
+
 	RoutingTierGatedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "lens_routing_tier_gated_total", Help: "Auto-route recommendations suppressed by the work-tier gate, by reason (sensitivity_optout / downgrade_veto)."},
 		[]string{"reason"},
@@ -376,7 +393,7 @@ func init() {
 		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged, DetectorLastRunAgeSeconds, AnnotationReputationEvents,
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal, RoutingTierGatedTotal,
-		UnpricedModelRequests,
+		UnpricedModelRequests, ModelWatchUnpricedModels, ModelWatchSinkConfigured,
 		RoutingBrainAppliedTotal, RoutingBrainAdvisoryTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 		SpendRecordsTotal,
