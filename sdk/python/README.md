@@ -76,4 +76,7 @@ Empty values are silently dropped — no blank headers ever leave the SDK.
 
 ## License
 
-Apache-2.0
+[MIT](LICENSE). This SDK is deliberately licensed more permissively than the Talyvor Lens server
+it talks to, which is under the [Business Source License 1.1](../../LICENSE): the SDK is a thin
+client you embed in your own application, so it should not put a licence review in the way of
+an integration.
