@@ -195,6 +195,13 @@ func (p *Proxy) agentReserveBlocks(ctx context.Context, apiKeyID, wsID, model, p
 // sourced from the reservation row inside the primitive (the hold wrote them), so only the served model,
 // known here and nowhere in the row, is passed through.
 func (p *Proxy) settleReservation(ctx context.Context, deliveredUSD float64, servedModel string) float64 {
+	return p.settleReservationBasis(ctx, deliveredUSD, servedModel, "")
+}
+
+// settleReservationBasis is settleReservation plus the PRICE BASIS of deliveredUSD. priceBasis is
+// "fallback" when the served model was absent from the catalog and the charge is therefore a derived
+// guess; empty when the price was exact. It rides onto the spend row so the guess is auditable later.
+func (p *Proxy) settleReservationBasis(ctx context.Context, deliveredUSD float64, servedModel, priceBasis string) float64 {
 	h, ok := reservationFrom(ctx)
 	if !ok || p.agentSpender == nil {
 		return 0 // no reservation on this request ⇒ the consumer was charged nothing (plain key / path off)
@@ -203,7 +210,8 @@ func (p *Proxy) settleReservation(ctx context.Context, deliveredUSD float64, ser
 	if deliveredUSD > 0 {
 		finalLXC = int64(math.Ceil(deliveredUSD / economy.LXCUSDValue * 1e6))
 	}
-	settledLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC, economy.AgentDebitMeta{ServedModel: servedModel})
+	settledLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC,
+		economy.AgentDebitMeta{ServedModel: servedModel, PriceBasis: priceBasis})
 	if err != nil {
 		// Logged-and-swallowed — the response is already served. A failed settle leaves the hold, which the
 		// stranded sweeper later REFUNDS (never over-charges): the customer is protected on the error path.

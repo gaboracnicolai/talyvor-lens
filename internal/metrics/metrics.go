@@ -218,6 +218,15 @@ var (
 	// RoutingTierGatedTotal counts auto-route recommendations SUPPRESSED by the
 	// Shape-1 work-tier gate (#198), by reason. Subtractive only — a gated
 	// request takes the base route, so it is also counted in RoutingFallbackTotal.
+	// UnpricedModelRequests counts requests priced on a DERIVED FALLBACK rate because the model is not
+	// in the catalog. ⚠ ALERT ON THIS: any non-zero value means a provider is serving a model Lens does
+	// not know, so that traffic is being billed on a guess (and, before the fix that added this counter,
+	// was being served FREE). The remedy is to add the model via LENS_MODEL_CATALOG_OVERRIDES.
+	UnpricedModelRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_unpriced_model_requests_total", Help: "Requests priced on a derived fallback rate because the model is absent from the catalog, by model and purpose (hold/charge). Non-zero means under-billing until the catalog is updated."},
+		[]string{"model", "purpose"},
+	)
+
 	RoutingTierGatedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "lens_routing_tier_gated_total", Help: "Auto-route recommendations suppressed by the work-tier gate, by reason (sensitivity_optout / downgrade_veto)."},
 		[]string{"reason"},
@@ -367,6 +376,7 @@ func init() {
 		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged, DetectorLastRunAgeSeconds, AnnotationReputationEvents,
 		ROIReportsGeneratedTotal, ROIReportDuration,
 		RoutingRecommendationsTotal, RoutingIntelligenceAppliedTotal, RoutingFallbackTotal, RoutingTierGatedTotal,
+		UnpricedModelRequests,
 		RoutingBrainAppliedTotal, RoutingBrainAdvisoryTotal,
 		RequestsByModalityTotal, VisionRouteRedirectsTotal, ModalityUnsupportedTotal,
 		SpendRecordsTotal,

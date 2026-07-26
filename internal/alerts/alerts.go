@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/talyvor/lens/internal/catalog"
+	"github.com/talyvor/lens/internal/metrics"
 )
 
 type AlertLevel string
@@ -527,4 +528,56 @@ func (a *AlertManager) evaluateAllRules(ctx context.Context) {
 		}
 		a.mu.Unlock()
 	}
+}
+
+// ─── MONEY-PATH PRICING (never zero) ─────────────────────────────────────────
+
+// CostUSDResolved is the pricing entry point for anything that MOVES MONEY — the reservation hold and
+// the delivered charge. It differs from CostUSD/CostUSDDetailed in the one way that matters: it cannot
+// return zero for an unknown model, because catalog.ResolveRates has no unknown outcome. It returns the
+// cost together with the PROVENANCE, so a fallback charge can be marked on its ledger row, alerted on,
+// and repriced later.
+//
+// ⚠ DO NOT use CostUSD or CostUSDDetailed to price a charge or a hold. Their contract is "unknown
+// models cost 0", which was written for alerting — where a missed alert beats a false one — and is a
+// revenue hole when the same function prices a bill. money_path_pricing_guard_test.go enforces this.
+//
+// purpose selects the fallback direction for an unknown model: a hold falls back HIGH (refundable), a
+// charge falls back LOW (a defensible floor). See catalog.Purpose.
+func CostUSDResolved(model string, purpose catalog.Purpose,
+	uncachedInput, cachedInput, cacheWriteInput, output int) (float64, catalog.Provenance) {
+	rates, prov := catalog.ResolveRates(model, purpose)
+	usd := (float64(uncachedInput)*rates.InputPer1M +
+		float64(cachedInput)*rates.CachedInputPer1M +
+		float64(cacheWriteInput)*rates.CacheWritePer1M +
+		float64(output)*rates.OutputPer1M) / 1_000_000
+	if prov == catalog.ProvenanceFallback {
+		WarnUnpricedModel(model, purpose, usd)
+	}
+	return usd, prov
+}
+
+// WarnUnpricedModel is the LOUD part, and the reason this bug survived: a log line nobody reads is how
+// a revenue hole stays open. Every unknown-model pricing decision emits an ERROR (not Info, not Debug —
+// an operator's alerting almost always ships on ERROR) naming the model, the purpose and the derived
+// amount, and increments a metric so it is graphable and alertable without log scraping.
+//
+// The message states the ACTION, because the operator needs to know the fix is one env var away:
+// LENS_MODEL_CATALOG_OVERRIDES extends the catalog on the box without a rebuild.
+func WarnUnpricedModel(model string, purpose catalog.Purpose, derivedUSD float64) {
+	metrics.UnpricedModelRequests.WithLabelValues(model, purposeLabel(purpose)).Inc()
+	slog.Error("PRICING: model is NOT in the catalog — billed on a DERIVED FALLBACK rate, not its real price",
+		slog.String("model", model),
+		slog.String("purpose", purposeLabel(purpose)),
+		slog.Float64("derived_usd", derivedUSD),
+		slog.String("impact", "a charge on this basis is a guess: a hold falls back to the provider's most expensive known model, a charge to its cheapest (a floor, never an over-bill)"),
+		slog.String("action", "add the model to the catalog NOW via LENS_MODEL_CATALOG_OVERRIDES (no rebuild, no restart of anything else) — until then this workspace is under-billed"),
+	)
+}
+
+func purposeLabel(p catalog.Purpose) string {
+	if p == catalog.PurposeHold {
+		return "hold"
+	}
+	return "charge"
 }

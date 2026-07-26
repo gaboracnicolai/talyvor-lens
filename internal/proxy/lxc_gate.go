@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -68,11 +69,17 @@ func lxcEstimate(model, prompt string) int64 {
 // input-only lxcEstimate (which under-holds against an output-inclusive charge and would leak the ceiling
 // by exactly the output cost), this is a true upper bound on the delivered cost, so the settle only ever
 // refunds. maxOutTokens is BOUNDED by the caller (explicit max_tokens, else a sane cap — never catalog max).
+//
+// ⚠ IT PRICES VIA CostUSDResolved, NOT CostUSD. An unknown model used to price at 0 here, which made
+// heldLXC 0, which made agentReserveBlocks return "no hold" — so the request carried no reservation, the
+// settle had nothing to charge against, and the sub-budget ceiling was never consulted. A hold falls back
+// to the provider's most expensive known model: over-holding is refunded by the settle, under-holding
+// leaks the ceiling, so HIGH is the conservative direction here.
 func reserveEstimateLXC(model, prompt string, maxOutTokens int) int64 {
 	if maxOutTokens < 0 {
 		maxOutTokens = 0
 	}
-	estUSD := alerts.CostUSD(model, len(prompt)/4, maxOutTokens)
+	estUSD, _ := alerts.CostUSDResolved(model, catalog.PurposeHold, len(prompt)/4, 0, 0, maxOutTokens)
 	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
 }
 
