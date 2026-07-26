@@ -73,3 +73,28 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// TestVersionDefaultIsAnHonestPlaceholder guards the OTHER half of this class.
+//
+// TestVersionHasASingleSource stops the version being copied. This stops the
+// single source from lying: a default of "0.1.0" looks like a version while
+// nothing sets it, which is how every deployment came to report 0.1.0 no matter
+// which commit shipped — and why deployed SHAs had to be verified by hand
+// against the registry.
+//
+// The default must therefore be visibly NOT a version. The complementary check
+// — that a release binary carries a real stamp — cannot be made from a unit
+// test, because nothing here can see whether the link step ran; CI asserts it
+// against the built artifact instead (see the build job).
+func TestVersionDefaultIsAnHonestPlaceholder(t *testing.T) {
+	if versionLiteral.MatchString(`"` + lensVersion + `"`) {
+		t.Errorf("lensVersion defaults to %q, which is version-SHAPED — an unstamped build "+
+			"would claim a version it does not have. Use an obviously-unset placeholder.", lensVersion)
+	}
+	for _, ok := range []string{"dev", "unknown", "none"} {
+		if lensVersion == ok {
+			return
+		}
+	}
+	t.Errorf("lensVersion defaults to %q; expected an explicit placeholder such as \"dev\"", lensVersion)
+}

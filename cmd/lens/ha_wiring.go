@@ -32,22 +32,31 @@ func breakerStateValue(s retry.CBState) float64 {
 }
 
 // lensVersion is THE version string for this binary. Every surface that reports
-// a version — /healthz, /status, the service page at /, the MCP server, the API
-// server — must read it from here.
+// a version — /healthz, /status, the service page at /, the MCP server and the
+// API server — reads it from here, so one stamp identifies the running process
+// everywhere it is asked.
 //
-// It used to be duplicated as a bare "0.1.0" literal at five separate call
-// sites, so bumping one would have left the others silently disagreeing about
-// what was deployed. That is the same shape as a hardcoded money constant: right
-// on the day it was written, quietly wrong afterwards, with nothing to catch it.
-// TestVersionHasASingleSource keeps it that way.
+// IT IS A VAR, NOT A CONST, BECAUSE IT IS INJECTED AT BUILD TIME:
 //
-// KNOWN LIMITATION, worth stating rather than implying otherwise: this is a
-// source constant, not a build stamp. The release build passes only
-// -ldflags="-w -s", so no version is injected and every deployment reports
-// 0.1.0 regardless of what actually shipped. Wiring -X to this symbol (and to a
-// git describe in CI) is the real fix; it touches the release pipeline and image
-// build, so it is deliberately not bundled into a status-page change.
-const lensVersion = "0.1.0"
+//	go build -ldflags="-X main.lensVersion=$(git rev-parse --short HEAD)"
+//
+// which is what the Dockerfile, the release image workflow, CI and `make
+// binaries` all do. A const cannot be set by -X, which is precisely why the
+// previous const could never be anything but its literal.
+//
+// THE DEFAULT IS "dev", DELIBERATELY. An unstamped build says so rather than
+// claiming a version it does not have: until now every deployment reported
+// "0.1.0" no matter which commit shipped, so the running binary could not be
+// identified and deployed SHAs had to be checked by hand against the registry —
+// which is how a stale :latest went unnoticed. A placeholder that looks like a
+// version is worse than one that admits it: "dev" is checkable, "0.1.0" is not.
+//
+// `lens version` prints this, so a deployment can be verified by asking the
+// service what it is instead of trusting a tag. CI asserts the built binary
+// does NOT report the placeholder (see the build job), and
+// TestVersionDefaultIsAnHonestPlaceholder asserts the default never becomes
+// version-shaped again.
+var lensVersion = "dev"
 
 // haComponents bundles the HA objects run() needs after setup: the health
 // handlers to mount and the registry + breaker bus to drive graceful shutdown.

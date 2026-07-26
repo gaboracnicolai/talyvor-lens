@@ -33,8 +33,14 @@ backup-verify-local:
 # Build all four binaries to ./bin/.
 binaries: lens node cachenode embednode
 
+# The build stamp for local builds: the commit this binary came from, with
+# -dirty when the tree has uncommitted changes. Outside a git checkout it falls
+# back to "dev" — honest about being unstamped rather than inventing a version.
+# (A bare `go build ./cmd/lens` also reports "dev", by the same default.)
+LENS_VERSION ?= $(shell git describe --always --dirty 2>/dev/null || echo dev)
+
 lens:
-	go build -o bin/talyvor-lens ./cmd/lens
+	go build -ldflags="-X main.lensVersion=$(LENS_VERSION)" -o bin/talyvor-lens ./cmd/lens
 
 node:
 	go build -o bin/talyvor-node ./cmd/node

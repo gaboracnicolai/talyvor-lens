@@ -112,9 +112,17 @@ import (
 )
 
 func main() {
-	// Subcommand dispatch. Only an explicit "migrate" diverts; with no
-	// subcommand (or any other arg, as before) the process starts the gateway
+	// Subcommand dispatch. Only an explicit "migrate" or "version" diverts; with
+	// no subcommand (or any other arg, as before) the process starts the gateway
 	// server exactly as it always has — the default entrypoint is unchanged.
+	// `lens version` prints the build stamp and exits. This is the operational
+	// point of injecting it: a deployment can be identified by asking the binary
+	// what it is — `docker exec … lens version` — rather than trusting the tag
+	// that was pulled. CI asserts this output is a real stamp, not "dev".
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(lensVersion)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		if err := runMigrate(); err != nil {
 			slog.Error("migrate failed", slog.String("err", err.Error()))

@@ -14,7 +14,14 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
 
-RUN go build -trimpath -ldflags="-w -s" -o /bin/lens ./cmd/lens
+# The build stamp. Passed by the image workflow as the commit SHA; an
+# unstamped build keeps the honest "dev" default rather than claiming a version
+# it does not have. This is what lets a running container answer "which commit
+# am I?" — via `lens version`, /healthz and /status — instead of that having to
+# be inferred from whichever tag was pulled.
+ARG LENS_VERSION=dev
+
+RUN go build -trimpath -ldflags="-w -s -X main.lensVersion=${LENS_VERSION}" -o /bin/lens ./cmd/lens
 
 # distill-worker is the killable, memory-limited conversion subprocess that
 # distill.ProcessIsolator spawns (the stage-3 resource-isolation envelope). It

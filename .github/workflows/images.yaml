@@ -39,6 +39,12 @@ jobs:
         with:
           context: .
           file: Dockerfile
+          # Stamp the binary with the SAME sha the image is tagged with below, so
+          # `lens version` (and /healthz, and /status) can be compared DIRECTLY
+          # against the registry tag. Verifying a deployment stops being a manual
+          # cross-check and becomes one command against the running service.
+          build-args: |
+            LENS_VERSION=${{ github.sha }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
