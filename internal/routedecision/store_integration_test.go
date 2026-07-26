@@ -37,6 +37,7 @@ func routePool(t *testing.T) *pgxpool.Pool {
 			output_tokens INTEGER NOT NULL,
 			actual_cost_u BIGINT NOT NULL,
 			counterfactual_cost_estimate_u BIGINT NOT NULL,
+			cost_basis TEXT NOT NULL DEFAULT 'flat',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
@@ -50,9 +51,9 @@ func TestRecordAndSummarize_Integration(t *testing.T) {
 
 	// 3 requests: 1 overrode (cheaper: actual 100 vs counterfactual 300), 2 did not.
 	rows := []RouteDecision{
-		{WorkspaceID: "wsA", BaselineModel: "big", ActualModel: "small", CohortOverrode: true, CohortN: 12, InputTokens: 100, OutputTokens: 50, ActualCostU: 100, CounterfactualCostEstimateU: 300},
-		{WorkspaceID: "wsA", BaselineModel: "small", ActualModel: "small", CohortOverrode: false, InputTokens: 100, OutputTokens: 50, ActualCostU: 100, CounterfactualCostEstimateU: 100},
-		{WorkspaceID: "wsB", BaselineModel: "small", ActualModel: "small", CohortOverrode: false, InputTokens: 100, OutputTokens: 50, ActualCostU: 100, CounterfactualCostEstimateU: 100},
+		{WorkspaceID: "wsA", BaselineModel: "big", ActualModel: "small", CohortOverrode: true, CohortN: 12, InputTokens: 100, OutputTokens: 50, ActualCostU: 100, CounterfactualCostEstimateU: 300, CostBasis: BasisCacheAware},
+		{WorkspaceID: "wsA", BaselineModel: "small", ActualModel: "small", CohortOverrode: false, InputTokens: 100, OutputTokens: 50, ActualCostU: 100, CounterfactualCostEstimateU: 100, CostBasis: BasisCacheAware},
+		{WorkspaceID: "wsB", BaselineModel: "small", ActualModel: "small", CohortOverrode: false, InputTokens: 100, OutputTokens: 50, ActualCostU: 100, CounterfactualCostEstimateU: 100, CostBasis: BasisCacheAware},
 	}
 	for _, r := range rows {
 		if err := w.Record(ctx, r); err != nil {
@@ -60,7 +61,9 @@ func TestRecordAndSummarize_Integration(t *testing.T) {
 		}
 	}
 
-	s, err := NewReader(pool).Summarize(ctx, time.Now().Add(-time.Hour))
+	// Cross-tenant, explicitly: this test's 3 rows span wsA and wsB. The per-tenant view is proven in
+	// scope_integration_test.go.
+	s, err := NewReader(pool).SummarizeAllTenants(ctx, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("summarize: %v", err)
 	}
@@ -82,11 +85,11 @@ func TestSummarize_WindowFilter_Integration(t *testing.T) {
 	ctx := context.Background()
 	// an old row (2h ago) must be excluded by a 1h window
 	if _, err := pool.Exec(ctx, `INSERT INTO routing_decisions
-		(workspace_id, baseline_model, actual_model, cohort_overrode, input_tokens, output_tokens, actual_cost_u, counterfactual_cost_estimate_u, created_at)
-		VALUES ('wsOld','big','small',true,10,10,1,2, now() - interval '2 hours')`); err != nil {
+		(workspace_id, baseline_model, actual_model, cohort_overrode, input_tokens, output_tokens, actual_cost_u, counterfactual_cost_estimate_u, cost_basis, created_at)
+		VALUES ('wsOld','big','small',true,10,10,1,2,'cache_aware', now() - interval '2 hours')`); err != nil {
 		t.Fatal(err)
 	}
-	s, err := NewReader(pool).Summarize(ctx, time.Now().Add(-time.Hour))
+	s, err := NewReader(pool).SummarizeAllTenants(ctx, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

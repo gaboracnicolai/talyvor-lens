@@ -13,6 +13,7 @@ import (
 
 type fakeRow struct {
 	total, override, actual, cf int64
+	excluded                    int64 // rows on the retired flat basis, excluded from the sums
 	err                         error
 }
 
@@ -20,7 +21,7 @@ func (r fakeRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
 	}
-	vals := []int64{r.total, r.override, r.actual, r.cf}
+	vals := []int64{r.total, r.override, r.actual, r.cf, r.excluded}
 	for i, d := range dest {
 		if p, ok := d.(*int64); ok && i < len(vals) {
 			*p = vals[i]
@@ -36,7 +37,7 @@ func (d fakeReadDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row { re
 // Summarize computes the override RATE and the estimated delta from the aggregate columns.
 func TestSummarize_OverrideRateAndDelta(t *testing.T) {
 	r := NewReader(fakeReadDB{row: fakeRow{total: 4, override: 1, actual: 300, cf: 500}})
-	s, err := r.Summarize(context.Background(), time.Unix(0, 0))
+	s, err := r.Summarize(context.Background(), "ws1", time.Unix(0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +55,7 @@ func TestSummarize_OverrideRateAndDelta(t *testing.T) {
 // Zero requests must not divide by zero — rate is 0.
 func TestSummarize_ZeroRequests_NoDivideByZero(t *testing.T) {
 	r := NewReader(fakeReadDB{row: fakeRow{total: 0}})
-	s, err := r.Summarize(context.Background(), time.Unix(0, 0))
+	s, err := r.Summarize(context.Background(), "ws1", time.Unix(0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
