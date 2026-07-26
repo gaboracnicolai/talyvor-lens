@@ -1523,8 +1523,26 @@ func Load() (*Config, error) {
 		// compares false to every bound, so the range checks alone would
 		// let a balance-poisoning NaN share through. (±Inf is caught by
 		// the range checks.)
-		if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
-			return nil, fmt.Errorf("invalid LENS_POOL_ROYALTY_SHARE (must be in [0,1]): %s", v)
+		if err != nil || math.IsNaN(f) || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_POOL_ROYALTY_SHARE (must be in [0,1)): %s", v)
+		}
+		// s >= 1 is refused because the share is a SECURITY parameter, not a tuning knob.
+		//
+		// Per-identity workspaces (POST /v1/provision) make Sybil self-dealing possible: one
+		// person holds two workspaces and has A's cached answers serve B. The identity guards
+		// do not stop it — workspace_owner_links has no writer, and the card-fingerprint half
+		// catches only a single operator lazily funding both from one card. What holds is
+		// arithmetic: anchor.go clamps a royalty's worth to <= AvoidedCOGSUSD and the mint is
+		// funded by the consumer's settled charge, so a self-dealing pair spends C to earn s*C
+		// and LOSES (1-s)*C every cycle. At s = 1 that becomes break-even and the only
+		// economic control is gone. Refuse at boot rather than rely on a convention.
+		if f >= 1 {
+			return nil, fmt.Errorf(
+				"invalid LENS_POOL_ROYALTY_SHARE (must be < 1): %s — the share is a self-deal control, "+
+					"not a tuning knob: a Sybil pair spends C to earn s*C, so it loses (1-s)*C per cycle only "+
+					"while s < 1; at s >= 1 that becomes break-even or better and per-identity workspaces lose "+
+					"their only economic protection (workspace_owner_links has no writer, and card fingerprints "+
+					"catch just the one-card operator)", v)
 		}
 		c.PoolRoyaltyShare = f
 	}
