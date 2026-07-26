@@ -190,6 +190,27 @@ ON CONFLICT (request_id) DO NOTHING`
 // have no card and were previously BLIND to this guard). EXISTS is false when
 // neither signal is present (default-ALLOW on missing — inconclusive never blocks
 // honest cross-actor reuse; the rate cap bounds yield regardless). Plain read, no lock.
+//
+// ⚠ DO NOT POPULATE workspace_owner_links FROM SIGNUP. POST /v1/provision derives exactly
+// one workspace per identity, so an owner_key written there — owner_key = hash(identity),
+// the obvious thing to reach for — would be UNIQUE PER WORKSPACE and this self-join could
+// never match across two of them. The guard would not improve by one request, but the table
+// would look populated, which is worse than empty: the next person to audit this concludes
+// the exclusion works. A signal only helps here if it is IDENTICAL ACROSS a person's several
+// accounts, and an OIDC subject is by construction not that.
+//
+// This column's intended writer is an OPERATOR VOUCH (migration 0088: it covers vouched
+// workspaces, which have no card). The automatic signal that would genuinely extend coverage
+// is the Stripe CUSTOMER id, alongside the card fingerprint already written by
+// internal/billing/billing.go — same person, second card, same customer.
+//
+// Note what is actually load-bearing today: this predicate is currently false for every pair
+// (owner_links has no writer; fingerprints are written only on a completed Stripe payment).
+// Self-dealing is bounded instead by economics — anchor.go clamps a royalty's worth to
+// <= AvoidedCOGSUSD, so at the default share of 0.5 a Sybil pair spends C to earn 0.5C and
+// loses (1-s)*C per cycle. That bound, not this join, is why per-identity workspaces are safe
+// to run. It degrades to break-even at s = 1.0, which is why config.go now refuses to boot
+// there.
 const sharedFingerprintSQL = `SELECT
     EXISTS (SELECT 1 FROM workspace_card_fingerprints a
             JOIN workspace_card_fingerprints b ON a.fingerprint_hash = b.fingerprint_hash

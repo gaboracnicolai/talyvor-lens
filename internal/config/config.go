@@ -139,6 +139,19 @@ type Config struct {
 	JWTPrivateKey string
 	TokenTTL      time.Duration
 
+	// ProvisionSecret is the shared secret gating POST /v1/provision — the narrow
+	// route that turns an authenticated identity into a tenant. It exists so the
+	// session gateway (the suite BFF) never has to hold LENS_API_KEY: the global
+	// admin key makes workspaceAuthorized return true for EVERY workspace and
+	// unlocks ~30 admin routes, so a gateway compromise would escalate from one
+	// tenant's data to control of every tenant. This credential can create a
+	// workspace and mint a session token for it, and nothing else.
+	//
+	// EMPTY MEANS THE CAPABILITY DOES NOT EXIST: run() does not register the route
+	// at all when this is unset, so an unconfigured deployment has no provisioning
+	// surface rather than an unauthenticated one. Env: LENS_PROVISION_SECRET.
+	ProvisionSecret string
+
 	// Global rate limits (Item 8). Zero = no global cap; the
 	// per-workspace tier in MultiTierLimiter still applies.
 	GlobalRPM       int
@@ -1013,8 +1026,9 @@ func Load() (*Config, error) {
 		NodeTLSSkipVerify:        parseBoolEnv("LENS_NODE_TLS_SKIP_VERIFY"),
 		NodePrivateCIDRAllowlist: os.Getenv("LENS_NODE_PRIVATE_CIDR_ALLOWLIST"),
 
-		JWTPrivateKey: os.Getenv("LENS_JWT_PRIVATE_KEY"),
-		TokenTTL:      24 * time.Hour,
+		JWTPrivateKey:   os.Getenv("LENS_JWT_PRIVATE_KEY"),
+		TokenTTL:        24 * time.Hour,
+		ProvisionSecret: os.Getenv("LENS_PROVISION_SECRET"),
 
 		HAEnabled: parseBoolEnv("LENS_HA_ENABLED"),
 
@@ -1509,8 +1523,26 @@ func Load() (*Config, error) {
 		// compares false to every bound, so the range checks alone would
 		// let a balance-poisoning NaN share through. (±Inf is caught by
 		// the range checks.)
-		if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
-			return nil, fmt.Errorf("invalid LENS_POOL_ROYALTY_SHARE (must be in [0,1]): %s", v)
+		if err != nil || math.IsNaN(f) || f < 0 {
+			return nil, fmt.Errorf("invalid LENS_POOL_ROYALTY_SHARE (must be in [0,1)): %s", v)
+		}
+		// s >= 1 is refused because the share is a SECURITY parameter, not a tuning knob.
+		//
+		// Per-identity workspaces (POST /v1/provision) make Sybil self-dealing possible: one
+		// person holds two workspaces and has A's cached answers serve B. The identity guards
+		// do not stop it — workspace_owner_links has no writer, and the card-fingerprint half
+		// catches only a single operator lazily funding both from one card. What holds is
+		// arithmetic: anchor.go clamps a royalty's worth to <= AvoidedCOGSUSD and the mint is
+		// funded by the consumer's settled charge, so a self-dealing pair spends C to earn s*C
+		// and LOSES (1-s)*C every cycle. At s = 1 that becomes break-even and the only
+		// economic control is gone. Refuse at boot rather than rely on a convention.
+		if f >= 1 {
+			return nil, fmt.Errorf(
+				"invalid LENS_POOL_ROYALTY_SHARE (must be < 1): %s — the share is a self-deal control, "+
+					"not a tuning knob: a Sybil pair spends C to earn s*C, so it loses (1-s)*C per cycle only "+
+					"while s < 1; at s >= 1 that becomes break-even or better and per-identity workspaces lose "+
+					"their only economic protection (workspace_owner_links has no writer, and card fingerprints "+
+					"catch just the one-card operator)", v)
 		}
 		c.PoolRoyaltyShare = f
 	}

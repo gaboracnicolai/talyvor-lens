@@ -1779,6 +1779,20 @@ func run() error {
 	// signs raw bytes) before any JSON.
 	bill.post(r, "/v1/billing/webhook", billingSvc.HandleWebhook)
 
+	// U-signup provisioning — turns an authenticated identity into a tenant. Mounted on the BARE
+	// router, OUTSIDE the authed group, because it carries its own credential
+	// (LENS_PROVISION_SECRET) rather than an API key: its whole purpose is to serve a caller that
+	// does not yet have a workspace, and therefore cannot have a workspace key.
+	//
+	// FAIL CLOSED: mountProvisionRoute registers nothing when the secret is unset, so an
+	// unconfigured deployment 404s here instead of exposing an unauthenticated provisioning
+	// surface. That is the reason the emptiness check lives inside the mount helper and not in
+	// the handler — a handler-level check would still leave the route reachable.
+	mountProvisionRoute(r, cfg.ProvisionSecret, wsManager,
+		func(workspaceID, userID string, scopes []string, ttl time.Duration) (string, error) {
+			return auth.GenerateToken(workspaceID, userID, scopes, authManager.PrivateKey(), ttl)
+		})
+
 	r.Group(func(authed chi.Router) {
 		// Helicone-compat translates Helicone-* headers and rewrites
 		// /oai/* and /anthropic/* paths BEFORE auth runs. That order
