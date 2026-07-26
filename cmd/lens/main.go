@@ -514,9 +514,9 @@ func run() error {
 	// proxying and metering, and neither depends on this. The real objection to the quiet
 	// option is that it goes unnoticed, and the answer to that is observability, not an
 	// outage: the mismatch is logged at ERROR with the specific reason on every boot.
-	poolingAttested := poolSafetyAttested(ctx, pool, cfg)
+	poolGate := poolSafetyGate(ctx, pool, cfg)
 	p.SetPoolGate(cache_pooling.New(
-		func() bool { return cfg.CachePoolableEnabled && poolingAttested },
+		func() bool { return cfg.CachePoolableEnabled && poolGate.Attested() },
 		wsManager.GetCachePoolable,
 	))
 	// Per-team / per-sprint budget governance (Upgrade 19). Seed the
@@ -1741,7 +1741,7 @@ func run() error {
 	// a re-read of the environment and not a default. If it could not be read the payload says
 	// so and carries no values — see internal/econflags.
 	r.Handle("/v1/admin/economy/flags", requireAdmin(authManager,
-		econflags.Handler(cfg, lensVersion)))
+		econflags.Handler(cfg, lensVersion, poolFlagOverride(cfg, poolGate))))
 
 	r.Handle("/v1/admin/keel/findings", requireAdmin(authManager,
 		newKeelFindingsHandler(keelFindingsReader)))
