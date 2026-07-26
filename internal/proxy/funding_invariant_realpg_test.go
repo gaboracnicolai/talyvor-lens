@@ -62,7 +62,7 @@ func fundingProxy(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.Pool)
 			avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount BIGINT NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '',
 			prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE IF NOT EXISTS lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0, livemode BOOLEAN)`,
 		`TRUNCATE lxc_balances, lxc_ledger, agent_lxc_subbudgets, lxc_reservations, lens_token_balances, lens_token_ledger, pool_royalty_mints, workspaces, lxc_purchases`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
@@ -72,7 +72,7 @@ func fundingProxy(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.Pool)
 
 	store := economy.NewDualTokenStore(nil, pool, nil)
 	tokenLedger := mining.NewLedgerStore(pool)
-	tokenLedger.SetMintVerifier(earnverify.New()) // U6 floor, wired unconditionally as production
+	tokenLedger.SetMintVerifier(earnverify.New(false)) // U6 floor, wired unconditionally as production
 	minter := poolroyalty.NewMinter(pool, tokenLedger, 0.5, func() bool { return true })
 
 	p := &Proxy{}

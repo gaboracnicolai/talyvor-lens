@@ -48,7 +48,7 @@ func confHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 			description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL, livemode BOOLEAN)`,
 		`CREATE TABLE inference_nodes (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL)`,
 		`CREATE TABLE benchmark_node_scores (node_id TEXT NOT NULL, model TEXT NOT NULL, score DOUBLE PRECISION NOT NULL,
 			sample_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (node_id, model))`,
@@ -64,7 +64,7 @@ func confHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New())
+	ledger.SetMintVerifier(earnverify.New(false))
 	return pool, ledger
 }
 

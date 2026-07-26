@@ -61,14 +61,14 @@ func routingHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 			input_token_range TEXT NOT NULL DEFAULT '', complexity_bucket TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
 			provider TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL, livemode BOOLEAN)`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New()) // U6 floor — wired exactly as production
+	ledger.SetMintVerifier(earnverify.New(false)) // U6 floor — wired exactly as production
 	return pool, ledger
 }
 

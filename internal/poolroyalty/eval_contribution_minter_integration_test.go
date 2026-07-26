@@ -62,14 +62,14 @@ func evalHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 		`CREATE TABLE workspace_card_fingerprints (workspace_id TEXT NOT NULL, fingerprint_hash TEXT NOT NULL,
 			PRIMARY KEY (workspace_id, fingerprint_hash))`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL, livemode BOOLEAN)`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New()) // U6 floor — wired exactly as production
+	ledger.SetMintVerifier(earnverify.New(false)) // U6 floor — wired exactly as production
 	return pool, ledger
 }
 

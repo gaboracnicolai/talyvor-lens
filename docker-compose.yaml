@@ -30,6 +30,22 @@ services:
     # raw HTTP proxy + the admin surface directly to the internet.
     ports:
       - "127.0.0.1:8080:8080"
+    # ADDITIVE to the curated environment: list below (#371/#373), which stays as the documented
+    # critical set and keeps its guards. This forwards .env WHOLESALE so reachability no longer
+    # depends on remembering to add an entry: internal/config reads 160 LENS_* variables and the
+    # list names 44, so 116 were unreachable however an operator set them. Five were found mute by
+    # accident in one day, each by an unrelated investigation and never by a gate.
+    #
+    # LEAKAGE, decided not inherited: env_file forwards the whole file. On the documented shape the
+    # only non-LENS_ variable is POSTGRES_PASSWORD, which this container ALREADY holds — it is
+    # interpolated into LENS_DATABASE_URL below. cmd/lens/compose_env_mechanism_test.go fails if a
+    # new non-LENS_ variable appears, so the next person re-decides rather than inherits.
+    #
+    # required:false so a checkout with no .env still starts. `environment:` keeps precedence, so
+    # the CONSTRUCTED values below stay authoritative.
+    env_file:
+      - path: .env
+        required: false
     environment:
       # Route through PgBouncer (transaction pooling) instead of Postgres directly.
       # LENS_DB_PGBOUNCER switches pgx to simple query protocol (required).

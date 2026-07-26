@@ -55,7 +55,7 @@ func poviNodeHarness(t *testing.T) *nodeHarness {
 		`DROP SCHEMA IF EXISTS ` + poviHarnessSchema + ` CASCADE`,
 		`CREATE SCHEMA ` + poviHarnessSchema,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`, // BIGINT µLXC (prod 0083)
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL, livemode BOOLEAN)`, // BIGINT µLXC (prod 0083)
 		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
 			locked_balance BIGINT NOT NULL DEFAULT 0, held_balance BIGINT NOT NULL DEFAULT 0,
 			lifetime_earned BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0,
@@ -88,7 +88,7 @@ func poviNodeHarness(t *testing.T) *nodeHarness {
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New()) // U6 floor — wired unconditionally, as production
+	ledger.SetMintVerifier(earnverify.New(false)) // U6 floor — wired unconditionally, as production
 	miner := mining.NewComputeMiner(ledger, pool)
 	stakeMgr := povi.NewStakeManager(povi.NewNodeStakeStore(pool), ledger, miner.NodeWorkspace, 100, 0, pool)
 	lookup := povi.PubKeyLookup(func(lookupCtx context.Context, nodeID string) (ed25519.PublicKey, error) {

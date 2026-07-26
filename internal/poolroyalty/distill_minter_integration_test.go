@@ -78,14 +78,14 @@ func distillMintHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 			minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held',
 			finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL, livemode BOOLEAN)`,
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			t.Fatalf("schema: %v", err)
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New()) // U6 floor — wired unconditionally, as production
+	ledger.SetMintVerifier(earnverify.New(false)) // U6 floor — wired unconditionally, as production
 	return pool, ledger
 }
 

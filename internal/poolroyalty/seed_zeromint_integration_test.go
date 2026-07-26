@@ -18,7 +18,7 @@ import (
 // never earn_verified, so MayEarn is false and the held-ledger verifyEarn chokepoint rolls the
 // mint back. The CONTRAST (a verified contributor in the identical scenario mints > 0) isolates
 // MayEarn as the cause (not self-serve, not a key mismatch). Real-PG; the ledger is wired exactly
-// like production (SetMintVerifier(earnverify.New())).
+// like production (SetMintVerifier(earnverify.New(false))).
 
 func seedZeroMintHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 	t.Helper()
@@ -65,14 +65,14 @@ func seedZeroMintHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 			avoided_cogs_usd DOUBLE PRECISION NOT NULL, minted_amount BIGINT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL, livemode BOOLEAN)`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("schema: %v", err)
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New()) // U6 floor — wired unconditionally, as production
+	ledger.SetMintVerifier(earnverify.New(false)) // U6 floor — wired unconditionally, as production
 	return pool, ledger
 }
 
@@ -165,7 +165,7 @@ func TestSeed_NeverVerified_MayEarnFalse_Integration(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	ok, err := earnverify.New().MayEarn(ctx, tx, economy.TalyvorSeedWorkspace)
+	ok, err := earnverify.New(false).MayEarn(ctx, tx, economy.TalyvorSeedWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}

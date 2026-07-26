@@ -22,7 +22,7 @@ import (
 // PR-A.5 money proof: a probe delivered through REAL /inference to a staked + earn_verified node with
 // PoVI minting ON is RECORDED but mints ZERO — the gateway-side request_id suppression. Plus the
 // suppression-only contrast (a non-probe receipt mints as today) and the on-the-wire node-blind +
-// happens-before checks. Wired like prod: SetMintVerifier(earnverify.New()) + minting ON +
+// happens-before checks. Wired like prod: SetMintVerifier(earnverify.New(false)) + minting ON +
 // SetProbeChecker(benchStore.IsProbe).
 
 func suppressionHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore, *mining.ComputeMiner, *benchprobe.Store) {
@@ -45,7 +45,7 @@ func suppressionHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore, *mini
 		`DROP SCHEMA IF EXISTS lens_benchsuppress_test CASCADE`,
 		`CREATE SCHEMA lens_benchsuppress_test`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`, // BIGINT µLXC (prod 0083)
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL, livemode BOOLEAN)`, // BIGINT µLXC (prod 0083)
 		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
 			locked_balance BIGINT NOT NULL DEFAULT 0, held_balance BIGINT NOT NULL DEFAULT 0,
 			lifetime_earned BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0,
@@ -90,7 +90,7 @@ func suppressionHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore, *mini
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New())
+	ledger.SetMintVerifier(earnverify.New(false))
 	return pool, ledger, mining.NewComputeMiner(ledger, pool), benchprobe.NewStore(pool)
 }
 
