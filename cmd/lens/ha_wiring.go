@@ -31,7 +31,32 @@ func breakerStateValue(s retry.CBState) float64 {
 	}
 }
 
-const lensVersion = "0.1.0"
+// lensVersion is THE version string for this binary. Every surface that reports
+// a version — /healthz, /status, the service page at /, the MCP server and the
+// API server — reads it from here, so one stamp identifies the running process
+// everywhere it is asked.
+//
+// IT IS A VAR, NOT A CONST, BECAUSE IT IS INJECTED AT BUILD TIME:
+//
+//	go build -ldflags="-X main.lensVersion=$(git rev-parse --short HEAD)"
+//
+// which is what the Dockerfile, the release image workflow, CI and `make
+// binaries` all do. A const cannot be set by -X, which is precisely why the
+// previous const could never be anything but its literal.
+//
+// THE DEFAULT IS "dev", DELIBERATELY. An unstamped build says so rather than
+// claiming a version it does not have: until now every deployment reported
+// "0.1.0" no matter which commit shipped, so the running binary could not be
+// identified and deployed SHAs had to be checked by hand against the registry —
+// which is how a stale :latest went unnoticed. A placeholder that looks like a
+// version is worse than one that admits it: "dev" is checkable, "0.1.0" is not.
+//
+// `lens version` prints this, so a deployment can be verified by asking the
+// service what it is instead of trusting a tag. CI asserts the built binary
+// does NOT report the placeholder (see the build job), and
+// TestVersionDefaultIsAnHonestPlaceholder asserts the default never becomes
+// version-shaped again.
+var lensVersion = "dev"
 
 // haComponents bundles the HA objects run() needs after setup: the health
 // handlers to mount and the registry + breaker bus to drive graceful shutdown.

@@ -128,47 +128,61 @@ func TestCheck_ReturnsOutageWhenPostgresDown(t *testing.T) {
 	}
 }
 
-func TestClassifyLatency_ThresholdsMatchSpec(t *testing.T) {
-	cases := []struct {
-		latency int64
-		err     error
-		want    ComponentStatus
-	}{
-		{50, nil, StatusOperational},
-		{99, nil, StatusOperational},
-		{100, nil, StatusOperational}, // == 100 is still healthy
-		{150, nil, StatusDegraded},    // "slow Redis" lands here
-		{499, nil, StatusDegraded},
-		{501, nil, StatusOutage},
-		{0, errors.New("boom"), StatusOutage},
+// TestClassifyLatency_ThresholdsMatchSpec is REPLACED by thresholds_test.go.
+//
+// It asserted the single shared band — <=100ms operational, <=500ms degraded,
+// >500ms outage — including the two cases that turned out to be the defect:
+// `{150, nil, StatusDegraded}` annotated "slow Redis lands here" (150ms is not a
+// slow Redis, it is a healthy Google Gemini), and `{501, nil, StatusOutage}`
+// (501ms is not an outage, it is AWS Bedrock on a normal day — measured p90 465ms).
+//
+// The spec the name appealed to was written for same-host components and then
+// applied to transatlantic ones, so a test that faithfully encoded it kept the
+// miscalibration pinned in place. What replaces it asserts the two bands
+// separately, against MEASURED provider latencies rather than against the spec.
+
+func TestClassifyLatency_LocalAndProviderBandsAreSeparate(t *testing.T) {
+	// The guarantee the old test was really protecting: an error is always an
+	// outage, and a healthy reading is always operational — on both bands.
+	if got := classifyLocalLatency(0, errors.New("boom")); got != StatusOutage {
+		t.Errorf("local error = %q, want outage", got)
 	}
-	for _, c := range cases {
-		got := classifyLatency(c.latency, c.err)
-		if got != c.want {
-			t.Errorf("classifyLatency(%d, %v) = %q, want %q", c.latency, c.err, got, c.want)
-		}
+	if got := classifyProviderLatency(0, errors.New("boom")); got != StatusOutage {
+		t.Errorf("provider error = %q, want outage", got)
+	}
+	// And the bands are genuinely different, or separating them bought nothing.
+	if localHealthyMs >= providerHealthyMs {
+		t.Fatalf("localHealthyMs (%d) must be well below providerHealthyMs (%d)",
+			localHealthyMs, providerHealthyMs)
 	}
 }
 
-func TestComputeOverall_IsWorstOfAllComponents(t *testing.T) {
-	// All operational → operational.
+// TestComputeOverall_IsWorstOfOurOwnComponents. This replaces
+// TestComputeOverall_IsWorstOfAllComponents, whose final case asserted
+// "provider outage still raises overall to outage".
+//
+// That is the behaviour being corrected, not a regression: the banner answers
+// "is Talyvor working?", and on the live box it read DEGRADED — with every Lens
+// component operational — because OpenAI answered a HEAD in 257ms. The provider
+// rows still carry each provider's real status, which is the useful information;
+// see TestOverall_ThirdPartyProviderDoesNotDefineOurStatus in thresholds_test.go
+// for the full argument.
+func TestComputeOverall_IsWorstOfOurOwnComponents(t *testing.T) {
 	allOK := []ComponentStatus{StatusOperational, StatusOperational, StatusOperational}
 	if got := computeOverall(allOK, nil); got != StatusOperational {
 		t.Errorf("all-ok overall = %q, want operational", got)
 	}
-	// One degraded → degraded.
 	oneDeg := []ComponentStatus{StatusOperational, StatusDegraded, StatusOperational}
 	if got := computeOverall(oneDeg, nil); got != StatusDegraded {
 		t.Errorf("one-degraded overall = %q, want degraded", got)
 	}
-	// One outage even with others healthy → outage.
 	oneOut := []ComponentStatus{StatusOperational, StatusOutage, StatusOperational}
 	if got := computeOverall(oneOut, nil); got != StatusOutage {
 		t.Errorf("one-outage overall = %q, want outage", got)
 	}
-	// Provider outage still raises overall to outage.
-	if got := computeOverall(allOK, []ComponentStatus{StatusOutage}); got != StatusOutage {
-		t.Errorf("provider-outage overall = %q, want outage", got)
+	// A provider outage no longer raises OUR status — it is reported on its own row.
+	if got := computeOverall(allOK, []ComponentStatus{StatusOutage}); got != StatusOperational {
+		t.Errorf("provider-outage overall = %q, want operational (theirs, not ours)", got)
 	}
 }
 

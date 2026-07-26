@@ -124,9 +124,22 @@ jobs:
           cache: false
       - name: Build binary
         run: |
+          VERSION="$(git rev-parse --short HEAD)"
           CGO_ENABLED=0 GOOS=linux go build \
-            -ldflags="-w -s" \
+            -ldflags="-w -s -X main.lensVersion=${VERSION}" \
             -o bin/lens ./cmd/lens
+          # THE GATE FOR THIS CLASS. A version constant that nothing sets looks
+          # exactly like information while carrying none — the same shape as a
+          # guard that never runs. A unit test cannot see whether the link step
+          # happened, so the check belongs here, against the built artifact:
+          # drop the -X flag and this fails.
+          got="$(./bin/lens version)"
+          echo "built binary reports: ${got}"
+          if [ "${got}" = "dev" ]; then
+            echo "::error::the release binary reports the unstamped placeholder — -X main.lensVersion was not applied"
+            exit 1
+          fi
+          test "${got}" = "${VERSION}"
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
