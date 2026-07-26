@@ -49,7 +49,7 @@ func latencyHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 			description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL, livemode BOOLEAN)`,
 		`CREATE TABLE inference_nodes (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL)`,
 		`CREATE TABLE node_cohort_latency_stats (node_id TEXT NOT NULL, feature_category TEXT NOT NULL,
 			input_token_range TEXT NOT NULL, complexity_bucket TEXT NOT NULL, model TEXT NOT NULL,
@@ -71,7 +71,7 @@ func latencyHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore) {
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New()) // U6 floor — wired exactly as production
+	ledger.SetMintVerifier(earnverify.New(false)) // U6 floor — wired exactly as production
 	return pool, ledger
 }
 

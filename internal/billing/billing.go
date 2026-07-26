@@ -271,12 +271,17 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 		status, creditAmt = "anomalous", 0
 	}
 
+	// livemode comes from the SIGNED event, not from inspecting the API key: it is
+	// the value Stripe itself reports for the transaction, so it cannot be forged by
+	// a caller and cannot drift from the key actually in use. internal/earnverify
+	// consumes it — a test-mode purchase must be recordable without silently
+	// conferring the same earning rights as real money.
 	ct, err := tx.Exec(ctx, `
 		INSERT INTO lxc_purchases
-			(stripe_event_id, stripe_session_id, stripe_payment_intent, workspace_id, usd_cents, lxc_amount, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+			(stripe_event_id, stripe_session_id, stripe_payment_intent, workspace_id, usd_cents, lxc_amount, status, livemode)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (stripe_event_id) DO NOTHING`,
-		event.ID, sess.ID, pi, wsID, usdCents, creditAmt, status)
+		event.ID, sess.ID, pi, wsID, usdCents, creditAmt, status, event.Livemode)
 	if err != nil {
 		// A unique violation here is NOT on the ON CONFLICT target — it is the
 		// partial index idx_lxc_purchases_session_credited: this SESSION already

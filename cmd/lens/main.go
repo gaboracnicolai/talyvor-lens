@@ -730,7 +730,7 @@ func run() error {
 	// economy toggle (mirrors the LXC-fiat unconditional wiring). Every
 	// mint-type credit now requires a verified-to-earn workspace; conservation
 	// credits pass through. nil-safe for tests (they construct ledgers without it).
-	tokenLedger.SetMintVerifier(earnverify.New())
+	tokenLedger.SetMintVerifier(earnverify.New(cfg.EarnRequireLivePurchase))
 
 	// SHADOW MODE for the six UNPROVEN mints (LENS_SHADOW_MINTS_ENABLED, default off). Each
 	// computes what it WOULD pay, records it to lens_shadow_mints, and credits NOTHING — no

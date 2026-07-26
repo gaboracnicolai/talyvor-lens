@@ -63,7 +63,7 @@ func distillHandoffProxy(t *testing.T) (*Proxy, *economy.DualTokenStore, *poolro
 			balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (id, workspace_id))`,
 		`CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE IF NOT EXISTS lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0, livemode BOOLEAN)`,
 		// distill basis + mints — DROP+CREATE so the settled_charge_usd column (0105) is guaranteed.
 		`DROP TABLE IF EXISTS distill_royalty_mints`,
 		`DROP TABLE IF EXISTS distill_royalty_basis`,
@@ -84,7 +84,7 @@ func distillHandoffProxy(t *testing.T) (*Proxy, *economy.DualTokenStore, *poolro
 
 	store := economy.NewDualTokenStore(nil, pool, nil)
 	tokenLedger := mining.NewLedgerStore(pool)
-	tokenLedger.SetMintVerifier(earnverify.New()) // U6 floor, as production
+	tokenLedger.SetMintVerifier(earnverify.New(false)) // U6 floor, as production
 	minter := poolroyalty.NewDistillMinter(pool, tokenLedger, 0.5, func() bool { return true })
 
 	p := &Proxy{}

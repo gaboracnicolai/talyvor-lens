@@ -76,14 +76,14 @@ func distillFundingHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore, *e
 			avoided_cogs_usd DOUBLE PRECISION NOT NULL, minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held',
 			finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0, livemode BOOLEAN)`,
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			t.Fatalf("schema: %v", err)
 		}
 	}
 	ledger := mining.NewLedgerStore(pool)
-	ledger.SetMintVerifier(earnverify.New())
+	ledger.SetMintVerifier(earnverify.New(false))
 	return pool, ledger, economy.NewDualTokenStore(nil, pool, nil)
 }
 

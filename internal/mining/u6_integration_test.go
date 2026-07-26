@@ -50,7 +50,7 @@ func u6TestPool(t *testing.T) *pgxpool.Pool {
 		`DROP TABLE IF EXISTS lxc_purchases`,
 		`DROP TABLE IF EXISTS workspaces`,
 		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, earn_verified BOOLEAN NOT NULL DEFAULT false)`,
-		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0)`,
+		`CREATE TABLE lxc_purchases (workspace_id TEXT NOT NULL, status TEXT NOT NULL, lxc_amount BIGINT NOT NULL DEFAULT 0, livemode BOOLEAN)`,
 		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY,
 			balance BIGINT NOT NULL DEFAULT 0,
 			held_balance BIGINT NOT NULL DEFAULT 0,
@@ -115,7 +115,7 @@ func TestU6Chokepoint_BlocksUnverified_AllowsVerified(t *testing.T) {
 	pool := u6TestPool(t)
 	ctx := context.Background()
 	store := NewLedgerStore(pool)
-	store.SetMintVerifier(earnverify.New())
+	store.SetMintVerifier(earnverify.New(false))
 	mustExec(t, pool, `INSERT INTO workspaces (id) VALUES ('ws_u')`) // unverified
 
 	if _, err := store.CreditOnce(ctx, "r1", "ws_u", micro(1.0), TypeComputeMineHeld, "compute", nil); !errors.Is(err, ErrEarnNotVerified) {
@@ -140,9 +140,9 @@ func TestU6Chokepoint_CompletedPurchaseEarns(t *testing.T) {
 	pool := u6TestPool(t)
 	ctx := context.Background()
 	store := NewLedgerStore(pool)
-	store.SetMintVerifier(earnverify.New())
+	store.SetMintVerifier(earnverify.New(false))
 	mustExec(t, pool, `INSERT INTO workspaces (id) VALUES ('ws_p')`)
-	mustExec(t, pool, `INSERT INTO lxc_purchases (workspace_id, status, lxc_amount) VALUES ('ws_p','completed',100)`)
+	mustExec(t, pool, `INSERT INTO lxc_purchases (workspace_id, status, lxc_amount, livemode) VALUES ('ws_p','completed',100,true)`)
 	if _, err := store.CreditOnce(ctx, "r1", "ws_p", micro(1.0), TypeCacheMine, "cache", nil); err != nil {
 		t.Fatalf("a paid workspace must earn, got %v", err)
 	}
@@ -158,7 +158,7 @@ func TestU6Chokepoint_HeldMintBlocksUnverified(t *testing.T) {
 	pool := u6TestPool(t)
 	ctx := context.Background()
 	store := NewLedgerStore(pool)
-	store.SetMintVerifier(earnverify.New())
+	store.SetMintVerifier(earnverify.New(false))
 	mustExec(t, pool, `INSERT INTO workspaces (id) VALUES ('ws_c')`) // unverified contributor
 
 	tx, err := pool.Begin(ctx)
@@ -181,7 +181,7 @@ func TestU6Chokepoint_IdempotentNoDoubleMint(t *testing.T) {
 	pool := u6TestPool(t)
 	ctx := context.Background()
 	store := NewLedgerStore(pool)
-	store.SetMintVerifier(earnverify.New())
+	store.SetMintVerifier(earnverify.New(false))
 	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_v', true)`)
 
 	if _, err := store.CreditOnce(ctx, "rid", "ws_v", micro(2.0), TypeCacheMine, "cache", nil); err != nil {
@@ -204,7 +204,7 @@ func TestU6Chokepoint_PlainCreditDoubleMints_RED(t *testing.T) {
 	pool := u6TestPool(t)
 	ctx := context.Background()
 	store := NewLedgerStore(pool)
-	store.SetMintVerifier(earnverify.New())
+	store.SetMintVerifier(earnverify.New(false))
 	mustExec(t, pool, `INSERT INTO workspaces (id, earn_verified) VALUES ('ws_v', true)`)
 
 	// plain Credit has no claim row — two identical credits both land.
@@ -227,7 +227,7 @@ func TestU6Chokepoint_ConservationUngated(t *testing.T) {
 	pool := u6TestPool(t)
 	ctx := context.Background()
 	store := NewLedgerStore(pool)
-	store.SetMintVerifier(earnverify.New())
+	store.SetMintVerifier(earnverify.New(false))
 	mustExec(t, pool, `INSERT INTO workspaces (id) VALUES ('ws_u')`) // unverified
 
 	if err := store.Credit(ctx, "ws_u", micro(3.0), "unstake", "stake return", nil); err != nil {
@@ -243,7 +243,7 @@ func TestU6Chokepoint_ConservationUngated(t *testing.T) {
 func ratecapStore(t *testing.T, pool *pgxpool.Pool, cap int64) *LedgerStore {
 	t.Helper()
 	s := NewLedgerStore(pool)
-	s.SetMintVerifier(earnverify.New())
+	s.SetMintVerifier(earnverify.New(false))
 	s.SetMintRateCap(cap, 24*time.Hour)
 	return s
 }

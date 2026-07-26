@@ -17,25 +17,45 @@ import (
 // Verifier satisfies mining.MintVerifier. It is stateless: MayEarn reads on the
 // MINT tx it is handed, so the check is consistent with the credit it gates and
 // needs no pool of its own.
-type Verifier struct{}
+type Verifier struct {
+	// requireLive tightens the purchase half to REAL-money purchases only. Env:
+	// LENS_EARN_REQUIRE_LIVE_PURCHASE, default FALSE.
+	//
+	// Default false is what lets a TEST-key trial work: a test purchase is recorded
+	// with livemode=false and still verifies, so trial users become earn-verified by
+	// buying rather than by a manual UPDATE. Flipping it true closes the door — test
+	// purchases stop verifying — WITHOUT a code change or a migration, which is the
+	// point: the trial works now and the door shuts before open signup.
+	requireLive bool
+}
 
 // New builds the verified-to-earn verifier. Wire it UNCONDITIONALLY at startup
 // via LedgerStore.SetMintVerifier — a safety restriction must not be liftable by
 // the economy toggle.
-func New() Verifier { return Verifier{} }
+func New(requireLive bool) Verifier { return Verifier{requireLive: requireLive} }
 
+// mayEarnSQL. The purchase half additionally requires that the purchase's MODE was
+// RECORDED (livemode IS NOT NULL) and, when $2 is true, that it was REAL money
+// (livemode). $2 is LENS_EARN_REQUIRE_LIVE_PURCHASE — see Verifier.
+//
+// A legacy row from before migration 0109 has livemode NULL and therefore stops
+// conferring earning rights: the column exists precisely because a row that does
+// not say which mode produced it cannot be trusted to mean real money.
 const mayEarnSQL = `SELECT
 	EXISTS(SELECT 1 FROM workspaces WHERE id = $1 AND earn_verified = true)
-	OR EXISTS(SELECT 1 FROM lxc_purchases WHERE workspace_id = $1 AND status = 'completed' AND lxc_amount > 0)`
+	OR EXISTS(SELECT 1 FROM lxc_purchases
+	          WHERE workspace_id = $1 AND status = 'completed' AND lxc_amount > 0
+	            AND livemode IS NOT NULL
+	            AND (NOT $2::boolean OR livemode))`
 
 // MayEarn reports whether wsID is verified-to-earn. Read at mint time on the
 // mint tx. An empty workspace_id is never verified.
-func (Verifier) MayEarn(ctx context.Context, tx pgx.Tx, workspaceID string) (bool, error) {
+func (v Verifier) MayEarn(ctx context.Context, tx pgx.Tx, workspaceID string) (bool, error) {
 	if workspaceID == "" {
 		return false, nil
 	}
 	var ok bool
-	if err := tx.QueryRow(ctx, mayEarnSQL, workspaceID).Scan(&ok); err != nil {
+	if err := tx.QueryRow(ctx, mayEarnSQL, workspaceID, v.requireLive).Scan(&ok); err != nil {
 		return false, err
 	}
 	return ok, nil

@@ -734,6 +734,20 @@ type Config struct {
 	// main.go does not register the billing routes (unregistered ⇒ 404).
 	BillingEnabled bool
 
+	// EarnRequireLivePurchase tightens the verified-to-earn predicate
+	// (internal/earnverify) to REAL-money purchases only. Env:
+	// LENS_EARN_REQUIRE_LIVE_PURCHASE, default FALSE.
+	//
+	// False is what makes a TEST-key trial work: a test purchase is recorded with
+	// livemode=false and still verifies, so a trial user becomes earn-verified by
+	// buying instead of by a manual UPDATE. True closes that door — a test purchase
+	// no longer verifies — with no code change and no migration, which is the whole
+	// reason the mode is a recorded column rather than an assumption.
+	//
+	// ⚠ Turn this ON before open signup. With self-service signup and test keys,
+	// anyone who can reach checkout can mint themselves earning rights for free.
+	EarnRequireLivePurchase bool
+
 	// DashboardEnabled gates the browser page at /dashboard. Env:
 	// LENS_DASHBOARD_ENABLED, default FALSE — Lens is an API, and serving a UI
 	// from the API host is opt-in. When false the route is not registered
@@ -1023,10 +1037,11 @@ func Load() (*Config, error) {
 		RoutingPredictionEnabled:        parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
 		RoutingPredictionScoringEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_SCORING_ENABLED"),
 
-		BillingEnabled:      parseBoolEnv("LENS_BILLING_ENABLED"),
-		DashboardEnabled:    parseBoolEnv("LENS_DASHBOARD_ENABLED"),
-		StripeSecretKey:     os.Getenv("LENS_STRIPE_SECRET_KEY"),
-		StripeWebhookSecret: os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
+		BillingEnabled:          parseBoolEnv("LENS_BILLING_ENABLED"),
+		EarnRequireLivePurchase: parseBoolEnv("LENS_EARN_REQUIRE_LIVE_PURCHASE"),
+		DashboardEnabled:        parseBoolEnv("LENS_DASHBOARD_ENABLED"),
+		StripeSecretKey:         os.Getenv("LENS_STRIPE_SECRET_KEY"),
+		StripeWebhookSecret:     os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
 		// Catalog-drift detection (internal/modelwatch). Poller default-ON: it is read-only, costs one
 		// provider GET an hour, and its absence is what let a whole model family be served free. The
 		// SINK is separate and, if unset, reported as a boot-time ERROR rather than silently skipped.
