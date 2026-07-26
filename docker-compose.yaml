@@ -64,6 +64,17 @@ services:
       - LENS_JWT_PRIVATE_KEY=${LENS_JWT_PRIVATE_KEY:-}
       - LENS_POVI_CHALLENGE_KEY=${LENS_POVI_CHALLENGE_KEY:-}
       - LENS_ADMIN_LXC_GRANT_ENABLED=${LENS_ADMIN_LXC_GRANT_ENABLED:-}
+      # Per-user signup provisioning (POST /v1/provision). This MUST be forwarded: without the
+      # line, setting it in .env reaches nothing, and because provisioning fails CLOSED the route
+      # is simply not registered — Lens boots healthy, passes its healthcheck, serves everything
+      # else, and 404s every login from a suite BFF that expects it. That is a broken deploy
+      # wearing a green healthcheck, and it was one missing line.
+      #
+      # `:-` and NOT `:?`: an empty value must stay legal. Most deployments run Lens with no BFF
+      # and never want provisioning; making the variable mandatory would turn an optional
+      # capability into a hard boot dependency for all of them. Unset ⇒ empty ⇒ route
+      # unregistered ⇒ boot logs a WARN naming this variable (cmd/lens/main.go).
+      - LENS_PROVISION_SECRET=${LENS_PROVISION_SECRET:-}
       # Pattern mining/earning (runbook Trap 5 — "opt-in succeeds, earning silently zero").
       # These were only ever passed by a gitignored docker-compose.override.yml, so a fresh
       # clone could never enable them. `:-` is safe for BOTH defaults: MINING is parseBoolEnv
