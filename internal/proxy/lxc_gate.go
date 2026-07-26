@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -58,8 +59,27 @@ func (p *Proxy) SetLXCGate(reader lxcBalanceReader, enabled func() bool) {
 // lxcEstimate is the input-only pre-serve LXC cost estimate (output=0),
 // converted at the fixed peg — in µLXC (SEC-2). It gates a CHARGE, so it rounds
 // UP (ceil): a conservative estimate never under-reserves a sub-µLXC.
+//
+// ⚠ IT PRICES VIA CostUSDResolved, NOT CostUSD, for the same reason reserveEstimateLXC does — and this
+// one is easier to miss, because both of its callers treat a zero as PERMISSION:
+//
+//	agentAllocationBlocks — the immediate-DEBIT path taken whenever p.reservationActive() is false
+//	                        (proxy.go:799). `estLXC <= 0` returned false = serve, WITHOUT DEBITING.
+//	                        LENS_LXC_AGENT_ALLOCATION_ENABLED defaults TRUE, so this was live.
+//	lxcGateBlocks         — the balance ADMISSION gate. A zero can never exceed a balance, so an
+//	                        unknown model was never gated, even on a workspace with no credit.
+//
+// PurposeCharge (the FLOOR) is right for both. This debit is immediate and never refunded, so
+// over-charging on a rate we admit is a guess is the indefensible direction; and for the gate a floor
+// starts blocking a zero-balance workspace without over-blocking a paying one.
+//
+// An EMPTY prompt still yields 0, correctly — zero tokens really is zero cost — so the callers' `<= 0`
+// branches remain reachable for that case and only that case.
 func lxcEstimate(model, prompt string) int64 {
-	estUSD := alerts.CostUSD(model, len(prompt)/4, 0)
+	estUSD, prov := alerts.CostUSDResolved(model, catalog.PurposeCharge, len(prompt)/4, 0, 0, 0)
+	if prov == catalog.ProvenanceFallback && len(prompt) > 0 {
+		alerts.WarnUnpricedModel(model, catalog.PurposeCharge, estUSD)
+	}
 	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
 }
 
@@ -68,11 +88,17 @@ func lxcEstimate(model, prompt string) int64 {
 // input-only lxcEstimate (which under-holds against an output-inclusive charge and would leak the ceiling
 // by exactly the output cost), this is a true upper bound on the delivered cost, so the settle only ever
 // refunds. maxOutTokens is BOUNDED by the caller (explicit max_tokens, else a sane cap — never catalog max).
+//
+// ⚠ IT PRICES VIA CostUSDResolved, NOT CostUSD. An unknown model used to price at 0 here, which made
+// heldLXC 0, which made agentReserveBlocks return "no hold" — so the request carried no reservation, the
+// settle had nothing to charge against, and the sub-budget ceiling was never consulted. A hold falls back
+// to the provider's most expensive known model: over-holding is refunded by the settle, under-holding
+// leaks the ceiling, so HIGH is the conservative direction here.
 func reserveEstimateLXC(model, prompt string, maxOutTokens int) int64 {
 	if maxOutTokens < 0 {
 		maxOutTokens = 0
 	}
-	estUSD := alerts.CostUSD(model, len(prompt)/4, maxOutTokens)
+	estUSD, _ := alerts.CostUSDResolved(model, catalog.PurposeHold, len(prompt)/4, 0, 0, maxOutTokens)
 	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
 }
 

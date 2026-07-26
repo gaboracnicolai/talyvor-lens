@@ -33,6 +33,7 @@ import (
 	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/cache_pooling"
+	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
@@ -1511,6 +1512,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// breakdown, so it stays the flat estimate — byte-identical to CostUSD(upstreamModel, inT, outT),
 		// today's behaviour (CostUSDDetailed with zero cached/write equals CostUSD by construction anyway).
 		var servedCostUSD float64
+		// servedPriceBasis is "fallback" when the served model is absent from the catalog, so the charge
+		// below is a derived floor rather than its real price. It rides onto the spend row.
+		servedPriceBasis := ""
 		// rdTokens carries the cache breakdown to the post-flush route-decision capture, which prices BOTH the
 		// served and the counterfactual model with it. Hoisted out of the usage block below because that block
 		// scopes `u`, and the capture runs after the response is flushed. ProviderReported=false until proven
@@ -1520,7 +1524,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			inT, outT = u.InputTokens, u.OutputTokens
 			costEstimated = false
 			spendSource = "provider_usage"
-			servedCostUSD = alerts.CostUSDDetailed(upstreamModel, u.UncachedInputTokens, u.CachedInputTokens, u.CacheWriteInputTokens, u.OutputTokens)
+			var prov catalog.Provenance
+			servedCostUSD, prov = alerts.CostUSDResolved(upstreamModel, catalog.PurposeCharge,
+				u.UncachedInputTokens, u.CachedInputTokens, u.CacheWriteInputTokens, u.OutputTokens)
+			if prov == catalog.ProvenanceFallback {
+				servedPriceBasis = prov.String()
+			}
 			rdTokens = routeTokens{
 				UncachedInput: u.UncachedInputTokens, CachedInput: u.CachedInputTokens,
 				CacheWriteInput: u.CacheWriteInputTokens, Output: u.OutputTokens, ProviderReported: true,
@@ -1529,8 +1538,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			inT = modSet.EstimateInputTokens()
 		}
 		if costEstimated {
-			// No provider usage → no cache breakdown exists; the flat estimate IS today's basis.
-			servedCostUSD = alerts.CostUSD(upstreamModel, inT, outT)
+			// No provider usage → no cache breakdown exists; the flat estimate IS today's basis. Priced
+			// through the resolver so an unknown model still cannot come out at zero.
+			var prov catalog.Provenance
+			servedCostUSD, prov = alerts.CostUSDResolved(upstreamModel, catalog.PurposeCharge, inT, 0, 0, outT)
+			if prov == catalog.ProvenanceFallback {
+				servedPriceBasis = prov.String()
+			}
 		}
 		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
 			// spendPrompt is "" in metadata mode (no prompt text persisted)
@@ -1568,7 +1582,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			if p.reservationActive() {
 				// Keep BOTH: #355's served-model arg (stamps the settle/charge row) AND our captured return
 				// (the clamped USD actually paid, which funds the distill royalty via recordDistillServes below).
-				settledChargeUSD = p.settleReservation(ctx, servedCostUSD, upstreamModel)
+				settledChargeUSD = p.settleReservationBasis(ctx, servedCostUSD, upstreamModel, servedPriceBasis)
 			} else {
 				p.shadowSpendLXC(ctx, wsID, servedCostUSD)
 			}
@@ -2882,8 +2896,17 @@ func boundedMaxOut(explicit int, cap func() int) int {
 // avoided_COGS that could exceed the bill, and never anything at all when the consumer paid $0.
 func (p *Proxy) resolveCacheReservation(ctx context.Context, pooledHit *poolroyalty.ServedHit, prompt string, served []byte) float64 {
 	if pooledHit != nil {
-		avoided := alerts.CostUSD(pooledHit.Model, len(prompt)/4, len(served)/4)
-		return p.settleReservation(ctx, avoided, pooledHit.Model)
+		// Priced through the resolver: a pooled hit on a model the catalog does not know used to bill the
+		// requester $0 for value they received, which ALSO left the contributor's royalty unfunded (the
+		// funding tie mints a share of what was actually paid). Charge falls back to the provider's
+		// cheapest known rate — a floor, marked on the row.
+		avoided, prov := alerts.CostUSDResolved(pooledHit.Model, catalog.PurposeCharge,
+			len(prompt)/4, 0, 0, len(served)/4)
+		basis := ""
+		if prov == catalog.ProvenanceFallback {
+			basis = prov.String()
+		}
+		return p.settleReservationBasis(ctx, avoided, pooledHit.Model, basis)
 	}
 	p.releaseReservation(ctx, "own cache hit")
 	return 0

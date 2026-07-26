@@ -79,9 +79,13 @@ func TestRecordSpend_CostForGPT4o(t *testing.T) {
 func TestRecordSpend_CostForClaudeHaiku(t *testing.T) {
 	mgr, _, pool := newTestManager(t, nil)
 
-	// claude-haiku-4-5: input $0.80/M, output $4.00/M.
-	// 1_000_000 in + 1_000_000 out = 0.80 + 4.00 = $4.80
-	const wantCost = 4.80
+	// claude-haiku-4-5: input $1.00/M, output $5.00/M — published at
+	// https://platform.claude.com/docs/en/about-claude/pricing (fetched 2026-07-26).
+	// 1_000_000 in + 1_000_000 out = 1.00 + 5.00 = $6.00
+	//
+	// ⚠ This asserted $4.80 — that is HAIKU 3.5's rate (0.80/4.00), left behind when the id was
+	// updated to 4.5 — so token_events under-recorded every Haiku 4.5 request's COGS by 20%.
+	const wantCost = 6.00
 
 	pool.ExpectExec(`INSERT INTO token_events`).
 		WithArgs("ws-test", "anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "", "search", wantCost, "p", "", "", "text", false, "").
@@ -287,9 +291,9 @@ func TestCostUSD_KnownValues(t *testing.T) {
 		{"gpt-4o", 0, 1_000_000, 10.00},
 		{"gpt-4o-mini", 1_000_000, 1_000_000, 0.75},
 		{"gpt-4.1-nano", 1_000_000, 1_000_000, 0.50},
-		{"claude-opus-4-5", 1_000_000, 1_000_000, 90.00},
+		{"claude-opus-4-5", 1_000_000, 1_000_000, 30.00}, // CORRECTED: 5+25, not the 15+75 pinned here before
 		{"claude-sonnet-4-5", 1_000_000, 1_000_000, 18.00},
-		{"claude-haiku-4-5", 1_000_000, 1_000_000, 4.80},
+		{"claude-haiku-4-5", 1_000_000, 1_000_000, 6.00}, // CORRECTED: 1+5, not Haiku 3.5's 0.8+4
 		{"unknown-model", 999, 999, 0},
 	}
 	for _, tc := range cases {
@@ -301,19 +305,29 @@ func TestCostUSD_KnownValues(t *testing.T) {
 }
 
 func TestCostUSD_ClaudeOpus46(t *testing.T) {
-	// claude-opus-4-6: input $15/M, output $75/M.
-	// 1M in + 1M out = 15.00 + 75.00 = 90.00
+	// claude-opus-4-6: input $5/M, output $25/M — published at
+	// https://platform.claude.com/docs/en/about-claude/pricing (fetched 2026-07-26).
+	// 1M in + 1M out = 5.00 + 25.00 = 30.00
+	//
+	// ⚠ THIS TEST ASSERTED 90.00 (i.e. 15/75, which is OPUS 4.1's rate) and passed for months while
+	// Lens over-billed Opus 4.6 by 3x. It was one of SIX tests across three files pinning at least one
+	// of five wrong rates. A test that encodes whatever the code currently does cannot detect that the
+	// code is wrong — see internal/catalog/published_rates_test.go, which pins rates to a cited URL and
+	// is now the authority for every number here.
 	got := CostUSD("claude-opus-4-6", 1_000_000, 1_000_000)
-	if math.Abs(got-90.00) > 1e-9 {
-		t.Errorf("CostUSD(claude-opus-4-6, 1M, 1M) = %v, want 90.00", got)
+	if math.Abs(got-30.00) > 1e-9 {
+		t.Errorf("CostUSD(claude-opus-4-6, 1M, 1M) = %v, want 30.00", got)
 	}
 }
 
 func TestCostUSD_GPT54(t *testing.T) {
-	// gpt-5.4: input $5/M, output $20/M.
-	// 1M in + 1M out = 5.00 + 20.00 = 25.00
+	// gpt-5.4: input $2.50/M, output $15/M — published at
+	// https://developers.openai.com/api/docs/pricing (fetched 2026-07-26).
+	// 1M in + 1M out = 2.50 + 15.00 = 17.50
+	//
+	// ⚠ Previously asserted 25.00 (5/20), over-billing input 2x. Same failure as Opus 4.6 above.
 	got := CostUSD("gpt-5.4", 1_000_000, 1_000_000)
-	if math.Abs(got-25.00) > 1e-9 {
-		t.Errorf("CostUSD(gpt-5.4, 1M, 1M) = %v, want 25.00", got)
+	if math.Abs(got-17.50) > 1e-9 {
+		t.Errorf("CostUSD(gpt-5.4, 1M, 1M) = %v, want 17.50", got)
 	}
 }

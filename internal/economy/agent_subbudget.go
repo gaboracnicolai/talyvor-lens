@@ -64,6 +64,11 @@ type AgentDebitMeta struct {
 	RequestedModel string
 	ServedModel    string
 	RequestID      string
+	// PriceBasis marks a charge that was priced on a DERIVED FALLBACK rate because the served model is
+	// not in the catalog ("fallback"). Empty for exact pricing, so an ordinary row is unchanged and only
+	// a guessed charge carries the marking — a bill built from this ledger can then separate measured
+	// charges from estimated ones instead of presenting a guess as a price.
+	PriceBasis string
 }
 
 // toMap renders the scalars as the lxc_ledger metadata document, OMITTING an empty scalar so a row carries
@@ -79,6 +84,9 @@ func (m AgentDebitMeta) toMap() map[string]interface{} {
 	}
 	if m.RequestID != "" {
 		out["request_id"] = m.RequestID
+	}
+	if m.PriceBasis != "" {
+		out["price_basis"] = m.PriceBasis
 	}
 	return out
 }
@@ -336,7 +344,8 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		// The delivered-charge spend row is self-describing: the model the customer REQUESTED (from the row)
 		// AND the model that actually SERVED (from the caller, known only post-route), plus the request_id join.
 		if err := insertLXCLedger(ctx, tx, workspaceID, -finalLXC, afterSpend, LXCTypeSpend, "reservation settle: delivered charge",
-			AgentDebitMeta{RequestedModel: reqModel, ServedModel: meta.ServedModel, RequestID: reqID}.toMap()); err != nil {
+			AgentDebitMeta{RequestedModel: reqModel, ServedModel: meta.ServedModel, RequestID: reqID,
+				PriceBasis: meta.PriceBasis}.toMap()); err != nil {
 			return 0, err
 		}
 	}

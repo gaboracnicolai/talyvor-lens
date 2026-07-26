@@ -79,6 +79,7 @@ import (
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/modelcapability"
+	"github.com/talyvor/lens/internal/modelwatch"
 	"github.com/talyvor/lens/internal/nodelatency"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/outputverify"
@@ -644,6 +645,40 @@ func run() error {
 	go haComps.leader.Run(ctx, "audit-export", 30*time.Second, func(lctx context.Context) {
 		auditExport.StartLoop(lctx, cfg.AuditExportInterval)
 	})
+
+	// Catalog-drift detection — ask the providers what they serve, alert on anything the catalog cannot
+	// price. This is the PREVENTIVE half of the unpriced-model fix: catalog.ResolveRates stops unknown
+	// traffic being free, but it bills it on a floor, and the only real repair is a person adding the
+	// published rate. Until this existed, the discovery mechanism was a customer's request — i.e. after
+	// the money was gone.
+	//
+	// ⚠ DETECTION ONLY, PERMANENTLY. It must never set a price: no provider serves rates in any API, so
+	// anything automated would be scraping HTML on a money path. See internal/modelwatch's doc comment.
+	//
+	// ReportReadiness runs on EVERY instance, before leader election, and deliberately so: whether an
+	// alert can reach a person is a property of the deployment's configuration, not of which pod won an
+	// election, and it must be stated at boot even on a follower that will never poll.
+	if cfg.ModelWatchEnabled {
+		alertSink, err := modelwatch.NewWebhookNotifier(cfg.OperatorAlertWebhookURL, cfg.OperatorAlertWebhookSecret)
+		if err != nil {
+			// A malformed sink URL is a configuration error worth failing on: the operator intended to be
+			// alerted, and starting anyway would leave them believing they are covered.
+			slog.Error("LENS_OPERATOR_ALERT_WEBHOOK_URL is invalid", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		// A nil *WebhookNotifier must be passed as a nil INTERFACE, not as a typed nil wrapped in a
+		// non-nil interface — otherwise the `notifier == nil` readiness check silently reads false and
+		// the whole anti-inert guarantee inverts into exactly the bug it is there to prevent.
+		var notifier modelwatch.Notifier
+		if alertSink != nil {
+			notifier = alertSink
+		}
+		watcher := modelwatch.New(cfg.AnthropicAPIKey, cfg.OpenAIAPIKey, notifier)
+		watcher.ReportReadiness()
+		go haComps.leader.Run(ctx, "model-catalog-drift", 30*time.Second, func(lctx context.Context) {
+			watcher.StartLoop(lctx, cfg.ModelWatchInterval)
+		})
+	}
 
 	// Control-plane — stateless reconciler (leader-only) + syncer (every instance).
 	//

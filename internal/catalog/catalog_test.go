@@ -5,29 +5,62 @@ import (
 	"testing"
 )
 
-// previousPrices is the EXACT price table that lived in alerts.modelPrices
-// before this consolidation — an independent golden reference. The catalog
-// must price every one of these models identically. A diff here means a
-// silent re-pricing, which would corrupt every budget/forecast/anomaly/ROI
-// figure. This is the critical gate.
+// previousPrices pins the catalog against the table that lived in alerts.modelPrices before the
+// consolidation in a05ff06 ("byte-identical price parity").
+//
+// ⚠⚠ READ THIS BEFORE TRUSTING IT. THIS GUARD IS WHY FIVE WRONG PRICES SURVIVED FOR MONTHS.
+//
+// It does exactly what it was built to do — prove a refactor moved no number — and that is NOT the same
+// property as "the prices are right". Its anchor is a snapshot of what Talyvor ONCE BELIEVED, not what a
+// provider PUBLISHES. So the guard is green whenever the catalog is self-consistent over time, which is
+// merely ADJACENT to the claim a reader takes from it. Worse, it is a one-way ratchet: the only way to
+// correct a genuinely wrong rate is to edit this table, and editing it produces the same green. A gate
+// that cannot tell a correction from a corruption is not gating correctness.
+//
+// It has now been RE-ANCHORED. Every entry below that also appears in published_rates_test.go is
+// cross-checked against it by TestParityTableAgreesWithPublishedRates, so this table can no longer drift
+// from the provider's own page without a failure. published_rates_test.go is the AUTHORITY (it cites a
+// URL per model); this table's remaining job is the narrow, real one it started with — catching an
+// ACCIDENTAL re-pricing during a refactor.
+//
+// Five entries were corrected on 2026-07-26 against the providers' published pages. Each had been
+// pinned green here at the wrong number:
+//
+//	claude-opus-4-5   15.00/75.00 -> 5.00/25.00   (Opus 4.1's rate; over-billed 3x)
+//	claude-opus-4-6   15.00/75.00 -> 5.00/25.00   (same)
+//	claude-haiku-4-5   0.80/4.00  -> 1.00/5.00    (Haiku 3.5's rate; under-billed)
+//	gpt-5.4            5.00/20.00 -> 2.50/15.00   (over-billed on input)
+//	gpt-5.4-mini       0.50/2.00  -> 0.75/4.50    (under-billed)
 var previousPrices = map[string][2]float64{
 	"gpt-4o":            {2.50, 10.00},
 	"gpt-4o-mini":       {0.15, 0.60},
 	"gpt-4.1-nano":      {0.10, 0.40},
-	"gpt-5.4":           {5.00, 20.00},
-	"gpt-5.4-mini":      {0.50, 2.00},
+	"gpt-5.4":           {2.50, 15.00}, // CORRECTED 2026-07-26
+	"gpt-5.4-mini":      {0.75, 4.50},  // CORRECTED 2026-07-26
 	"gpt-4.1":           {2.00, 8.00},
 	"gpt-4.1-mini":      {0.40, 1.60},
-	"claude-opus-4-5":   {15.00, 75.00},
+	"claude-opus-4-5":   {5.00, 25.00}, // CORRECTED 2026-07-26
 	"claude-sonnet-4-5": {3.00, 15.00},
-	"claude-haiku-4-5":  {0.80, 4.00},
-	"claude-opus-4-6":   {15.00, 75.00},
+	"claude-haiku-4-5":  {1.00, 5.00},  // CORRECTED 2026-07-26
+	"claude-opus-4-6":   {5.00, 25.00}, // CORRECTED 2026-07-26
 	"claude-sonnet-4-6": {3.00, 15.00},
 	"gemini-2.5-pro":    {1.25, 10.00},
 	"gemini-2.5-flash":  {0.075, 0.30},
 	"gemini-2.0-flash":  {0.10, 0.40},
 	"gemini-1.5-pro":    {1.25, 5.00},
 	"gemini-1.5-flash":  {0.075, 0.30},
+	// ⚠ NOT CORRECTED, AND THAT IS A DELIBERATE REFUSAL TO GUESS. AWS publishes Bedrock pricing on its
+	// own page, which I did not fetch, so I have no citable rate for these and will not invent one.
+	//
+	// But this much is ARITHMETIC, not inference: 17.25 == 15.00 x 1.15 and 86.25 == 75.00 x 1.15
+	// exactly, as are 3.45 and 17.25 against Sonnet's 3.00/15.00. These rows were DERIVED by applying a
+	// 15% markup to the direct rate — so the Opus row inherits the very error corrected above and is
+	// most likely ~3.45x too high. "Most likely" is not good enough to bill on in either direction,
+	// which is why they stand unchanged and flagged rather than quietly re-derived. Interpolating a new
+	// number from a corrected input would repeat the original mistake with more confidence.
+	//
+	// ACTION: verify against https://aws.amazon.com/bedrock/pricing/ and correct with a citation. Until
+	// then these are the only knowingly-suspect rates left in the catalog.
 	"anthropic.claude-opus-4-6-20251101-v1:0":   {17.25, 86.25},
 	"anthropic.claude-sonnet-4-6-20251101-v1:0": {3.45, 17.25},
 	"mistral-large-latest":                      {2.00, 6.00},
@@ -38,6 +71,33 @@ var previousPrices = map[string][2]float64{
 	"llama-3.1-8b-instant":                      {0.05, 0.08},
 	"mixtral-8x7b-32768":                        {0.24, 0.24},
 	"gemma2-9b-it":                              {0.20, 0.20},
+}
+
+// TestParityTableAgreesWithPublishedRates closes the hole that let previousPrices pin a wrong number.
+//
+// Two tables asserting prices independently is two opinions, and the older one wins by inertia — that
+// is exactly how 15.00/75.00 stayed green for months. This makes them ONE detector: where both cover a
+// model, they must agree, so a future edit to either that is not reflected in the other FAILS. In
+// particular a "fix" applied only to the golden table (the easy way to make a red go away) can no
+// longer pass.
+func TestParityTableAgreesWithPublishedRates(t *testing.T) {
+	checked := 0
+	for _, c := range publishedRateCases() {
+		want, pinned := previousPrices[c.id]
+		if !pinned {
+			continue // newer model, not in the pre-consolidation snapshot — nothing to reconcile
+		}
+		checked++
+		if !approxEq(want[0], c.in) || !approxEq(want[1], c.out) {
+			t.Errorf("%s: parity table says %.4f/%.4f but the PUBLISHED rate is %.4f/%.4f (%s). "+
+				"These two tables must not disagree — the published page is the authority; update this "+
+				"table's entry, do not relax the published one.", c.id, want[0], want[1], c.in, c.out, c.source)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("cross-check covered NO models — the two tables no longer share any ids, so this guard " +
+			"is passing vacuously. That is the failure mode it exists to prevent.")
+	}
 }
 
 func TestPriceParity_NoSilentRepricing(t *testing.T) {

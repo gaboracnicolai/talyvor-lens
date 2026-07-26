@@ -4,8 +4,16 @@
 -- WHY: a node-served request (proxy.tryNodeRouting) wrote NO token_events row — it records to the
 -- learner store, not this table (that is AlertManager.RecordSpend / RecordCacheServe). So a node
 -- serve was absent from BOTH the numerator AND the denominator of the cache hit rate. With node
--- routing enabled, the rate (the trial's core number — it prices BYOK and tests "our margin is the
--- cache") would read HIGH, and nothing on screen would say so. Inert today (node routing default-off,
+-- routing enabled, the rate would read HIGH, and nothing on screen would say so.
+--
+-- ⚠ COMMENT CORRECTED 2026-07-26. This line previously described the hit rate as "the trial's core
+-- number — it prices BYOK and tests 'our margin is the cache'". BOTH CLAIMS WERE WRONG and the model
+-- they describe never existed: BYOK IS NOT BUILT (and deliberately will not be until it can be
+-- designed from real usage data rather than assumption), there is no subscription for a cache hit to
+-- retain margin on, and "our margin is the cache" has been removed from the code, the README and
+-- COORDINATION.md. Billing is per-request against prepaid LXC at a fixed $0.10 peg. The hit rate is
+-- a COGS-avoided and royalty-funding measurement, not a pricing input — see 0100's corrected header.
+-- The DDL was never affected; only the reason given for it. Inert today (node routing default-off,
 -- no registered nodes) — which is why it is cheap to fix now, before anyone trusts the number.
 --
 -- serve_source = 'node' says WHO produced the served bytes: a registered node, not an upstream
