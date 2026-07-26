@@ -114,6 +114,37 @@ services:
       # capability into a hard boot dependency for all of them. Unset ⇒ empty ⇒ route
       # unregistered ⇒ boot logs a WARN naming this variable (cmd/lens/main.go).
       - LENS_PROVISION_SECRET=${LENS_PROVISION_SECRET:-}
+
+      # ── The money path. ⚠ EVERY ONE OF THESE WAS MUTE. ────────────────────────
+      # `.env` is NOT passed into containers: compose reads it only for ${}
+      # substitution inside this file, and this stack declares no `env_file:`. So a
+      # variable reaches the process if and only if it is listed HERE. Setting one in
+      # .env and not here looks correct in review, survives a restart, and does
+      # nothing — the failure LENS_PROVISION_SECRET already caused once.
+      #
+      # These are the ones whose silence costs money. cmd/lens/compose_env_reach_test.go
+      # holds the list and the rule for adding to it.
+      #
+      # LENS_CACHE_POOLABLE_ENABLED is the GLOBAL gate on cross-tenant pooling — one of
+      # three gates (this, the per-workspace cache_poolable, and earn_verified on both
+      # sides). Mute, it shuts pooling off entirely no matter how many workspaces opt
+      # in, and reports nothing: the royalty test simply shows no mint, with no way to
+      # tell "not implemented" from "not switched on".
+      - LENS_CACHE_POOLABLE_ENABLED=${LENS_CACHE_POOLABLE_ENABLED:-}
+      - LENS_DISTILL_POOLABLE_ENABLED=${LENS_DISTILL_POOLABLE_ENABLED:-}
+      - LENS_ECONOMY_ENABLED=${LENS_ECONOMY_ENABLED:-}
+      - LENS_POOL_ROYALTY_MINTING_ENABLED=${LENS_POOL_ROYALTY_MINTING_ENABLED:-}
+      # Also a SECURITY parameter: the anti-self-dealing property is that a Sybil pair
+      # loses (1-s)*C per cycle, so s must stay < 1 (config.go refuses to boot at >= 1).
+      - LENS_POOL_ROYALTY_SHARE=${LENS_POOL_ROYALTY_SHARE:-}
+      - LENS_MINT_RATE_CAP_LENS_24H=${LENS_MINT_RATE_CAP_LENS_24H:-}
+
+      # ── Customer money IN. Mute ⇒ nobody can buy LXC, and nothing says so. ────
+      - LENS_BILLING_ENABLED=${LENS_BILLING_ENABLED:-}
+      - LENS_STRIPE_SECRET_KEY=${LENS_STRIPE_SECRET_KEY:-}
+      - LENS_STRIPE_WEBHOOK_SECRET=${LENS_STRIPE_WEBHOOK_SECRET:-}
+      - LENS_BILLING_SUCCESS_URL=${LENS_BILLING_SUCCESS_URL:-}
+      - LENS_BILLING_CANCEL_URL=${LENS_BILLING_CANCEL_URL:-}
       # Pattern mining/earning (runbook Trap 5 — "opt-in succeeds, earning silently zero").
       # These were only ever passed by a gitignored docker-compose.override.yml, so a fresh
       # clone could never enable them. `:-` is safe for BOTH defaults: MINING is parseBoolEnv
