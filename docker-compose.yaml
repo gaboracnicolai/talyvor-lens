@@ -30,7 +30,31 @@ services:
     # raw HTTP proxy + the admin surface directly to the internet.
     ports:
       - "127.0.0.1:8080:8080"
+    # ── HOW LENS_* VARIABLES REACH THIS CONTAINER ────────────────────────────────────────────
+    # `lens.env` is forwarded WHOLESALE. That is deliberate and it ends a bug class: this service
+    # previously had only the `environment:` list below, which forwards a variable if and only if
+    # someone remembered to add it. internal/config reads 98 LENS_* variables; the list forwarded 33.
+    # The other 65 were MUTE — settable in .env, correct in every review, never reaching the process.
+    # From inside there is no difference between unset and unforwarded, so no behavioural test can
+    # see it. That list drifted five times in one day; enumerating 98 entries is not a mechanism.
+    #
+    # ⚠ WHY A SEPARATE FILE AND NOT `.env`. `.env` is the COMPOSE-PROJECT file: it feeds ${VAR}
+    # substitution for every service, and on the deployed box it also holds the values that
+    # deploy/track-docs.compose.yaml needs — TRACK_GATEWAY_AUTH_SECRET, DOCS_GATEWAY_AUTH_SECRET,
+    # DOCS_WORKSPACE_ID (that file references `postgres:5432`, so it runs in THIS project and reads
+    # THIS .env). Forwarding `.env` would put two other services' gateway secrets into the Lens
+    # process environment, where Lens has no use for them and a Lens compromise or crash dump would
+    # expose them. Lens gets its OWN file; the project file stays for substitution.
+    #
+    # `required: false` so a deployment without the file still boots — the variables simply keep
+    # their documented defaults, exactly as before this change. See lens.env.example.
+    env_file:
+      - path: lens.env
+        required: false
     environment:
+      # ⚠ The entries below are NOT the reachability mechanism any more — lens.env is. These remain
+      # because they are values compose DERIVES (service DNS names, the pgbouncer DSN) or pins, and
+      # `environment:` overrides `env_file`, so anything set here still wins.
       # Route through PgBouncer (transaction pooling) instead of Postgres directly.
       # LENS_DB_PGBOUNCER switches pgx to simple query protocol (required).
       # LENS_DB_MAX_CONNS is raised — connections are cheap against PgBouncer.
