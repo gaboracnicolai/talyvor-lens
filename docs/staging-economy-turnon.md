@@ -10,7 +10,7 @@
 > NOT covered here: the deferred distill-specific fraud **detector + per-pair caps
 > + revoke/adjudication wiring**; the **external crypto/ledger audit**; the legal
 > definition of "what is LENS"; and **live Stripe keys** (live billing is blocked
-> by the missing UK entity + bank regardless).
+> — live Stripe REQUIRES a registered legal entity and a business bank account).
 
 Every variable name, default, and command below is confirmed against the code at
 main `302dc48` (citations inline). The mint is built **inert** — these steps turn it
@@ -114,7 +114,8 @@ if you want to exercise the real Stripe checkout → webhook → `lxc_purchases`
 | `LENS_STRIPE_WEBHOOK_SECRET` | `whsec_…` | `config.go:628`. |
 
 > **TEST keys ONLY (`sk_test_…`), NEVER live (`sk_live_…`).** Live billing is blocked
-> by the missing UK entity + bank regardless; do not attempt it.
+> — live Stripe REQUIRES a registered legal entity and a business bank account; do not attempt it
+> until both are in place.
 
 ---
 
@@ -179,4 +180,5 @@ value. The **public, real-money flip remains separately gated** on all of:
   linkage are the closed test meanwhile);
 - the **external security/crypto + ledger audit** of the mint/ledger path;
 - the **legal definition of LENS** (closed-loop internal credit, never fiat-convertible);
-- **live Stripe keys** + a real billing entity (blocked by the missing UK entity + bank).
+- **live Stripe keys** + a real billing entity — Stripe activation REQUIRES a registered legal
+  entity and a business bank account.
