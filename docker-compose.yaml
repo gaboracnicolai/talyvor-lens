@@ -64,6 +64,45 @@ services:
       - LENS_JWT_PRIVATE_KEY=${LENS_JWT_PRIVATE_KEY:-}
       - LENS_POVI_CHALLENGE_KEY=${LENS_POVI_CHALLENGE_KEY:-}
       - LENS_ADMIN_LXC_GRANT_ENABLED=${LENS_ADMIN_LXC_GRANT_ENABLED:-}
+
+      # ── OPERATOR ALERTING + CATALOG DRIFT ────────────────────────────────────────────────
+      # ⚠ EVERY LINE HERE EXISTS BECAUSE OF THE SAME TRAP THAT HID LENS_PROVISION_SECRET: this
+      # service has an explicit `environment:` list and NO `env_file:`, so a variable set in
+      # .env that is not named below reaches NOTHING. The container starts healthy and the
+      # feature is simply inert, with no log line saying why.
+      #
+      # LENS_TRACK_WEBHOOK_* is the Lens→Track spend-alert emitter (internal/alerts/emitter.go).
+      # It has NEVER been passed here, so alerts.NewEmitter has always returned nil and NO SPEND
+      # ALERT HAS EVER BEEN DELIVERED — silently, because an unconfigured emitter is a total
+      # no-op. Track's receiver is real and gateway-exempt: POST /v1/lens/webhook, HMAC-verified
+      # against Track's TRACK_LENS_WEBHOOK_SECRET, which MUST hold the same value as the secret
+      # below — different names, one value, the same shape as GATEWAY_AUTH_SECRET.
+      - LENS_TRACK_WEBHOOK_URL=${LENS_TRACK_WEBHOOK_URL:-}
+      - LENS_TRACK_WEBHOOK_SECRET=${LENS_TRACK_WEBHOOK_SECRET:-}
+      #
+      # ⚠ LENS_OPERATOR_ALERT_WEBHOOK_* IS PLUMBING FOR A RECEIVER THAT DOES NOT EXIST YET.
+      # The catalog-drift alert (internal/modelwatch) POSTs a `catalog_drift` payload. NOTHING on
+      # the box accepts that type today. Track's /v1/lens/webhook handles only "spend_alert" and
+      # its default branch logs "ignoring unknown webhook type" and returns 200 — which this
+      # client would read as DELIVERED and never retry. Pointing this at Track is therefore worse
+      # than leaving it unset: the metric would read sink_configured=1 while nobody is told.
+      # Leave BOTH unset until a receiver exists (see the follow-up report). The lines are here
+      # so that the day one does, it is a .env edit and not a compose change nobody remembers.
+      - LENS_OPERATOR_ALERT_WEBHOOK_URL=${LENS_OPERATOR_ALERT_WEBHOOK_URL:-}
+      - LENS_OPERATOR_ALERT_WEBHOOK_SECRET=${LENS_OPERATOR_ALERT_WEBHOOK_SECRET:-}
+      #
+      # ⚠ LENS_MODEL_CATALOG_OVERRIDES is the remedy the unpriced-model alert NAMES ("add the
+      # model via LENS_MODEL_CATALOG_OVERRIDES, no rebuild"). It was never passed through, so
+      # that instruction was inoperable on this compose: an operator following it exactly would
+      # see nothing change and have no way to tell why. Adding a model here is strictly better
+      # than the derived floor, because it replaces a guess with the published rate.
+      - LENS_MODEL_CATALOG_OVERRIDES=${LENS_MODEL_CATALOG_OVERRIDES:-}
+      # Catalog-drift poller. Default ON in code; these allow disabling or re-pacing it.
+      - LENS_MODEL_WATCH_ENABLED=${LENS_MODEL_WATCH_ENABLED:-}
+      - LENS_MODEL_WATCH_INTERVAL=${LENS_MODEL_WATCH_INTERVAL:-}
+      # Documented in .env.production.example but never passed — the same trap, found by sweeping
+      # the example file against this list.
+      - LENS_PATTERN_CAPTURE_ENABLED=${LENS_PATTERN_CAPTURE_ENABLED:-}
       # Per-user signup provisioning (POST /v1/provision). This MUST be forwarded: without the
       # line, setting it in .env reaches nothing, and because provisioning fails CLOSED the route
       # is simply not registered — Lens boots healthy, passes its healthcheck, serves everything
