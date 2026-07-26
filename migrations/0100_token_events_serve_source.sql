@@ -1,8 +1,25 @@
 -- 0100_token_events_serve_source.sql — CACHE-SERVE SPEND VISIBILITY: make cache hits countable
 -- from the SAME table every spend reader uses.
 --
--- WHY: the closed trial's core number is the CACHE HIT RATE — it sets the BYOK subscription price
--- and tests whether "our margin is the cache" survives real traffic. Before this migration a
+-- ⚠ COMMENT CORRECTED 2026-07-26 — THE ORIGINAL RATIONALE DESCRIBED A BUSINESS MODEL THAT DOES NOT
+-- EXIST. It said this number "sets the BYOK subscription price and tests whether 'our margin is the
+-- cache' survives real traffic". Both halves were wrong, and the DDL below was never affected — only
+-- the reason given for it. Read the correction before trusting any inherited assumption here:
+--
+--   * THERE IS NO BYOK OFFERING AND NO SUBSCRIPTION. Bring-your-own-key is NOT BUILT, and the
+--     deliberate decision is not to build it yet — it will be designed from real usage data rather
+--     than from an assumption about what customers want. Nothing in this schema prices a
+--     subscription, because there is no subscription to price.
+--   * "OUR MARGIN IS THE CACHE" WAS THE INVERTED MODEL and has been removed from the code, the
+--     README and COORDINATION.md. Billing is per-request against prepaid LXC credit at a FIXED peg
+--     (1 LXC = $0.10, economy.LXCUSDValue); there is no subscription whose margin a cache hit could
+--     widen. A cache hit is not retained margin on a flat fee.
+--
+-- WHY THIS COLUMN ACTUALLY MATTERS, which is a measurement reason and survives the correction: the
+-- cache hit rate is how AVOIDED PROVIDER COGS is measured, and it is the funding basis for pooled-
+-- cache contributor royalties (a mint is tied to the consumer's SETTLED charge, so an unmeasurable
+-- hit is an unfundable royalty). It is a cost-and-attribution number, not a pricing input.
+-- Before this migration a
 -- cache-served request wrote NO token_events row (the serve branch returns before the recording
 -- seam), so the single most important number in the business was unmeasurable from the table the
 -- dashboard reads. The requester WAS still debited (the agent-allocator's pre-serve LXC estimate in
