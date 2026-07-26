@@ -76,5 +76,7 @@ Empty values are silently dropped — no blank headers ever leave the SDK.
 
 ## License
 
-[Business Source License 1.1](../../LICENSE) (BUSL-1.1). Not an open-source licence today.
-See the `Additional Use Grant` in the repository `LICENSE` for what production use is permitted.
+[MIT](LICENSE). This SDK is deliberately licensed more permissively than the Talyvor Lens server
+it talks to, which is under the [Business Source License 1.1](../../LICENSE): the SDK is a thin
+client you embed in your own application, so it should not put a licence review in the way of
+an integration.
