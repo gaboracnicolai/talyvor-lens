@@ -43,6 +43,7 @@ var mustForward = map[string]string{
 	"LENS_POOL_ROYALTY_SHARE":           "s, the contributor share. Also a SECURITY parameter — the anti-self-dealing property is that farming loses (1-s)*C, so an operator who cannot set it cannot tune it either",
 	"LENS_DISTILL_POOLABLE_ENABLED":     "the distill half of pooling consent. Mute ⇒ distill reuse never pools",
 	"LENS_MINT_RATE_CAP_LENS_24H":       "the 24h mint cap. Mute ⇒ the cap cannot be tightened in response to abuse",
+	"LENS_SHADOW_MINTS_ENABLED":         "shadow mode for the six unproven mints. Mute ⇒ shadow mode is silently OFF while the operator believes the trial is being measured — and since a shadowed mint credits nothing, the observable symptom is an empty lens_shadow_mints table, indistinguishable from \"the mints never fired\"",
 
 	// ── customer money in ─────────────────────────────────────────────────────
 	"LENS_BILLING_ENABLED":       "Mute ⇒ checkout routes are never registered and a customer cannot buy LXC at all",
