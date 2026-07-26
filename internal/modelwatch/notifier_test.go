@@ -115,11 +115,19 @@ func TestNotify_NonSuccessIsAFailure(t *testing.T) {
 // a Notifier interface is NOT == nil, so the readiness check would report an armed sink and the
 // anti-inert guarantee would invert into the exact bug it exists to prevent. cmd/lens converts
 // explicitly; this pins why that is necessary.
+// asNotifier stores a *WebhookNotifier in the interface. The wrap goes through a function, and the
+// comparison below is against an interface-typed variable rather than the `nil` literal, because
+// staticcheck can otherwise PROVE the comparison false (SA4023) — and the thing it would be proving is
+// exactly the fact under test. A guard written the obvious way fails the linter for being correct.
+func asNotifier(n *WebhookNotifier) Notifier { return n }
+
 func TestTypedNilNotifierIsNotNilInterface(t *testing.T) {
 	var concrete *WebhookNotifier
-	var iface Notifier = concrete
-	if iface == nil {
-		t.Skip("Go semantics changed; the guard in cmd/lens is no longer needed")
+	iface := asNotifier(concrete)
+
+	var trulyNil Notifier // a genuinely nil interface: no type, no value
+	if iface == trulyNil {
+		t.Skip("Go semantics changed; the explicit conversion in cmd/lens is no longer needed")
 	}
 	// Given that, a nil *WebhookNotifier must at least refuse to claim it delivered anything.
 	if err := concrete.Notify(context.Background(), "s", "b"); err == nil {
