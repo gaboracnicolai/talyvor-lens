@@ -383,4 +383,9 @@ There are no built-in browser pages for these; the reads are API endpoints:
 
 ## License
 
-Open core. The proxy and every package under `internal/` is MIT-licensed. SSO, compliance exports, and SLA support are available commercially — contact `hello@talyvor.com`.
+[Business Source License 1.1](LICENSE) (BUSL-1.1). **Not an open-source licence today.**
+
+You may read, modify and self-host Talyvor Lens, including in production, for your own
+organisation's purposes. You may **not** offer Talyvor Lens to third parties as a hosted or
+managed service. See the `Additional Use Grant` in [LICENSE](LICENSE) for the exact boundary,
+and the `Change Date`, on which this converts to Apache License 2.0.

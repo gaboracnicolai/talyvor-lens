@@ -76,4 +76,5 @@ Empty values are silently dropped — no blank headers ever leave the SDK.
 
 ## License
 
-Apache-2.0
+[Business Source License 1.1](../../LICENSE) (BUSL-1.1). Not an open-source licence today.
+See the `Additional Use Grant` in the repository `LICENSE` for what production use is permitted.
