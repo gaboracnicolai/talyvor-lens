@@ -100,15 +100,41 @@ func seedModels() []Model {
 		// alias below rather than by a duplicate priced row.
 
 		// ─── Google Gemini (vision + audio + document) ───
+		// VERIFIED CORRECT for prompts <= 200k tokens (1.25 / 10.00), same source, same date.
+		// ⚠ UNMODELLED TIER: above 200k tokens Google charges 2.50 / 15.00 — double. Lens has no
+		// prompt-size-dependent rate, so long-context requests to this model UNDER-bill 2x. Same
+		// class as Anthropic's fast mode: a price that varies by request shape, not by model id.
 		{ID: "gemini-2.5-pro", Provider: "google", DisplayName: "Gemini 2.5 Pro", InputPer1M: 1.25, OutputPer1M: 10.00, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
-		{ID: "gemini-2.5-flash", Provider: "google", DisplayName: "Gemini 2.5 Flash", InputPer1M: 0.075, OutputPer1M: 0.30, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
+		// ⚠ CORRECTED 2026-07-26 — UNDER-BILLING BADLY. Held 0.075/0.30 (an older Flash generation's
+		// rate); published is 0.30 in / 2.50 out — 4x under on input and 8.3x under on OUTPUT.
+		// Source: https://ai.google.dev/gemini-api/docs/pricing (fetched 2026-07-26), paid tier.
+		// The $1.00 audio-input tier is NOT modelled — Lens has no per-modality input rate, so
+		// audio prompts to this model still bill at the text rate. Flagged, not guessed.
+		{ID: "gemini-2.5-flash", Provider: "google", DisplayName: "Gemini 2.5 Flash", InputPer1M: 0.30, OutputPer1M: 2.50, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
 		{ID: "gemini-2.0-flash", Provider: "google", DisplayName: "Gemini 2.0 Flash", InputPer1M: 0.10, OutputPer1M: 0.40, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
 		{ID: "gemini-1.5-pro", Provider: "google", DisplayName: "Gemini 1.5 Pro", InputPer1M: 1.25, OutputPer1M: 5.00, Capabilities: visionAudioDoc, ContextTokens: 2000000, MaxOutput: 8192},
 		{ID: "gemini-1.5-flash", Provider: "google", DisplayName: "Gemini 1.5 Flash", InputPer1M: 0.075, OutputPer1M: 0.30, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
 
 		// ─── AWS Bedrock Claude (vision + document; ~15% markup) ───
-		{ID: "anthropic.claude-opus-4-6-20251101-v1:0", Provider: "bedrock", DisplayName: "Claude Opus 4.6 (Bedrock)", InputPer1M: 17.25, OutputPer1M: 86.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
-		{ID: "anthropic.claude-sonnet-4-6-20251101-v1:0", Provider: "bedrock", DisplayName: "Claude Sonnet 4.6 (Bedrock)", InputPer1M: 3.45, OutputPer1M: 17.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
+		// ⚠ CORRECTED 2026-07-26 — THESE WERE OVER-BILLING, AND THE MARKUP WAS INVENTED.
+		// They held 17.25/86.25 and 3.45/17.25, which are EXACTLY 1.15x the direct Anthropic rates
+		// (17.25 == 15.00 x 1.15, 86.25 == 75.00 x 1.15). Somebody assumed Bedrock charges a 15%
+		// premium and derived these instead of reading AWS's price. Two errors compounded: the 15%
+		// was fictional, AND the direct rate it was applied to was itself wrong (Opus 4.6 was
+		// carrying Opus 4.1's 15/75 — see the corrections above).
+		//
+		// AWS publishes the SAME per-token rate as Anthropic direct — no premium at all:
+		//   Opus 4.6:   $5 in / $25 out   https://aws.amazon.com/marketplace/pp/prodview-ssjdkfefxkn4i
+		//   Sonnet 4.6: $3 in / $15 out   https://aws.amazon.com/marketplace/pp/prodview-o6w4hyizv7g64
+		//   (AWS Marketplace "Bedrock Edition" listings, fetched 2026-07-26. The main
+		//    aws.amazon.com/bedrock/pricing page does NOT list the 4.6 models at all.)
+		// So Opus-on-Bedrock was billed 3.45x its real cost and Sonnet 1.15x.
+		//
+		// Cache rates stay DERIVED (withCacheRates treats bedrock with the anthropic multipliers).
+		// The Marketplace listing shows separate cache and batch line items which I did not
+		// transcribe, so those remain an approximation — flagged rather than guessed at.
+		{ID: "anthropic.claude-opus-4-6-20251101-v1:0", Provider: "bedrock", DisplayName: "Claude Opus 4.6 (Bedrock)", InputPer1M: 5.00, OutputPer1M: 25.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
+		{ID: "anthropic.claude-sonnet-4-6-20251101-v1:0", Provider: "bedrock", DisplayName: "Claude Sonnet 4.6 (Bedrock)", InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
 		// NOTE: no Bedrock "claude-haiku-4-6" twin either — the underlying Haiku 4.6 does not exist.
 
 		// ─── Mistral (text-only) ───

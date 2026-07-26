@@ -45,24 +45,22 @@ var previousPrices = map[string][2]float64{
 	"claude-opus-4-6":   {5.00, 25.00}, // CORRECTED 2026-07-26
 	"claude-sonnet-4-6": {3.00, 15.00},
 	"gemini-2.5-pro":    {1.25, 10.00},
-	"gemini-2.5-flash":  {0.075, 0.30},
+	"gemini-2.5-flash":  {0.30, 2.50}, // CORRECTED 2026-07-26
 	"gemini-2.0-flash":  {0.10, 0.40},
 	"gemini-1.5-pro":    {1.25, 5.00},
 	"gemini-1.5-flash":  {0.075, 0.30},
-	// ⚠ NOT CORRECTED, AND THAT IS A DELIBERATE REFUSAL TO GUESS. AWS publishes Bedrock pricing on its
-	// own page, which I did not fetch, so I have no citable rate for these and will not invent one.
+	// ⚠ NOW CORRECTED (2026-07-26) — and the prediction from the arithmetic held exactly. These read
+	// 17.25/86.25 and 3.45/17.25, which are 1.15x the direct rates, i.e. DERIVED from an assumed 15%
+	// Bedrock premium. AWS publishes NO premium: Opus 4.6 is $5/$25 and Sonnet 4.6 is $3/$15, the same
+	// as Anthropic direct (AWS Marketplace Bedrock Edition listings, cited in seed.go). So Bedrock Opus
+	// was over-billing 3.45x and Bedrock Sonnet 1.15x.
 	//
-	// But this much is ARITHMETIC, not inference: 17.25 == 15.00 x 1.15 and 86.25 == 75.00 x 1.15
-	// exactly, as are 3.45 and 17.25 against Sonnet's 3.00/15.00. These rows were DERIVED by applying a
-	// 15% markup to the direct rate — so the Opus row inherits the very error corrected above and is
-	// most likely ~3.45x too high. "Most likely" is not good enough to bill on in either direction,
-	// which is why they stand unchanged and flagged rather than quietly re-derived. Interpolating a new
-	// number from a corrected input would repeat the original mistake with more confidence.
-	//
-	// ACTION: verify against https://aws.amazon.com/bedrock/pricing/ and correct with a citation. Until
-	// then these are the only knowingly-suspect rates left in the catalog.
-	"anthropic.claude-opus-4-6-20251101-v1:0":   {17.25, 86.25},
-	"anthropic.claude-sonnet-4-6-20251101-v1:0": {3.45, 17.25},
+	// The lesson worth keeping: I refused to re-derive these from the CORRECTED direct rate, and that
+	// was right for the wrong-sounding reason — re-deriving would have produced 5.75/28.75, which is
+	// still wrong, because the 15% premium never existed. Fixing an input to a bad formula does not
+	// make the formula true.
+	"anthropic.claude-opus-4-6-20251101-v1:0":   {5.00, 25.00}, // CORRECTED 2026-07-26
+	"anthropic.claude-sonnet-4-6-20251101-v1:0": {3.00, 15.00}, // CORRECTED 2026-07-26
 	"mistral-large-latest":                      {2.00, 6.00},
 	"mistral-small-latest":                      {0.10, 0.30},
 	"mistral-nemo":                              {0.015, 0.045},

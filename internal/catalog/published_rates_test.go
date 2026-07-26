@@ -61,6 +61,29 @@ func publishedRateCases() []publishedRateCase {
 		{"gpt-5.4", 2.50, 0.25, 0, 15.00, "openai pricing: gpt-5.4 (was wrongly 5.00/20.00)"},
 		// CORRECTED: the catalog carried 0.50/2.00 and under-billed gpt-5.4-mini.
 		{"gpt-5.4-mini", 0.75, 0.075, 0, 4.50, "openai pricing: gpt-5.4-mini (was wrongly 0.50/2.00)"},
+
+		// ── Amazon Bedrock ── AWS Marketplace "Bedrock Edition" listings (fetched 2026-07-26).
+		// aws.amazon.com/bedrock/pricing does NOT list the 4.6 models; these are the AWS-owned
+		// Marketplace product pages, which do. NO Bedrock premium exists — same rate as direct.
+		// cachedIn/write are DERIVED by withCacheRates (anthropic multipliers), not published here,
+		// so only in/out are pinned.
+		{"anthropic.claude-opus-4-6-20251101-v1:0", 5.00, 0.50, 0, 25.00, "AWS Marketplace prodview-ssjdkfefxkn4i — Opus 4.6 Bedrock $5/$25 (was wrongly 17.25/86.25, a 3.45x OVER-bill)"},
+		{"anthropic.claude-sonnet-4-6-20251101-v1:0", 3.00, 0.30, 0, 15.00, "AWS Marketplace prodview-o6w4hyizv7g64 — Sonnet 4.6 Bedrock $3/$15 (was wrongly 3.45/17.25, a 1.15x OVER-bill)"},
+
+		// ── Google ── https://ai.google.dev/gemini-api/docs/pricing (fetched 2026-07-26), paid tier.
+		// google gets NO cache discount in withCacheRates (cache read == input), so cachedIn == in.
+		// CORRECTED: held 0.075/0.30, an older Flash generation's rate — 4x under in, 8.3x under out.
+		{"gemini-2.5-flash", 0.30, 0.30, 0, 2.50, "gemini pricing: 2.5 Flash $0.30/$2.50 (was wrongly 0.075/0.30)"},
+		// Correct for prompts <= 200k. Above that Google charges 2.50/15.00 and Lens does not model it.
+		{"gemini-2.5-pro", 1.25, 1.25, 0, 10.00, "gemini pricing: 2.5 Pro, <=200k-token tier"},
+
+		// ── Groq ── https://groq.com/pricing (fetched 2026-07-26). BOTH ALREADY CORRECT — pinned so
+		// they stay that way. A verification that finds nothing wrong is still worth keeping.
+		{"llama-3.3-70b-versatile", 0.59, 0.59, 0, 0.79, "groq pricing: llama-3.3-70b-versatile"},
+		{"llama-3.1-8b-instant", 0.05, 0.05, 0, 0.08, "groq pricing: llama-3.1-8b-instant"},
+
+		// ── Mistral ── https://mistral.ai/pricing (fetched 2026-07-26). ALREADY CORRECT.
+		{"mistral-large-latest", 2.00, 2.00, 0, 6.00, "mistral pricing: Mistral Large $2/$6"},
 	}
 }
 
