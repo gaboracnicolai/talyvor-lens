@@ -126,6 +126,24 @@ func main() {
 		fmt.Println(lensVersion)
 		return
 	}
+	// `lens poolcheck` is a DEPLOY PREFLIGHT for cross-tenant cache pooling. It embeds a
+	// corpus of "same fixed preamble, unrelated content" prompts through the CONFIGURED
+	// embedder and exits non-zero if any unrelated pair reaches LENS_SEMANTIC_THRESHOLD —
+	// i.e. if this configuration could serve one workspace's cached response to another.
+	//
+	// It is a subcommand rather than a boot check on purpose: it costs real embedding calls,
+	// and a gateway restart is the wrong moment to discover a config problem AND pay for it
+	// on every replica. Run it in the deploy pipeline, and after ANY change to
+	// LENS_EMBEDDING_MODEL, LENS_SEMANTIC_THRESHOLD, or a major client's prompt templates.
+	// It is also the only thing standing between "today's model happens to be safe" and
+	// "we would notice if it stopped being".
+	if len(os.Args) > 1 && os.Args[1] == "poolcheck" {
+		if err := runPoolCheck(); err != nil {
+			slog.Error("poolcheck failed", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		if err := runMigrate(); err != nil {
 			slog.Error("migrate failed", slog.String("err", err.Error()))
