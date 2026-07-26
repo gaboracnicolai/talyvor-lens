@@ -27,6 +27,22 @@ import (
 // (remove it here AND from seed.go). This is a deliberately HUMAN-maintained mirror of /v1/models: a
 // live network check in CI would be flaky and couple the build to an external API.
 var verifiedAnthropicModels = map[string]struct{}{
+	// ⚠ claude-opus-5 IS NOT FROM THE 2026-07-19 /v1/models CAPTURE. Added 2026-07-26 on different
+	// evidence, stated plainly rather than folded into the list above:
+	//   1. It is PUBLISHED on https://platform.claude.com/docs/en/about-claude/pricing with rates.
+	//   2. Stronger — it is BEING SERVED THROUGH THIS PROXY TODAY. The unpriced-model hole this
+	//      PR closes was found on live Opus 5 traffic, so its existence is not in question: requests
+	//      on it succeeded and Talyvor paid the provider for them.
+	// No API key was available in this environment to re-run GET /v1/models, so the capture itself was
+	// NOT refreshed. If you have a key, re-capture and fold this entry into the list above.
+	"claude-opus-5": {},
+	// ⚠ claude-mythos-5 IS DELIBERATELY ABSENT, and so is its seed entry. Its PRICE is published
+	// ($10/$50) but the page marks it "limited availability" and it is in neither the capture nor any
+	// traffic I can point to. This guard is an EXISTENCE check, and widening it from a marketing page is
+	// precisely the failure it was built to catch (there is no Haiku 4.6 either, and that phantom
+	// 404'd a live request). If Mythos 5 is dispatchable, the fallback prices it and the detection job
+	// added in this PR alerts on it — that is the safe order: alert first, then price.
+
 	// returned undated by /v1/models
 	"claude-sonnet-5":   {},
 	"claude-fable-5":    {},

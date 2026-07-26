@@ -23,7 +23,14 @@ func TestPriceDetailed_CacheAwareRates(t *testing.T) {
 		ok                            bool
 	}{
 		{"claude-sonnet-4-5", 3.00, 0.30, 3.75, 15.00, true}, // 0.1x read, 1.25x write
-		{"claude-opus-4-5", 15.00, 1.50, 18.75, 75.00, true},
+		// ⚠ THIS CASE PINNED A WRONG PRICE FOR MONTHS, and shows how a mispricing acquires a green test.
+		// It was written to assert the cache MULTIPLIERS (0.1x read, 1.25x write); Opus 4.5 was merely the
+		// vehicle, and its 15.00/75.00 — Opus 4.1's rate, never Opus 4.5's — rode along unexamined. A
+		// test that pins whatever the code currently does cannot detect that the code is wrong.
+		// The multipliers still hold at the corrected rate (0.1 x 5 = 0.50, 1.25 x 5 = 6.25), which is
+		// why the case is kept rather than moved. The AUTHORITY on the absolute numbers is
+		// published_rates_test.go, which cites the provider page per model — not this file.
+		{"claude-opus-4-5", 5.00, 0.50, 6.25, 25.00, true},
 		{"gpt-4o", 2.50, 1.25, 2.50, 10.00, true},         // 0.5x read, 1.0x (no write charge)
 		{"gemini-2.5-pro", 1.25, 1.25, 1.25, 10.00, true}, // no discount (not billed here)
 		{"unknown-model", 0, 0, 0, 0, false},
