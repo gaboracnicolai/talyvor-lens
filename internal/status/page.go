@@ -34,9 +34,51 @@ const (
 	StatusOutage      ComponentStatus = "outage"
 	StatusUnknown     ComponentStatus = "unknown"
 
-	// Latency bands. <=100ms healthy, <=500ms slow-but-up, >500ms outage.
-	latencyHealthyMs  = 100
-	latencyDegradedMs = 500
+	// ── LATENCY BANDS ───────────────────────────────────────────────────
+	//
+	// There are TWO, because there are two very different distances, and for a
+	// long time there was only one: a band written for a Postgres ping on the
+	// same host was applied unchanged to a HEAD across the Atlantic. The
+	// deployment is in Europe and three of the four providers answer from the
+	// US, so every provider sat permanently above the 100ms "healthy" ceiling
+	// and the page reported DEGRADED forever. A signal that is always amber
+	// carries no information — it just teaches people to ignore the page.
+	//
+	// MEASURED from a European host (2026-07-26, Chișinău MD; full HEAD
+	// including DNS + TCP + TLS, 15 cold samples each):
+	//
+	//	OpenAI          min 180  p50 233  p90 289  max 300
+	//	Anthropic       min  24  p50  28  p90  41  max 115  (nearby edge)
+	//	Google Gemini   min 147  p50 179  p90 230  max 231
+	//	AWS Bedrock     min 356  p50 386  p90 465  max 469
+	//
+	// Warm (connection reused): OpenAI 156-215, Google 56-59, Bedrock 125-150.
+	//
+	// Those two regimes are what the physics predicts, which is why the numbers
+	// below are derived rather than picked. Chișinău→us-east-1 is ~8,400 km
+	// great circle; light in fibre travels at ~2/3 c, giving an ~84ms RTT floor,
+	// and real routing (~1.5× great circle) puts it near 125ms — exactly the
+	// warm Bedrock reading. A COLD connection pays three of those round trips
+	// (TCP, then TLS, then the request) ≈ 375-450ms — exactly the cold reading.
+	// Both occur in normal operation: the cacher ticks every 60s while Go's
+	// transport discards idle connections after 90s, so the check alternates.
+	//
+	// providerHealthyMs = 750: the worst MEASURED healthy reading is 469ms
+	// (Bedrock p100 — which under the old rule was 31ms away from being called
+	// an OUTAGE). 750ms sits ~1.6× above it, which absorbs the things that
+	// legitimately vary — a TLS 1.2 handshake costs a fourth round trip (~580ms
+	// at 145ms/RTT), routes shift, peering changes — without absorbing a real
+	// provider slowdown. Below 750ms geography explains it; above 750ms it does
+	// not, and that is the whole content of the number.
+	//
+	// localHealthyMs = 50: PostgreSQL, Redis and NATS are on the same host and
+	// measure 1-4ms (live box: 4/1/1). 50ms is more than ten times normal — far
+	// enough above to survive a GC pause or a scheduler hiccup without flapping
+	// (a spike is held for a full 60s by the cache), and still tight enough to
+	// catch a real problem. The old 100ms band let a Postgres ping at 90ms —
+	// over twenty times its normal — report OPERATIONAL.
+	localHealthyMs    = 50
+	providerHealthyMs = 750
 
 	// Per-check timeouts. The 5s provider budget caps the worst-case
 	// Check() runtime at ~5s (everything runs in parallel) — well under
@@ -49,11 +91,17 @@ const (
 )
 
 type Component struct {
-	Name      string          `json:"name"`
-	Status    ComponentStatus `json:"status"`
-	Latency   int64           `json:"latency_ms"`
-	Message   string          `json:"message,omitempty"`
-	CheckedAt time.Time       `json:"checked_at"`
+	Name    string          `json:"name"`
+	Status  ComponentStatus `json:"status"`
+	Latency int64           `json:"latency_ms"`
+	// Measured says whether Latency is a real timing or a placeholder. The
+	// proxy self-check probes nothing (if this code runs, the process is up),
+	// and rendering its 0 alongside three genuine probes made a placeholder
+	// look like a measurement. ADDITIVE in JSON — latency_ms keeps its shape
+	// and value, so an existing uptime monitor is unaffected.
+	Measured  bool      `json:"measured"`
+	Message   string    `json:"message,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 type ProviderStatus struct {
@@ -113,27 +161,64 @@ func newStatusPage(pool pgxPinger, redisClient *redis.Client, nc *nats.Conn, ver
 	}
 }
 
-// classifyLatency maps a (latency, error) pair to a status. Transport
-// errors are always outage regardless of latency. >500ms is also outage
-// — the upstream is up but unusable; we want the page to surface it red.
-func classifyLatency(latencyMs int64, err error) ComponentStatus {
+// classify maps a (latency, error) pair to a status against a healthy ceiling.
+//
+// OUTAGE MEANS UNREACHABLE. Latency alone never produces one, however large.
+// The previous rule called anything over 500ms an outage, reasoning that "the
+// upstream is up but unusable" — a defensible thought for a database on the
+// same host, and plainly wrong for a provider across an ocean, where 600ms is
+// slow rather than down. It also made a measured-healthy AWS Bedrock (up to
+// 469ms) one bad routing day away from being reported as an outage.
+//
+// Something that is genuinely hung still reports outage, and by a better route:
+// each check has its own timeout (Postgres 2s, Redis 1s, NATS 2s, providers 5s),
+// and a timeout arrives here as an error. So the boundary between "slow" and
+// "down" is a real deadline rather than a guess about latency.
+func classify(latencyMs int64, err error, healthyMs int64) ComponentStatus {
 	if err != nil {
 		return StatusOutage
 	}
-	if latencyMs > latencyDegradedMs {
-		return StatusOutage
-	}
-	if latencyMs > latencyHealthyMs {
+	if latencyMs > healthyMs {
 		return StatusDegraded
 	}
 	return StatusOperational
 }
 
-// computeOverall returns the worst of every component/provider status.
+// classifyLocalLatency grades a component sharing this host — Postgres, Redis,
+// NATS. Normal is 1-4ms.
+func classifyLocalLatency(latencyMs int64, err error) ComponentStatus {
+	return classify(latencyMs, err, localHealthyMs)
+}
+
+// classifyProviderLatency grades a third-party API reached over the public
+// internet, where a healthy transatlantic round trip already costs more than a
+// local component's entire degraded budget. See the band comment above.
+func classifyProviderLatency(latencyMs int64, err error) ComponentStatus {
+	return classify(latencyMs, err, providerHealthyMs)
+}
+
+// computeOverall returns the worst of OUR OWN components. Provider statuses are
+// accepted and deliberately ignored; the parameter is kept so the call site
+// still reads as "here is everything we know", and so this comment sits where
+// someone would look for the behaviour.
+//
+// WHY A THIRD PARTY DOES NOT DEFINE OUR STATUS. The banner answers one question
+// — "is Talyvor working?" — and another company's latency is not an answer to
+// it. On the live box every Lens component was operational (PostgreSQL 4ms,
+// Redis 1ms, NATS 1ms) while the banner read DEGRADED because OpenAI answered a
+// HEAD in 257ms. That is not a harsh reading of our health; it is a false one.
+//
+// Nothing is hidden by this. Each provider keeps its own row with its own real
+// status, and "Talyvor: operational · OpenAI: outage" is precisely what a
+// customer whose requests are failing needs to see — it tells them where the
+// problem is. Folding the two together destroys that information in both
+// directions: it hides which one is broken, and it burns the banner's
+// credibility on events we neither cause nor can fix.
+//
 // Empty input is operational — the system has nothing to fail on.
-func computeOverall(components []ComponentStatus, providers []ComponentStatus) ComponentStatus {
+func computeOverall(components []ComponentStatus, _ []ComponentStatus) ComponentStatus {
 	worst := StatusOperational
-	upgrade := func(s ComponentStatus) {
+	for _, s := range components {
 		switch s {
 		case StatusOutage:
 			worst = StatusOutage
@@ -142,12 +227,6 @@ func computeOverall(components []ComponentStatus, providers []ComponentStatus) C
 				worst = StatusDegraded
 			}
 		}
-	}
-	for _, s := range components {
-		upgrade(s)
-	}
-	for _, s := range providers {
-		upgrade(s)
 	}
 	return worst
 }
@@ -213,7 +292,8 @@ func (s *StatusPage) checkPostgres(ctx context.Context) Component {
 	start := time.Now()
 	err := s.pool.Ping(probeCtx)
 	c.Latency = time.Since(start).Milliseconds()
-	c.Status = classifyLatency(c.Latency, err)
+	c.Measured = true
+	c.Status = classifyLocalLatency(c.Latency, err)
 	if err != nil {
 		c.Message = err.Error()
 	}
@@ -232,7 +312,8 @@ func (s *StatusPage) checkRedis(ctx context.Context) Component {
 	start := time.Now()
 	err := s.redisClient.Ping(probeCtx).Err()
 	c.Latency = time.Since(start).Milliseconds()
-	c.Status = classifyLatency(c.Latency, err)
+	c.Measured = true
+	c.Status = classifyLocalLatency(c.Latency, err)
 	if err != nil {
 		c.Message = err.Error()
 	}
@@ -273,27 +354,42 @@ func (s *StatusPage) checkNATS(ctx context.Context) Component {
 	}
 	_, err = sub.NextMsg(natsTimeout)
 	c.Latency = time.Since(start).Milliseconds()
-	c.Status = classifyLatency(c.Latency, err)
+	c.Measured = true
+	c.Status = classifyLocalLatency(c.Latency, err)
 	if err != nil {
 		c.Message = err.Error()
 	}
 	return c
 }
 
-// checkProxy is the self-check. If this code is running, the proxy
-// process is up — there's nothing to ping. Latency is zero.
+// checkProxy is the self-check, and it is honest about being one: if this code
+// is running the process is up, so there is nothing to probe and no latency to
+// report. It used to render "Proxy | operational | 0ms" beside three genuinely
+// measured rows, where the 0 read as a measurement rather than the placeholder
+// it is. Measured=false makes the difference explicit in the JSON and renders a
+// dash instead of a number in the HTML. A check that always passes is the same
+// defect as one that always warns — it just wears a different colour.
 func (s *StatusPage) checkProxy() Component {
 	return Component{
 		Name:      "Proxy",
 		Status:    StatusOperational,
-		Latency:   0,
+		Measured:  false,
+		Message:   "self-check: this page was served by the proxy",
 		CheckedAt: time.Now().UTC(),
 	}
 }
 
-// checkProvider issues a HEAD against the provider's base URL. 2xx or
-// 4xx both count as reachable — a 401 just means we didn't send a key,
-// not that the provider is down. 5xx or transport error → outage.
+// checkProvider issues a HEAD against the provider's base URL.
+//
+// 2xx and 4xx both count as REACHABLE — a 401 only means we sent no key. That
+// is what every real endpoint answers today (OpenAI 401, Anthropic 405, Google
+// 404, Bedrock 404), so the healthy path is the 4xx path.
+//
+// A 5xx is an OUTAGE. It previously reported merely degraded while a 600ms
+// response reported outage — exactly inverted: the provider answering "I am
+// broken" was ranked below the provider answering slowly. Since no real
+// endpoint returns 5xx to a HEAD, this branch fires only on a genuine incident
+// and cannot cry wolf.
 func (s *StatusPage) checkProvider(ctx context.Context, name, url string) ProviderStatus {
 	p := ProviderStatus{Name: name, CheckedAt: time.Now().UTC()}
 	probeCtx, cancel := context.WithTimeout(ctx, providerTimeout)
@@ -313,10 +409,10 @@ func (s *StatusPage) checkProvider(ctx context.Context, name, url string) Provid
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 500 {
-		p.Status = StatusDegraded
+		p.Status = StatusOutage
 		return p
 	}
-	p.Status = classifyLatency(p.Latency, nil)
+	p.Status = classifyProviderLatency(p.Latency, nil)
 	return p
 }
 
@@ -464,8 +560,8 @@ func renderHTML(s *StatusResponse) string {
 	)
 
 	for _, c := range s.Components {
-		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%dms</td><td>%s</td></tr>`,
-			htmlEscape(c.Name), statusPill(c.Status), c.Latency, htmlEscape(c.Message))
+		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			htmlEscape(c.Name), statusPill(c.Status), latencyCell(c.Latency, c.Measured), htmlEscape(c.Message))
 	}
 	b.WriteString(`</tbody></table></section>`)
 
@@ -483,6 +579,16 @@ func renderHTML(s *StatusResponse) string {
 </body>
 </html>`, s.UpdatedAt.Format("2006-01-02 15:04:05"))
 	return b.String()
+}
+
+// latencyCell renders a latency, or a dash when the check did not measure one.
+// "0ms" is a claim — it says we timed something and got zero. Only a real probe
+// is entitled to make it.
+func latencyCell(latencyMs int64, measured bool) string {
+	if !measured {
+		return "—"
+	}
+	return fmt.Sprintf("%dms", latencyMs)
 }
 
 func bannerFor(s ComponentStatus) (cls, text string) {

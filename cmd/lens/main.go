@@ -388,7 +388,7 @@ func run() error {
 	// eval scheduler and anomaly monitor goroutines are launched after setupHA
 	// below so they can be wrapped with leader election.
 	anomalyDetector := anomaly.New(dbrouting.ReadPool(pool, replicaPool))
-	statusPage := status.New(pool, redisClient, nc, "0.1.0")
+	statusPage := status.New(pool, redisClient, nc, lensVersion)
 	go statusPage.StartCacher(ctx, 60*time.Second)
 	// Model-catalog runtime overrides (Upgrade 16): an operator can add or
 	// reprice models without a rebuild via LENS_MODEL_CATALOG_OVERRIDES (a
@@ -1456,7 +1456,7 @@ func run() error {
 
 	// Detailed /healthz pings DB + Redis + the multi-endpoint local
 	// router. Each checker has a 100ms budget so the rollup stays fast.
-	healthHandler := api.NewHealthHandler("0.1.0", map[string]api.HealthChecker{
+	healthHandler := api.NewHealthHandler(lensVersion, map[string]api.HealthChecker{
 		"database": api.HealthCheckFunc(func(ctx context.Context) (bool, int64, string) {
 			if pool == nil {
 				return false, 0, "no pool configured"
@@ -1668,7 +1668,7 @@ func run() error {
 		pool, redisClient, nc, exactCache, l,
 		alertManager, branchTracker, wsManager, lr,
 		anomalyDetector,
-		"0.1.0",
+		lensVersion,
 	)
 	// Budgets store powers the dashboard's read-only Budgets panel.
 	apiServer.SetBudgetStore(budgetStore)
@@ -1694,7 +1694,7 @@ func run() error {
 	// ("MCP clients bring their own auth"), letting any unauthenticated caller read any workspace's
 	// financials by naming it. Gate it with the same AuthMiddleware as the authed group; the tools
 	// additionally force the acted-on workspace to the verified caller (effectiveWorkspace).
-	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, "0.1.0")
+	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, lensVersion)
 	mcpAuth := auth.AuthMiddleware(keyStore, authManager)
 	r.With(mcpAuth).Post("/mcp", mcpServer.HandleRPC)
 	r.With(mcpAuth).Get("/mcp/sse", mcpServer.HandleSSE)
@@ -1719,7 +1719,7 @@ func run() error {
 	// the same never-registered shape as billReg. It serves the same page, so an
 	// existing link to /dashboard lands somewhere honest on deployments that
 	// still want that path.
-	dashHandler := dashboard.New("0.1.0")
+	dashHandler := dashboard.New(lensVersion)
 	r.Get("/", dashHandler.ServeHTTP)
 	dashReg{on: cfg.DashboardEnabled}.get(r, "/dashboard", dashHandler.ServeHTTP)
 
