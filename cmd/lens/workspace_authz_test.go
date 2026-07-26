@@ -92,8 +92,18 @@ func TestWorkspaceIsolationMiddleware_EnforcesAndPassesThrough(t *testing.T) {
 // TestWorkspaceIsolationMiddleware_GroupPlacementResolvesParam locks in the
 // load-bearing assumption: the guard MUST be registered via a group's Use (as
 // main.go does), not a top-level mux Use. A top-level Use runs before routing,
-// so chi.URLParam(wsID) would be empty and the guard would fail OPEN. If a
-// future refactor moves the guard to a top-level Use, this test fails loudly.
+// so chi.URLParam(wsID) would be empty and the guard would fail OPEN.
+//
+// CORRECTION — this test does NOT notice if a refactor moves main.go's mount, as
+// it previously claimed. It builds its own router and never reads main.go, so it
+// is a canary for CHI'S SEMANTICS (it fails if a future chi resolves params before
+// top-level middleware, at which point the hazard is gone), not a guard on our call
+// site. Measured: with main.go's mount relocated to a bare top-level r.Use — tenant
+// isolation silently disabled for every request — this test still reported ok.
+//
+// The call site is guarded by TestWorkspaceIsolationMiddleware_MountedWhereURLParamsResolve
+// (workspace_isolation_mount_test.go), which parses main.go. The two are complements:
+// this one proves the property is real, that one proves it is applied where it matters.
 func TestWorkspaceIsolationMiddleware_GroupPlacementResolvesParam(t *testing.T) {
 	// Top-level Use: middleware runs before route match → wsID empty → passes.
 	top := chi.NewRouter()
