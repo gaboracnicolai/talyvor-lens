@@ -271,17 +271,53 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 		status, creditAmt = "anomalous", 0
 	}
 
+	// ⚠ HAS THIS PAYMENT ALREADY BEEN REFUNDED? Read INSIDE the transaction that makes
+	// the claim, so a refund landing concurrently either precedes this read or waits
+	// behind the commit — never lands between the check and the credit.
+	//
+	// A FULL refund suppresses the credit entirely and the row is born `refunded`: the
+	// money is back with the customer, so there is nothing to credit and nothing to
+	// earn from. A PARTIAL refund records the amount and credits normally, matching
+	// what the in-order path does — v1 has no clawback, and a mostly-paid purchase is
+	// still a purchase.
+	//
+	// ⚠ REFUNDED BEATS ANOMALOUS when both apply, and the order of these two branches
+	// is the decision. `anomalous` means "charged, NOT credited — go refund this by
+	// hand"; if the money has already gone back, that instruction is not merely stale,
+	// following it would refund the customer twice. A refunded row says the operator
+	// has nothing to do, which is the truth.
+	refundedCents, fullyRefunded, err := s.refundFor(ctx, tx, pi)
+	if err != nil {
+		s.fail(w, "refund lookup", event.ID, err)
+		return
+	}
+	if fullyRefunded {
+		status, creditAmt = "refunded", recomp // amount KEPT: it records what was bought
+		if anomaly != "" {
+			s.log.Warn("billing: anomalous purchase was already refunded — recording refunded, "+
+				"no manual refund needed", "reason", anomaly, "workspace", wsID, "event", event.ID)
+			anomaly = ""
+		}
+	}
+
 	// livemode comes from the SIGNED event, not from inspecting the API key: it is
 	// the value Stripe itself reports for the transaction, so it cannot be forged by
 	// a caller and cannot drift from the key actually in use. internal/earnverify
 	// consumes it — a test-mode purchase must be recordable without silently
 	// conferring the same earning rights as real money.
+	// A row born `refunded` keeps its lxc_amount deliberately: the partial index
+	// idx_lxc_purchases_session_credited is ON (stripe_session_id) WHERE lxc_amount > 0,
+	// so keeping it claims the session's single crediting slot and no later event for
+	// the same session can create a second one. It is the same reason the in-order
+	// refund path never zeroes the amount.
 	ct, err := tx.Exec(ctx, `
 		INSERT INTO lxc_purchases
-			(stripe_event_id, stripe_session_id, stripe_payment_intent, workspace_id, usd_cents, lxc_amount, status, livemode)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			(stripe_event_id, stripe_session_id, stripe_payment_intent, workspace_id, usd_cents, lxc_amount, status, livemode,
+			 refunded_cents, refunded_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $10 THEN NOW() ELSE NULL END)
 		ON CONFLICT (stripe_event_id) DO NOTHING`,
-		event.ID, sess.ID, pi, wsID, usdCents, creditAmt, status, event.Livemode)
+		event.ID, sess.ID, pi, wsID, usdCents, creditAmt, status, event.Livemode,
+		refundedCents, fullyRefunded)
 	if err != nil {
 		// A unique violation here is NOT on the ON CONFLICT target — it is the
 		// partial index idx_lxc_purchases_session_credited: this SESSION already
@@ -313,6 +349,20 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 		// resolution is a manual refund in the Stripe dashboard.
 		s.log.Warn("billing anomaly: charged, NOT credited",
 			"reason", anomaly, "workspace", wsID, "event", event.ID, "session", sess.ID, "usd_cents", usdCents)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if fullyRefunded {
+		// Durably recorded as refunded, and NOT credited. Ack: this event needs no
+		// redelivery, and the claim above stops any sibling event for the session.
+		if err := tx.Commit(ctx); err != nil {
+			s.fail(w, "commit refunded-first", event.ID, err)
+			return
+		}
+		s.log.Warn("billing: purchase arrived AFTER its refund — recorded refunded, not credited",
+			"workspace", wsID, "event", event.ID, "session", sess.ID,
+			"usd_cents", usdCents, "refunded_cents", refundedCents)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -383,12 +433,86 @@ func (s *Service) handleRefund(w http.ResponseWriter, ctx context.Context, event
 		w.WriteHeader(http.StatusOK) // nothing to correlate → ack
 		return
 	}
-	// v1: mark refunded only, NO clawback. Idempotent via the refunded_at guard;
-	// lxc_amount is kept so the session can never re-credit (partial-index backstop).
-	if _, err := s.pool.Exec(ctx, `
-		UPDATE lxc_purchases SET status = 'refunded', refunded_at = NOW()
-		WHERE stripe_payment_intent = $1 AND refunded_at IS NULL`, pi); err != nil {
+
+	// ⚠ THE REFUND IS RECORDED WHETHER OR NOT A PURCHASE ROW EXISTS.
+	//
+	// This used to be one UPDATE correlated on the payment intent. When the refund
+	// arrived BEFORE its purchase — which Stripe permits, and which needs no exotic
+	// race — it matched no row, acked, and recorded nothing; the purchase then landed
+	// and credited normally. That cost spendable LXC for returned money AND permanent
+	// earning rights, since a `completed` row is what internal/earnverify reads.
+	//
+	// Two alternatives were considered:
+	//
+	//   · DEFERRED REPLAY — queue the unmatched refund, retry later. Rejected: the
+	//     credit is live and spendable for the length of the retry window, and on a
+	//     money path "it was correct eventually" is the failure you cannot explain to
+	//     the customer who spent it.
+	//   · 5xx SO STRIPE RETRIES — zero schema, but it outsources OUR ordering problem
+	//     to Stripe's retry schedule, reports a working service as broken for up to
+	//     days, and when the retries are exhausted the refund is lost silently anyway.
+	//     It also turns a legitimate refund for a charge this deployment never handled
+	//     into a permanent error loop.
+	//
+	// Recording it makes BOTH orders converge on the same state, which is the only
+	// property worth having here. The cost is one row and one indexed lookup on the
+	// credit path (in the transaction that path already opens).
+	//
+	// Amounts are ASSIGNED, not accumulated: Stripe reports the charge's running
+	// total on every event, so a partial→full sequence lands on the full amount.
+	// GREATEST guards the one case that would otherwise lose information — events
+	// delivered out of order relative to each other.
+	// ⚠ THE DEFAULT WHEN THE EVENT DOES NOT SAY IS "FULL", AND THE DIRECTION IS THE
+	// POINT. A charge.refunded event means money went back; the only question is how
+	// much. Partial refunds always report a non-zero amount_refunded, so an event
+	// carrying none is either a fixture or a shape we did not anticipate — and reading
+	// that as "a refund of nothing" would silently ignore a refund, which is the exact
+	// class of bug this change exists to remove. Treating it as full is recoverable
+	// (an operator sees a purchase marked refunded and can look); the other way is not.
+	fully := ch.Refunded
+	switch {
+	case fully:
+	case ch.AmountRefunded == 0:
+		fully = true // no amount information → treat as full
+	case ch.Amount > 0 && ch.AmountRefunded >= ch.Amount:
+		fully = true // amounts say full even if the flag has not caught up
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		s.fail(w, "refund begin", event.ID, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO billing_refunds
+			(stripe_payment_intent, fully_refunded, amount_refunded_cents, first_event_id)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (stripe_payment_intent) DO UPDATE SET
+			fully_refunded        = billing_refunds.fully_refunded OR EXCLUDED.fully_refunded,
+			amount_refunded_cents = GREATEST(billing_refunds.amount_refunded_cents, EXCLUDED.amount_refunded_cents),
+			updated_at            = NOW()`,
+		pi, fully, ch.AmountRefunded, event.ID); err != nil {
+		s.fail(w, "refund record", event.ID, err)
+		return
+	}
+
+	// Apply to the purchase if we have one. A PARTIAL refund records the amount and
+	// leaves status alone — marking a $50 purchase refunded because $1 came back is
+	// wrong today (reporting) and dangerous the moment a clawback reads this status.
+	// refunded_at is still set once and only on a full refund, preserving the
+	// original idempotency.
+	if _, err := tx.Exec(ctx, `
+		UPDATE lxc_purchases
+		SET refunded_cents = GREATEST(refunded_cents, $2),
+		    status         = CASE WHEN $3 THEN 'refunded' ELSE status END,
+		    refunded_at    = CASE WHEN $3 AND refunded_at IS NULL THEN NOW() ELSE refunded_at END
+		WHERE stripe_payment_intent = $1`, pi, ch.AmountRefunded, fully); err != nil {
 		s.fail(w, "refund mark", event.ID, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.fail(w, "refund commit", event.ID, err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -423,6 +547,26 @@ func (s *Service) classify(ctx context.Context, currency string, usdCents int64,
 		return "amount_mismatch", nil
 	}
 	return "", nil
+}
+
+// refundFor reads any refund already recorded against this payment intent, ON THE
+// CALLER'S TX so the read is serialized with the claim it informs. No row is the
+// ordinary case and is not an error. An empty payment intent (a session with no
+// charge yet) cannot correlate to a refund, so it short-circuits.
+func (s *Service) refundFor(ctx context.Context, tx pgx.Tx, paymentIntentID string) (cents int64, fully bool, err error) {
+	if paymentIntentID == "" {
+		return 0, false, nil
+	}
+	err = tx.QueryRow(ctx,
+		`SELECT amount_refunded_cents, fully_refunded FROM billing_refunds
+		 WHERE stripe_payment_intent = $1`, paymentIntentID).Scan(&cents, &fully)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return cents, fully, nil
 }
 
 func (s *Service) fail(w http.ResponseWriter, stage, eventID string, err error) {
