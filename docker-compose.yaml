@@ -36,15 +36,33 @@ services:
     # list names 44, so 116 were unreachable however an operator set them. Five were found mute by
     # accident in one day, each by an unrelated investigation and never by a gate.
     #
-    # LEAKAGE, decided not inherited: env_file forwards the whole file. On the documented shape the
-    # only non-LENS_ variable is POSTGRES_PASSWORD, which this container ALREADY holds — it is
-    # interpolated into LENS_DATABASE_URL below. cmd/lens/compose_env_mechanism_test.go fails if a
-    # new non-LENS_ variable appears, so the next person re-decides rather than inherits.
+    # ⚠ LEAKAGE — THE ORIGINAL REASONING WAS RIGHT ABOUT THE DOCUMENTED SHAPE AND WRONG ABOUT THE
+    # DEPLOYED ONE, so this forwards lens.env and NOT .env.
+    #
+    # It used to say "on the documented shape the only non-LENS_ variable is POSTGRES_PASSWORD".
+    # That is true of .env.example / .env.production.example in THIS repo. It is not true of the
+    # .env that exists on the box: talyvor-suite's deploy/README.md (lines 470-476) instructs the
+    # operator to run, in this very directory,
+    #
+    #     printf 'TRACK_GATEWAY_AUTH_SECRET=%s\nDOCS_GATEWAY_AUTH_SECRET=%s\n' ... >> .env
+    #
+    # so the deployed .env carries two OTHER services' gateway auth secrets. Forwarding it put them
+    # in this process, where Lens has no use for them and a compromise or crash dump exposes them.
+    #
+    # ⚠ AND NO TEST IN THIS REPOSITORY COULD HAVE CAUGHT THAT. compose_env_mechanism_test.go reads
+    # the example files here; the hazard is written by a deploy step in a different repository. The
+    # static check is structurally blind to it and now says so. What actually covers it is the
+    # BOOT-TIME check in cmd/lens (logEnvironmentHygiene): it reads the real process environment, so
+    # it sees what is actually there rather than what this repo documents.
+    #
+    # lens.env is LENS_* only. .env stays the project file for ${VAR} substitution.
+    # ⚠ MIGRATION: if you set LENS_* variables in .env expecting #375's behaviour, move them to
+    # lens.env. The curated environment: list below still covers the critical set either way.
     #
     # required:false so a checkout with no .env still starts. `environment:` keeps precedence, so
     # the CONSTRUCTED values below stay authoritative.
     env_file:
-      - path: .env
+      - path: lens.env
         required: false
     environment:
       # Route through PgBouncer (transaction pooling) instead of Postgres directly.

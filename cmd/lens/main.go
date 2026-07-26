@@ -224,6 +224,11 @@ func run() error {
 		return err
 	}
 
+	// Boot-time environment checks. Neither blocks startup; both surface a state that no test in
+	// this repository can see — see cmd/lens/env_hygiene.go for why each has to be here.
+	logEnvironmentHygiene()
+	warnEmbeddingModelAffectsPoolingMargin(cfg.EmbeddingModel, config.DefaultEmbeddingModel, cfg.CachePoolableEnabled)
+
 	logger := newLogger(cfg.LogLevel)
 	slog.SetDefault(logger)
 

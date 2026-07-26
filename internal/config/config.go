@@ -976,7 +976,7 @@ func Load() (*Config, error) {
 		OpenAIAPIKey:      os.Getenv("LENS_OPENAI_API_KEY"),
 		AnthropicAPIKey:   os.Getenv("LENS_ANTHROPIC_API_KEY"),
 		GoogleAPIKey:      os.Getenv("LENS_GOOGLE_API_KEY"),
-		EmbeddingModel:    getEnv("LENS_EMBEDDING_MODEL", "text-embedding-3-small"),
+		EmbeddingModel:    getEnv("LENS_EMBEDDING_MODEL", DefaultEmbeddingModel),
 		EmbeddingBaseURL:  os.Getenv("LENS_EMBEDDING_BASE_URL"),
 		SemanticThreshold: 0.92,
 		MaxCacheTTL:       24 * time.Hour,
@@ -1921,6 +1921,12 @@ func defaultDistillWorkerBin() string {
 	}
 	return "distill-worker"
 }
+
+// DefaultEmbeddingModel is the embedder Lens ships with. Exported because the cross-tenant pooling
+// safety margin is a property of the CONFIGURED embedder, so cmd/lens warns at boot when this has
+// been changed while pooling is on — and that comparison must use the same value as the default
+// here, not a copy that can drift away from it.
+const DefaultEmbeddingModel = "text-embedding-3-small"
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

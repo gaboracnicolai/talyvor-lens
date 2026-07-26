@@ -47,6 +47,26 @@ import (
 //
 // env_file forwards the whole file, so anything unrelated sitting in .env enters
 // the container. That was decided deliberately, not waved through: on the
+// ⚠⚠ WHAT THIS TEST CANNOT SEE, STATED SO IT DOES NOT IMPLY COVERAGE IT DOES NOT HAVE.
+//
+// It reads the DOCUMENTED env files IN THIS REPOSITORY. It is structurally blind to what the
+// deployed .env actually contains, and that is where the hazard lives: talyvor-suite's
+// deploy/README.md (470-476) instructs the operator to append TRACK_GATEWAY_AUTH_SECRET and
+// DOCS_GATEWAY_AUTH_SECRET to the .env sitting in the Lens checkout, because
+// deploy/track-docs.compose.yaml runs in this compose project. Those never appear in any file here,
+// so this test was green — correctly, by its own rule — while forwarding .env wholesale would have
+// put two other services' gateway secrets into the Lens process.
+//
+// ⚠ IT CANNOT BE FIXED FROM INSIDE LENS. Closing it statically would mean this repository reading
+// another repository's deploy prose to learn what a third file will contain at runtime — a coupling
+// worse than the problem, and stale the moment that prose moves.
+//
+// ⚠ WHAT COVERS IT INSTEAD: cmd/lens/env_hygiene.go, at BOOT. The process environment is not a
+// proxy for the deployed shape, it IS the deployed shape, so a runtime check sees exactly what a
+// static one cannot. This test keeps its narrower, real job — the documented shape stays clean and a
+// new non-LENS_ variable makes the next person re-decide — and the compose file now forwards
+// lens.env rather than .env, so the blind spot is not load-bearing.
+//
 // documented shape (.env.example, .env.production.example) the only non-LENS_
 // variable is POSTGRES_PASSWORD, and the lens container ALREADY receives it —
 // it is interpolated into LENS_DATABASE_URL. So the mechanism exposes nothing the
@@ -177,7 +197,7 @@ func TestComposeForwardsEnvironmentWholesale(t *testing.T) {
 	}
 	t.Errorf("the lens service enumerates its environment instead of passing it through, so %d of the "+
 		"variables internal/config reads CANNOT reach the process however they are set:\n\t%s\n\t… (%d total)\n\n"+
-		"Add `env_file: .env` to the lens service. A list has to be edited for every new variable, and "+
+		"Add `env_file: - path: lens.env` to the lens service. A list has to be edited for every new variable, and "+
 		"four were found mute by accident in one day — the mechanism is the bug, not the missing entries.",
 		len(mute), strings.Join(preview, "\n\t"), len(mute))
 }
@@ -251,5 +271,38 @@ func TestEnvFileLeakSurfaceIsBounded(t *testing.T) {
 			"Decide deliberately: either the value belongs in the container (add it to the allowlist here "+
 			"with the reason), or it belongs in a file the lens service does not read.",
 			strings.Join(unexpected, "\n\t"))
+	}
+}
+
+// TestComposeForwardsLensEnvNotDotEnv is the assertion that keeps the fix in place.
+//
+// Forwarding the project .env is the specific mistake: on the deployed box it carries
+// TRACK_GATEWAY_AUTH_SECRET and DOCS_GATEWAY_AUTH_SECRET (talyvor-suite deploy/README.md:470-476),
+// which Lens has no use for. This is the only part of that hazard a static test CAN check — not
+// what the file contains, but which file we point at.
+func TestComposeForwardsLensEnvNotDotEnv(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yaml"))
+	if err != nil {
+		t.Fatalf("read docker-compose.yaml: %v", err)
+	}
+	// Strip comments: the prose around env_file necessarily mentions both filenames, and matching
+	// documentation about a mechanism rather than the mechanism is a guard that cannot fail.
+	var live []string
+	for _, ln := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(ln), "#") {
+			live = append(live, ln)
+		}
+	}
+	body := strings.Join(live, "\n")
+
+	if !regexp.MustCompile(`(?m)^\s+-\s+path:\s+lens\.env\s*$`).MatchString(body) {
+		t.Error("the lens service does not forward lens.env. Without it the long tail of LENS_* " +
+			"variables is unreachable again — settable in a file and never delivered.")
+	}
+	if regexp.MustCompile(`(?m)^\s+-\s+path:\s+\.env\s*$`).MatchString(body) {
+		t.Error("the lens service forwards the project .env. On the deployed box that file holds " +
+			"TRACK_GATEWAY_AUTH_SECRET and DOCS_GATEWAY_AUTH_SECRET — the deploy procedure appends " +
+			"them there (talyvor-suite deploy/README.md:470-476) — so this hands two other services' " +
+			"gateway secrets to Lens. Forward lens.env instead.")
 	}
 }
