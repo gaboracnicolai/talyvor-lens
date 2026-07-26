@@ -530,7 +530,7 @@ func TestDeriveWorkspaceID(t *testing.T) {
 		t.Errorf("id length = %d, want 27", len(a1))
 	}
 	for _, c := range a1[1:] {
-		if !((c >= 'a' && c <= 'z') || (c >= '2' && c <= '7')) {
+		if (c < 'a' || c > 'z') && (c < '2' || c > '7') {
 			t.Errorf("id %q contains %q, outside base32-lower — unsafe for the cache_prefix", a1, c)
 		}
 	}
