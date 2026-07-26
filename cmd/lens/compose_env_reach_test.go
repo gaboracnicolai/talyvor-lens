@@ -17,11 +17,21 @@ import (
 // there is no way to tell "not implemented" from "not switched on".
 //
 // WHY A TEST AND NOT A REVIEW HABIT. `.env` is NOT passed into containers. Compose reads it only
-// for ${VAR} substitution inside the compose file itself, and this stack declares no `env_file:`
-// anywhere — so a variable reaches the process if and only if it appears in a service's
-// `environment:` list. Nothing about editing .env tells you that. The gap is invisible from
-// inside the process (an unset variable and an unforwarded one are the same empty string), so no
-// behavioural test can find it. It is only visible from outside, in the file that forwards.
+// for ${VAR} substitution inside the compose file itself. Nothing about editing .env tells you that.
+// The gap is invisible from inside the process (an unset variable and an unforwarded one are the
+// same empty string), so no behavioural test can find it. It is only visible from outside, in the
+// file that forwards.
+//
+// ⚠ PREMISE UPDATED: this comment used to say "this stack declares no `env_file:` anywhere", and
+// that is no longer true — the lens service now forwards `lens.env` wholesale, which is what ended
+// the mute class for the long tail of ~65 variables. The sentence was left stale by that change and
+// is corrected here rather than left asserting the opposite of the compose file, which is exactly
+// the failure this repo spent a day removing from prose elsewhere.
+//
+// THIS CHECK IS STILL WORTH KEEPING, and it is not redundant with env_file. It is defence in depth
+// on a small critical set: `environment:` entries are visible in docker-compose.yaml itself, so the
+// money-path variables stay legible to anyone reading the deployment without having to know a
+// separate operator-local file exists. env_file covers everything else.
 //
 // WHAT THIS GUARDS, AND WHAT IT DELIBERATELY DOES NOT. Lens's config reads ~160 LENS_* variables
 // and compose forwards ~28. Most of the difference is fine: feature flags that default off and
@@ -69,8 +79,10 @@ func TestComposeForwardsEveryCriticalConfigVar(t *testing.T) {
 	for _, name := range missing {
 		t.Errorf("docker-compose.yaml does not forward %s to the lens service — %s.\n"+
 			"    Add `- %s=${%s:-}` to the lens service's environment. `.env` alone does NOT reach "+
-			"the container: compose reads it only for ${} substitution, and this stack declares no "+
-			"env_file.", name, mustForward[name], name, name)
+			"the container: compose reads it only for ${} substitution. (The lens service also "+
+			"forwards lens.env wholesale, which would deliver this variable — but this critical set "+
+			"is kept explicit in compose so it stays legible in the deployment file itself.)",
+			name, mustForward[name], name, name)
 	}
 }
 
