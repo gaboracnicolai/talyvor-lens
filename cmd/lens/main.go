@@ -61,6 +61,7 @@ import (
 	"github.com/talyvor/lens/internal/distillattrib"
 	"github.com/talyvor/lens/internal/distillpreview"
 	"github.com/talyvor/lens/internal/earnverify"
+	"github.com/talyvor/lens/internal/econflags"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/eval"
@@ -102,6 +103,7 @@ import (
 	"github.com/talyvor/lens/internal/royaltyhaircut"
 	"github.com/talyvor/lens/internal/safehttp"
 	"github.com/talyvor/lens/internal/session"
+	"github.com/talyvor/lens/internal/shadowmint"
 	"github.com/talyvor/lens/internal/status"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/tenant"
@@ -711,6 +713,22 @@ func run() error {
 	// mint-type credit now requires a verified-to-earn workspace; conservation
 	// credits pass through. nil-safe for tests (they construct ledgers without it).
 	tokenLedger.SetMintVerifier(earnverify.New())
+
+	// SHADOW MODE for the six UNPROVEN mints (LENS_SHADOW_MINTS_ENABLED, default off). Each
+	// computes what it WOULD pay, records it to lens_shadow_mints, and credits NOTHING — no
+	// balance change, no spendable token, no supply movement. Wired at the SAME ledger chokepoint
+	// as the U6 verifier, so a mint added later is covered without touching its call site.
+	//
+	// The sink is a shadowmint.Recorder, which holds a pool and no ledger — it cannot credit. See
+	// internal/mining/shadow.go for the four structural obstacles that keep a shadow row from
+	// becoming real, and migrations/0108 for why it is a separate table.
+	if cfg.ShadowMintsEnabled {
+		tokenLedger.SetShadowSink(shadowmint.New(pool), mining.ShadowableMintTypes())
+		slog.Warn("SHADOW MODE: the six unproven mints record what they would pay and credit NOTHING",
+			slog.String("mint_types", strings.Join(mining.ShadowableMintTypes(), ",")),
+			slog.String("query", "SELECT mint_type, count(*), sum(would_mint_micro_lens) FROM lens_shadow_mints GROUP BY mint_type"),
+		)
+	}
 	// U6 PR2: the per-identity mint rate cap — the universal steady-state bound on
 	// Sybil wash yield. Wired UNCONDITIONALLY (a safety restriction the economy
 	// kill must not lift, like the verifier). Default 1000 LENS/24h; 0 = off.
@@ -1674,6 +1692,15 @@ func run() error {
 	// drift attribution). Rows name only a self workspace + cohort aggregates; no counterparty raw value.
 	// One keel reader feeds both the admin (all-workspace) and the tenant (self-scoped) findings reads.
 	keelFindingsReader := keel.NewReader(dbrouting.ReadPool(pool, replicaPool))
+	// ECONOMY FLAG READOUT — the LIVE value of every economy/minting flag as this process holds
+	// it. requireAdmin because it describes the money path.
+	//
+	// `cfg` here is the same *config.Config every gate above reads, so this is observation, not
+	// a re-read of the environment and not a default. If it could not be read the payload says
+	// so and carries no values — see internal/econflags.
+	r.Handle("/v1/admin/economy/flags", requireAdmin(authManager,
+		econflags.Handler(cfg, lensVersion)))
+
 	r.Handle("/v1/admin/keel/findings", requireAdmin(authManager,
 		newKeelFindingsHandler(keelFindingsReader)))
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool

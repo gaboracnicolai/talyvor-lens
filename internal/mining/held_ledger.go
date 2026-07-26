@@ -194,6 +194,20 @@ func (s *LedgerStore) heldInner(
 		return err
 	}
 
+	// SHADOW MODE (shadow.go) — the HELD kernel, the second of the two every LENS mint funnels
+	// through. Four of the six shadowed mints are held mints, so this is the site that carries
+	// them.
+	//
+	// Placed HERE, not beside verifyEarn above, because `delta` — the amount the mint actually
+	// computed — is not known until the transition closure has run. Recording the hypothetical
+	// before that point would record zero, which is a confident wrong number: exactly the failure
+	// shadow mode is supposed to avoid. It is still BEFORE the INSERT below, so no held row is
+	// written and then undone, and after the rate cap so a capped mint shadows what the cap would
+	// have allowed.
+	if err := s.shadowIntercept(ctx, workspaceID, txType, delta, metadata); err != nil {
+		return err
+	}
+
 	meta, err := dbjson.Marshal(metadata) // JSON text on both protocols (#133)
 	if err != nil {
 		return fmt.Errorf("mining: marshal metadata: %w", err)

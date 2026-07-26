@@ -110,6 +110,12 @@ type LedgerStore struct {
 	// below the access floor — an ADDITIVE constraint downstream of verifyEarn (mint_gate.go).
 	reputationGate func() bool
 
+	// shadowSink / shadowTypes are shadow mode (shadow.go): a mint type in shadowTypes records
+	// what it WOULD pay and credits nothing. nil sink or empty set ⇒ entirely off, mint path
+	// byte-identical.
+	shadowSink  ShadowSink
+	shadowTypes map[string]struct{}
+
 	// driftHaircut is KE-2: a REDUCE-ONLY multiplier in [floor, 1.0] applied AFTER the reputation factor,
 	// derived from Keel's HARDENED idiosyncratic drift finding for the workspace. nil ⇒ no-op (byte-identical).
 	// It can only LOWER a bonded mint (never increase, never below the floor, never burn/slash). Reads via the
@@ -212,6 +218,12 @@ func (s *LedgerStore) applyTx(
 	// change, no metrics.
 	if add {
 		if err := s.verifyEarn(ctx, tx, workspaceID, txType); err != nil {
+			return err
+		}
+		// SHADOW MODE (shadow.go). Placed at this kernel — one of the only two every LENS mint
+		// funnels through — so a mint added later is shadowable without touching its call site,
+		// and BEFORE the ledger INSERT below, so no row is written and then undone.
+		if err := s.shadowIntercept(ctx, workspaceID, txType, amount, metadata); err != nil {
 			return err
 		}
 		// P1 #9: reputation bond — DOWNSTREAM of the U6 floor (compose, never bypass). For a bonded

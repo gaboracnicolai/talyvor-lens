@@ -134,6 +134,12 @@ services:
       - LENS_DISTILL_POOLABLE_ENABLED=${LENS_DISTILL_POOLABLE_ENABLED:-}
       - LENS_ECONOMY_ENABLED=${LENS_ECONOMY_ENABLED:-}
       - LENS_POOL_ROYALTY_MINTING_ENABLED=${LENS_POOL_ROYALTY_MINTING_ENABLED:-}
+      # Shadow mode for the six unproven mints: they compute what they WOULD pay, record it to
+      # lens_shadow_mints, and credit nothing. Plumbed here for the reason #371 exists — a money
+      # -path gate set in .env and not listed here never reaches the process, and this one going
+      # mute would be the worst version of that: shadow mode silently off while the operator
+      # believes the trial is being measured.
+      - LENS_SHADOW_MINTS_ENABLED=${LENS_SHADOW_MINTS_ENABLED:-}
       # Also a SECURITY parameter: the anti-self-dealing property is that a Sybil pair
       # loses (1-s)*C per cycle, so s must stay < 1 (config.go refuses to boot at >= 1).
       - LENS_POOL_ROYALTY_SHARE=${LENS_POOL_ROYALTY_SHARE:-}

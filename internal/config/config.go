@@ -717,6 +717,16 @@ type Config struct {
 	// LENS_HA_ENABLED, LENS_GUARDRAILS_ENABLED.
 	EconomyEnabled bool
 
+	// ShadowMintsEnabled puts the six UNPROVEN mints (POVI, annotation, eval-contribution,
+	// routing-prediction, latency-locality, confidential-compute) into SHADOW MODE: each
+	// computes what it would pay, records it to lens_shadow_mints, and credits NOTHING.
+	//
+	// Default FALSE. Independent of EconomyEnabled and deliberately NOT in the force-off block:
+	// shadow mode cannot pay anyone, so there is nothing for the master switch to protect against
+	// — and force-off'ing it would make the one safe way to run these mints unavailable exactly
+	// when the economy is off, which is when you most want to measure before paying.
+	ShadowMintsEnabled bool
+
 	// BillingEnabled (U18b) gates the FIAT Stripe billing surface (checkout +
 	// webhook + admin purchases). Env: LENS_BILLING_ENABLED, default FALSE. It is
 	// FIAT, NOT economy — independent of EconomyEnabled (a pure fiat-SaaS
@@ -1810,6 +1820,9 @@ func Load() (*Config, error) {
 			*f.p = parseBoolEnv(f.env)
 		}
 	}
+
+	// Shadow mode: default off, env-overridable, and NOT force-off'd below (see the field's note).
+	c.ShadowMintsEnabled = parseBoolEnv("LENS_SHADOW_MINTS_ENABLED")
 
 	if !c.EconomyEnabled {
 		c.PatternMiningEnabled = false
