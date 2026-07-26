@@ -139,6 +139,19 @@ type Config struct {
 	JWTPrivateKey string
 	TokenTTL      time.Duration
 
+	// ProvisionSecret is the shared secret gating POST /v1/provision — the narrow
+	// route that turns an authenticated identity into a tenant. It exists so the
+	// session gateway (the suite BFF) never has to hold LENS_API_KEY: the global
+	// admin key makes workspaceAuthorized return true for EVERY workspace and
+	// unlocks ~30 admin routes, so a gateway compromise would escalate from one
+	// tenant's data to control of every tenant. This credential can create a
+	// workspace and mint a session token for it, and nothing else.
+	//
+	// EMPTY MEANS THE CAPABILITY DOES NOT EXIST: run() does not register the route
+	// at all when this is unset, so an unconfigured deployment has no provisioning
+	// surface rather than an unauthenticated one. Env: LENS_PROVISION_SECRET.
+	ProvisionSecret string
+
 	// Global rate limits (Item 8). Zero = no global cap; the
 	// per-workspace tier in MultiTierLimiter still applies.
 	GlobalRPM       int
@@ -1013,8 +1026,9 @@ func Load() (*Config, error) {
 		NodeTLSSkipVerify:        parseBoolEnv("LENS_NODE_TLS_SKIP_VERIFY"),
 		NodePrivateCIDRAllowlist: os.Getenv("LENS_NODE_PRIVATE_CIDR_ALLOWLIST"),
 
-		JWTPrivateKey: os.Getenv("LENS_JWT_PRIVATE_KEY"),
-		TokenTTL:      24 * time.Hour,
+		JWTPrivateKey:   os.Getenv("LENS_JWT_PRIVATE_KEY"),
+		TokenTTL:        24 * time.Hour,
+		ProvisionSecret: os.Getenv("LENS_PROVISION_SECRET"),
 
 		HAEnabled: parseBoolEnv("LENS_HA_ENABLED"),
 
