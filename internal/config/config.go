@@ -453,37 +453,6 @@ type Config struct {
 	// Burn-and-Mint invariant).
 	PoolRoyaltyShare float64
 
-	// PoolConsumerDiscount is r, the fraction of a CROSS-TENANT POOLED cache hit's list price handed
-	// back to the CONSUMER. Env: LENS_POOL_CONSUMER_DISCOUNT. Default 0.30. Must be in [0,1).
-	//
-	// WHY THE DISCOUNT EXISTS: a pooled hit costs Talyvor nothing — there is no provider call — so the
-	// entire charge is margin, split between the contributor (s) and us (1−s). Charging the consumer
-	// the full avoided cost meant the cache saved them nothing, which is the first thing a buyer
-	// notices and the last thing they forgive.
-	//
-	// WHY 0.30, argued rather than assumed. Both shares come out of the DISCOUNTED charge, so r is a
-	// straight transfer from (contributor + Talyvor) to the consumer, split by s. Two constraints
-	// pull against each other, and at s = 0.5 they cross here:
-	//
-	//   - the contributor must still want to contribute. They paid C upstream and earn s(1−r) of each
-	//     pooled hit's list price, so they need 1/(s(1−r)) ≈ 2/(1−r) hits before their original call
-	//     is paid for: 2.5 hits at r=0.2, 2.9 at r=0.3, 3.3 at r=0.4, 4.0 at r=0.5. 0.30 is the
-	//     largest rate that keeps that under three — past it the ask on contributors grows faster
-	//     than the consumer's benefit does.
-	//   - the margin must still be worth running. Talyvor nets (1−s)(1−r) = 0.35 of list per pooled
-	//     hit against zero COGS.
-	//
-	// ⚠ IT DOES NOT WEAKEN THE SELF-DEAL CONTROL that refuses s ≥ 1 below. A Sybil pair pays C
-	// upstream and (1−r)·list as the consumer, earning s(1−r)·list back: net −C − (1−s)(1−r)·C, which
-	// is negative for EVERY r < 1 — at r → 1 it is still a full −C, because the upstream call was
-	// real money and the royalty is bounded by the consumer's settled charge. The discount moves the
-	// pair's loss from 1.5C to 1.35C at the defaults; it cannot approach break-even.
-	//
-	// ⚠ AND THE VISIBILITY IS NOT OPTIONAL. A charge of 644 instead of 920 with nothing saying so is
-	// indistinguishable from a cheaper answer — the rate does nothing a buyer can perceive unless the
-	// response and the ledger row both carry what it WOULD have cost.
-	PoolConsumerDiscount float64
-
 	// POVIMinStake is the minimum LENS a node must lock as collateral to be
 	// minting-eligible (Part 2). Env: LENS_POVI_MIN_STAKE. Default 100.
 	POVIMinStake float64
@@ -1619,31 +1588,6 @@ func Load() (*Config, error) {
 					"catch just the one-card operator)", v)
 		}
 		c.PoolRoyaltyShare = f
-	}
-	// r = 0.30 by default; see the field comment for why that number and not another.
-	c.PoolConsumerDiscount = 0.30
-	if v := os.Getenv("LENS_POOL_CONSUMER_DISCOUNT"); v != "" {
-		f, err := strconv.ParseFloat(v, 64)
-		// math.IsNaN is load-bearing for the same reason it is on the share above: ParseFloat("NaN")
-		// succeeds and NaN compares false to every bound, so the range checks alone would let a NaN
-		// rate reach the charge math — and NaN µLXC ceils to a garbage int64 debit.
-		if err != nil || math.IsNaN(f) || f < 0 {
-			return nil, fmt.Errorf("invalid LENS_POOL_CONSUMER_DISCOUNT (must be in [0,1)): %s", v)
-		}
-		// r >= 1 is refused rather than clamped. At r = 1 the consumer is charged nothing, which the
-		// funding invariant then turns into a ZERO royalty — the contributor works for free and the
-		// pool quietly stops being worth contributing to, with no error anywhere. Above 1 the charge
-		// would compute NEGATIVE; the settle floors it at 0, so the damage is contained, but a
-		// configuration that only survives because a downstream guard catches it is not configured,
-		// it is lucky. Refuse at boot.
-		if f >= 1 {
-			return nil, fmt.Errorf(
-				"invalid LENS_POOL_CONSUMER_DISCOUNT (must be < 1): %s — at r = 1 the consumer is charged "+
-					"nothing for a pooled hit, and because the contributor's royalty is funded by the "+
-					"consumer's settled charge (the funding invariant), the contributor then earns NOTHING "+
-					"too. That is not a generous discount, it is the pool silently ceasing to pay", v)
-		}
-		c.PoolConsumerDiscount = f
 	}
 	c.POVISlashFraction = 0.5
 	if v := os.Getenv("LENS_POVI_SLASH_FRACTION"); v != "" {

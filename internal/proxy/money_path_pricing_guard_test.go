@@ -36,14 +36,9 @@ import (
 // admitted on balance, it belongs here. "It's only an estimate" is not an exemption — an estimate that
 // gates money is money.
 var moneyPathFuncs = map[string]string{
-	"reserveEstimateLXC":     "computes the pre-serve HOLD",
-	"settleReservationBasis": "computes the delivered CHARGE",
-	// resolveCacheReservation was SPLIT so the saving could be headered before the body goes out
-	// (the serve precedes the settle). Both halves are money-path and both are listed: the pricer
-	// decides HOW MUCH, the settler turns it into a debit. Listing only one would leave the other
-	// exactly as uncovered as `lxcEstimate` used to be.
-	"pricePooledServe":        "prices a pooled hit, discount applied",
-	"settleReservationPooled": "turns that price into the consumer's DEBIT",
+	"reserveEstimateLXC":      "computes the pre-serve HOLD",
+	"settleReservationBasis":  "computes the delivered CHARGE",
+	"resolveCacheReservation": "prices a pooled-hit charge",
 	"lxcEstimate":             "prices the immediate agent debit AND the balance admission gate",
 }
 

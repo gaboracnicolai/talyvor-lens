@@ -133,7 +133,7 @@ func TestFundingInvariant_UnfundedPlainKey_MintsZero_Integration(t *testing.T) {
 	prompt, served := "a cross-tenant prompt", []byte("a shared cached response body")
 
 	// Plain key ⇒ NO reservation on ctx ⇒ the settle finds nothing ⇒ the consumer is charged $0.
-	funded := p.settlePooledServe(ctx, p.pricePooledServe(hit, prompt, served))
+	funded := p.resolveCacheReservation(ctx, hit, prompt, served)
 	if funded != 0 {
 		t.Fatalf("plain-key consumer funded=%v, want 0 (no reservation ⇒ no charge)", funded)
 	}
@@ -200,7 +200,7 @@ func TestFundingInvariant_Charged10_MintsAtMost5_Integration(t *testing.T) {
 	}
 }
 
-// (C) WIRING: the pooled settle on a genuinely reserved pooled hit funds a real mint (proves the fix
+// (C) WIRING: resolveCacheReservation on a genuinely reserved pooled hit funds a real mint (proves the fix
 // is not "always zero" — a paid consumer DOES fund the contributor).
 func TestFundingInvariant_ResolveFundsRealMint_Integration(t *testing.T) {
 	p, _, pool := fundingProxy(t)
@@ -213,11 +213,7 @@ func TestFundingInvariant_ResolveFundsRealMint_Integration(t *testing.T) {
 	hit := pooledHitFor(consumer, contributor)
 	prompt, served := "prompt to hold against", []byte("a served cached response of some length")
 
-	// The discount is SET here rather than left at the harness default, so this proves the funding tie
-	// holds on the DISCOUNTED charge — which is the version that now ships. At r=0 it would prove the
-	// old arrangement and quietly stop covering the new one.
-	p.SetPoolConsumerDiscount(0.30)
-	funded := p.settlePooledServe(rctx, p.pricePooledServe(hit, prompt, served)) // settles list×(1−r) via the real path
+	funded := p.resolveCacheReservation(rctx, hit, prompt, served) // settles avoided_COGS via the real path
 	if funded <= 0 {
 		t.Fatalf("a reserved pooled hit must settle a positive charge, got $%v", funded)
 	}
