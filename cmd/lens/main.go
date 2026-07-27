@@ -4620,6 +4620,24 @@ func run() error {
 // base64 seed/private key (LENS_POVI_CHALLENGE_KEY) gives a STABLE key so a Lens
 // restart doesn't invalidate the pubkey nodes have pinned (which would make
 // honest nodes fail challenges). Empty → ephemeral key + a loud warning.
+//
+// ⚠ SET-BUT-INVALID EXITS; UNSET FALLS BACK. This deliberately mirrors the LENS_JWT_PRIVATE_KEY
+// block above (main.go, "Parse or generate the EC P-256 JWT signing key"), which is the same
+// problem — a long-lived asymmetric key that must survive restarts — and which already resolved
+// it: a key that is PRESENT and unparseable is a configuration error, not a request to generate
+// one, so it exits rather than proceeding.
+//
+// The old behaviour warned and generated an ephemeral key, which made a MISCONFIGURED key
+// indistinguishable in effect from NO key. That is the worse of the two: an operator who set the
+// variable believes persistence is configured, so the one line telling them otherwise is the line
+// they are least likely to be looking for. Pinned node pubkeys then break silently on every
+// restart and honest nodes fail challenges — the exact outcome the variable exists to prevent.
+//
+// Unset is left as a warn-and-generate, also matching JWT: a dev run with no key must still boot.
+//
+// Coordination note: if the JWT-key work lands a shared helper for "load this key or fail", move
+// BOTH call sites onto it. This block is kept deliberately small and local so that rebase is a
+// deletion rather than a merge.
 func loadOrGenChallengeKey(b64 string, logger *slog.Logger) (ed25519.PublicKey, ed25519.PrivateKey) {
 	if b64 != "" {
 		if raw, err := base64.StdEncoding.DecodeString(b64); err == nil {
@@ -4632,12 +4650,29 @@ func loadOrGenChallengeKey(b64 string, logger *slog.Logger) (ed25519.PublicKey, 
 				return priv.Public().(ed25519.PublicKey), priv
 			}
 		}
-		logger.Warn("LENS_POVI_CHALLENGE_KEY is set but not a valid base64 ed25519 seed/key — generating an ephemeral key instead")
-	} else {
-		logger.Warn("PoVI challenge key generated EPHEMERALLY — set LENS_POVI_CHALLENGE_KEY (base64 ed25519 seed) in production; a restart otherwise invalidates pinned node pubkeys and would fail honest challenges")
+		logger.Error("LENS_POVI_CHALLENGE_KEY is SET but is not a valid base64 ed25519 seed or private key. "+
+			"Refusing to start rather than silently substituting an ephemeral key, which would invalidate "+
+			"every pinned node pubkey on this restart and fail honest challenges.",
+			slog.String("remedy", "generate one with: openssl rand -base64 32   (32 raw bytes = an ed25519 seed); "+
+				"or unset the variable entirely to run with an ephemeral key"),
+			slog.Int("decoded_bytes", decodedLen(b64)),
+			slog.Int("want_bytes", ed25519.SeedSize), slog.Int("or_bytes", ed25519.PrivateKeySize))
+		os.Exit(1)
 	}
+	logger.Warn("PoVI challenge key generated EPHEMERALLY — set LENS_POVI_CHALLENGE_KEY (base64 ed25519 seed) in production; a restart otherwise invalidates pinned node pubkeys and would fail honest challenges")
 	pub, priv, _ := povi.GenerateNodeKey()
 	return pub, priv
+}
+
+// decodedLen reports how many bytes a base64 string decodes to, or -1 when it is not valid base64.
+// Reported in the failure above so the operator can tell "wrong length" (a truncated paste) from
+// "not base64 at all" (a raw PEM, a hex string) without echoing any key material.
+func decodedLen(b64 string) int {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return -1
+	}
+	return len(raw)
 }
 
 func writeJSONOK(w http.ResponseWriter, status int, body any) {

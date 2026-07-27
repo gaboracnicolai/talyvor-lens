@@ -17,8 +17,11 @@ func nearly(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
 // So each expectation below was transcribed from the provider's own pricing page — not inferred from a
 // sibling model, not interpolated across a version series, not taken second-hand.
 //
-//	Anthropic: https://platform.claude.com/docs/en/about-claude/pricing   (fetched 2026-07-26)
-//	OpenAI:    https://developers.openai.com/api/docs/pricing             (fetched 2026-07-26)
+//	Anthropic: https://platform.claude.com/docs/en/about-claude/pricing   (fetched 2026-07-26; re-read 2026-07-28)
+//	OpenAI:    https://developers.openai.com/api/docs/pricing             (fetched 2026-07-26; re-read 2026-07-28)
+//
+// The 2026-07-28 re-read confirmed every rate already pinned here is unchanged, and added the five
+// rows marked below that were published but missing from the catalog.
 //
 // ⚠ THIS TEST CANNOT DETECT A PRICE CHANGE. It pins the catalog to what was published on the fetch
 // date; if a provider changes a rate tomorrow this test stays green while Lens bills the old one. That
@@ -61,6 +64,16 @@ func publishedRateCases() []publishedRateCase {
 		{"gpt-5.4", 2.50, 0.25, 0, 15.00, "openai pricing: gpt-5.4 (was wrongly 5.00/20.00)"},
 		// CORRECTED: the catalog carried 0.50/2.00 and under-billed gpt-5.4-mini.
 		{"gpt-5.4-mini", 0.75, 0.075, 0, 4.50, "openai pricing: gpt-5.4-mini (was wrongly 0.50/2.00)"},
+
+		// ── ADDED 2026-07-28. Each was on the provider's pricing page and absent from this catalog, so
+		// it billed on the derived floor. Transcribed by reading the pages below, row by row; nothing
+		// here was interpolated from a sibling or inferred from a version series.
+		//   openai     https://developers.openai.com/api/docs/pricing            (fetched 2026-07-28)
+		//   anthropic  https://platform.claude.com/docs/en/about-claude/pricing  (fetched 2026-07-28)
+		{"gpt-5.4-nano", 0.20, 0.02, 0, 1.25, "openai pricing: gpt-5.4-nano — $0.20 / cached $0.02 / $1.25"},
+		{"gpt-5.3-codex", 1.75, 0.175, 0, 14.00, "openai pricing: gpt-5.3-codex — $1.75 / cached $0.175 / $14.00"},
+		{"chat-latest", 5.00, 0.50, 0, 30.00, "openai pricing: chat-latest — $5.00 / cached $0.50 / $30.00 (own SKU)"},
+		{"claude-opus-4-1", 15.00, 1.50, 18.75, 75.00, "anthropic pricing: Claude Opus 4.1 (deprecated, retires 2026-08-05) — $15 / 5m write $18.75 / hit $1.50 / $75"},
 
 		// ── Amazon Bedrock ── AWS Marketplace "Bedrock Edition" listings (fetched 2026-07-26).
 		// aws.amazon.com/bedrock/pricing does NOT list the 4.6 models; these are the AWS-owned

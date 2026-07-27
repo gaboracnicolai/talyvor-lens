@@ -58,6 +58,12 @@ var verifiedAnthropicModels = map[string]struct{}{
 	"claude-sonnet-4-5-20250929": {},
 	"claude-sonnet-4-5":          {},
 	"claude-opus-4-1-20250805":   {},
+	// Undated alias of the line above, added 2026-07-28 under this file's stated convention ("Where the
+	// catalog and router use the undated alias of a dated snapshot, BOTH forms are listed"). No widening
+	// of the existence claim: the 2026-07-19 capture already contains the dated form, and Anthropic's
+	// model table gives claude-opus-4-1 as its alias. Deprecated; RETIRES 2026-08-05, at which point
+	// this entry and its seed row should both be removed.
+	"claude-opus-4-1": {},
 }
 
 // bedrockAnthropicRe extracts the base anthropic family from a Bedrock model id, e.g.
