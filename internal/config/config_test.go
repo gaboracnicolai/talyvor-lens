@@ -554,6 +554,48 @@ func TestLoad_PoolRoyaltyParsing(t *testing.T) {
 	}
 }
 
+// THE CONSUMER DISCOUNT on cross-tenant pooled hits. Default 0.30 — argued in the field comment:
+// the largest rate that keeps a contributor's break-even under three pooled hits at s=0.5.
+func TestLoad_PoolConsumerDiscountDefaultsTo30Percent(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PoolConsumerDiscount != 0.30 {
+		t.Errorf("PoolConsumerDiscount = %v, want 0.30", c.PoolConsumerDiscount)
+	}
+}
+
+func TestLoad_PoolConsumerDiscountParsing(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("LENS_POOL_CONSUMER_DISCOUNT", "0.45")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PoolConsumerDiscount != 0.45 {
+		t.Errorf("PoolConsumerDiscount = %v, want 0.45 — the rate must be tunable without a rebuild", c.PoolConsumerDiscount)
+	}
+}
+
+// ⚠ r >= 1 is refused, NOT clamped. At r = 1 the consumer pays nothing for a pooled hit and — because
+// the royalty is funded by the consumer's settled charge — the CONTRIBUTOR then earns nothing either.
+// That is the pool silently ceasing to pay, which no error would otherwise report. NaN is refused for
+// the same reason the royalty share refuses it: it parses, compares false to every bound, and would
+// ceil to a garbage int64 debit on a real customer.
+func TestLoad_PoolConsumerDiscountInvalidRejected(t *testing.T) {
+	for _, bad := range []string{"1", "1.5", "-0.1", "abc", "NaN"} {
+		t.Run(bad, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LENS_POOL_CONSUMER_DISCOUNT", bad)
+			if _, err := Load(); err == nil {
+				t.Errorf("Load should reject LENS_POOL_CONSUMER_DISCOUNT=%q (must be in [0,1))", bad)
+			}
+		})
+	}
+}
+
 func TestLoad_PoolRoyaltyShareInvalidRejected(t *testing.T) {
 	for _, bad := range []string{"1.5", "-0.1", "abc"} {
 		t.Run(bad, func(t *testing.T) {

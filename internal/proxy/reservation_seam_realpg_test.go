@@ -14,7 +14,7 @@ import (
 )
 
 // Real-PG proofs that the reservation SEAM bills what was DELIVERED. The seam helpers (agentReserveBlocks →
-// settleReservation / resolveCacheReservation / releaseReservation) run against a real economy.DualTokenStore
+// settleReservation / pricePooledServe+settlePooledServe / releaseReservation) run against a real economy.DualTokenStore
 // so the assertions are on the workspace BALANCE and lxc_ledger — never a status code.
 
 func seamProxy(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.Pool) {
@@ -114,7 +114,7 @@ func TestOwnCacheHitIsFree(t *testing.T) {
 	ctx := context.Background()
 	seamFund(t, pool, "ws", 100_000_000)
 	rctx, _ := p.agentReserveBlocks(ctx, "agent", "ws", "gpt-4o", "prompt", "rq1", 4096)
-	if funded := p.resolveCacheReservation(rctx, nil, "", nil); funded != 0 { // own hit → release → $0
+	if funded := p.settlePooledServe(rctx, p.pricePooledServe(nil, "", nil)); funded != 0 { // own hit → release → $0
 		t.Fatalf("own cache hit funded=$%v, want 0 (free)", funded)
 	}
 	if b := seamBalance(t, store, "ws"); b != 100_000_000 {
@@ -122,17 +122,26 @@ func TestOwnCacheHitIsFree(t *testing.T) {
 	}
 }
 
-// TestCrossTenantHitChargesAvoidedCOGS: a pooled (cross-tenant) hit bills the requester avoided_COGS — the
-// value received, derived from the served content — and resolve RETURNS that charge for the royalty seam.
-func TestCrossTenantHitChargesAvoidedCOGS(t *testing.T) {
+// TestCrossTenantHitChargesDiscountedAvoidedCOGS: a pooled (cross-tenant) hit bills the requester
+// avoided_COGS LESS the consumer discount — the value received, minus the share handed back because the
+// hit cost Talyvor no provider call — and the settle RETURNS that charge for the royalty seam, so the
+// contributor is funded from what was ACTUALLY paid.
+func TestCrossTenantHitChargesDiscountedAvoidedCOGS(t *testing.T) {
 	p, store, pool := seamProxy(t)
 	ctx := context.Background()
 	seamFund(t, pool, "ws", 100_000_000)
 	rctx, _ := p.agentReserveBlocks(ctx, "agent", "ws", "gpt-4o", "prompt", "rq1", 4096)
 	prompt, served := "a requester prompt", []byte("a served cross-tenant cached response body")
 	avoided := alerts.CostUSD("gpt-4o", len(prompt)/4, len(served)/4)
-	wantCharge := int64(math.Ceil(avoided / economy.LXCUSDValue * 1e6)) // the exact conversion settleReservation uses
-	funded := p.resolveCacheReservation(rctx, &poolroyalty.ServedHit{Model: "gpt-4o"}, prompt, served)
+	// ⚠ THE CONTRACT CHANGED HERE, DELIBERATELY. This used to assert the requester was billed the FULL
+	// avoided_COGS. That was the defect: the consumer of a pooled hit saved nothing, so the cache was
+	// invisible to the person paying for it. The charge is now discounted by r, and this test SETS r
+	// explicitly rather than relying on the harness default — an unwired proxy discounts by 0, so a
+	// test that did not set it would keep asserting the OLD behaviour and pass forever while
+	// production discounted.
+	p.SetPoolConsumerDiscount(0.30)
+	wantCharge := int64(math.Ceil(avoided * 0.70 / economy.LXCUSDValue * 1e6)) // list × (1−r), ceil
+	funded := p.settlePooledServe(rctx, p.pricePooledServe(&poolroyalty.ServedHit{Model: "gpt-4o"}, prompt, served))
 	if funded <= 0 {
 		t.Fatalf("cross-tenant resolve must return the positive settled charge, got $%v", funded)
 	}

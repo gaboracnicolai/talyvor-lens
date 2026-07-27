@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/compressor"
+	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/inference"
@@ -156,6 +158,7 @@ type Proxy struct {
 	distiller         *distillIntegration
 	poolGate          *cache_pooling.PoolabilityGate
 	royaltyMinter     royaltySink
+	poolDiscount      float64 // r — consumer discount on CROSS-TENANT pooled hits; 0 = charge list
 
 	// Shadow LXC spend (Stage 2.4/2.5) — optional, nil-safe. lxcShadowEnabled
 	// is read per-call so the flag stays live. See shadow_lxc.go.
@@ -426,6 +429,89 @@ type royaltySink interface {
 // serve exactly as Stage 2.0 left them and nothing mints.
 func (p *Proxy) SetRoyaltyMinter(m royaltySink) {
 	p.royaltyMinter = m
+}
+
+// SetPoolConsumerDiscount sets r, the fraction of a CROSS-TENANT POOLED hit's list price handed back
+// to the consumer (config.PoolConsumerDiscount; see there for why 0.30). Same setter idiom as the
+// royalty minter so proxy.New's signature stays put.
+//
+// UNWIRED MEANS 0, i.e. charge list — exactly today's behaviour. That is the safe direction for a
+// money path: a forgotten wiring under-discounts, which is visible to a customer and costs them
+// nothing they were promised, whereas a default that over-discounted would silently under-fund
+// every contributor's royalty (the royalty is a share of the settled charge).
+func (p *Proxy) SetPoolConsumerDiscount(r float64) {
+	if r < 0 || r >= 1 || math.IsNaN(r) {
+		return // config already refuses these at boot; belt-and-braces, never a garbage charge
+	}
+	p.poolDiscount = r
+}
+
+// pooledPrice is the priced outcome of one cross-tenant pooled hit, in µLXC — the ledger's unit, so
+// the number quoted to the consumer and the number debited are the same kind of thing.
+//
+// ⚠ BOTH PRICES CEIL AND `Saved` IS THE DIFFERENCE OF THE ROUNDED INTEGERS, never a separately
+// rounded USD figure. Rounding each of the three independently lets them disagree by a µLXC, and a
+// bill whose parts do not add up is worse than one with no parts. Charged ≤ List because ceil is
+// monotone and r < 1, so Saved is never negative.
+type pooledPrice struct {
+	ListULXC    int64   // what the live call would have cost (avoided COGS), priced as a charge
+	ChargedULXC int64   // what the consumer is billed after the discount
+	SavedULXC   int64   // ListULXC − ChargedULXC, exact by construction
+	Rate        float64 // the rate actually applied to THIS request
+	PriceBasis  string  // "fallback" when the model was absent from the catalog
+	modelForRow string  // the model that served, stamped on the money row
+	Pooled      bool    // false ⇒ own-cache hit or no pooled hit; nothing is charged or advertised
+}
+
+// chargeULXC prices a USD amount as a CHARGE: µLXC, rounded UP. The single conversion used for both
+// the list price and the discounted price, so they round the same way.
+func chargeULXC(usd float64) int64 {
+	if usd <= 0 {
+		return 0
+	}
+	return int64(math.Ceil(usd / economy.LXCUSDValue * 1e6))
+}
+
+// pricePooledHit applies the consumer discount to a pooled hit's avoided cost. Pure — no I/O, no
+// context — so it can be called BEFORE the response body goes out, which is the only moment the
+// saving can still be put in a header.
+func pricePooledHit(avoidedUSD, rate float64, priceBasis string) pooledPrice {
+	list := chargeULXC(avoidedUSD)
+	charged := chargeULXC(avoidedUSD * (1 - rate))
+	if charged > list {
+		charged = list // unreachable while rate >= 0; a charge above list is never emitted
+	}
+	return pooledPrice{ListULXC: list, ChargedULXC: charged, SavedULXC: list - charged,
+		Rate: rate, PriceBasis: priceBasis, Pooled: true}
+}
+
+// setSavingHeaders puts the saving on the response. ⚠ MUST BE CALLED BEFORE THE BODY IS WRITTEN —
+// the serve happens before the settle (a billing failure must never affect an already-served
+// response), so a header written after the body silently never reaches the client.
+//
+// This is the half that decides whether the discount works at all: 644 instead of 920, with nothing
+// saying so, is indistinguishable from a cheaper answer. The tester who reported this only noticed
+// by comparing two numbers by hand.
+func (pp pooledPrice) setSavingHeaders(w http.ResponseWriter) {
+	if !pp.Pooled || pp.ListULXC <= 0 {
+		return
+	}
+	w.Header().Set("X-Talyvor-Pool-List-ULXC", strconv.FormatInt(pp.ListULXC, 10))
+	w.Header().Set("X-Talyvor-Pool-Charged-ULXC", strconv.FormatInt(pp.ChargedULXC, 10))
+	w.Header().Set("X-Talyvor-Pool-Saved-ULXC", strconv.FormatInt(pp.SavedULXC, 10))
+	w.Header().Set("X-Talyvor-Pool-Discount-Rate", strconv.FormatFloat(pp.Rate, 'f', -1, 64))
+}
+
+// clearSavingHeaders removes them again. Needed on exactly one path: an SSE replay that FAILS
+// validation falls through to a live upstream call, and that response must not carry a pooled
+// saving — it was not a pooled serve, the consumer pays full price for it, and a stale header would
+// promise a discount the ledger does not show. Safe because replayAsSSE validates every frame
+// before writing anything, so nothing has been flushed when it errors.
+func clearSavingHeaders(w http.ResponseWriter) {
+	for _, h := range []string{"X-Talyvor-Pool-List-ULXC", "X-Talyvor-Pool-Charged-ULXC",
+		"X-Talyvor-Pool-Saved-ULXC", "X-Talyvor-Pool-Discount-Rate"} {
+		w.Header().Del(h)
+	}
 }
 
 // extractResponseContent pulls the assistant text out of an OpenAI-shape
@@ -1000,6 +1086,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				p.recordSessionTurn(ctx, sessionID, prompt, string(cached), model, 0, true)
 				setSessionHeaders(w, p, sessionID)
 			}
+			// PRICE THE HIT BEFORE ANY BYTES GO OUT. The serve precedes the settle by design (a
+			// billing failure must never affect an already-served response), so the saving can only
+			// reach the client if it is computed and headered here. Pure: no I/O, no settle.
+			// Zero-valued and header-free for an own-cache hit (pooledHit == nil), which is free.
+			price := p.pricePooledServe(pooledHit, prompt, cached)
+			price.setSavingHeaders(w)
 			if streaming {
 				// SSE replay: synthesises the provider's streaming wire
 				// format from the cached JSON so strict SSE clients can
@@ -1012,7 +1104,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					// SERVE point. FUNDING INVARIANT (settle-then-mint): resolve the pre-serve HOLD FIRST — a
 					// pooled hit bills the consumer avoided_COGS (returned), an own hit is free — then mint a
 					// royalty funded by what the consumer ACTUALLY paid ($0 charge ⇒ $0 mint).
-					funded := p.resolveCacheReservation(ctx, pooledHit, prompt, cached)
+					funded := p.settlePooledServe(ctx, price)
 					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
 					// Cache-serve spend visibility (0100): the served request
 					// becomes a zero-provider-cost token_events row tagged with
@@ -1028,6 +1120,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// NOT served: fall through to the live LLM below — the
 				// pooled hit (if any) must NOT mint (claim at serve, not
 				// at lookup).
+				// ⚠ The saving headers were set above, before replayAsSSE could report failure. This
+				// request is now going UPSTREAM and the consumer will pay full price for a live call,
+				// so a surviving "you saved 276" header would promise a discount the ledger will not
+				// show. Nothing has been flushed (replayAsSSE validates every frame before writing),
+				// so removing them here is both safe and necessary.
+				clearSavingHeaders(w)
 				slog.Warn("proxy: cached payload not replayable as SSE; falling through to LLM",
 					slog.String("provider", cfg.ProviderName()),
 				)
@@ -1038,7 +1136,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// SERVE point. FUNDING INVARIANT (settle-then-mint): resolve the pre-serve HOLD FIRST — a
 				// pooled hit bills the consumer avoided_COGS (returned), an own hit is free — then mint a
 				// royalty funded by what the consumer ACTUALLY paid ($0 charge ⇒ $0 mint).
-				funded := p.resolveCacheReservation(ctx, pooledHit, prompt, cached)
+				funded := p.settlePooledServe(ctx, price)
 				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
 				// Cache-serve spend visibility (0100): see recordCacheServe.
 				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
@@ -2885,29 +2983,59 @@ func boundedMaxOut(explicit int, cap func() int) int {
 	return 4096 // last-resort default if the cap fn is unwired
 }
 
-// resolveCacheReservation resolves a held reservation at a CACHE SERVE point and RETURNS the USD the
-// consumer was ACTUALLY charged for this request. A cross-tenant POOLED hit bills the requester
-// avoided_COGS (the value received — Talyvor keeps its margin); an OWN cache hit is FREE (no upstream call,
-// no contributor ⇒ full refund → $0). Returns 0 without a reservation on the context (non-agent / plain
-// key / reservation path off) — a plain-key cache hit is NOT metered and so funds NO royalty.
+// pricePooledServe prices a cache serve for the consumer, and does NOTHING ELSE — no settle, no
+// I/O, no context. That purity is the point: it must run BEFORE the response body is written, which
+// is the only moment the saving can still be put in a header (the serve precedes the settle so a
+// billing failure can never affect an already-served response).
 //
-// THE FUNDING TIE: the caller feeds this return into mintPooledRoyalty as the royalty's funding basis, so
-// the contributor is minted a share of what the consumer REALLY paid — never an independently computed
-// avoided_COGS that could exceed the bill, and never anything at all when the consumer paid $0.
-func (p *Proxy) resolveCacheReservation(ctx context.Context, pooledHit *poolroyalty.ServedHit, prompt string, served []byte) float64 {
-	if pooledHit != nil {
-		// Priced through the resolver: a pooled hit on a model the catalog does not know used to bill the
-		// requester $0 for value they received, which ALSO left the contributor's royalty unfunded (the
-		// funding tie mints a share of what was actually paid). Charge falls back to the provider's
-		// cheapest known rate — a floor, marked on the row.
-		avoided, prov := alerts.CostUSDResolved(pooledHit.Model, catalog.PurposeCharge,
-			len(prompt)/4, 0, 0, len(served)/4)
-		basis := ""
-		if prov == catalog.ProvenanceFallback {
-			basis = prov.String()
-		}
-		return p.settleReservationBasis(ctx, avoided, pooledHit.Model, basis)
+// A CROSS-TENANT POOLED hit is priced at avoided_COGS — what the live call would have cost — and
+// then DISCOUNTED by r, so the consumer keeps part of a saving that costs Talyvor nothing to give:
+// there was no provider call, so the whole charge was margin.
+//
+// An OWN-CACHE hit returns the zero value (Pooled false). It is FREE and stays free — no charge, no
+// headers, nothing to discount. Charging someone for their own repeat would be pure extraction, and
+// discounting a charge that does not exist is meaningless.
+//
+// A model the catalog does not know is priced at the provider's cheapest known rate and MARKED
+// (PriceBasis), exactly as before: pricing it at 0 would bill the consumer nothing for value they
+// received AND leave the contributor's royalty unfunded.
+func (p *Proxy) pricePooledServe(pooledHit *poolroyalty.ServedHit, prompt string, served []byte) pooledPrice {
+	if pooledHit == nil {
+		return pooledPrice{}
 	}
-	p.releaseReservation(ctx, "own cache hit")
-	return 0
+	avoided, prov := alerts.CostUSDResolved(pooledHit.Model, catalog.PurposeCharge,
+		len(prompt)/4, 0, 0, len(served)/4)
+	basis := ""
+	if prov == catalog.ProvenanceFallback {
+		basis = prov.String()
+	}
+	pp := pricePooledHit(avoided, p.poolDiscount, basis)
+	pp.modelForRow = pooledHit.Model
+	return pp
+}
+
+// settlePooledServe resolves the held reservation at a CACHE SERVE point and RETURNS the USD the
+// consumer was ACTUALLY charged.
+//
+// THE FUNDING TIE, UNCHANGED AND NOW STRICTLY TIGHTER: the caller feeds this return into
+// mintPooledRoyalty as the royalty's funding basis, so the contributor is minted a share of what the
+// consumer REALLY paid. Because the DISCOUNT is applied here — before the settle, not after — the
+// royalty comes out of the discounted charge automatically, with no change to the mint at all. The
+// invariant (#351/#353) maintains itself: royalty = s × charged and Talyvor keeps (1−s) × charged,
+// both still bounded by the payment, so a discount can never mint against money nobody paid.
+//
+// Returns 0 with no reservation on the context (non-agent / plain key / reservation path off) — a
+// plain-key cache hit is not metered and so funds NO royalty. An own-cache hit (price.Pooled false)
+// RELEASES the hold in full: free, exactly as before.
+//
+// The LIST price and the rate ride onto the ledger row so the customer's evidence is the row itself.
+// The SAVING is not passed — the row derives it from what was actually debited, because the settle
+// clamps to the hold and a passed-in saving could then contradict the amount charged.
+func (p *Proxy) settlePooledServe(ctx context.Context, price pooledPrice) float64 {
+	if !price.Pooled {
+		p.releaseReservation(ctx, "own cache hit")
+		return 0
+	}
+	chargedUSD := float64(price.ChargedULXC) * economy.LXCUSDValue / 1e6
+	return p.settleReservationPooled(ctx, chargedUSD, price)
 }
