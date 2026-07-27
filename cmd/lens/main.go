@@ -599,8 +599,54 @@ func run() error {
 			logger.Error("failed to generate ephemeral JWT key", slog.String("error", keyErr.Error()))
 			os.Exit(1)
 		}
-		logger.Warn("JWT signing: using ephemeral EC P-256 key — tokens will not survive a restart; " +
-			"set LENS_JWT_PRIVATE_KEY for production")
+		// ⚠ SEVERITY IS CONDITIONAL, AND THE HA CASE IS A REFUSAL, NOT A WARNING.
+		//
+		// The old line was a flat WARN saying "tokens will not survive a restart". Two problems: it
+		// understated what happens (every signed-in user is logged out, which reads as an auth bug
+		// rather than a restart), and a WARN on every boot is a line people learn to scroll past.
+		//
+		// The distinction drawn here is whether the configuration CAN work:
+		//
+		//   HA + no key  → it CANNOT. GenerateECKey is a plain in-process keygen with no
+		//                  persistence and no sharing, so every instance holds a DIFFERENT key —
+		//                  while JWTKid is the constant "lens-1", so the header does not even
+		//                  reveal which. Behind a load balancer a token minted by one instance
+		//                  fails on every other, so roughly (1 - 1/N) of authenticated requests
+		//                  fail PER REQUEST, intermittently, looking exactly like a flaky auth bug.
+		//                  A configuration that cannot work is a refusal, not a warning.
+		//
+		//   economy on   → it works and DEGRADES: sessions survive until the next restart. Refusing
+		//                  here would convert an occasional partial outage into a certain total
+		//                  one, which is worse for the people it is meant to protect. So: ERROR —
+		//                  loud, alertable, but it boots.
+		//
+		//   otherwise    → a local single-instance experiment. WARN, as before.
+		const jwtKeyRemedy = "generate one with: openssl ecparam -name prime256v1 -genkey -noout " +
+			"(the -noout is REQUIRED — without it openssl emits an EC PARAMETERS block first and " +
+			"parsing fails with `unexpected PEM type \"EC PARAMETERS\"`), then set " +
+			"LENS_JWT_PRIVATE_KEY to the whole PEM. PKCS#8 (openssl pkcs8 -topk8 -nocrypt) is also " +
+			"accepted. The curve must be P-256."
+		switch {
+		case cfg.HAEnabled:
+			logger.Error("LENS_JWT_PRIVATE_KEY is REQUIRED when LENS_HA_ENABLED is set, and Lens will "+
+				"not start without it. Each instance would otherwise generate its own ephemeral "+
+				"signing key, so a token issued by one instance is rejected by every other — "+
+				"authentication would fail intermittently, per request, for as long as more than one "+
+				"instance is running.",
+				slog.String("remedy", jwtKeyRemedy))
+			os.Exit(1)
+		case cfg.EconomyEnabled:
+			logger.Error("JWT signing: using an EPHEMERAL EC P-256 key. THE NEXT RESTART LOGS OUT "+
+				"EVERY SIGNED-IN USER — existing tokens cannot be verified by the new key, and the "+
+				"failure surfaces as ordinary auth rejections rather than as a restart. Booting "+
+				"anyway: refusing would turn a restart-scoped outage into a total one.",
+				slog.String("remedy", jwtKeyRemedy))
+		default:
+			logger.Warn("JWT signing: using ephemeral EC P-256 key — every signed-in user is logged "+
+				"out on restart. Fine for a single-instance local run; set LENS_JWT_PRIVATE_KEY for "+
+				"anything serving real sessions.",
+				slog.String("remedy", jwtKeyRemedy))
+		}
 	}
 
 	// Auth manager — unified JWT + workspace-key + global-key
