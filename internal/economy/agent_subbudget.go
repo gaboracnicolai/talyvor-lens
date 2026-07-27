@@ -69,24 +69,6 @@ type AgentDebitMeta struct {
 	// a guessed charge carries the marking — a bill built from this ledger can then separate measured
 	// charges from estimated ones instead of presenting a guess as a price.
 	PriceBasis string
-
-	// PoolListULXC is the LIST price of a CROSS-TENANT POOLED cache hit: what this request would
-	// have cost the consumer had it gone upstream, in µLXC, priced exactly the way a real charge is
-	// (ceil). Zero on every other kind of charge, and zero leaves the row untouched — an ordinary
-	// provider call must not carry a pooled-saving claim.
-	//
-	// ⚠ THE SAVING IS NOT A FIELD HERE, DELIBERATELY. It is derived at the insert from this list
-	// price and the amount ACTUALLY debited, because the settle CLAMPS the charge to the hold: a
-	// saving computed by the caller can disagree with what the customer really paid, and then one
-	// row states two different prices. Derived, the three numbers reconcile on every row —
-	// charged + saved = list — including clamped and partially-settled ones.
-	PoolListULXC int64
-
-	// PoolDiscountRate is the consumer discount rate in force WHEN THIS CHARGE WAS MADE. It rides on
-	// the row so a bill can be audited against the rate that actually applied rather than the rate
-	// configured today: the rate is tunable at boot, so reading it back from config would silently
-	// re-price history.
-	PoolDiscountRate float64
 }
 
 // toMap renders the scalars as the lxc_ledger metadata document, OMITTING an empty scalar so a row carries
@@ -106,34 +88,6 @@ func (m AgentDebitMeta) toMap() map[string]interface{} {
 	if m.PriceBasis != "" {
 		out["price_basis"] = m.PriceBasis
 	}
-	return out
-}
-
-// toSpendMap is toMap plus the POOLED-DISCOUNT DISCLOSURE, and the only place that disclosure is
-// assembled.
-//
-// chargedULXC is what was ACTUALLY debited — post-clamp — so pool_saved_ulxc is derived from the
-// real charge rather than from what the caller intended to charge. That is the whole reason this
-// takes an argument instead of being a field: the settle never bills above the hold, so it may bill
-// less than the discounted price, and a saving passed in alongside would keep claiming the intended
-// discount while the customer was charged something else.
-//
-// Emits NOTHING when PoolListULXC is 0, so an ordinary upstream charge is byte-for-byte the row it
-// was before. A saving is clamped at 0: it must never read negative, which would present a pooled
-// hit as having cost MORE than the live call and, read by any aggregator, would subtract from the
-// total saved.
-func (m AgentDebitMeta) toSpendMap(chargedULXC int64) map[string]interface{} {
-	out := m.toMap()
-	if m.PoolListULXC <= 0 {
-		return out
-	}
-	saved := m.PoolListULXC - chargedULXC
-	if saved < 0 {
-		saved = 0
-	}
-	out["pool_list_ulxc"] = m.PoolListULXC
-	out["pool_saved_ulxc"] = saved
-	out["pool_discount_rate"] = m.PoolDiscountRate
 	return out
 }
 
@@ -391,8 +345,7 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		// AND the model that actually SERVED (from the caller, known only post-route), plus the request_id join.
 		if err := insertLXCLedger(ctx, tx, workspaceID, -finalLXC, afterSpend, LXCTypeSpend, "reservation settle: delivered charge",
 			AgentDebitMeta{RequestedModel: reqModel, ServedModel: meta.ServedModel, RequestID: reqID,
-				PriceBasis: meta.PriceBasis, PoolListULXC: meta.PoolListULXC,
-				PoolDiscountRate: meta.PoolDiscountRate}.toSpendMap(finalLXC)); err != nil {
+				PriceBasis: meta.PriceBasis}.toMap()); err != nil {
 			return 0, err
 		}
 	}

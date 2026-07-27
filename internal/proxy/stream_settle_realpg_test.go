@@ -137,14 +137,14 @@ func TestStreamSettle_NoCacheIdenticalToFlat(t *testing.T) {
 
 // TestStreamSettle_CrossTenantPooledHit_FundsViaResolve answers the funding-invariant question on the
 // STREAMING lane: a streamed cross-tenant POOLED cache hit is served by the SSE-replay path (serve() —
-// BEFORE the stream-handler dispatch), which calls settlePooledServe → mintPooledRoyalty(funded)
-// exactly like the buffered path. So the streamed pooled hit does NOT bypass settlePooledServe: the
+// BEFORE the stream-handler dispatch), which calls resolveCacheReservation → mintPooledRoyalty(funded)
+// exactly like the buffered path. So the streamed pooled hit does NOT bypass resolveCacheReservation: the
 // consumer's reservation is SETTLED at avoided_COGS (a positive charge), which is the mint's funding basis
-// (#351 proves settlePooledServe's return funds the mint). A bypass would leave the hold stranded.
+// (#351 proves resolveCacheReservation's return funds the mint). A bypass would leave the hold stranded.
 func TestStreamSettle_CrossTenantPooledHit_FundsViaResolve(t *testing.T) {
 	p, _, pool := costWireProxy(t) // full serve proxy + reservation store; ws-log is the consumer (agent)
 	// A COUNTING upstream so we can PROVE the streamed request was served from the pool (no upstream call) —
-	// i.e. it took the cache-hit lane (settlePooledServe), not a miss (my recordStreamSpend, which
+	// i.e. it took the cache-hit lane (resolveCacheReservation), not a miss (my recordStreamSpend, which
 	// would also settle and thus not distinguish the funding path).
 	var upstreamCalls int64
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -197,15 +197,15 @@ func TestStreamSettle_CrossTenantPooledHit_FundsViaResolve(t *testing.T) {
 	}
 
 	// PROVE the streamed request took the POOLED-HIT lane: it served from the pool with NO upstream call.
-	// (Else it was a miss served live, and the settle would be recordStreamSpend, not settlePooledServe.)
+	// (Else it was a miss served live, and the settle would be recordStreamSpend, not resolveCacheReservation.)
 	if delta := atomic.LoadInt64(&upstreamCalls) - beforeStream; delta != 0 {
-		t.Fatalf("streamed request made %d upstream calls — it was NOT a pooled cache hit, so this doesn't exercise settlePooledServe", delta)
+		t.Fatalf("streamed request made %d upstream calls — it was NOT a pooled cache hit, so this doesn't exercise resolveCacheReservation", delta)
 	}
 
 	// THE ANSWER — no bypass: the streamed pooled hit SETTLED the consumer's reservation (only
-	// settlePooledServe does that on this path), so the funding tie fired.
+	// resolveCacheReservation does that on this path), so the funding tie fired.
 	if st := reservationStatus(t, pool, "ws-log"); st != "settled" {
-		t.Errorf("streamed cross-tenant pooled hit left reservation %q, want 'settled' — the streaming lane must invoke settlePooledServe (which funds the mint), not bypass it (which would strand the hold → free)", st)
+		t.Errorf("streamed cross-tenant pooled hit left reservation %q, want 'settled' — the streaming lane must invoke resolveCacheReservation (which funds the mint), not bypass it (which would strand the hold → free)", st)
 	}
 	// The consumer was actually CHARGED avoided_COGS (a spend row) — that positive charge is exactly the
 	// mint's funding basis, so a streamed pooled hit funds a real royalty (never mints on $0).
