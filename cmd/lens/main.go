@@ -470,6 +470,18 @@ func run() error {
 	go semanticCache.StartSweeper(ctx, cfg.SemanticCacheSweepInterval)
 
 	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, guardrailsEngine, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	// CONSUMER DISCOUNT on cross-tenant pooled cache hits (r). Wired HERE, unconditionally, and
+	// NOT beside the royalty minter below: a pooled hit CHARGES the consumer whether or not royalty
+	// minting is enabled (the mint is skipped, the bill is not), so gating the discount on the mint
+	// flag would leave consumers paying full price for pooled hits on any deploy with minting off —
+	// the exact complaint this closes, reintroduced through the wiring rather than the code.
+	p.SetPoolConsumerDiscount(cfg.PoolConsumerDiscount)
+	slog.Info("economy: cross-tenant pooled hits are DISCOUNTED for the consumer",
+		slog.Float64("consumer_discount_rate", cfg.PoolConsumerDiscount),
+		slog.Float64("contributor_share_of_discounted_charge", cfg.PoolRoyaltyShare),
+		slog.String("effect", "a pooled hit bills list×(1−r); the contributor's royalty is a share of "+
+			"that DISCOUNTED charge, so the funding invariant holds unchanged"))
+
 	// Upgraded per-request attribution store (Upgrade Batch 1 / Item 3).
 	// Wired as a setter so the existing proxy.New signature stays put.
 	p.SetAttributionStore(attrStore)

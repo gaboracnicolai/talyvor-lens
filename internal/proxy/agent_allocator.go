@@ -226,6 +226,33 @@ func (p *Proxy) settleReservationBasis(ctx context.Context, deliveredUSD float64
 	return float64(settledLXC) * economy.LXCUSDValue / 1e6 // the USD the consumer ACTUALLY paid
 }
 
+// settleReservationPooled is settleReservationBasis for a CROSS-TENANT POOLED hit: it settles the
+// charge and puts the pooled-discount disclosure on the money row, so the customer's evidence lives
+// in the ledger and not only in a response header they may never have looked at.
+//
+// It passes the LIST price and the RATE, and deliberately NOT the saving: the settle clamps the
+// charge to the hold, so the saving is derived inside the insert from what was actually debited
+// (economy.AgentDebitMeta.toSpendMap). Passing it here would create a second source of truth that
+// disagrees with the amount on the very same row.
+//
+// The rate is stamped per-row because it is tunable at boot: reading it back from config to explain
+// an old charge would silently re-price history.
+func (p *Proxy) settleReservationPooled(ctx context.Context, chargedUSD float64, price pooledPrice) float64 {
+	h, ok := reservationFrom(ctx)
+	if !ok || p.agentSpender == nil {
+		return 0 // no reservation ⇒ the consumer was charged nothing (plain key / path off)
+	}
+	settledLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, price.ChargedULXC,
+		economy.AgentDebitMeta{ServedModel: price.modelForRow, PriceBasis: price.PriceBasis,
+			PoolListULXC: price.ListULXC, PoolDiscountRate: price.Rate})
+	if err != nil {
+		slog.Warn("economy: pooled reservation settle failed (hold will be swept/refunded; royalty treated as unfunded)",
+			slog.String("reservation", h.reservationID), slog.String("err", err.Error()))
+		return 0
+	}
+	return float64(settledLXC) * economy.LXCUSDValue / 1e6 // the USD the consumer ACTUALLY paid
+}
+
 // releaseReservation REFUNDS the held reservation in full (if any) — an own-cache hit (no upstream call, no
 // contributor ⇒ free) or a serve that delivered nothing. No-op without a reservation on the context.
 func (p *Proxy) releaseReservation(ctx context.Context, reason string) {
