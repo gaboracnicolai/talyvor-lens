@@ -197,7 +197,18 @@ func (w *Watcher) ReportReadiness() {
 		slog.Error("modelwatch: NO ALERT SINK CONFIGURED — new-model detection will only write to this log, "+
 			"which is the exact failure that let five wrong prices and an entire model family go unnoticed. "+
 			"This detector is running but cannot reach a person.",
-			"remedy", "set LENS_OPERATOR_ALERT_WEBHOOK_URL and LENS_OPERATOR_ALERT_WEBHOOK_SECRET",
+			"remedy", "set LENS_OPERATOR_ALERT_WEBHOOK_URL and LENS_OPERATOR_ALERT_WEBHOOK_SECRET — "+
+				"the URL must accept a POST of THIS payload: "+
+				`{"kind":"catalog_drift","severity":"error","subject":...,"body":...,"emitted_at":...,"source":...} `+
+				"with a hex HMAC-SHA256 of the exact body in X-Lens-Signature. It is a custom contract, "+
+				"NOT a chat-provider shape: a Slack incoming webhook needs a top-level `text` and Discord "+
+				"needs `content`, so pointing this at either rejects every delivery with a 400 and the "+
+				"alert you configured never arrives. Point it at something that takes arbitrary JSON, or "+
+				"at a small relay that reshapes it.",
+			"alternative", "for a single-operator deployment this sink may not be worth standing up at all: "+
+				"every restart re-reports the COMPLETE current finding set at ERROR (the alerted-set is "+
+				"in-memory, so nothing is suppressed across a boot), and lens_modelwatch_unpriced_models "+
+				"carries the same number to any dashboard with no configuration",
 			"metric", "lens_modelwatch_sink_configured=0")
 		return
 	}

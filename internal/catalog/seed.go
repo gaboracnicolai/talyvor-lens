@@ -21,6 +21,24 @@ func seedModels() []Model {
 		{ID: "gpt-4.1-nano", Provider: "openai", DisplayName: "GPT-4.1 nano", InputPer1M: 0.10, OutputPer1M: 0.40, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
 		{ID: "gpt-5.4", Provider: "openai", DisplayName: "GPT-5.4", InputPer1M: 2.50, OutputPer1M: 15.00, CachedInputPer1M: 0.25, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 		{ID: "gpt-5.4-mini", Provider: "openai", DisplayName: "GPT-5.4 mini", InputPer1M: 0.75, OutputPer1M: 4.50, CachedInputPer1M: 0.075, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+		// ⚠ THE THREE BELOW WERE ON THE PRICING PAGE AND NOT IN THIS CATALOG. Every rate transcribed
+		// from https://developers.openai.com/api/docs/pricing (fetched 2026-07-28), Standard tier.
+		// Cached-input is the page's own "Cached" column in each case — 0.1x input for this generation,
+		// NOT the 0.5x withCacheRates would otherwise derive for openai, so each is set explicitly.
+		// ContextTokens/MaxOutput mirror their siblings and are informational only (nothing gates on
+		// them); the PRICES are the authoritative part and are the only figures taken from the page.
+		{ID: "gpt-5.4-nano", Provider: "openai", DisplayName: "GPT-5.4 nano", InputPer1M: 0.20, OutputPer1M: 1.25, CachedInputPer1M: 0.02, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+		// gpt-5.3-codex is the one that matters most in practice: talyvor-code sends source code, and a
+		// coding-specialised model is what such a client reaches for. 35x under-recovery on output.
+		{ID: "gpt-5.3-codex", Provider: "openai", DisplayName: "GPT-5.3 Codex", InputPer1M: 1.75, OutputPer1M: 14.00, CachedInputPer1M: 0.175, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+		// ⚠ chat-latest is priced by OpenAI as its own SKU, so this row bills what the page publishes
+		// for that id — it is NOT an attempt to track whatever model the pointer currently resolves to.
+		// It also has no "gpt-" prefix, so providerFromID could not infer its provider and the derived
+		// floor was taken across the WHOLE catalog (mistral-nemo, $0.025/1M): a measured 1200x
+		// under-recovery on output, the largest of any id here. That fallback is behaving as designed —
+		// a CHARGE deliberately falls back low so a guessed rate never over-bills — which is exactly
+		// why the remedy is to price the model rather than to change the fallback.
+		{ID: "chat-latest", Provider: "openai", DisplayName: "GPT chat-latest", InputPer1M: 5.00, OutputPer1M: 30.00, CachedInputPer1M: 0.50, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 		{ID: "gpt-4.1", Provider: "openai", DisplayName: "GPT-4.1", InputPer1M: 2.00, OutputPer1M: 8.00, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
 		{ID: "gpt-4.1-mini", Provider: "openai", DisplayName: "GPT-4.1 mini", InputPer1M: 0.40, OutputPer1M: 1.60, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
 
@@ -46,9 +64,24 @@ func seedModels() []Model {
 		// price, no edit. Re-verify before relying on them.
 
 		// ─── Anthropic (vision + document) ───
-		{ID: "claude-opus-4-5", Provider: "anthropic", DisplayName: "Claude Opus 4.5", InputPer1M: 5.00, OutputPer1M: 25.00, CachedInputPer1M: 0.50, CacheWritePer1M: 6.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
-		{ID: "claude-sonnet-4-5", Provider: "anthropic", DisplayName: "Claude Sonnet 4.5", InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
-		{ID: "claude-haiku-4-5", Provider: "anthropic", DisplayName: "Claude Haiku 4.5", InputPer1M: 1.00, OutputPer1M: 5.00, CachedInputPer1M: 0.10, CacheWritePer1M: 1.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
+		{ID: "claude-opus-4-5", Provider: "anthropic", DisplayName: "Claude Opus 4.5", InputPer1M: 5.00, OutputPer1M: 25.00, CachedInputPer1M: 0.50, CacheWritePer1M: 6.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192, Aliases: []string{"claude-opus-4-5-20251101"}},
+		{ID: "claude-sonnet-4-5", Provider: "anthropic", DisplayName: "Claude Sonnet 4.5", InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192, Aliases: []string{"claude-sonnet-4-5-20250929"}},
+		{ID: "claude-haiku-4-5", Provider: "anthropic", DisplayName: "Claude Haiku 4.5", InputPer1M: 1.00, OutputPer1M: 5.00, CachedInputPer1M: 0.10, CacheWritePer1M: 1.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192, Aliases: []string{"claude-haiku-4-5-20251001"}},
+
+		// ⚠ THE DATED IDS ABOVE ARE THE PROVIDER'S PRIMARY IDS, NOT VARIANTS. Anthropic's model table
+		// lists the dated form as the "Claude API ID" and the bare name as a convenience alias;
+		// GET /v1/models returns the dated form, and Anthropic's docs recommend pinning a snapshot.
+		// Without these aliases a client following that advice was billed on the derived floor — 5x
+		// under on Opus 4.5, 3x under on Sonnet 4.5 — while its requests looked entirely ordinary.
+		// The alias mechanism was already here and already used for OpenAI's dated snapshots
+		// (gpt-4o-2024-11-20); it had simply never been applied to Anthropic's.
+		// https://platform.claude.com/docs/en/about-claude/models/overview (fetched 2026-07-28)
+
+		// Claude Opus 4.1 — DEPRECATED, retires 2026-08-05, still callable first-party until then.
+		// $15/$75 against a $1/$5 floor is the largest single under-recovery in the Anthropic set (15x).
+		// Rates transcribed from https://platform.claude.com/docs/en/about-claude/pricing (2026-07-28):
+		// base input $15, 5m cache write $18.75, cache hit $1.50, output $75.
+		{ID: "claude-opus-4-1", Provider: "anthropic", DisplayName: "Claude Opus 4.1", InputPer1M: 15.00, OutputPer1M: 75.00, CachedInputPer1M: 1.50, CacheWritePer1M: 18.75, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 32768, Aliases: []string{"claude-opus-4-1-20250805"}},
 		{ID: "claude-opus-4-6", Provider: "anthropic", DisplayName: "Claude Opus 4.6", InputPer1M: 5.00, OutputPer1M: 25.00, CachedInputPer1M: 0.50, CacheWritePer1M: 6.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
 		{ID: "claude-sonnet-4-6", Provider: "anthropic", DisplayName: "Claude Sonnet 4.6", InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
 		// NOTE: there is deliberately NO "claude-haiku-4-6" — no Haiku 4.6 exists at any version
