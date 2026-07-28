@@ -470,6 +470,18 @@ func run() error {
 	go semanticCache.StartSweeper(ctx, cfg.SemanticCacheSweepInterval)
 
 	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, guardrailsEngine, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+	// CONSUMER DISCOUNT on cross-tenant pooled cache hits (r). Wired HERE, unconditionally, and
+	// NOT beside the royalty minter below: a pooled hit CHARGES the consumer whether or not royalty
+	// minting is enabled (the mint is skipped, the bill is not), so gating the discount on the mint
+	// flag would leave consumers paying full price for pooled hits on any deploy with minting off —
+	// the exact complaint this closes, reintroduced through the wiring rather than the code.
+	p.SetPoolConsumerDiscount(cfg.PoolConsumerDiscount)
+	slog.Info("economy: cross-tenant pooled hits are DISCOUNTED for the consumer",
+		slog.Float64("consumer_discount_rate", cfg.PoolConsumerDiscount),
+		slog.Float64("contributor_share_of_discounted_charge", cfg.PoolRoyaltyShare),
+		slog.String("effect", "a pooled hit bills list×(1−r); the contributor's royalty is a share of "+
+			"that DISCOUNTED charge, so the funding invariant holds unchanged"))
+
 	// Upgraded per-request attribution store (Upgrade Batch 1 / Item 3).
 	// Wired as a setter so the existing proxy.New signature stays put.
 	p.SetAttributionStore(attrStore)
@@ -879,6 +891,33 @@ func run() error {
 	// Default-allow-on-missing; the rate cap bounds yield regardless.
 	royaltyMinter.SetOwnerLinkageCheck(true)
 	p.SetRoyaltyMinter(royaltyMinter)
+
+	// ⚠ SAY WHEN POOLED HITS WILL SERVE AND PAY NOBODY.
+	//
+	// The mint being off is a deliberate default — it credits spendable LENS, so it is an
+	// explicit opt-in. What was NOT deliberate is that the off state is completely silent:
+	// Minter.MintServedHit returns (Result{}, nil) when its enabled predicate is false, before
+	// touching the database, and mintPooledRoyalty only logs when the mint returns an ERROR. So
+	// a deployment serving cross-tenant pooled hits writes NO row to pool_royalty_mints, NO row
+	// to lens_token_ledger, and NO line to the log explaining either.
+	//
+	// That is how an operator arrives at an empty lens_token_ledger having verified the three
+	// POOLING gates — the global flag, the pool-safety attestation, and both workspaces'
+	// cache_poolable + earn_verified — and finds nothing wrong, because the gate that is shut is
+	// a FOURTH one those three say nothing about.
+	//
+	// Logged at boot rather than per hit: it is a configuration state, not an event, and a line
+	// per pooled serve would be noise that teaches people to filter it.
+	if cfg.CachePoolableEnabled && !cfg.PoolRoyaltyMintingEnabled {
+		slog.Warn("economy: cross-tenant pooling is ON but ROYALTY MINTING IS OFF — pooled hits "+
+			"will serve and be charged, and contributors will earn NOTHING for them",
+			slog.String("remedy", "set LENS_POOL_ROYALTY_MINTING_ENABLED=true to arm the mint"),
+			slog.String("expect_while_off", "no rows in pool_royalty_mints and none in "+
+				"lens_token_ledger, however many pooled hits are served — this is the reason, "+
+				"not a fault in the mint"),
+			slog.String("unaffected", "the consumer discount is wired independently, so pooled "+
+				"hits are still billed at list×(1−r)"))
+	}
 
 	// Stage-2.3a finalize sweeper: settles due held mints (held → spendable;
 	// supply counts here via the TypePoolRoyalty row FinalizeHeldTx writes).
