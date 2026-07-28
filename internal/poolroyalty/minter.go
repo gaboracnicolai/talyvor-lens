@@ -158,7 +158,33 @@ type Result struct {
 	CapReason     string // when Capped: "per_pair" | "per_entry" (which cap fired)
 	Amount        int64  // µLENS credited (s × avoided_COGS) when Minted (SEC-2)
 	RequestID     string // SEC-11: the server-derived claim key actually used (mintClaimKey); set on Minted and AlreadyMinted
+
+	// Refused names the gate that declined, "" when the mint proceeded.
+	//
+	// ⚠ WHY A REASON AND NOT ONLY A BOOLEAN. Every refusal below returns (Result{}, nil) —
+	// deliberately, because a declined royalty must never fail the serve it rode on. The cost was
+	// that a deployment with the flag ON, the gates open and pooled hits serving produced no row
+	// in pool_royalty_mints, no row in lens_token_ledger and NO LOG LINE, and there was no way to
+	// tell "nothing was due" from "something refused" without attaching a debugger. Nine distinct
+	// conditions all looked identical from outside.
+	//
+	// The caller logs this. It is a per-refusal line on a path that only runs for pooled hits, so
+	// it is bounded by pooled traffic rather than by all traffic.
+	Refused string
 }
+
+// The refusal reasons. Named constants rather than inline strings so a log line and a test can
+// agree on the spelling, and so grepping one finds the other.
+const (
+	RefusedDisabled      = "minting_disabled"       // LENS_POOL_ROYALTY_MINTING_ENABLED is false, or db/ledger unwired
+	RefusedSelfDeal      = "self_deal"              // contributor == requester: a workspace cannot earn from its own cache
+	RefusedNoParty       = "missing_workspace"      // contributor or requester empty — no party to pay or charge
+	RefusedNoEvidence    = "no_evidence_hashes"     // answer/prompt digests absent: an unadjudicable mint must not exist
+	RefusedValuation     = "non_positive_valuation" // the anchor valued this hit at <= 0 (or non-finite)
+	RefusedDust          = "sub_micro_lens"         // valuation floors to 0 µLENS — real, but smaller than the unit
+	RefusedOwnerLinked   = "owner_linkage"          // both workspaces share a captured card fingerprint (U6 wash guard)
+	RefusedAlreadyMinted = "already_minted"         // the server-derived claim key was already taken
+)
 
 // txBeginner matches *pgxpool.Pool.Begin (the povi/stakes.go seam) so tests
 // can inject pgxmock and a nil DB degrades to a no-op.
@@ -365,14 +391,23 @@ func (m *Minter) Share() float64 {
 // X-Talyvor-Request-ID (h.RequestID) is never consulted for the key.
 func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error) {
 	if m == nil || m.enabled == nil || !m.enabled() || m.db == nil || m.ledger == nil {
-		return Result{}, nil
+		return Result{Refused: RefusedDisabled}, nil
 	}
 	// SEC-11: the mint key is derived from the contributor + requester + served
 	// content, so the client X-Talyvor-Request-ID is NO LONGER required or
 	// consulted here — both workspaces must be present (they feed the key) and a
 	// self-serve is refused. Every direction is deflationary.
-	if h.ContributorWorkspace == "" || h.RequesterWorkspace == "" || h.ContributorWorkspace == h.RequesterWorkspace {
-		return Result{}, nil
+	if h.ContributorWorkspace == "" || h.RequesterWorkspace == "" {
+		return Result{Refused: RefusedNoParty}, nil
+	}
+	// ⚠ THE ONE THAT LOOKS LIKE A BROKEN MINT FROM THE OUTSIDE. The pool gate permits a workspace
+	// to read its OWN pooled entry (MaybeAllowPooledHit checks participation, a non-empty owner and
+	// the owner's poolability — never that the two DIFFER), and such a serve is recorded as
+	// serve_source = 'cache_hit_pooled' like any other. So a deployment can accumulate pooled
+	// hits, correctly mint nothing for them, and give an operator counting that column no way to
+	// see why. Refusing is right; being silent about it was not.
+	if h.ContributorWorkspace == h.RequesterWorkspace {
+		return Result{Refused: RefusedSelfDeal}, nil
 	}
 	// NO HASH -> NO MINT (Stage 2.3.0, the privacy-coherence gate): a serve
 	// whose evidence hashes could not be captured still serves and caches
@@ -381,14 +416,14 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	// are historical data this gate never scans. Deflationary direction,
 	// like every other defensive no-op here.
 	if h.AnswerSHA256 == "" || h.PromptSHA256 == "" {
-		return Result{}, nil
+		return Result{Refused: RefusedNoEvidence}, nil
 	}
 	valuation := m.anchor.Value(GainInput{AvoidedCOGSUSD: h.AvoidedCOGSUSD}) // default CostAnchor ⇒ share × avoided_COGS (Tier-2/3 float LENS)
 	// Non-finite amounts must NEVER reach the ledger: a NaN or ±Inf written
 	// to lens_token_balances poisons the balance permanently (every later
 	// bal+delta stays non-finite). amount <= 0 alone does NOT catch NaN.
 	if math.IsNaN(valuation) || math.IsInf(valuation, 0) || valuation <= 0 {
-		return Result{}, nil
+		return Result{Refused: RefusedValuation}, nil
 	}
 	// SEC-2 site #4 (mint valuation → conserved µLENS). The anchor's float LENS
 	// valuation is a MINT amount, so it rounds DOWN (FloatToMicroFloor) — a
@@ -396,7 +431,7 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	// other defensive no-op here). The dropped remainder is retained by the protocol.
 	amount := mining.FloatToMicroFloor(valuation) // µLENS
 	if amount <= 0 {
-		return Result{}, nil
+		return Result{Refused: RefusedDust}, nil
 	}
 
 	// SEC-11: derive the exactly-once claim key SERVER-SIDE. The value-then-claim
@@ -427,7 +462,7 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 			return Result{}, fmt.Errorf("poolroyalty: owner-linkage check: %w", err)
 		}
 		if linked {
-			return Result{}, nil
+			return Result{Refused: RefusedOwnerLinked}, nil
 		}
 	}
 
@@ -442,7 +477,7 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 		// This exact (contributor, requester, served content, window) was already
 		// claimed — the exactly-once suppression for a legitimate identical repeat.
 		// Nothing was written; the deferred rollback just ends the transaction.
-		return Result{AlreadyMinted: true, RequestID: claimKey}, nil
+		return Result{AlreadyMinted: true, RequestID: claimKey, Refused: RefusedAlreadyMinted}, nil
 	}
 
 	// #145: the requester workspace id is DELIBERATELY omitted from the
