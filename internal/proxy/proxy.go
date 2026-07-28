@@ -2315,6 +2315,28 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 		)
 		return
 	}
+	// ⚠ EVERY OTHER REFUSAL IS ALSO SAID OUT LOUD. The minter declines in nine places and returns
+	// (Result{}, nil) from all of them, because a refused royalty must never fail the serve it rode
+	// on. That was correct and completely opaque: a deployment with the flag ON, the gates open and
+	// pooled hits serving produced no claim row, no ledger row and no log line, so "nothing was due"
+	// and "something refused" were indistinguishable without a debugger.
+	//
+	// The most common reason is expected and benign — a workspace reading its OWN pooled entry is
+	// recorded as serve_source='cache_hit_pooled' and correctly earns nothing — which is exactly why
+	// counting that column is not a way to tell whether royalties should be appearing.
+	//
+	// INFO, not WARN: these are decisions, not faults, and the one that IS a fault (a mint error)
+	// already has its own Warn above. Bounded by pooled traffic, one line per refused pooled hit.
+	if res.Refused != "" && !res.Capped {
+		slog.Info("poolroyalty: mint refused — no royalty for this pooled hit",
+			slog.String("gate", res.Refused),
+			slog.String("request_id", hit.RequestID),
+			slog.String("contributor", hit.ContributorWorkspace),
+			slog.String("requester", hit.RequesterWorkspace),
+			slog.Float64("funded_usd", fundedUSD),
+		)
+		return
+	}
 	if res.Capped {
 		// 2.3b: serve-but-skip, same shape as the no-hash gate — the customer
 		// was served before the mint ran; the pair's window budget is spent.
