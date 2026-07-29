@@ -2328,13 +2328,25 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 	// INFO, not WARN: these are decisions, not faults, and the one that IS a fault (a mint error)
 	// already has its own Warn above. Bounded by pooled traffic, one line per refused pooled hit.
 	if res.Refused != "" && !res.Capped {
-		slog.Info("poolroyalty: mint refused — no royalty for this pooled hit",
+		attrs := []any{
 			slog.String("gate", res.Refused),
 			slog.String("request_id", hit.RequestID),
 			slog.String("contributor", hit.ContributorWorkspace),
 			slog.String("requester", hit.RequesterWorkspace),
 			slog.Float64("funded_usd", fundedUSD),
-		)
+		}
+		// ⚠ NAME THE SIGNAL, NOT JUST THE GATE. "owner_linkage" alone sent us looking for a defect
+		// in a guard that was working: two workspaces funded by the SAME CARD are one operator, and
+		// refusing a royalty between them is the wash-trade protection doing its job. Saying which
+		// signal matched turns an alarming refusal into a self-explaining one.
+		if res.LinkageSignal != "" {
+			attrs = append(attrs,
+				slog.String("linkage_signal", res.LinkageSignal),
+				slog.String("meaning", "these two workspaces are treated as ONE OPERATOR, so a "+
+					"royalty between them would be self-dealing. Expected when the same card funded "+
+					"both. For a royalty to mint here the two sides must be separately funded."))
+		}
+		slog.Info("poolroyalty: mint refused — no royalty for this pooled hit", attrs...)
 		return
 	}
 	if res.Capped {
