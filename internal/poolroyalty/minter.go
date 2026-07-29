@@ -159,6 +159,9 @@ type Result struct {
 	Amount        int64  // µLENS credited (s × avoided_COGS) when Minted (SEC-2)
 	RequestID     string // SEC-11: the server-derived claim key actually used (mintClaimKey); set on Minted and AlreadyMinted
 
+	// LinkageSignal names WHICH linkage matched, when Refused == RefusedOwnerLinked.
+	LinkageSignal string
+
 	// Refused names the gate that declined, "" when the mint proceeded.
 	//
 	// ⚠ WHY A REASON AND NOT ONLY A BOOLEAN. Every refusal below returns (Result{}, nil) —
@@ -184,6 +187,15 @@ const (
 	RefusedDust          = "sub_micro_lens"         // valuation floors to 0 µLENS — real, but smaller than the unit
 	RefusedOwnerLinked   = "owner_linkage"          // both workspaces share a captured card fingerprint (U6 wash guard)
 	RefusedAlreadyMinted = "already_minted"         // the server-derived claim key was already taken
+)
+
+// Which linkage signal matched, set on Result.LinkageSignal when Refused == RefusedOwnerLinked.
+// Named because the two mean very different things to whoever reads the log: a shared card is the
+// expected outcome of ONE PERSON funding two workspaces — their own doing, not a fault — while a
+// shared owner_key is an operator vouch someone entered deliberately.
+const (
+	SignalSharedCard     = "shared_card"        // the same physical card funded both (billing captured it)
+	SignalSharedOwnerKey = "declared_owner_key" // an operator-declared link (workspace_owner_links)
 )
 
 // txBeginner matches *pgxpool.Pool.Begin (the povi/stakes.go seam) so tests
@@ -237,13 +249,19 @@ ON CONFLICT (request_id) DO NOTHING`
 // loses (1-s)*C per cycle. That bound, not this join, is why per-identity workspaces are safe
 // to run. It degrades to break-even at s = 1.0, which is why config.go now refuses to boot
 // there.
+// ⚠ TWO BOOLEANS, NOT ONE OR'd TOGETHER. The predicate is unchanged — linked is still
+// (card OR owner_key) — but the caller can now say WHICH signal matched. A refusal reported only
+// as "owner_linkage" cost a full diagnostic round-trip on the live deployment: the operator could
+// not tell "you funded both workspaces with the same card", which is expected and their own doing,
+// from "something in the linkage data is wrong". The gate was right; it was unable to explain
+// itself, and an unexplained refusal on a money path reads as a defect.
 const sharedFingerprintSQL = `SELECT
     EXISTS (SELECT 1 FROM workspace_card_fingerprints a
             JOIN workspace_card_fingerprints b ON a.fingerprint_hash = b.fingerprint_hash
-            WHERE a.workspace_id = $1 AND b.workspace_id = $2)
- OR EXISTS (SELECT 1 FROM workspace_owner_links a
+            WHERE a.workspace_id = $1 AND b.workspace_id = $2) AS shared_card,
+    EXISTS (SELECT 1 FROM workspace_owner_links a
             JOIN workspace_owner_links b ON a.owner_key = b.owner_key
-            WHERE a.workspace_id = $1 AND b.workspace_id = $2)`
+            WHERE a.workspace_id = $1 AND b.workspace_id = $2) AS shared_owner_key`
 
 // capCountSQL is the 2.3b per-pair cap count, run INSIDE the mint tx AFTER
 // CreditTx. The ordering is the whole trick: every mint for a given
@@ -457,12 +475,17 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 	// there is no lock-ordering surface. A linked pair is a deflationary no-op,
 	// like the same-id self-serve guard above.
 	if m.linkageEnabled {
-		var linked bool
-		if err := tx.QueryRow(ctx, sharedFingerprintSQL, h.ContributorWorkspace, h.RequesterWorkspace).Scan(&linked); err != nil {
+		var sharedCard, sharedOwnerKey bool
+		if err := tx.QueryRow(ctx, sharedFingerprintSQL, h.ContributorWorkspace, h.RequesterWorkspace).
+			Scan(&sharedCard, &sharedOwnerKey); err != nil {
 			return Result{}, fmt.Errorf("poolroyalty: owner-linkage check: %w", err)
 		}
-		if linked {
-			return Result{Refused: RefusedOwnerLinked}, nil
+		if linked := sharedCard || sharedOwnerKey; linked {
+			signal := SignalSharedOwnerKey
+			if sharedCard {
+				signal = SignalSharedCard
+			}
+			return Result{Refused: RefusedOwnerLinked, LinkageSignal: signal}, nil
 		}
 	}
 
