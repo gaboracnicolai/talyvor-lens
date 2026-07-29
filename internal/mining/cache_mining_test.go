@@ -152,14 +152,16 @@ func TestGetBalance_ReturnsZeroForNew(t *testing.T) {
 
 func TestGetSnapshot_NewWorkspaceReturnsZeroSnapshot(t *testing.T) {
 	store, mock := newMockStore(t)
-	mock.ExpectQuery("SELECT workspace_id, balance, lifetime_earned").
+	// held_balance joined the select when the snapshot gained the third state — earned but not
+	// yet spendable. See held_snapshot_integration_test.go.
+	mock.ExpectQuery("SELECT workspace_id, balance, held_balance, lifetime_earned").
 		WithArgs("ws_snap").
 		WillReturnError(errNoRows())
 	snap, err := store.GetSnapshot(context.Background(), "ws_snap")
 	if err != nil {
 		t.Fatalf("GetSnapshot: %v", err)
 	}
-	if snap.WorkspaceID != "ws_snap" || snap.Balance != 0 {
+	if snap.WorkspaceID != "ws_snap" || snap.Balance != 0 || snap.HeldBalance != 0 {
 		t.Fatalf("expected zero snapshot, got %+v", snap)
 	}
 }
