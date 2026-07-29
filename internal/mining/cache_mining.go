@@ -63,8 +63,19 @@ type LedgerEntry struct {
 // BalanceSnapshot mirrors one row of lens_token_balances. Balances are integer
 // µLENS (SEC-2); JSON keys carry the explicit _ulens unit suffix.
 type BalanceSnapshot struct {
-	WorkspaceID    string    `json:"workspace_id"`
-	Balance        int64     `json:"balance_ulens"`
+	WorkspaceID string `json:"workspace_id"`
+	// Balance is SPENDABLE LENS. A held mint does not touch it.
+	Balance int64 `json:"balance_ulens"`
+	// HeldBalance is EARNED BUT NOT YET SPENDABLE — a pool royalty in its holdback window,
+	// settled to Balance by internal/poolroyalty's finalize sweeper once finalize_after passes
+	// (LENS_POOL_HOLDBACK_WINDOW, default 72h).
+	//
+	// ⚠ REPORTED SEPARATELY, NEVER FOLDED IN. The first real royalty minted 822 µLENS held while
+	// the screen showed a balance of 0 — correct, and unexplainable, because a caller reading only
+	// Balance cannot tell "earned nothing" from "earned 822 that has not settled". Adding it to
+	// Balance would be the opposite error: offering a number that cannot be spent, so a conversion
+	// refuses an amount the user was just shown. Three states, three numbers.
+	HeldBalance    int64     `json:"held_balance_ulens"`
 	LifetimeEarned int64     `json:"lifetime_earned_ulens"`
 	LifetimeSpent  int64     `json:"lifetime_spent_ulens"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -391,11 +402,11 @@ func (s *LedgerStore) GetSnapshot(ctx context.Context, workspaceID string) (Bala
 		return BalanceSnapshot{WorkspaceID: workspaceID}, nil
 	}
 	row := s.pool.QueryRow(ctx, `
-		SELECT workspace_id, balance, lifetime_earned, lifetime_spent, updated_at
+		SELECT workspace_id, balance, held_balance, lifetime_earned, lifetime_spent, updated_at
 		FROM lens_token_balances WHERE workspace_id = $1
 	`, workspaceID)
 	var s2 BalanceSnapshot
-	if err := row.Scan(&s2.WorkspaceID, &s2.Balance, &s2.LifetimeEarned, &s2.LifetimeSpent, &s2.UpdatedAt); err != nil {
+	if err := row.Scan(&s2.WorkspaceID, &s2.Balance, &s2.HeldBalance, &s2.LifetimeEarned, &s2.LifetimeSpent, &s2.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return BalanceSnapshot{WorkspaceID: workspaceID}, nil
 		}
