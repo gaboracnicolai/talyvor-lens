@@ -144,6 +144,19 @@ func main() {
 		}
 		return
 	}
+	// `rephrasecheck` is poolcheck's other half. poolcheck answers "is the threshold high enough
+	// that unrelated prompts never collide" — the safety ceiling. This answers "is it low enough
+	// that two people asking the same question in different words actually match" — the utility
+	// floor. The pool's promise to a consumer is a claim about REPHRASINGS, and a deployment that
+	// measures only the ceiling has measured whether the pool is SAFE, not whether it WORKS.
+	// Read-only: it prints numbers and writes nothing.
+	if len(os.Args) > 1 && os.Args[1] == "rephrasecheck" {
+		if err := runRephraseCheck(); err != nil {
+			slog.Error("rephrasecheck failed", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		if err := runMigrate(); err != nil {
 			slog.Error("migrate failed", slog.String("err", err.Error()))
