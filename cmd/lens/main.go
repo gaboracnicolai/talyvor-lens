@@ -157,6 +157,15 @@ func main() {
 		}
 		return
 	}
+	// engcheck measures the ENGINEERING corpora — rephrasings, entity-mismatch danger pairs, and
+	// the post-gate separation. Read-only.
+	if len(os.Args) > 1 && os.Args[1] == "engcheck" {
+		if err := runEngCheck(); err != nil {
+			slog.Error("engcheck failed", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		if err := runMigrate(); err != nil {
 			slog.Error("migrate failed", slog.String("err", err.Error()))

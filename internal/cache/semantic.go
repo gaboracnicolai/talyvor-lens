@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/discriminator"
 	"github.com/talyvor/lens/internal/metrics"
 )
 
@@ -136,6 +137,11 @@ WHERE provider = $2 AND model = $3
   AND embedding_model = $5
   AND updated_at > $4
   AND is_poolable = true
+  -- ⚠ THE ENTITY GATE. Similarity judges topic; this judges identity. Pydantic v1 and v2 score
+  -- 0.9579 — the vector distance cannot tell them apart and no threshold can. Equality here is
+  -- also what fails legacy rows closed: their discriminators are NULL, and NULL = $6 is NULL,
+  -- never TRUE, so a row whose prompt text no longer exists is never served.
+  AND discriminators = $6
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -166,8 +172,8 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
 // is_poolable=true (a literal). Its prompt_hash is keyed on a NUL-sentinel-
 // prefixed prompt (the caller's job), provably disjoint from any private hash.
 const semanticUpsertPooledSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model)
-VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''))
+  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), $8)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
@@ -176,6 +182,9 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
   -- The overwriting vector comes from THIS process's embedder, so the provenance must
   -- follow it. Leaving the old value would label a new-model vector with the old model.
   embedding_model = EXCLUDED.embedding_model,
+  -- Same reasoning for the entities: the row now answers the NEW prompt, so it must be
+  -- findable by that prompt's entities and not the previous one's.
+  discriminators = EXCLUDED.discriminators,
   updated_at = NOW()`
 
 // freshnessCutoff is the lower bound a row's updated_at must exceed to remain
@@ -254,6 +263,7 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 		ctx,
 		semanticUpsertPooledSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
+		string(discriminator.Canon(prompt)),
 	)
 	return err
 }
@@ -279,7 +289,8 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt s
 		contributor string
 		similarity  float64
 	)
-	err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel).
+	err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
+		string(discriminator.Canon(prompt))).
 		Scan(&id, &response, &contributor, &similarity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", "", 0, nil
