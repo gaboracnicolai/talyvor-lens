@@ -173,6 +173,15 @@ func main() {
 		}
 		return
 	}
+	// realdist measures the nearest-neighbour similarity of REAL stored prompts. Read-only; reads
+	// no prompt content (there is none stored).
+	if len(os.Args) > 1 && os.Args[1] == "realdist" {
+		if err := runRealDist(); err != nil {
+			slog.Error("realdist failed", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		if err := runMigrate(); err != nil {
 			slog.Error("migrate failed", slog.String("err", err.Error()))
