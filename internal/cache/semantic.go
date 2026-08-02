@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/discriminator"
+	"github.com/talyvor/lens/internal/doc2query"
 	"github.com/talyvor/lens/internal/metrics"
 )
 
@@ -131,7 +132,7 @@ LIMIT 1`
 // verify the contributor's live opt-in. The `updated_at > $4` serve window and
 // its cutoff are identical to the private path (see semanticSelectSQL). COALESCE
 // makes a missing contributor an empty string (→ the gate blocks it).
-const semanticSelectPooledSQL = `SELECT id, response, COALESCE(contributor_workspace_id, '') AS contributor, 1 - (embedding <=> $1) AS similarity
+const semanticSelectPooledSQL = `SELECT COALESCE(variant_of, id) AS entry_id, response, COALESCE(contributor_workspace_id, '') AS contributor, 1 - (embedding <=> $1) AS similarity
 FROM prompt_embeddings
 WHERE provider = $2 AND model = $3
   AND embedding_model = $5
@@ -267,6 +268,63 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 	)
 	return err
 }
+
+// SetPooledWithVariants writes a pooled answer plus doc2query match targets for it.
+//
+// ⚠ EVERY VARIANT ROW COPIES THE ORIGINAL PROMPT'S DISCRIMINATORS. It never canonicalises its own
+// text, and the one-line difference is the entire safety argument for this feature.
+//
+// A model asked to derive questions from a Pydantic v2 answer reliably produces version-less
+// phrasings — "how do I validate a field?" — because the version is context it already has. If
+// such a variant carried the entities of its OWN text it would be a match target with no version
+// constraint pointing at version-specific prose, and the first person to ask the unversioned
+// question would be served v2 content with a royalty paid on it. That is the hole migration 0112
+// closed, re-opened by the safest-looking line of code in the package.
+//
+// Inheriting confines doc2query to widening recall INSIDE an entity class, which is the only place
+// it is safe: it can find you a different phrasing of a Pydantic v2 question, and can never find
+// you a Pydantic v1 one.
+func (c *SemanticCache) SetPooledWithVariants(ctx context.Context, provider, model, prompt, contributorWsID string, response []byte, embedding []float32, variants []doc2query.Variant) error {
+	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + prompt))
+	hash := hex.EncodeToString(sum[:])
+
+	var originalID string
+	if err := c.pool.QueryRow(ctx, semanticUpsertPooledReturningSQL,
+		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
+		string(discriminator.Canon(prompt)),
+	).Scan(&originalID); err != nil {
+		return err
+	}
+
+	// Computed ONCE, from the original, and reused for every variant — so there is no code path
+	// on which a variant's own text can reach the discriminators column.
+	inherited := string(discriminator.Canon(prompt))
+	for _, v := range variants {
+		vsum := sha256.Sum256([]byte(provider + ":" + model + ":variant:" + v.Question))
+		if _, err := c.pool.Exec(ctx, semanticUpsertVariantSQL,
+			provider, model, hex.EncodeToString(vsum[:]), vectorLiteral(v.Embedding), string(response),
+			contributorWsID, c.embeddingModel, inherited, originalID,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const semanticUpsertPooledReturningSQL = semanticUpsertPooledSQL + `
+RETURNING id`
+
+const semanticUpsertVariantSQL = `INSERT INTO prompt_embeddings
+  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, variant_of)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), $8, $9)
+ON CONFLICT (prompt_hash) DO UPDATE SET
+  response = EXCLUDED.response,
+  embedding = EXCLUDED.embedding,
+  contributor_workspace_id = EXCLUDED.contributor_workspace_id,
+  embedding_model = EXCLUDED.embedding_model,
+  discriminators = EXCLUDED.discriminators,
+  variant_of = EXCLUDED.variant_of,
+  updated_at = NOW()`
 
 // GetPooled is the cross-tenant similarity lookup: it searches ONLY is_poolable
 // rows and returns the cached response, the contributing workspace, the matched
