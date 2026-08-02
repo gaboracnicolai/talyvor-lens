@@ -102,11 +102,11 @@ func expPrivateMiss(m pgxmock.PgxPoolIface) {
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
 }
 func expPooledMiss(m pgxmock.PgxPoolIface) {
-	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), semEmbedder).
+	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), semEmbedder, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}))
 }
 func expPooledHit(m pgxmock.PgxPoolIface, contributor string) {
-	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), semEmbedder).
+	m.ExpectQuery(`is_poolable = true`).WithArgs(pgxmock.AnyArg(), "openai", "gpt-4o", pgxmock.AnyArg(), semEmbedder, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 			AddRow("row-1", okResp, contributor, 0.99))
 	m.ExpectExec(`UPDATE prompt_embeddings`).WithArgs("row-1").WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -118,7 +118,7 @@ func expPrivateStore(m pgxmock.PgxPoolIface) {
 }
 func expPooledStore(m pgxmock.PgxPoolIface, contributor string) {
 	m.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), contributor, semEmbedder).
+		WithArgs("openai", "gpt-4o", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), contributor, semEmbedder, pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/talyvor/lens/internal/discriminator"
 	"testing"
 
 	"github.com/pashagolub/pgxmock/v4"
@@ -18,7 +19,10 @@ func TestSemanticCache_SetPooled_TagsContributor(t *testing.T) {
 	wantHash := hex.EncodeToString(sum[:])
 
 	mock.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "resp", "wsA", testEmbeddingModel).
+		// 8th arg: the entity discriminators of the stored prompt. A pooled row that does not
+		// carry them cannot be matched safely later, so the write is where they must appear.
+		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "resp", "wsA", testEmbeddingModel,
+			string(discriminator.Canon("pooledprompt"))).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := c.SetPooled(context.Background(), "openai", "gpt-4", "pooledprompt", "wsA", []byte("resp"), []float32{0.1, 0.2}); err != nil {
@@ -37,7 +41,9 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 
 	const id = "11111111-1111-1111-1111-111111111111"
 	mock.ExpectQuery(`is_poolable = true`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel).
+		// 6th arg: the ASKING prompt's discriminators — the entity gate. Equality against the
+		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 				AddRow(id, "pooled_payload", "wsA", 0.95),
@@ -68,7 +74,9 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 func TestSemanticCache_GetPooled_BelowThreshold(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1}}, 0.9)
 	mock.ExpectQuery(`is_poolable = true`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel).
+		// 6th arg: the ASKING prompt's discriminators — the entity gate. Equality against the
+		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 				AddRow("id1", "x", "wsA", 0.5),
@@ -87,7 +95,9 @@ func TestSemanticCache_GetPooled_BelowThreshold(t *testing.T) {
 func TestSemanticCache_GetPooled_EmptyContributor(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1}}, 0.9)
 	mock.ExpectQuery(`is_poolable = true`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel).
+		// 6th arg: the ASKING prompt's discriminators — the entity gate. Equality against the
+		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 				AddRow("id1", "x", "", 0.99),
