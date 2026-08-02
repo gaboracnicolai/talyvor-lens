@@ -412,3 +412,7 @@ func SeparationTable(rephrase, dangerous []PairScore) string {
 	}
 	return b.String()
 }
+
+// CosineOf exposes the package cosine so measurement commands compute similarity with the SAME
+// function the serve path uses, rather than a second implementation that could drift from it.
+func CosineOf(a, b []float32) (float64, error) { return cosine(a, b) }
