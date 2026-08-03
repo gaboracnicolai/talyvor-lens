@@ -121,12 +121,19 @@ func (l *Learner) Record(_ context.Context, event TokenEvent) error {
 	return nil
 }
 
+// ⚠ "UNCACHED" IS serve_source, NOT THE `cached` BOOLEAN. This filter used to read
+// `AND cached = false`, and because nothing has ever written that column it was TRUE for every
+// row — an inert predicate that filtered nothing. The consequence is not a crash but a wrong
+// recommendation: prompts ALREADY being served from cache were returned as pre-warming
+// candidates, and their hit_count inflates the estimated_monthly_savings_usd that
+// get_model_recommendations derives from it. Same column, same root cause, third surface — see
+// internal/catalog/writerless_column_guard_test.go, which is what found this one.
 const analyseSQL = `SELECT prompt_hash, COUNT(*) as hit_count,
        AVG(input_tokens + output_tokens) as avg_tokens,
        MAX(created_at) as last_seen
 FROM token_events
 WHERE created_at > NOW() - INTERVAL '7 days'
-  AND cached = false
+  AND serve_source NOT LIKE 'cache_hit%'
 GROUP BY prompt_hash
 HAVING COUNT(*) >= 3
 ORDER BY hit_count DESC

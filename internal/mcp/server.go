@@ -306,11 +306,25 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, id,
 
 // Tool 1: get_spend_summary -------------------------------------------------
 
+// ⚠ CACHE HITS ARE COUNTED FROM serve_source, NOT THE `cached` BOOLEAN — the same definition
+// internal/api/server.go uses, and deliberately worded the same way so a reader comparing the two
+// surfaces can see at a glance that they agree.
+//
+// `token_events.cached` is BOOLEAN NOT NULL DEFAULT false and NOTHING WRITES IT: neither
+// insertTokenEventSQL nor insertCacheServeSQL names the column, and no UPDATE touches it. So
+// `FILTER (WHERE cached)` matched zero rows on every deployment that has ever existed, and this
+// tool reported a hit rate of 0 as though it had measured one.
+//
+// That was already known. Migration 0100 added serve_source for exactly this reason and the REST
+// endpoint moved to it; these tools were not moved, so the defect survived in the surface nobody
+// re-checked — an assistant asking Lens what it saved got $0.00. The guard against a third
+// divergence is TestMCPAndRESTAgreeOnTheHitRateDefinition, which fails if either side is edited
+// alone.
 const spendSummarySQL = `SELECT COALESCE(SUM(cost_usd), 0),
   COALESCE(SUM(input_tokens), 0),
   COALESCE(SUM(output_tokens), 0),
   COUNT(*),
-  COUNT(*) FILTER (WHERE cached)
+  COUNT(*) FILTER (WHERE serve_source LIKE 'cache_hit%')
 FROM token_events
 WHERE workspace_id = $1
   AND created_at > NOW() - INTERVAL '1 day' * $2`
@@ -377,9 +391,14 @@ func (s *Server) toolGetSpendSummary(ctx context.Context, args json.RawMessage) 
 
 // Tool 2: get_cache_stats ---------------------------------------------------
 
+// Same correction as spendSummarySQL above. Note the second aggregate in particular: with `cached`
+// universally false, `FILTER (WHERE NOT cached)` selected EVERY row, so the savings estimate was
+// (total spend x 0) — zero by construction rather than by measurement. The complement of a
+// cache hit is "served by something other than the cache", which serve_source states directly.
+// serve_source is NOT NULL DEFAULT 'upstream' (migration 0100), so NOT LIKE has no NULL hole.
 const cacheStatsSQL = `SELECT COUNT(*),
-  COUNT(*) FILTER (WHERE cached),
-  COALESCE(SUM(cost_usd) FILTER (WHERE NOT cached), 0)
+  COUNT(*) FILTER (WHERE serve_source LIKE 'cache_hit%'),
+  COALESCE(SUM(cost_usd) FILTER (WHERE serve_source NOT LIKE 'cache_hit%'), 0)
 FROM token_events
 WHERE workspace_id = $1`
 
