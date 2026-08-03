@@ -746,6 +746,21 @@ type Config struct {
 	// env value), and main.go does not register the economy route surface — the
 	// deployment runs as pure fiat SaaS. NOT economy (untouched by this switch):
 	// LENS_HA_ENABLED, LENS_GUARDRAILS_ENABLED.
+	// BatchEnabled turns on the /v1/batch/* lane. DEFAULT FALSE, and deliberately so.
+	//
+	// ⚠ THE LANE BILLS NOTHING. /v1/batch/submit calls Anthropic directly and never enters
+	// serve(), so Talyvor pays the provider and the workspace is charged nothing:
+	// BatchRouter.SetSettleHook has no production caller, so the settle hook is nil in every
+	// running Lens. It is worse than unbilled — the route takes its workspace from a CLIENT
+	// HEADER (X-Talyvor-Workspace, defaulting to "default") without authorizing it, and
+	// /v1/batch/jobs returns every workspace's jobs unfiltered, prompts and responses included.
+	//
+	// Off is therefore the honest position and a reversible one: the routes are not registered,
+	// so the surface is absent rather than broken. Turning it on is a conscious act that should
+	// wait for a settle hook, a session-derived workspace, and a filtered list.
+	// Env: LENS_BATCH_ENABLED.
+	BatchEnabled bool
+
 	EconomyEnabled bool
 
 	// ShadowMintsEnabled puts the six UNPROVEN mints (POVI, annotation, eval-contribution,
@@ -1865,6 +1880,13 @@ func Load() (*Config, error) {
 	// so no mint/earn/pool/LXC path can fire. The route SURFACE is unregistered
 	// separately in main.go (registerEconomyRoutes). Adding a NEW economy gate?
 	// add it to this block AND to the manifest in cmd/lens/economy_killswitch_test.go.
+	// Default OFF — see the field comment. An unbilled lane that defaults on leaves every
+	// deployment exactly where it started.
+	c.BatchEnabled = false
+	if os.Getenv("LENS_BATCH_ENABLED") != "" {
+		c.BatchEnabled = parseBoolEnv("LENS_BATCH_ENABLED")
+	}
+
 	c.EconomyEnabled = true
 	if os.Getenv("LENS_ECONOMY_ENABLED") != "" {
 		c.EconomyEnabled = parseBoolEnv("LENS_ECONOMY_ENABLED")

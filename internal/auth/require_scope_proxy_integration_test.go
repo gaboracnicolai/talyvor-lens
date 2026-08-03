@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/talyvor/lens/internal/tenant"
 )
 
@@ -61,9 +63,30 @@ func TestProxyScope_RealCredentials_EndToEnd(t *testing.T) {
 	}
 	proxyKey := mkKey("ws_proxy", []string{ScopeProxy})
 	analyticsKey := mkKey("ws_analytics", []string{ScopeAnalytics})
-	// A real empty-scope key: an empty (non-nil) array, which is what the
-	// scopes column stores when a key is created with scopes:[]. len==0 ⇒ grandfathered.
-	emptyKey := mkKey("ws_empty", []string{})
+	// A real empty-scope key — INSERTED DIRECTLY, not minted.
+	//
+	// ⚠ IT CAN NO LONGER BE MINTED, and that is the point of the change this test now guards from
+	// the other side: tenant.ValidateScopes refuses an empty list, so no NEW scopeless key can be
+	// issued. What still exists in the wild is ROWS THAT PREDATE SCOPES, and RequireScope must keep
+	// grandfathering those or an upgrade breaks working keys. Writing the row directly is exactly
+	// that shape, and it keeps the grandfather covered instead of deleting the case along with the
+	// mint path.
+	emptyKey := func() string {
+		raw, prefix, err := tenant.GenerateKey()
+		if err != nil {
+			t.Fatalf("GenerateKey: %v", err)
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(raw), bcrypt.MinCost)
+		if err != nil {
+			t.Fatalf("bcrypt: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO workspace_api_keys (workspace_id, key_hash, key_prefix, name, scopes, created_at)
+			 VALUES ($1, $2, $3, $4, '{}', NOW())`, "ws_empty", string(hash), prefix, "legacy"); err != nil {
+			t.Fatalf("insert legacy scopeless key: %v", err)
+		}
+		return raw
+	}()
 
 	stub := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	hit := func(chain http.Handler, bearer string) int {
