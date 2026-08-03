@@ -511,6 +511,22 @@ func (s *Store) ListAPIKeys(ctx context.Context, workspaceID string) ([]Workspac
 // outside ValidScopes. Empty slice is OK (request-with-no-
 // permissions; the caller decides how to treat that).
 func ValidateScopes(scopes []string) error {
+	// ⚠ AN EMPTY LIST IS REFUSED AT ISSUANCE, and this is the whole fix for the scopeless key.
+	//
+	// auth.RequireScope deliberately grandfathers `len(Scopes) == 0` so keys that predate scopes
+	// keep working. That back-compat is correct and is NOT changed here — changing it would break
+	// existing rows on upgrade. What is wrong is that the grandfather, meant for history, was
+	// reachable by anyone minting a key today: `"scopes": []` produced a credential that satisfied
+	// every RequireScope in the system, including the proxy gate that spends the workspace's
+	// credit. So a restricted key could not actually be issued.
+	//
+	// Closing it here rather than at the check means old keys are untouched and no NEW unscoped key
+	// can be created. CreateAPIKey is the only non-test caller, so the blast radius is exactly key
+	// minting.
+	if len(scopes) == 0 {
+		return fmt.Errorf("%w: at least one scope is required (%s) — a key with no scopes would "+
+			"pass every scope check", ErrInvalidScope, "proxy, analytics, admin")
+	}
 	for _, s := range scopes {
 		if !ValidScopes[s] {
 			return fmt.Errorf("%w: %q", ErrInvalidScope, s)

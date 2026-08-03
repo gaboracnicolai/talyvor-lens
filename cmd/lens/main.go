@@ -1649,6 +1649,10 @@ func run() error {
 	// when off the routes are never mounted → chi-native 404 (#152). See
 	// economy_routes.go.
 	econ := econReg{on: cfg.EconomyEnabled}
+	// The unbilled batch lane — off unless consciously enabled. See batch_routes.go.
+	// false = no settle hook is wired anywhere in this binary (SetSettleHook has no production
+	// caller). The gate refuses to open on the flag alone — see newBatchReg.
+	batchGate := newBatchReg(cfg.BatchEnabled, false)
 	// OTel HTTP middleware runs FIRST so every route — authenticated or
 	// not — is traced and any incoming W3C traceparent header is extracted
 	// into the request context before downstream middleware sees it.
@@ -3907,7 +3911,7 @@ func run() error {
 
 		authed.Get("/v1/sessions", newSessionsListHandler(sessionTracker))
 
-		authed.Post("/v1/batch/submit", func(w http.ResponseWriter, req *http.Request) {
+		batchGate.post(authed, "/v1/batch/submit", func(w http.ResponseWriter, req *http.Request) {
 			body, err := io.ReadAll(req.Body)
 			if err != nil {
 				writeJSONErr(w, http.StatusBadRequest, "read body: "+err.Error())
@@ -3953,9 +3957,9 @@ func run() error {
 			})
 		})
 
-		authed.Get("/v1/batch/status/{requestID}", newBatchStatusHandler(batchRouter))
+		batchGate.get(authed, "/v1/batch/status/{requestID}", newBatchStatusHandler(batchRouter))
 
-		authed.Get("/v1/batch/jobs", func(w http.ResponseWriter, req *http.Request) {
+		batchGate.get(authed, "/v1/batch/jobs", func(w http.ResponseWriter, req *http.Request) {
 			// workspace_id filtering happens client-side for now — the
 			// in-memory list doesn't index by workspace.
 			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs())

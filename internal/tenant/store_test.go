@@ -67,7 +67,13 @@ func TestValidateScopes(t *testing.T) {
 	}{
 		{"valid_proxy", []string{"proxy"}, false},
 		{"valid_all", []string{"proxy", "analytics", "admin"}, false},
-		{"empty", []string{}, false},
+		// CHANGED DELIBERATELY: an empty list used to mint, and the resulting key passed every
+		// RequireScope check (auth grandfathers len(Scopes) == 0), including the proxy gate that
+		// spends the workspace's credit — so a restricted key could not be issued at all. The
+		// grandfather stays for rows that predate scopes; the MINT now refuses. See
+		// scopeless_key_test.go for the argument.
+		{"empty", []string{}, true},
+		{"nil", nil, true},
 		{"invalid_single", []string{"root"}, true},
 		{"invalid_mixed", []string{"proxy", "billing"}, true},
 	}
