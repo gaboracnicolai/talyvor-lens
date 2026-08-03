@@ -448,6 +448,13 @@ func run() error {
 	injectionDetector := injection.New(injection.DefaultPolicy())
 	budgetEnforcer := budget.New(pool, budget.BudgetPolicy{MaxOutputTokens: 4096})
 	batchRouter := batch.New(pool, cfg.AnthropicAPIKey)
+
+	// Workspace-scoped distill evidence (see the /distill/usage route). Reads token_events by
+	// workspace_id; nil pool leaves it unconfigured and the route answers 503 rather than 0.
+	var distillUsageStore api.DistillUsageStore
+	if pool != nil {
+		distillUsageStore = api.NewDistillUsageStore(pool)
+	}
 	go batchRouter.StartPoller(ctx)
 	sessionTracker := session.New(pool)
 	go sessionTracker.StartCleanup(ctx)
@@ -3808,6 +3815,38 @@ func run() error {
 				"ok":             true,
 				"distill_policy": ws.DistillPolicy,
 			})
+		})
+
+		// DISTILL EVIDENCE — a workspace-scoped COUNT of documents this workspace had converted.
+		//
+		// ⚠ DELIBERATELY NOT /v1/api/distill/summary: those counters are PROCESS-GLOBAL, so serving
+		// them to a customer would put other tenants' document counts on their screen. This reads
+		// token_events filtered by workspace_id — the scoping is in the WHERE clause, not in a
+		// caller's discipline. Same auth + #84 workspace-isolation middleware as the PUT above.
+		//
+		// A COUNT, never a saving: 'convert' rows carry the saving implicitly in their lower
+		// input_tokens, and the savings metric reads 0 for every format except HTML at the tier the
+		// request path uses — so there is no honest saving figure to render here.
+		authed.Get("/v1/workspaces/{wsID}/distill/usage", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			days := 30
+			if v := req.URL.Query().Get("days"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil {
+					days = n
+				}
+			}
+			usage, err := api.ReadDistillUsage(req.Context(), distillUsageStore, wsID, days, time.Now())
+			if errors.Is(err, api.ErrNoDistillUsageStore) {
+				// 503, never 200-with-zeroes: "nothing wired" and "converted nothing" are
+				// different answers and the screen must be able to tell them apart.
+				writeJSONErr(w, http.StatusServiceUnavailable, "distill usage reader not configured")
+				return
+			}
+			if err != nil {
+				writeJSONErr(w, http.StatusBadGateway, "could not read distill usage")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, usage)
 		})
 
 		// Phase-2 Stage 2.0 shared-cache governance gate (exact cache): per-tenant
