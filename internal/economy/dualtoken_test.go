@@ -324,6 +324,12 @@ func TestCreditLXC_MintsWithoutBurningLENS(t *testing.T) {
 	mock.ExpectExec(`UPDATE lxc_balances`).
 		WithArgs("ws_buy", 120*uLXC, 120*uLXC, int64(0)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// migration 0115: a PURCHASE adds cash backing. Read-then-write inside the same tx.
+	mock.ExpectQuery(`SELECT cash_backed_ulxc`).WithArgs("ws_buy").
+		WillReturnRows(pgxmock.NewRows([]string{"cash_backed_ulxc"}).AddRow(int64(0)))
+	mock.ExpectExec(`UPDATE lxc_balances SET cash_backed_ulxc`).
+		WithArgs("ws_buy", 100*uLXC).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
 	newBal, err := store.CreditLXC(context.Background(), "ws_buy", 100*uLXC, "stripe top-up",
@@ -432,6 +438,11 @@ func TestSpendLXC_DebitsBalance(t *testing.T) {
 	mock.ExpectExec(`UPDATE lxc_balances`).
 		WithArgs("ws_s", 75*uLXC/10, 10*uLXC, 25*uLXC/10).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// migration 0115: a spend consumes UNBACKED first. This workspace has balance 10 and NO cash
+	// backing, so the whole spend is unbacked and cash_backed stays 0 — no UPDATE is issued at all.
+	// That absence is the assertion: an unbacked spend must not touch the backing column.
+	mock.ExpectQuery(`SELECT cash_backed_ulxc`).WithArgs("ws_s").
+		WillReturnRows(pgxmock.NewRows([]string{"cash_backed_ulxc"}).AddRow(int64(0)))
 	mock.ExpectCommit()
 	if err := store.SpendLXC(context.Background(), "ws_s", 25*uLXC/10, "ai call"); err != nil {
 		t.Fatalf("SpendLXC: %v", err)

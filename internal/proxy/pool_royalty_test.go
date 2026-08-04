@@ -26,8 +26,12 @@ func (fundingSpender) SpendLXCForAgent(context.Context, string, string, string, 
 func (fundingSpender) ReserveLXCForAgent(context.Context, string, string, string, int64, economy.AgentDebitMeta) error {
 	return nil
 }
-func (fundingSpender) SettleLXCReservation(_ context.Context, _ string, finalLXC int64, _ economy.AgentDebitMeta) (int64, error) {
-	return finalLXC, nil // book the delivered charge → funds the royalty
+
+// This double funds the royalty FULLY: it reports the whole delivered charge as cash-backed, which
+// is what a purchase-funded workspace produces. The unbacked cases are covered against real Postgres
+// in unbacked_credit_royalty_realpg_test.go — a double cannot distinguish a funding source.
+func (fundingSpender) SettleLXCReservation(_ context.Context, _ string, finalLXC int64, _ economy.AgentDebitMeta) (int64, int64, error) {
+	return finalLXC, finalLXC, nil // charge, and all of it cash-backed → funds the royalty
 }
 func (fundingSpender) ReleaseLXCReservation(context.Context, string, string) error { return nil }
 

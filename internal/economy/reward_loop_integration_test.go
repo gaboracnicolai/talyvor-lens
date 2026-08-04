@@ -171,6 +171,8 @@ func rewardLoopSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
 		`CREATE TABLE lens_token_balances (
 			workspace_id    TEXT PRIMARY KEY,
 			balance         BIGINT NOT NULL DEFAULT 0,
+			-- migration 0115: hand-rolled schema, so a migration-added column must be added here too.
+			cash_backed_ulxc BIGINT NOT NULL DEFAULT 0,
 			held_balance    BIGINT NOT NULL DEFAULT 0,
 			locked_balance  BIGINT NOT NULL DEFAULT 0,
 			lifetime_earned BIGINT NOT NULL DEFAULT 0,
@@ -191,6 +193,9 @@ func rewardLoopSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
 		`CREATE TABLE lxc_balances (
 			workspace_id    TEXT PRIMARY KEY,
 			balance         BIGINT NOT NULL DEFAULT 0,
+			-- migration 0115: this fixture hand-rolls the schema, so a column added by a
+			-- migration has to be added here too or the real code cannot write it.
+			cash_backed_ulxc BIGINT NOT NULL DEFAULT 0,
 			lifetime_minted BIGINT NOT NULL DEFAULT 0,
 			lifetime_spent  BIGINT NOT NULL DEFAULT 0,
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()

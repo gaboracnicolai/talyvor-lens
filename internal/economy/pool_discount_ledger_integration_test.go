@@ -81,7 +81,7 @@ func TestPoolDiscount_LedgerRowCarriesListAndSaving(t *testing.T) {
 		t.Fatalf("reserve: %v", err)
 	}
 	// 30% off 920 = 644, the number the consumer should actually be billed.
-	settled, err := s.SettleLXCReservation(ctx, "res-pooled-1", 644, AgentDebitMeta{
+	settled, _, err := s.SettleLXCReservation(ctx, "res-pooled-1", 644, AgentDebitMeta{
 		ServedModel: "gpt-5.3", PoolListULXC: 920, PoolDiscountRate: 0.30,
 	})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestPoolDiscount_SavingIsDerivedFromWhatWasActuallyCharged(t *testing.T) {
 		AgentDebitMeta{RequestedModel: "gpt-5.3", RequestID: "req-pooled-2"}); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	settled, err := s.SettleLXCReservation(ctx, "res-pooled-2", 644, AgentDebitMeta{
+	settled, _, err := s.SettleLXCReservation(ctx, "res-pooled-2", 644, AgentDebitMeta{
 		ServedModel: "gpt-5.3", PoolListULXC: 920, PoolDiscountRate: 0.30,
 	})
 	if err != nil {
@@ -157,7 +157,7 @@ func TestPoolDiscount_OrdinaryChargeRowIsUntouched(t *testing.T) {
 		AgentDebitMeta{RequestedModel: "gpt-5.3", RequestID: "req-plain"}); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if _, err := s.SettleLXCReservation(ctx, "res-plain", 640, AgentDebitMeta{ServedModel: "gpt-5.3"}); err != nil {
+	if _, _, err := s.SettleLXCReservation(ctx, "res-plain", 640, AgentDebitMeta{ServedModel: "gpt-5.3"}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	_, meta := poolMeta(t, s, ws)

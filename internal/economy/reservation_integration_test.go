@@ -25,7 +25,7 @@ func reservationHarness(t *testing.T) *DualTokenStore {
 	}
 	t.Cleanup(pool.Close)
 	for _, ddl := range []string{
-		`CREATE TABLE IF NOT EXISTS lxc_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+		`CREATE TABLE IF NOT EXISTS lxc_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0, cash_backed_ulxc BIGINT NOT NULL DEFAULT 0, 
 			lifetime_minted BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE TABLE IF NOT EXISTS lxc_ledger (id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, amount BIGINT NOT NULL,
@@ -50,8 +50,8 @@ func reservationHarness(t *testing.T) *DualTokenStore {
 func resFund(t *testing.T, s *DualTokenStore, ws string, ulxc int64) {
 	t.Helper()
 	if _, err := s.pool.Exec(context.Background(),
-		`INSERT INTO lxc_balances (workspace_id, balance) VALUES ($1, $2)
-		 ON CONFLICT (workspace_id) DO UPDATE SET balance = EXCLUDED.balance`, ws, ulxc); err != nil {
+		`INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1, $2, $2)
+		 ON CONFLICT (workspace_id) DO UPDATE SET balance = EXCLUDED.balance, cash_backed_ulxc = EXCLUDED.cash_backed_ulxc`, ws, ulxc); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -132,7 +132,7 @@ func TestSettleBillsDeliveredRefundsRest(t *testing.T) {
 	ctx := context.Background()
 	resFund(t, s, "ws", 1_000_000)
 	_ = s.ReserveLXCForAgent(ctx, "agent", "ws", "res1", 300_000, AgentDebitMeta{RequestID: "rq1"})
-	if _, err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{RequestID: "rq1"}); err != nil {
+	if _, _, err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{RequestID: "rq1"}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	if b := resBalance(t, s, "ws"); b != 880_000 {
@@ -202,7 +202,7 @@ func TestExactlyOnce(t *testing.T) {
 		t.Fatalf("balance after 3x hold(same id) = %d, want 700000 (once)", b)
 	}
 	for i := 0; i < 3; i++ { // replay the settle
-		if _, err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{}); err != nil {
+		if _, _, err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{}); err != nil {
 			t.Fatalf("settle replay %d: %v", i, err)
 		}
 	}
