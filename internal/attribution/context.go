@@ -49,13 +49,16 @@ type GitContext struct {
 // call before tokens get counted. Populated by
 // ExtractFromRequest and handed to Store.Record.
 type AttributionContext struct {
-	WorkspaceID string     `json:"workspace_id"`
-	Feature     string     `json:"feature"`
-	IssueID     string     `json:"issue_id"`
-	Git         GitContext `json:"git"`
-	UserID      string     `json:"user_id"`
-	SessionID   string     `json:"session_id"`
-	Timestamp   time.Time  `json:"timestamp"`
+	WorkspaceID string `json:"workspace_id"`
+	Feature     string `json:"feature"`
+	IssueID     string `json:"issue_id"`
+	// RequestID ties this attribution to the spend row in token_events. Without it the issue is
+	// stored but unjoinable, which is exactly how per-issue attribution silently did nothing.
+	RequestID string     `json:"request_id"`
+	Git       GitContext `json:"git"`
+	UserID    string     `json:"user_id"`
+	SessionID string     `json:"session_id"`
+	Timestamp time.Time  `json:"timestamp"`
 }
 
 // Header length limits. Values beyond these are silently truncated before
@@ -159,13 +162,13 @@ func (s *Store) SetWriteLimiter(l *backpressure.Limiter) {
 
 const recordSQL = `
 INSERT INTO request_attribution (
-    workspace_id, feature, issue_id,
+    workspace_id, feature, issue_id, request_id,
     branch, pr_number, commit_sha, author, repo_name,
     user_id, session_id,
     input_tokens, output_tokens, cost_usd,
     model, provider, latency_ms
 ) VALUES (
-    $1, $2, $3,
+    $1, $2, $3, $17,
     $4, $5, $6, $7, $8,
     $9, $10,
     $11, $12, $13,
@@ -199,7 +202,7 @@ func (s *Store) Record(
 		attr.Git.Author, attr.Git.RepoName,
 		attr.UserID, attr.SessionID,
 		inputTokens, outputTokens, costUSD,
-		model, provider, latency.Milliseconds(),
+		model, provider, latency.Milliseconds(), attr.RequestID,
 	); err != nil {
 		return fmt.Errorf("attribution: insert request_attribution: %w", err)
 	}
