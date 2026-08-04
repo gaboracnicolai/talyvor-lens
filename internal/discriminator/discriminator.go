@@ -69,6 +69,26 @@ var (
 	// digits are not preceded by a word boundary.
 	reCode = regexp.MustCompile(`\b[A-Za-z]+[0-9]+[A-Za-z0-9]*\b`)
 
+	// STRUCTURAL — a number with its unit GLUED to it: 512mb, 30s, 400mg, 8080tcp.
+	//
+	// ⚠ THIS IS THE OTHER HALF OF reNum, AND WITHOUT IT reNum IS BLIND TO THE COMMONEST WAY
+	// ENGINEERS WRITE NUMBERS. reNum requires a word boundary AFTER the digits, and in "512mb"
+	// there is none — "2" and "m" are both word characters — so the number was discarded
+	// ENTIRELY. "How do I set the JVM heap to 512mb?" and "…2048mb?" extracted identical
+	// discriminators and pooled, at the same similarity as pydantic v1/v2. reCode does not cover
+	// it either: it requires letters BEFORE the digits (E0382, sha256sum), not after.
+	//
+	// ⚠ IT EMITS THE SAME "num" TOKEN AS THE SPACED FORM, deliberately. "512mb" and "512 mb" are
+	// the same question, and before this they extracted different discriminators — so a genuine
+	// rephrasing between the two spellings was REFUSED for a spurious reason. Normalising to one
+	// token fixes the false-allow and the false-refuse together; a separate "numunit" token would
+	// have fixed only the first and made the second permanent.
+	//
+	// The leading class is what protects letter-led compounds: "sha256sum" and "utf8mb4" have
+	// digits preceded by letters, so they stay whole and keep going to reCode. Only a number that
+	// STARTS a token is treated as a quantity with a unit.
+	reNumUnit = regexp.MustCompile(`(?:^|[^A-Za-z0-9._-])(\d+(?:\.\d+)*)[A-Za-z]{1,5}\b`)
+
 	// STRUCTURAL — SCREAMING_CASE constants and acronyms: SIGTERM, SIGKILL, ECONNREFUSED, CPU.
 	// Signal names and error constants are entities; two of them are two questions.
 	reCaps = regexp.MustCompile(`\b[A-Z]{2,}(?:_[A-Z0-9]+)*\b`)
@@ -199,6 +219,9 @@ func Extract(prompt string) []Token {
 		}
 	}
 	for _, m := range reNum.FindAllStringSubmatch(prompt, -1) {
+		add("num", m[1], TierStructural)
+	}
+	for _, m := range reNumUnit.FindAllStringSubmatch(prompt, -1) {
 		add("num", m[1], TierStructural)
 	}
 	for _, m := range reCode.FindAllString(prompt, -1) {

@@ -22,6 +22,12 @@ package poolsafety
 // real case — one person asks the concept, the next pastes the failure.
 func EngineeringRephrasePairs() []RephrasePair {
 	return []RephrasePair{
+		// ⚠ THE FALSE-REFUSE HALF of the glued-unit fix. These are the SAME question spelled two
+		// ways; before the normalisation they extracted different discriminators and the pool
+		// refused a genuine rephrasing. A fix that only stopped the false-allow would make this
+		// permanent, so it is measured here.
+		{"heap-spacing", "How do I set the JVM heap to 512mb?", "How do I set the JVM heap to 512 mb?"},
+		{"timeout-spacing", "Why does my request time out after 30s?", "Why does my request time out after 30 s?"},
 		{"git-revert-last", "How do I revert the last commit in git?", "Undo my most recent git commit"},
 		{"node-econnrefused", "What does ECONNREFUSED mean in Node?", "Node keeps throwing connection refused, what is causing it"},
 		{"css-center", "How do I center a div?", "Best way to horizontally and vertically center an element in CSS"},
@@ -73,6 +79,15 @@ func EngineeringDangerPairs() []RephrasePair {
 		{"tailwind-v3-v4", "How do I configure Tailwind CSS v3?", "How do I configure Tailwind CSS v4?"},
 		{"vue-2-3", "How do I define a component in Vue 2?", "How do I define a component in Vue 3?"},
 		{"django-3-5", "How do I write a migration in Django 3?", "How do I write a migration in Django 5?"},
+
+		// ⚠ GLUED UNITS — the class the corpus itself was blind to, which is why the code's blind
+		// spot survived. reNum required a word boundary AFTER the digits, so "512mb" extracted NO
+		// number and these pooled at the same similarity as pydantic v1/v2. Nothing in either
+		// corpus had a unit glued to a number, so the measurement kept reporting a clean gate.
+		{"jvm-heap-mb", "How do I set the JVM heap to 512mb?", "How do I set the JVM heap to 2048mb?"},
+		{"timeout-seconds", "Why does my request time out after 30s?", "Why does my request time out after 60s?"},
+		{"upload-limit-mb", "How do I raise the upload limit to 8mb?", "How do I raise the upload limit to 64mb?"},
+		{"cache-ttl-ms", "Should the cache TTL be 500ms?", "Should the cache TTL be 5000ms?"},
 
 		// Same error, different cause.
 		{"econnrefused-target", "Why do I get ECONNREFUSED connecting to Postgres?", "Why do I get ECONNREFUSED connecting to Redis?"},

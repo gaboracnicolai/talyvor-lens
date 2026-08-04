@@ -194,3 +194,76 @@ func TestGetPooled_LegacyRowWithoutDiscriminatorsIsNotServed(t *testing.T) {
 			"of an unverifiable row is that it does not match.", string(resp))
 	}
 }
+
+// THE GLUED-UNIT BLIND SPOT — measured on the real serve path, not on Match().
+//
+// reNum required a word boundary AFTER the digits (`\b[vV]?(\d+(?:\.\d+)*)\b`), so a unit glued to
+// the number swallowed it whole: "512mb" extracted NO number at all, while "512 mb" extracted
+// num:512. The gate built to catch numeric mismatches was blind to the most common way engineers
+// write them, and these pairs sit at the same similarity as pydantic v1/v2 — above the threshold,
+// so nothing in the similarity path can refuse them either.
+//
+// ⚠ IT IS A FALSE-ALLOW **AND** A FALSE-REFUSE. The same question written "512mb" and "512 mb"
+// extracted DIFFERENT discriminators, so a genuine rephrasing between the two forms was refused for
+// a spurious reason. The fix normalises both forms to the same token, which is why the second test
+// below is not optional.
+func TestGetPooled_RefusesGluedUnitMismatch(t *testing.T) {
+	pool := discrimPool(t)
+	ctx := context.Background()
+	c := NewSemanticCache(pool, constEmbedder{}, 0.92, 24*time.Hour)
+
+	for _, tc := range []struct{ name, stored, asked string }{
+		{"jvm-heap", "How do I set the JVM heap to 512mb?", "How do I set the JVM heap to 2048mb?"},
+		{"timeout", "Why does my request time out after 30s?", "Why does my request time out after 60s?"},
+		{"dose", "Can I take 400mg of ibuprofen?", "Can I take 800mg of ibuprofen?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vec, _ := constEmbedder{}.Embed(ctx, tc.stored)
+			if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", tc.stored, "ws-contributor",
+				[]byte("stored answer"), vec); err != nil {
+				t.Fatalf("SetPooled: %v", err)
+			}
+			resp, contributor, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", tc.asked)
+			if err != nil {
+				t.Fatalf("GetPooled: %v", err)
+			}
+			if resp != nil {
+				t.Errorf("pool served %q in answer to %q (similarity %.4f, contributor %q, body %q).\n"+
+					"The numbers differ and the unit is glued to them, so reNum's trailing \\b "+
+					"discarded the number entirely and the discriminators compared equal. Served "+
+					"cross-tenant on a paid path, and credited as a royalty to someone who answered "+
+					"a different question.", tc.stored, tc.asked, sim, contributor, string(resp))
+			}
+		})
+	}
+}
+
+// ⚠ THE SPACING POSITIVE CONTROL — the false-REFUSE half.
+//
+// "512mb" and "512 mb" are the same question. Before the fix they extracted different
+// discriminators and the pool refused a genuine rephrasing; after it they must normalise to the
+// same token and still pool. Without this test the fix could "pass" by making every glued number
+// its own opaque token, which trades a false-allow for a false-refuse.
+func TestGetPooled_GluedAndSpacedUnitsAreTheSameQuestion(t *testing.T) {
+	pool := discrimPool(t)
+	ctx := context.Background()
+	c := NewSemanticCache(pool, constEmbedder{}, 0.92, 24*time.Hour)
+
+	stored := "How do I set the JVM heap to 512mb?"
+	asked := "How do I set the JVM heap to 512 mb?"
+
+	vec, _ := constEmbedder{}.Embed(ctx, stored)
+	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, "ws-contributor",
+		[]byte("-Xmx512m"), vec); err != nil {
+		t.Fatalf("SetPooled: %v", err)
+	}
+	resp, _, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked)
+	if err != nil {
+		t.Fatalf("GetPooled: %v", err)
+	}
+	if resp == nil {
+		t.Errorf("the pool REFUSED a genuine rephrasing (similarity %.4f): %q vs %q differ only in "+
+			"whether the unit is glued to the number, and must normalise to the same discriminator",
+			sim, stored, asked)
+	}
+}
