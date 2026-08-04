@@ -176,7 +176,7 @@ func TestGetCirculatingSupply_TotalMinusBurned(t *testing.T) {
 		WithArgs(mining.CountedSupplyTypes()). // one array arg: type = ANY($1)
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(100 * uLENS))
 	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(-amount\\), 0\\) FROM lens_token_ledger WHERE type").
-		WithArgs(mining.TypeBurn, mining.TypeStakeSlash).
+		WithArgs(mining.BurnedSupplyTypes()).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(15 * uLENS))
 	got, err := ledger.GetCirculatingSupply(context.Background())
 	if err != nil {

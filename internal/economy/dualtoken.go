@@ -67,8 +67,12 @@ const (
 	// LXCTypePurchase so an auditor summing revenue (type='purchase') never counts a
 	// comp as a sale, and a comp is always self-identifying in the ledger. Not a LENS
 	// mint type (mint_gate.mintTypeList is the lens_token_ledger; this is lxc_ledger).
-	LXCTypeGrant         = "admin_grant"
-	LENSTypeConvertToLXC = "convert_to_lxc"
+	LXCTypeGrant = "admin_grant"
+	// LENSTypeConvertToLXC is the writer-side name for the conversion debit. The canonical
+	// constant lives in internal/mining beside the supply predicates that classify it as a
+	// BURN (burnedSupplyTypeList) — aliasing rather than re-declaring keeps the string that
+	// the ledger writes and the string that supply subtracts provably identical.
+	LENSTypeConvertToLXC = mining.TypeConvertToLXC
 )
 
 // ─── errors ──────────────────────────────────────

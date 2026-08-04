@@ -45,7 +45,7 @@ func expectSupply(mock pgxmock.PgxPoolIface, totalMinted, burned int64) {
 		WithArgs(miningTypeArgs()...).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(totalMinted))
 	mock.ExpectQuery(`SELECT COALESCE\(SUM\(-amount\), 0\) FROM lens_token_ledger WHERE type`).
-		WithArgs(mining.TypeBurn, mining.TypeStakeSlash).
+		WithArgs(mining.BurnedSupplyTypes()).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(burned))
 }
 
