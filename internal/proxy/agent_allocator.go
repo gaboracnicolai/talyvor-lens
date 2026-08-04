@@ -34,7 +34,10 @@ type agentSpender interface {
 	// Reservation lifecycle (billing redesign) — satisfied by *economy.DualTokenStore. Settle returns the
 	// µLXC ACTUALLY charged (clamped to the hold) so the caller can fund a royalty on the real payment.
 	ReserveLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, reservationID string, heldLXC int64, meta economy.AgentDebitMeta) error
-	SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta economy.AgentDebitMeta) (int64, error)
+	// Returns the settled charge AND the CASH-BACKED portion of it. Two figures because they answer
+	// different questions: the charge is what the customer paid, the cash-backed portion is what may
+	// fund a royalty. Collapsing them would either under-bill the customer or over-mint the pool.
+	SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta economy.AgentDebitMeta) (settled, cashBacked int64, err error)
 	ReleaseLXCReservation(ctx context.Context, reservationID, reason string) error
 }
 
@@ -213,7 +216,7 @@ func (p *Proxy) settleReservationBasis(ctx context.Context, deliveredUSD float64
 	if deliveredUSD > 0 {
 		finalLXC = int64(math.Ceil(deliveredUSD / economy.LXCUSDValue * 1e6))
 	}
-	settledLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC,
+	settledLXC, _, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC,
 		economy.AgentDebitMeta{ServedModel: servedModel, PriceBasis: priceBasis})
 	if err != nil {
 		// Logged-and-swallowed — the response is already served. A failed settle leaves the hold, which the
@@ -242,7 +245,7 @@ func (p *Proxy) settleReservationPooled(ctx context.Context, chargedUSD float64,
 	if !ok || p.agentSpender == nil {
 		return 0 // no reservation ⇒ the consumer was charged nothing (plain key / path off)
 	}
-	settledLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, price.ChargedULXC,
+	settledLXC, cashBackedLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, price.ChargedULXC,
 		economy.AgentDebitMeta{ServedModel: price.modelForRow, PriceBasis: price.PriceBasis,
 			PoolListULXC: price.ListULXC, PoolDiscountRate: price.Rate})
 	if err != nil {
@@ -250,7 +253,20 @@ func (p *Proxy) settleReservationPooled(ctx context.Context, chargedUSD float64,
 			slog.String("reservation", h.reservationID), slog.String("err", err.Error()))
 		return 0
 	}
-	return float64(settledLXC) * economy.LXCUSDValue / 1e6 // the USD the consumer ACTUALLY paid
+	// ⚠ THIS RETURNS THE CASH-BACKED PORTION, NOT THE CHARGE. The customer is still billed the full
+	// settledLXC — that is untouched and lives on the ledger row. What changes is the ROYALTY BASIS:
+	// only the part of this spend that real money paid for may mint LENS. Credit that arrived by
+	// admin grant or by converting earnings funds no royalty, because no cash entered the system.
+	//
+	// The two figures are returned separately rather than collapsed because they answer different
+	// questions, and settleReservationBasis's charge return is read by recordDistillServes —
+	// repurposing it there would have silently corrupted distill attribution.
+	if settledLXC > 0 && cashBackedLXC < settledLXC {
+		slog.Info("poolroyalty: royalty basis reduced to the cash-backed portion of this spend",
+			slog.Int64("settled_ulxc", settledLXC), slog.Int64("cash_backed_ulxc", cashBackedLXC),
+			slog.String("reservation", h.reservationID))
+	}
+	return float64(cashBackedLXC) * economy.LXCUSDValue / 1e6
 }
 
 // releaseReservation REFUNDS the held reservation in full (if any) — an own-cache hit (no upstream call, no

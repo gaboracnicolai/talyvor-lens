@@ -511,6 +511,62 @@ func (s *Service) handleRefund(w http.ResponseWriter, ctx context.Context, event
 		s.fail(w, "refund mark", event.ID, err)
 		return
 	}
+
+	// ⚠ REMOVE THE CASH BACKING THIS REFUND TOOK BACK OUT OF THE SYSTEM.
+	//
+	// Lens does NOT claw back the credit on a refund — the workspace keeps the spendable LXC and
+	// only the purchase row is marked. That is a deliberate decision, but it means the money behind
+	// that credit is gone while the credit remains, and without this the workspace keeps PHANTOM
+	// BACKING that mints a royalty on every future settle: a purchase-then-refund would fund
+	// royalties forever with money that was returned.
+	//
+	// Scoped to the rows this payment intent actually credited, so a refund can never remove more
+	// backing than that purchase added. ReduceCashBackedForRefund clamps at zero, which is the
+	// correct reading when the backing was already spent: there is nothing left to take back, and
+	// the mints that already happened are not clawed back here (there is no clawback path).
+	//
+	// Same transaction as the tombstone and the purchase mark, so a crash cannot leave the refund
+	// recorded with the backing intact.
+	rows, err := tx.Query(ctx,
+		`SELECT workspace_id, lxc_amount FROM lxc_purchases
+		  WHERE stripe_payment_intent = $1 AND lxc_amount > 0`, pi)
+	if err != nil {
+		s.fail(w, "refund backing read", event.ID, err)
+		return
+	}
+	type backing struct {
+		ws     string
+		amount int64
+	}
+	var toReduce []backing
+	for rows.Next() {
+		var b backing
+		if err := rows.Scan(&b.ws, &b.amount); err != nil {
+			rows.Close()
+			s.fail(w, "refund backing scan", event.ID, err)
+			return
+		}
+		toReduce = append(toReduce, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		s.fail(w, "refund backing rows", event.ID, err)
+		return
+	}
+	for _, b := range toReduce {
+		// A PARTIAL refund removes the refunded FRACTION of that purchase's backing; a full refund
+		// removes all of it. Reading the fraction off the amounts rather than assuming full keeps a
+		// $1 refund on a $50 purchase from deleting $50 of backing.
+		reduce := b.amount
+		if !fully && ch.Amount > 0 && ch.AmountRefunded < ch.Amount {
+			reduce = b.amount * ch.AmountRefunded / ch.Amount
+		}
+		if err := economy.ReduceCashBackedForRefund(ctx, tx, b.ws, reduce); err != nil {
+			s.fail(w, "refund backing reduce", event.ID, err)
+			return
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		s.fail(w, "refund commit", event.ID, err)
 		return

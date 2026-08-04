@@ -334,20 +334,20 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 // action — a cross-tenant royalty mint — to what the consumer REALLY paid. The idempotent no-op and every
 // error path return 0 (this call charged nothing new): a royalty funded on a 0 return mints nothing, which
 // is the deflationary-safe direction.
-func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) (settledULXC int64, err error) {
+func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) (settledULXC, cashBackedULXC int64, err error) {
 	if reservationID == "" {
-		return 0, errors.New("economy: settle requires reservation_id")
+		return 0, 0, errors.New("economy: settle requires reservation_id")
 	}
 	if finalLXC < 0 {
 		finalLXC = 0
 	}
 	if s == nil || s.pool == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("economy: begin settle: %w", err)
+		return 0, 0, fmt.Errorf("economy: begin settle: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -360,13 +360,15 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		   FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
 		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status, &reqModel, &reqID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("economy: settle unknown reservation %q", reservationID)
+		return 0, 0, fmt.Errorf("economy: settle unknown reservation %q", reservationID)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("economy: read reservation: %w", err)
+		return 0, 0, fmt.Errorf("economy: read reservation: %w", err)
 	}
 	if status != "held" {
-		return 0, nil // already settled or released — idempotent no-op (charged nothing new)
+		// ⚠ IDEMPOTENT NO-OP, and it is what makes a double settle unable to double-decrement
+		// cash-backed: the second call returns before consumeCashBacked is ever reached.
+		return 0, 0, nil
 	}
 	if finalLXC > heldLXC {
 		finalLXC = heldLXC // never bill above the conservative hold
@@ -377,13 +379,13 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 	// balance move = +refund. Both are INSERTs — 0055-safe. lifetime_spent nets to +final (was +held at hold).
 	bal, minted, wsSpent, err := readLXCBalance(ctx, tx, workspaceID)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	afterRelease := bal + heldLXC
 	// The release (undo the hold) is a refund — nothing served, so requested_model + request_id only.
 	if err := insertLXCLedger(ctx, tx, workspaceID, heldLXC, afterRelease, LXCTypeReservationRelease, "reservation settle: release hold",
 		AgentDebitMeta{RequestedModel: reqModel, RequestID: reqID}.toMap()); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	afterSpend := afterRelease - finalLXC
 	if finalLXC > 0 {
@@ -393,26 +395,39 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 			AgentDebitMeta{RequestedModel: reqModel, ServedModel: meta.ServedModel, RequestID: reqID,
 				PriceBasis: meta.PriceBasis, PoolListULXC: meta.PoolListULXC,
 				PoolDiscountRate: meta.PoolDiscountRate}.toSpendMap(finalLXC)); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, afterSpend, minted, wsSpent-refund); err != nil {
-		return 0, err
+		return 0, 0, err
+	}
+	// ⚠ CASH-BACKED CONSUMPTION, AGAINST afterRelease — NOT against the held-down balance. The hold
+	// debited `balance` without touching cash_backed, so mid-hold `balance - cash_backed` is
+	// negative and a naive subtraction is nonsense. afterRelease is the balance with the hold undone,
+	// which is the figure this spend actually draws from.
+	//
+	// ⚠ HERE AND NOT AT THE HOLD: a hold is provisional and may be released in full. Only a settled
+	// spend consumes. ReleaseLXCReservation writes no spend row and does not call this, so a
+	// hold-then-release cannot decrement backing, and the `status != "held"` guard above makes a
+	// second settle a no-op — neither can double-decrement.
+	cashSpent, err := consumeCashBacked(ctx, tx, workspaceID, afterRelease, finalLXC)
+	if err != nil {
+		return 0, 0, err
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE agent_lxc_subbudgets SET spent_lxc = spent_lxc - $2, updated_at = now() WHERE scoped_key_id = $1`,
 		scopedKeyID, refund); err != nil {
-		return 0, fmt.Errorf("economy: reclaim spent (settle): %w", err)
+		return 0, 0, fmt.Errorf("economy: reclaim spent (settle): %w", err)
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE lxc_reservations SET status = 'settled', settled_ulxc = $2, resolved_at = now() WHERE reservation_id = $1`,
 		reservationID, finalLXC); err != nil {
-		return 0, fmt.Errorf("economy: mark settled: %w", err)
+		return 0, 0, fmt.Errorf("economy: mark settled: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("economy: commit settle: %w", err)
+		return 0, 0, fmt.Errorf("economy: commit settle: %w", err)
 	}
-	return finalLXC, nil
+	return finalLXC, cashSpent, nil
 }
 
 // ReleaseLXCReservation refunds a held reservation IN FULL (final charge 0): a self-cache hit (no upstream

@@ -29,7 +29,7 @@ func seamProxy(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.Pool) {
 	}
 	t.Cleanup(pool.Close)
 	for _, ddl := range []string{
-		`CREATE TABLE IF NOT EXISTS lxc_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+		`CREATE TABLE IF NOT EXISTS lxc_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0, cash_backed_ulxc BIGINT NOT NULL DEFAULT 0, 
 			lifetime_minted BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE TABLE IF NOT EXISTS lxc_ledger (id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, amount BIGINT NOT NULL,
 			balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
@@ -52,11 +52,16 @@ func seamProxy(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.Pool) {
 	return p, store, pool
 }
 
+// ⚠ FUNDS AS A PAYING CUSTOMER. Writing `balance` alone is UNBACKED credit under migration 0115
+// (no purchase ever happened), and unbacked credit funds no royalty — so these tests would be
+// asserting the new refusal rather than the behaviour they exist to check. A cash-funded
+// workspace is what they mean, so the fixture says so.
 func seamFund(t *testing.T, pool *pgxpool.Pool, ws string, ulxc int64) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO lxc_balances (workspace_id, balance) VALUES ($1,$2)
-		 ON CONFLICT (workspace_id) DO UPDATE SET balance = EXCLUDED.balance`, ws, ulxc); err != nil {
+		`INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1,$2,$2)
+		 ON CONFLICT (workspace_id) DO UPDATE SET balance = EXCLUDED.balance,
+		     cash_backed_ulxc = EXCLUDED.cash_backed_ulxc`, ws, ulxc); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -28,6 +28,9 @@ func agentHarness(t *testing.T) *DualTokenStore {
 		// SEC-2: LXC columns are BIGINT µLXC.
 		`CREATE TABLE IF NOT EXISTS lxc_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
 			lifetime_minted BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0,
+			-- migration 0115: the cash-backed portion of the balance. These fixtures hand-roll the
+			-- schema instead of migrating, so a column added by a migration has to be added here too.
+			cash_backed_ulxc BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE TABLE IF NOT EXISTS lxc_ledger (id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, amount BIGINT NOT NULL,
 			balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',

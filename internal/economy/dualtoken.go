@@ -447,6 +447,12 @@ func (s *DualTokenStore) SpendLXC(ctx context.Context, workspaceID string, lxcAm
 	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, spent+lxcAmount); err != nil {
 		return err
 	}
+	// A direct spend consumes backing exactly as a settled reservation does. Without this the
+	// invariant cash_backed <= balance breaks and a LATER settle mints against backing this spend
+	// already used. `bal` is the pre-spend balance and carries no hold on this path.
+	if _, err := consumeCashBacked(ctx, tx, workspaceID, bal, lxcAmount); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -487,6 +493,14 @@ func (s *DualTokenStore) creditLXCTxTyped(ctx context.Context, tx pgx.Tx, worksp
 	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted+lxcAmount, spent); err != nil {
 		return 0, err
+	}
+	// ⚠ ONLY A REAL PURCHASE ADDS BACKING. creditLXCTxTyped serves BOTH purchase and admin_grant —
+	// they differ only in the ledger type — so the type is the ONE thing that decides here. A grant
+	// credits spendable LXC and adds no cash to the system.
+	if ledgerType == LXCTypePurchase {
+		if err := addCashBacked(ctx, tx, workspaceID, lxcAmount); err != nil {
+			return 0, err
+		}
 	}
 	return newBal, nil
 }

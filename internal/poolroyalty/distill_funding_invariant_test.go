@@ -52,6 +52,9 @@ func distillFundingHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore, *e
 		`DROP TABLE IF EXISTS lxc_reservations`,
 		// consumer (LXC) side
 		`CREATE TABLE lxc_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0,
+			-- migration 0115: this fixture DROPs and re-CREATEs the table, so a column added by a
+			-- migration has to be added here too or the real code cannot write it.
+			cash_backed_ulxc BIGINT NOT NULL DEFAULT 0,
 			lifetime_minted BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE TABLE lxc_ledger (id BIGSERIAL PRIMARY KEY, workspace_id TEXT NOT NULL, amount BIGINT NOT NULL,
 			balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
@@ -92,7 +95,7 @@ func distillFundingHarness(t *testing.T) (*pgxpool.Pool, *mining.LedgerStore, *e
 func chargeConsumerLXC(t *testing.T, store *economy.DualTokenStore, pool *pgxpool.Pool, consumer string, chargeUSD float64) float64 {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `INSERT INTO lxc_balances (workspace_id, balance) VALUES ($1, 1000000000)
+	if _, err := pool.Exec(ctx, `INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1, 1000000000, 1000000000)
 		ON CONFLICT (workspace_id) DO UPDATE SET balance = 1000000000`, consumer); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +105,7 @@ func chargeConsumerLXC(t *testing.T, store *economy.DualTokenStore, pool *pgxpoo
 	if err := store.ReserveLXCForAgent(ctx, "agent-"+consumer, consumer, "res-"+consumer, 500_000_000, economy.AgentDebitMeta{}); err != nil {
 		t.Fatal(err)
 	}
-	settled, err := store.SettleLXCReservation(ctx, "res-"+consumer, int64(chargeUSD/economy.LXCUSDValue*1e6+0.5), economy.AgentDebitMeta{})
+	settled, _, err := store.SettleLXCReservation(ctx, "res-"+consumer, int64(chargeUSD/economy.LXCUSDValue*1e6+0.5), economy.AgentDebitMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}

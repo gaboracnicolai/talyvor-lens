@@ -67,7 +67,7 @@ func TestSettleStampsRequestedAndServedModel(t *testing.T) {
 		t.Fatalf("reserve: %v", err)
 	}
 	// Served by a cheaper routed model than the customer requested — the whole point of billing delivered.
-	if _, err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{ServedModel: "gpt-4o-mini"}); err != nil {
+	if _, _, err := s.SettleLXCReservation(ctx, "res1", 120_000, AgentDebitMeta{ServedModel: "gpt-4o-mini"}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 
