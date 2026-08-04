@@ -41,6 +41,24 @@ func spendHarness(t *testing.T) *Server {
 		`ALTER TABLE token_events ADD COLUMN IF NOT EXISTS serve_source TEXT NOT NULL DEFAULT 'upstream'`); err != nil {
 		t.Fatalf("schema align: %v", err)
 	}
+	// request_attribution is LEFT JOINed by spendByRequestSQL to surface the issue. Created here
+	// with the fixture rather than assumed, because CI never migrates lens_test — the gated tests
+	// build their own schema (see .github/workflows/ci.yaml).
+	if _, err := pool.Exec(context.Background(), `CREATE TABLE IF NOT EXISTS request_attribution (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		workspace_id TEXT NOT NULL,
+		feature TEXT NOT NULL DEFAULT '',
+		issue_id TEXT NOT NULL DEFAULT '',
+		request_id TEXT NOT NULL DEFAULT '')`); err != nil {
+		t.Fatalf("create request_attribution: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`ALTER TABLE request_attribution ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatalf("add request_id: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `TRUNCATE request_attribution`); err != nil {
+		t.Fatalf("truncate attribution: %v", err)
+	}
 	if _, err := pool.Exec(context.Background(), `TRUNCATE token_events`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}

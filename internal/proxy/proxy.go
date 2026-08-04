@@ -1788,8 +1788,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// proxy.go/stream.go scope. The customer's BILL (the settle) is correct.
 		if p.attrStore != nil && loggingPolicy != workspace.LoggingNone {
 			cost := servedCostUSD
+			// The request id is what makes the issue joinable to the spend row; without it the
+			// issue is stored and unusable (migration 0116).
+			attrCtx := attribution.ExtractFromRequest(r)
+			attrCtx.RequestID = requestID
 			p.attrStore.RecordAsync(
-				attribution.ExtractFromRequest(r),
+				attrCtx,
 				inT, outT, cost,
 				upstreamModel, cfg.ProviderName(),
 				time.Since(requestStart),

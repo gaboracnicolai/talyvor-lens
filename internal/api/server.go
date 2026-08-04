@@ -644,12 +644,24 @@ const (
 
 // SAME table + SAME tenancy clause (workspace_id + window) as handleSpendBy; keyset-paginated on the unique
 // id. $1=workspace_id $2=days $3=cursor(uuid or NULL) $4=limit.
-const spendByRequestSQL = `SELECT id, request_id, feature, cost_usd, input_tokens, output_tokens, created_at, serve_source
-FROM token_events
-WHERE workspace_id = $1
-  AND created_at > NOW() - INTERVAL '1 day' * $2
-  AND ($3::uuid IS NULL OR id > $3::uuid)
-ORDER BY id
+// ⚠ THE JOIN IS LEFT, AND THAT IS LOAD-BEARING. request_attribution only has a row when the caller
+// sent attribution headers, and only carries a request_id from migration 0116 onward. An INNER join
+// would silently drop every untagged request and every historical row from this endpoint — turning
+// "spend Track could not attribute" into "spend Track never sees", which is the opposite of #66's
+// rule that unmatched spend is recorded as unattributed rather than dropped. COALESCE keeps the
+// column a string so a consumer never has to distinguish NULL from "no issue".
+const spendByRequestSQL = `SELECT te.id, te.request_id, te.feature,
+       COALESCE(ra.issue_id, '') AS issue_id,
+       te.cost_usd, te.input_tokens, te.output_tokens, te.created_at, te.serve_source
+FROM token_events te
+LEFT JOIN request_attribution ra
+       ON ra.request_id = te.request_id
+      AND ra.workspace_id = te.workspace_id
+      AND ra.request_id != ''
+WHERE te.workspace_id = $1
+  AND te.created_at > NOW() - INTERVAL '1 day' * $2
+  AND ($3::uuid IS NULL OR te.id > $3::uuid)
+ORDER BY te.id
 LIMIT $4`
 
 func (s *Server) handleSpendByRequest(w http.ResponseWriter, r *http.Request) {
@@ -700,13 +712,13 @@ func (s *Server) handleSpendByRequest(w http.ResponseWriter, r *http.Request) {
 	var lastID string
 	for rows.Next() {
 		var (
-			id, requestID, feature string
-			cost                   float64
-			inTok, outTok          int64
-			ts                     time.Time
-			serveSource            string
+			id, requestID, feature, issueID string
+			cost                            float64
+			inTok, outTok                   int64
+			ts                              time.Time
+			serveSource                     string
 		)
-		if err := rows.Scan(&id, &requestID, &feature, &cost, &inTok, &outTok, &ts, &serveSource); err != nil {
+		if err := rows.Scan(&id, &requestID, &feature, &issueID, &cost, &inTok, &outTok, &ts, &serveSource); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -714,7 +726,11 @@ func (s *Server) handleSpendByRequest(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"request_id": requestID,
 			"feature":    feature,
-			"cost_usd":   cost,
+			// The issue the caller was working on, from X-Talyvor-Issue. EMPTY when the caller
+			// sent no issue header, or when the row predates migration 0116 — Track must treat
+			// empty as "fall back to matching on feature", never as "no such issue".
+			"issue_id": issueID,
+			"cost_usd": cost,
 			// serve_source (0100): 'upstream' or a cache_hit_* layer. cost_usd on a
 			// cache row is TALYVOR'S provider cost (zero) — the requester's LXC debit
 			// lives in lxc_ledger; render cache rows as "served from cache", not "free".

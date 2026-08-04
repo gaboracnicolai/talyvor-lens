@@ -98,6 +98,9 @@ func TestRecord_InsertsRequestAttribution(t *testing.T) {
 			"user-7", "sess-xyz",
 			100, 50, 0.0123,
 			"claude-sonnet-4-6", "anthropic", int64(345),
+			// $17 — request_id (migration 0116). Without it the issue above is stored but
+			// unjoinable to the spend row, which is how per-issue attribution did nothing.
+			pgxmock.AnyArg(),
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
@@ -142,7 +145,7 @@ func TestRecord_RequestAttributionWriteIntact_Neutrality157(t *testing.T) {
 			"ws-1", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), // 17th = request_id (migration 0116)
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
