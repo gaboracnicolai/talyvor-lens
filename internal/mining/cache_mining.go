@@ -591,6 +591,46 @@ var countedSupplyTypeList = []string{
 	TypeConfidentialCompute,
 }
 
+// TypeConvertToLXC is the LENS→LXC conversion DEBIT. The canonical constant lives here,
+// with the other ledger row types and with the two supply predicates that must classify it;
+// internal/economy aliases it as LENSTypeConvertToLXC for the writer-side name (the same
+// shape poolroyalty uses for TypePoolRoyalty).
+//
+// IT IS A BURN, NOT A TRANSFER. ConvertLENStoLXC debits the workspace's LENS and credits only
+// LXC — a different token on a different ledger. Nothing holds that LENS afterwards: there is
+// no treasury and deliberately no house account (LXC is a liability, and spending it is what
+// discharges it). So the µLENS is destroyed, which puts it in burnedSupplyTypeList and NEVER
+// in countedSupplyTypeList — adding it to the latter would retroactively un-mint work that
+// really happened.
+const TypeConvertToLXC = "convert_to_lxc"
+
+// burnedSupplyTypeList is the SINGLE SOURCE OF TRUTH for the types that DESTROY LENS, in the
+// same shape as countedSupplyTypeList above and for the same reason: GetCirculatingSupply and
+// GetTotalBurned both read it directly, so the two public readouts cannot drift into reporting
+// different circulating supplies.
+//
+// Membership test: does this row remove µLENS from a wallet with NO counterparty credited
+// anywhere? Transfers, stake locks and marketplace moves all have a counterparty and are
+// excluded; the _revoked types are excluded because held LENS never entered supply to begin
+// with (and are negative, which the counted query's `amount > 0` filter drops independently).
+var burnedSupplyTypeList = []string{
+	TypeBurn,
+	TypeStakeSlash,
+	// convert_to_lxc was in NEITHER list until this change — excluded from total twice over
+	// (absent from the allow-list AND negative) and absent here — so counted circulating stayed
+	// FLAT while the wallet fell. ComputeFairRate reads both, and its algebra reduces to
+	// circulating/totalMinted, so the omission overstated the rate pricing the NEXT conversion.
+	TypeConvertToLXC,
+}
+
+// BurnedSupplyTypes returns the ledger types that reduce circulating supply. Exported so a
+// guard test can pin every destructive label against the REAL list the queries use.
+func BurnedSupplyTypes() []string {
+	out := make([]string, len(burnedSupplyTypeList))
+	copy(out, burnedSupplyTypeList)
+	return out
+}
+
 // CountedSupplyTypes returns the ledger types GetTotalSupply counts. Exported so the
 // finalize sweeper's guard test can pin every settled label it can write as counted —
 // against the REAL list the query uses, not a copy.
@@ -633,10 +673,13 @@ func (s *LedgerStore) GetTotalSupply(ctx context.Context) (int64, error) {
 // GetCirculatingSupply = total minted - total burned. The
 // difference is what's currently in workspace wallets + staked.
 //
-// "Burned" counts BOTH plain burns (TypeBurn) AND slashed stake
-// (TypeStakeSlash) — a slash destroys collateral, reducing supply
-// (PoVI Part 3). Without counting slashes, supply would be overstated
-// after a slash, and supply feeds the LXC conversion math.
+// "Burned" is burnedSupplyTypeList — every type that removes µLENS from a
+// wallet with NO counterparty credited: plain burns (TypeBurn), slashed stake
+// (TypeStakeSlash — a slash destroys collateral, PoVI Part 3), and the LENS→LXC
+// conversion debit (TypeConvertToLXC), whose LENS is destroyed against newly
+// minted LXC on a different ledger. Supply feeds the LXC conversion math, so a
+// destructive type missing from this list overstates circulating and therefore
+// overstates the rate that prices the next conversion.
 func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (int64, error) {
 	total, err := s.GetTotalSupply(ctx)
 	if err != nil {
@@ -646,8 +689,8 @@ func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (int64, error) {
 		return total, nil
 	}
 	row := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type IN ($1, $2)`,
-		TypeBurn, TypeStakeSlash)
+		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = ANY($1)`,
+		burnedSupplyTypeList)
 	var burned int64
 	if err := row.Scan(&burned); err != nil {
 		return 0, fmt.Errorf("mining: burned: %w", err)
@@ -655,17 +698,18 @@ func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (int64, error) {
 	return total - burned, nil
 }
 
-// GetTotalBurned returns the cumulative LENS removed from supply — both plain
-// burns (TypeBurn) AND slashed stake (TypeStakeSlash). Counting slashes keeps
-// the economy-stats display (GetEconomyStats = total − burned) consistent with
-// the slash-aware GetCirculatingSupply.
+// GetTotalBurned returns the cumulative LENS removed from supply. It reads the
+// SAME burnedSupplyTypeList as GetCirculatingSupply, which is the point: the
+// economy-stats display computes total − burned and must land on exactly the
+// number GetCirculatingSupply reports. Two hand-maintained lists would be two
+// different "circulating supply" figures on two screens.
 func (s *LedgerStore) GetTotalBurned(ctx context.Context) (int64, error) {
 	if s.pool == nil {
 		return 0, nil
 	}
 	row := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type IN ($1, $2)`,
-		TypeBurn, TypeStakeSlash)
+		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = ANY($1)`,
+		burnedSupplyTypeList)
 	var n int64
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("mining: total burned: %w", err)

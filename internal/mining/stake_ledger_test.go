@@ -125,9 +125,12 @@ func TestGetCirculatingSupply_CountsSlashBurns(t *testing.T) {
 	mock.ExpectQuery(`amount > 0 AND type = ANY`).
 		WithArgs(countedSupplyTypeList).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(1000.0)))
-	// burned: MUST include both plain burns AND stake slashes.
+	// burned: MUST include every destructive type — plain burns, stake slashes, and the
+	// LENS→LXC conversion debit.
 	mock.ExpectQuery(`SUM\(-amount\)`).
-		WithArgs(TypeBurn, TypeStakeSlash).
+		// Pinned against burnedSupplyTypeList — the list the query actually reads — not a
+		// hand-written pair. Dropping a destructive type from that list now fails HERE.
+		WithArgs(burnedSupplyTypeList).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(30.0))) // 10 burn + 20 slash
 
 	got, err := store.GetCirculatingSupply(context.Background())
@@ -148,7 +151,9 @@ func TestGetCirculatingSupply_CountsSlashBurns(t *testing.T) {
 func TestGetTotalBurned_CountsSlashBurns(t *testing.T) {
 	store, mock := newMockStore(t)
 	mock.ExpectQuery(`SUM\(-amount\)`).
-		WithArgs(TypeBurn, TypeStakeSlash).
+		// Pinned against burnedSupplyTypeList — the list the query actually reads — not a
+		// hand-written pair. Dropping a destructive type from that list now fails HERE.
+		WithArgs(burnedSupplyTypeList).
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(micro(42.0)))
 	got, err := store.GetTotalBurned(context.Background())
 	if err != nil {
