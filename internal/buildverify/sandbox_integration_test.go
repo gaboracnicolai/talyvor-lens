@@ -87,6 +87,11 @@ func TestSandbox_ResourceHog_Killed(t *testing.T) {
 	lim := defaultLimits()
 	lim.Timeout = 6 * time.Second
 	v := requireSandbox(t, WithLimits(lim))
+	// ⚠ REAP REGARDLESS. This test spins a CPU inside a container and relies on the wall-clock
+	// kill; a test that PROVES a kill must not depend on the mechanism it is testing. Before the
+	// sandbox reaped by name, a failure here left a container pegging a full core indefinitely —
+	// ~25 of them accumulated on one machine in a night. See sandbox_leak_test.go.
+	t.Cleanup(func() { reapByPrefix(t, sandboxContainerPrefix) })
 	start := time.Now()
 	_, _, err := v.runContained(context.Background(), validGoMod(t),
 		[]string{"sh", "-c", "while :; do :; done"})
