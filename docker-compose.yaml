@@ -83,6 +83,12 @@ services:
       - LENS_AWS_REGION=${LENS_AWS_REGION:-us-east-1}
       - LENS_AWS_ACCESS_KEY_ID=${LENS_AWS_ACCESS_KEY_ID:-}
       - LENS_AWS_SECRET_ACCESS_KEY=${LENS_AWS_SECRET_ACCESS_KEY:-}
+      # ⚠ A THIRD INSTANCE OF THE SAME TRAP, found by sweeping the credential class rather than
+      # by someone hitting it. Bedrock via TEMPORARY credentials (STS / assume-role / SSO) needs
+      # a session token alongside the id+secret above; config.go:1035 reads it and it was never
+      # forwarded, so those credentials could not authenticate and only long-lived static keys
+      # worked. Empty ⇒ static-key auth, exactly as before.
+      - LENS_AWS_SESSION_TOKEN=${LENS_AWS_SESSION_TOKEN:-}
       - LENS_OLLAMA_URL=${LENS_OLLAMA_URL:-}
       - LENS_LOG_LEVEL=${LENS_LOG_LEVEL:-info}
       # Identity / admin / bootstrap. These are read by config.Load but were never
@@ -95,15 +101,32 @@ services:
       # pubkeys survive a restart — required under LENS_HA_ENABLED); LXC-grant flag
       # empty ⇒ off.
       - LENS_API_KEY=${LENS_API_KEY:-}
+      # ⚠ THE SECOND VICTIM OF THE TRAP BELOW. LENS_MINT_KEY (#402) is the NARROW credential the
+      # content services hold: it mints a per-workspace token and nothing else. Generated into
+      # .env and never declared here, so os.Getenv returned "" and the digest inside the running
+      # container was e3b0c44298fc1c14 — the SHA-256 of the EMPTY STRING. The feature was simply
+      # inert, with no log line saying so, exactly as the note below predicted.
+      #
+      # Empty ⇒ absent, and minting stays admin-only exactly as before (cmd/lens/main.go:718).
+      # It is deliberately NOT defaulted to LENS_API_KEY: a default that silently grants admin is
+      # the failure #402 exists to remove.
+      - LENS_MINT_KEY=${LENS_MINT_KEY:-}
       - LENS_JWT_PRIVATE_KEY=${LENS_JWT_PRIVATE_KEY:-}
       - LENS_POVI_CHALLENGE_KEY=${LENS_POVI_CHALLENGE_KEY:-}
       - LENS_ADMIN_LXC_GRANT_ENABLED=${LENS_ADMIN_LXC_GRANT_ENABLED:-}
 
       # ── OPERATOR ALERTING + CATALOG DRIFT ────────────────────────────────────────────────
-      # ⚠ EVERY LINE HERE EXISTS BECAUSE OF THE SAME TRAP THAT HID LENS_PROVISION_SECRET: this
-      # service has an explicit `environment:` list and NO `env_file:`, so a variable set in
-      # .env that is not named below reaches NOTHING. The container starts healthy and the
-      # feature is simply inert, with no log line saying why.
+      # ⚠ EVERY LINE HERE EXISTS BECAUSE OF THE SAME TRAP THAT HID LENS_PROVISION_SECRET, AND
+      # THEN LENS_MINT_KEY: this service has an explicit `environment:` list and NO `env_file:`,
+      # so a variable set in .env that is not named below reaches NOTHING. The container starts
+      # healthy and the feature is simply inert, with no log line saying why.
+      #
+      # ⚠ IT HAS NOW HAPPENED TWICE, which is why prose is no longer the guard. #402's
+      # LENS_MINT_KEY was generated into .env, the stack restarted, and the digest in the running
+      # container was the SHA-256 of the empty string. The mechanical check that would have caught
+      # both — os.Getenv("X") in the tree with no `X=` in this list — now runs in CI; see
+      # compose_env_reach_test.go. Adding a variable to the code without adding it here fails
+      # that test rather than shipping a silently dead feature.
       #
       # LENS_TRACK_WEBHOOK_* is the Lens→Track spend-alert emitter (internal/alerts/emitter.go).
       # It has NEVER been passed here, so alerts.NewEmitter has always returned nil and NO SPEND
