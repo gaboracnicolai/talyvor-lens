@@ -24,11 +24,15 @@ func newAuthTokenMintHandler(authManager *auth.Manager) http.HandlerFunc {
 			writeJSONErr(w, http.StatusServiceUnavailable, "JWT signing not available")
 			return
 		}
-		// Require global-admin auth via the unified manager. err != nil short-circuits before
-		// actx is dereferenced, so a missing/invalid credential is a clean 403 (fail-closed).
+		// ADMIN **OR** THE NARROW MINT CREDENTIAL. err != nil short-circuits before actx is
+		// dereferenced, so a missing/invalid credential is a clean 403 (fail-closed).
+		//
+		// ⚠ This is the ONLY route that accepts auth.ScopeMint. Every other privileged route gates
+		// on actx.IsAdmin (29 requireAdmin call sites; zero use RequireScope(ScopeAdmin)), and the
+		// mint credential authenticates with IsAdmin=false — so widening here cannot widen them.
 		actx, err := authManager.Authenticate(req)
-		if err != nil || !actx.IsAdmin {
-			writeJSONErr(w, http.StatusForbidden, "admin credentials required")
+		if err != nil || actx == nil || (!actx.IsAdmin && !actx.HasScope(auth.ScopeMint)) {
+			writeJSONErr(w, http.StatusForbidden, "admin or mint credentials required")
 			return
 		}
 		var in struct {
@@ -45,8 +49,26 @@ func newAuthTokenMintHandler(authManager *auth.Manager) http.HandlerFunc {
 			writeJSONErr(w, http.StatusBadRequest, "workspace_id required")
 			return
 		}
+		// ⚠ A MINTER MUST NOT CHOOSE ITS OWN TOKEN'S POWER. The request body carries `scopes`, so
+		// without this a mint-scoped credential could mint itself an admin-scoped token and the
+		// narrowing would be decorative. An admin caller keeps today's behaviour byte-for-byte
+		// (whatever it asks for); a mint-scoped caller gets exactly {proxy} and is REFUSED if it
+		// asks for anything, rather than having its request silently rewritten — a caller that
+		// asked for something it cannot have should be told, not quietly downgraded.
+		scopes := in.Scopes
+		if !actx.IsAdmin {
+			if len(in.Scopes) > 0 {
+				writeJSONErr(w, http.StatusForbidden,
+					"this credential may not choose token scopes; omit \"scopes\"")
+				return
+			}
+			// {proxy} is what a content service needs: the /v1/proxy/* completion routes. It is
+			// also strictly NARROWER than the empty set today's minted tokens carry, because
+			// RequireScope grandfathers an empty scope list through every gate.
+			scopes = []string{auth.ScopeProxy}
+		}
 		ttl := auth.ClampTTL(time.Duration(in.TTLHours) * time.Hour)
-		tok, err := auth.GenerateToken(in.WorkspaceID, in.UserID, in.Scopes, authManager.PrivateKey(), ttl)
+		tok, err := auth.GenerateToken(in.WorkspaceID, in.UserID, scopes, authManager.PrivateKey(), ttl)
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
