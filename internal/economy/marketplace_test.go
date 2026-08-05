@@ -470,8 +470,31 @@ func TestUnstake_AfterLockCreditsYield(t *testing.T) {
 		WithArgs("ws_u").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
 			AddRow(int64(0), int64(0), int64(0)))
+	// ⚠ TWO CREDITS NOW, AND THE AMOUNTS ARE PINNED. This used to expect ONE ledger row of
+	// principal+yield under type "unstake" — a type in no counted supply list, so the yield was
+	// real LENS that GetTotalSupply never saw. The rows are split so only the newly-created half
+	// is counted; the principal's return stays uncounted because it never left supply.
+	//
+	// The amounts are asserted rather than AnyArg: a split that wrote the wrong halves (or the
+	// same half twice) would satisfy a count-only expectation and be exactly the defect back.
+	wantYield := computeYield(100*uLENS, APY30, time.Since(started))
+	// 1) the PRINCIPAL, under the uncounted "unstake" type.
 	mock.ExpectExec("INSERT INTO lens_token_ledger").
-		WithArgs("ws_u", pgxmock.AnyArg(), pgxmock.AnyArg(), "unstake", pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("ws_u", int64(100*uLENS), pgxmock.AnyArg(), "unstake", pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE lens_token_balances").
+		WithArgs("ws_u", pgxmock.AnyArg(), pgxmock.AnyArg(), int64(0)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// 2) the YIELD, under the COUNTED mining.TypeStakeYield.
+	mock.ExpectExec("INSERT INTO lens_token_balances").
+		WithArgs("ws_u").
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectQuery("SELECT balance, lifetime_earned, lifetime_spent").
+		WithArgs("ws_u").
+		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_earned", "lifetime_spent"}).
+			AddRow(int64(100*uLENS), int64(100*uLENS), int64(0)))
+	mock.ExpectExec("INSERT INTO lens_token_ledger").
+		WithArgs("ws_u", wantYield, pgxmock.AnyArg(), mining.TypeStakeYield, pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE lens_token_balances").
 		WithArgs("ws_u", pgxmock.AnyArg(), pgxmock.AnyArg(), int64(0)).

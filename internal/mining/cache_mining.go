@@ -589,6 +589,10 @@ var countedSupplyTypeList = []string{
 	TypeRoutingPrediction,
 	TypeLatencyLocality,
 	TypeConfidentialCompute,
+	// Staking yield. The principal's return stays UNCOUNTED (type "unstake") because it was
+	// already in supply when it was staked; only this newly-created half is a mint. Splitting the
+	// row is what makes counting it possible without inflating supply on every unstake.
+	TypeStakeYield,
 }
 
 // TypeConvertToLXC is the LENS→LXC conversion DEBIT. The canonical constant lives here,
@@ -622,6 +626,16 @@ var burnedSupplyTypeList = []string{
 	// circulating/totalMinted, so the omission overstated the rate pricing the NEXT conversion.
 	TypeConvertToLXC,
 }
+
+// TypeStakeYield is the LENS newly created by a staking position's accrued yield.
+//
+// ⚠ IT IS A MINT, AND THE PRINCIPAL IS NOT. MarketplaceStore.Unstake used to credit
+// principal+yield as ONE row of type "unstake", which is in no counted list — so the yield was
+// real LENS in a wallet that GetTotalSupply never saw (found by #400's sweep, reported, unfixed
+// then). The fix could NOT be "count unstake": the principal was already in supply when it was
+// staked, so counting its return would inflate supply on every unstake — a worse error. The row
+// is split instead, and only this half is counted.
+const TypeStakeYield = "stake_yield"
 
 // BurnedSupplyTypes returns the ledger types that reduce circulating supply. Exported so a
 // guard test can pin every destructive label against the REAL list the queries use.
