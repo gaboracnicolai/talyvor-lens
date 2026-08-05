@@ -607,16 +607,39 @@ func (s *MarketplaceStore) Unstake(ctx context.Context, positionID, workspaceID 
 		// do NOT credit. Clean already-unstaked signal (handler maps it to 404).
 		return ErrPositionNotFound
 	}
+	// ⚠ TWO ROWS, BECAUSE THIS IS TWO KINDS OF MONEY. It was one CreditTx of principal+yield under
+	// type "unstake", with the split visible only inside the metadata JSON — and "unstake" is in
+	// no counted supply list, so the YIELD was real LENS in a wallet that GetTotalSupply never saw
+	// (found by #400's sweep, reported, unfixed then).
+	//
+	// The fix is NOT to count "unstake". The PRINCIPAL was already in supply when it was staked —
+	// staking debits the wallet and locks it, it does not burn it — so counting the return as a
+	// mint would inflate supply on every unstake, a worse error than the one being fixed. Only the
+	// yield is new LENS, so only the yield is written under a counted type.
+	//
+	// Both rows are inside the SAME transaction as the position delete, so a wallet can never be
+	// credited a principal without its yield or vice versa.
 	meta := map[string]interface{}{
 		"position_id": positionID,
 		"principal":   pos.Amount,
 		"accrued":     yield,
 		"lock_days":   pos.LockDays,
 	}
-	if err := s.ledger.CreditTx(ctx, tx, workspaceID, payout, "unstake",
-		"stake unlocked with yield", meta); err != nil {
-		return fmt.Errorf("economy: credit unstake: %w", err)
+	if err := s.ledger.CreditTx(ctx, tx, workspaceID, pos.Amount, "unstake",
+		"stake principal returned", meta); err != nil {
+		return fmt.Errorf("economy: credit unstake principal: %w", err)
 	}
+	// A zero-yield unstake (unlocked immediately, or a 0% APY position) writes NO yield row:
+	// CreditTx refuses a non-positive amount, and a 0-µLENS mint row would be noise in the
+	// ledger a customer reads. payout is retained above purely as the arithmetic check that the
+	// two rows sum to what the position is worth.
+	if yield > 0 {
+		if err := s.ledger.CreditTx(ctx, tx, workspaceID, yield, mining.TypeStakeYield,
+			"stake yield accrued", meta); err != nil {
+			return fmt.Errorf("economy: credit stake yield: %w", err)
+		}
+	}
+	_ = payout // the two rows above sum to it; kept named so the invariant is readable here
 	return tx.Commit(ctx)
 }
 

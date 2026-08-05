@@ -436,6 +436,16 @@ func TestGetTotalSupply_CountsPoolRoyalty_ExcludesNonMints(t *testing.T) {
 		// fixed these µLENS were counted under the pool_royalty label; they are the SAME
 		// µLENS, so this list keeps total supply identical while attributing it honestly.
 		TypeEvalContribution, TypeRoutingPrediction, TypeLatencyLocality, TypeConfidentialCompute,
+		// Staking YIELD. computeYield creates LENS that existed nowhere before, and it was
+		// invisible to supply because Unstake credited principal+yield as one row of type
+		// "unstake" — a type that is (correctly) in no counted list. The row is now split and
+		// only this half is counted.
+		//
+		// ⚠ THE EXCLUSION BELOW IS THE OTHER HALF OF THIS DECISION: "unstake" itself must stay
+		// OUT. The principal was already in supply when it was staked, so counting its return
+		// would inflate supply by the whole stake on every unstake — a worse error than the one
+		// this fixes, and the tempting one-line "fix".
+		TypeStakeYield,
 	}
 	if len(countedSupplyTypeList) != len(wantCounted) {
 		t.Errorf("counted-supply allow-list has %d types, want %d:\n got: %v\nwant: %v",
@@ -455,6 +465,8 @@ func TestGetTotalSupply_CountsPoolRoyalty_ExcludesNonMints(t *testing.T) {
 	// must NOT contain these. The _held types are the sharp edge — counting a held mint would
 	// put un-settled LENS into supply.
 	excluded := []string{"marketplace_fee", "receipt_mine_provisional", TypeBurn, TypeStakeSlash, TypeTransferIn,
+		// "unstake" returns principal that never left supply; "stake" locks it. Neither is a mint.
+		"unstake", "stake",
 		TypePoolRoyaltyHeld, TypePoolRoyaltyRevoked,
 		TypeEvalContributionHeld, TypeRoutingPredictionHeld, TypeLatencyLocalityHeld, TypeConfidentialComputeHeld}
 	for _, ex := range excluded {
