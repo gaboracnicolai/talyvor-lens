@@ -710,7 +710,12 @@ func run() error {
 	// authenticator. Coexists with the legacy auth.AuthMiddleware
 	// (which is still mounted below for backward compat); new
 	// /v1/auth/* routes use authManager directly.
-	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), jwtKey, keyStore, tenantStore)
+	// LENS_MINT_KEY is the NARROW credential the content services (Docs, Track) hold: it can mint a
+	// per-workspace token and nothing else. Unset ⇒ absent, and minting stays admin-only exactly as
+	// before. It is deliberately NOT defaulted to the global key — a default that silently grants
+	// admin is the failure this exists to remove.
+	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), jwtKey, keyStore, tenantStore).
+		WithMintKey(os.Getenv("LENS_MINT_KEY"))
 
 	// requireAdmin (admin-gate) is now a package-level helper in
 	// authz_admin_handlers.go — it takes authManager explicitly so it is

@@ -52,7 +52,23 @@ const (
 	ScopeProxy     = "proxy"
 	ScopeAnalytics = "analytics"
 	ScopeAdmin     = "admin"
-	ScopeKeys      = "keys"
+	// ScopeMint authorises ONE thing: minting a per-workspace token via POST /v1/auth/token.
+	//
+	// ⚠ WHY IT EXISTS. Talyvor Docs and Talyvor Track both need per-workspace Lens tokens, and the
+	// mint route requires IsAdmin — which only the global key carries. So both services were
+	// obliged to hold LENS_API_KEY, a credential bearing ScopeAdmin: LXC grants, royalty
+	// adjudication, injection patterns, and token minting for EVERY tenant. Docs handles
+	// user-authored content, a rich-text editor, embeds and HTML — the largest attack surface in
+	// the suite — so a Docs compromise would have become Lens admin over every workspace.
+	// config.go already states the BFF "never has to hold LENS_API_KEY"; this makes that true of
+	// the content services too.
+	//
+	// ⚠ IT IS A SCOPE, NOT A SECOND GLOBAL KEY. A credential bearing it authenticates with
+	// IsAdmin=false, so every one of the 29 requireAdmin gates refuses it by the check they
+	// already perform — the refusal is enforced by existing code, not by a convention that the
+	// key "should only be used for minting".
+	ScopeMint = "mint"
+	ScopeKeys = "keys"
 )
 
 // AuthMethod values shipped on AuthContext.AuthMethod.
@@ -60,6 +76,10 @@ const (
 	MethodJWT          = "jwt"
 	MethodWorkspaceKey = "workspace_key"
 	MethodGlobalKey    = "global_key"
+	// MethodMintKey is the narrow mint credential (LENS_MINT_KEY). Named distinctly from
+	// MethodGlobalKey so a log line, an audit export or a future policy can tell them apart —
+	// "which credential minted this token" is exactly the question an incident asks.
+	MethodMintKey      = "mint_key"
 	MethodLegacyHeader = "legacy_header"
 )
 
@@ -187,6 +207,7 @@ func ValidateToken(tokenString string, key *ecdsa.PublicKey) (*TokenClaims, erro
 // the JWT cache uses RWMutex.
 type Manager struct {
 	globalKey   string
+	mintKey     string
 	privateKey  *ecdsa.PrivateKey
 	publicKey   *ecdsa.PublicKey
 	keyStore    *KeyStore
@@ -200,6 +221,11 @@ type jwtCacheEntry struct {
 	claims  *TokenClaims
 	expires time.Time
 }
+
+// WithMintKey attaches the narrow mint credential (LENS_MINT_KEY). Optional: unset ⇒ no mint
+// credential exists and the only way to mint stays the global key, i.e. today's behaviour exactly.
+// A deployment that never sets it is unchanged by this feature.
+func (m *Manager) WithMintKey(k string) *Manager { m.mintKey = k; return m }
 
 func NewManager(globalKey string, privateKey *ecdsa.PrivateKey, keyStore *KeyStore, tenantStore *tenant.Store) *Manager {
 	var pub *ecdsa.PublicKey
@@ -301,6 +327,21 @@ func (m *Manager) Authenticate(r *http.Request) (*AuthContext, error) {
 			Scopes:      []string{ScopeProxy, ScopeAnalytics, ScopeAdmin, ScopeKeys},
 			AuthMethod:  MethodGlobalKey,
 			IsAdmin:     true,
+		}, nil
+	}
+
+	// Narrow mint credential. IsAdmin is FALSE and the scope set is exactly {mint} — it cannot be
+	// widened here, and HasScope(ScopeAdmin) is false for it, so every admin gate refuses it.
+	//
+	// Ordered AFTER the global-key branch on purpose: if an operator sets LENS_MINT_KEY to the
+	// same string as LENS_API_KEY, the admin branch wins and behaviour is unchanged rather than
+	// silently DEMOTED — a downgrade would break admin, which is worse than the gap this closes.
+	if m.mintKey != "" && raw == m.mintKey {
+		return &AuthContext{
+			WorkspaceID: "",
+			Scopes:      []string{ScopeMint},
+			AuthMethod:  MethodMintKey,
+			IsAdmin:     false,
 		}, nil
 	}
 
