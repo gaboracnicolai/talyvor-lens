@@ -18,6 +18,25 @@ func seedModels() []Model {
 		// ─── OpenAI (vision) ───
 		{ID: "gpt-4o", Provider: "openai", DisplayName: "GPT-4o", InputPer1M: 2.50, OutputPer1M: 10.00, Capabilities: vision, ContextTokens: 128000, MaxOutput: 16384, Aliases: []string{"gpt-4o-2024-11-20", "gpt-4o-2024-08-06"}},
 		{ID: "gpt-4o-mini", Provider: "openai", DisplayName: "GPT-4o mini", InputPer1M: 0.15, OutputPer1M: 0.60, Capabilities: vision, ContextTokens: 128000, MaxOutput: 16384, Aliases: []string{"gpt-4o-mini-2024-07-18"}},
+		// ⚠ EMBEDDINGS — absent until now, and their absence was not free. talyvor-code v0.1.0's
+		// semantic index posts text-embedding-3-small, and with no catalog row ResolveRates fell
+		// back for BOTH purposes:
+		//   CHARGE → the catalog's cheapest model ($0.025/1M): 1.25x OVER for 3-small, but 5.2x
+		//            UNDER for 3-large and 4x UNDER for ada-002 — Talyvor eating the difference.
+		//   HOLD   → the catalog's most EXPENSIVE ($30/1M in, $180/1M out). An embeddings call has
+		//            no max_tokens, so the hold was sized on a phantom output the endpoint never
+		//            produces: ~$0.74 held per call against a true cost near $0.000002. On an agent
+		//            sub-budget that blocks an index run after a dozen chunks while spending
+		//            almost nothing — the feature budget-blocking itself.
+		// Pricing them fixes both, because a KNOWN model uses its own rates for hold and charge
+		// alike. OutputPer1M is 0 because the endpoint returns vectors, not completion tokens —
+		// that zero is what collapses the phantom-output hold.
+		// Rates from https://platform.openai.com/docs/pricing (fetched 2026-08-05), Standard tier.
+		// No Capabilities (text in, vectors out) and MaxOutput 0 — nothing gates on either, but a
+		// nonzero MaxOutput here would reintroduce the phantom-output hold this row removes.
+		{ID: "text-embedding-3-small", Provider: "openai", DisplayName: "Embedding 3 small", InputPer1M: 0.02, OutputPer1M: 0, ContextTokens: 8191, MaxOutput: 0},
+		{ID: "text-embedding-3-large", Provider: "openai", DisplayName: "Embedding 3 large", InputPer1M: 0.13, OutputPer1M: 0, ContextTokens: 8191, MaxOutput: 0},
+		{ID: "text-embedding-ada-002", Provider: "openai", DisplayName: "Embedding ada 002", InputPer1M: 0.10, OutputPer1M: 0, ContextTokens: 8191, MaxOutput: 0},
 		{ID: "gpt-4.1-nano", Provider: "openai", DisplayName: "GPT-4.1 nano", InputPer1M: 0.10, OutputPer1M: 0.40, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
 		{ID: "gpt-5.4", Provider: "openai", DisplayName: "GPT-5.4", InputPer1M: 2.50, OutputPer1M: 15.00, CachedInputPer1M: 0.25, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 		{ID: "gpt-5.4-mini", Provider: "openai", DisplayName: "GPT-5.4 mini", InputPer1M: 0.75, OutputPer1M: 4.50, CachedInputPer1M: 0.075, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},

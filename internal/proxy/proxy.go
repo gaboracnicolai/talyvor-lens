@@ -750,6 +750,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// won't redirect to a vision model), and the workspace-scoped cachePrompt.
 	// distillMethod tags the spend row written far below ("" = not distilled);
 	// visionOCR carries any OCR sub-call cost to book as its own spend row.
+	// WHICH upstream endpoint this request is for. Classified once, from the inbound path, and
+	// read by the cache guard below and by forward(). Anything unrecognised is endpointChat, so
+	// every route that worked before is byte-identical.
+	endpoint := classifyEndpoint(r)
+
 	distillMethod := ""
 	var visionOCR visionSpend
 	var distillFacts []distillServeFact // S1: consented cross-tenant serves, recorded post-flush below
@@ -1022,8 +1027,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// served hit (e.g. SSE replay failure falling through to the live
 		// LLM) therefore reports nothing and mints nothing.
 		var pooledHit *poolroyalty.ServedHit
+		// ⚠ NON-CHAT ENDPOINTS NEVER CONSULT THE CACHE. extractPrompt reads `messages`, so an
+		// embeddings body (which carries `input`) derives the EMPTY prompt — every embeddings
+		// request would share one cache key and the second would be served the first's vector,
+		// silently. See endpoint.cacheable().
 		span.AddEvent("cache.check.exact")
-		if c := p.tryExact(ctx, cfg.ProviderName(), model, cachePrompt); c != nil {
+		if !endpoint.cacheable() {
+			span.AddEvent("cache.skip.non_chat")
+		} else if c := p.tryExact(ctx, cfg.ProviderName(), model, cachePrompt); c != nil {
 			cached, layer = c, "cache_hit_exact"
 			span.AddEvent("cache.hit.exact")
 		} else {
@@ -2452,7 +2463,21 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 	// forward_retry_test.go pin it. forward keeps its signature + the deferred RecordUpstream above and
 	// passes the closures cfg already holds (the ProviderConfig type does NOT move). r.Header is the
 	// inbound client headers (a scorer passes nil).
-	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, cfg.UpstreamURL(model), cfg.ApplyAuth, body, r.Header)
+	// THE URL IS ENDPOINT-DEPENDENT. Every provider config returns a fixed chat URL regardless of
+	// the inbound path (see endpoint.go), so an embeddings request was forwarded to
+	// /v1/chat/completions and 400'd. Non-chat endpoints resolve their own URL from the same
+	// configured base, so an operator's override still applies.
+	upstreamURL := cfg.UpstreamURL(model)
+	if ep := classifyEndpoint(r); ep == endpointEmbeddings {
+		eu, ok := embeddingsURLFor(cfg.ProviderName(), upstreamURL)
+		if !ok {
+			// Refuse rather than forward an embeddings body to a chat URL — that silent
+			// mismatch is exactly the defect this replaces.
+			return nil, nil, 0, fmt.Errorf("proxy: provider %q has no embeddings endpoint", cfg.ProviderName())
+		}
+		upstreamURL = eu
+	}
+	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, upstreamURL, cfg.ApplyAuth, body, r.Header)
 	return resp, respBody, attempts, err
 }
 
