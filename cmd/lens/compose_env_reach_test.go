@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -158,4 +159,161 @@ func lensServiceEnv(t *testing.T, compose string) string {
 		}
 	}
 	return rest[:end]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE CODE-SIDE HALF. Everything above is a CURATED list, and a curated list catches only what
+// someone remembered — which is the failure it exists to prevent. It did not catch
+// LENS_MINT_KEY: #402 added the variable, the operator generated it into .env, and the digest
+// inside the running container was the SHA-256 of the empty string. Nothing failed.
+//
+// So this half enumerates FROM THE CODE and asks compose to justify itself, rather than asking a
+// human to remember. It cannot go stale, because adding os.Getenv("LENS_NEW_THING") to the tree
+// is what makes it fire.
+//
+// ⚠ WHY A CLASS AND NOT "EVERY VARIABLE". The process reads ~169 LENS_* names; compose forwards
+// ~53. Demanding all 169 would produce a 116-line failure nobody can act on, and a guard nobody
+// can act on gets deleted — which is worse than no guard. The class chosen is the one whose
+// absence is SILENT AND HAS NO SENSIBLE DEFAULT: credentials. A tuning knob's absence is its
+// documented default; a credential's absence is a dead feature or an unarmed control. It is also,
+// empirically, the class that has bitten: LENS_PROVISION_SECRET, then LENS_MINT_KEY, then
+// LENS_AWS_SESSION_TOKEN — three for three.
+//
+// The rule is MECHANICAL (a name suffix), so it needs no judgement to apply and no memory to
+// maintain. Judgement lives only in the exemptions below, and each one states its reason.
+
+// credentialExemptions are credential-shaped names that must NOT be forwarded, with the reason.
+// An exemption is a decision; it is written here so the next person can disagree with it rather
+// than guess at it.
+var credentialExemptions = map[string]string{
+	"LENS_JWT_SECRET": "the RETIRED HS256 key. internal/config/config.go REFUSES TO START when it " +
+		"is set (Lens moved to ES256), so forwarding it would convert a boot guard into a boot " +
+		"failure. It must stay unforwarded.",
+
+	// ⚠ FOUR MORE EXEMPTIONS WERE WRITTEN HERE AND REMOVED, because
+	// TestCredentialExemptionsAreStillRead refused them: LENS_TEST_NVIDIA_EAT{,_NONCE},
+	// LENS_POVI_KEY_VALUE and LENS_POVI_KEY_CRASHER are read ONLY from _test.go files, which the
+	// enumerator skips, so they were never candidates and exempting them was dead weight that
+	// would hide the next real one. The staleness check caught that on its first run — which is
+	// the argument for having it.
+}
+
+// credentialSuffixes is the mechanical class test. Deliberately name-based: no judgement to
+// apply, nothing to keep in sync with a feature list.
+var credentialSuffixes = []string{"_KEY", "_SECRET", "_TOKEN", "_PASSWORD", "_CREDENTIALS"}
+
+func looksLikeCredential(name string) bool {
+	for _, s := range credentialSuffixes {
+		if strings.HasSuffix(name, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// readsLensEnvVars enumerates every LENS_* name the tree actually reads, from the SOURCE. This is
+// the "never a hand-maintained list" requirement: the guard's input is the code.
+func readsLensEnvVars(t *testing.T) map[string]string {
+	t.Helper()
+	pat := regexp.MustCompile(`(?:os\.Getenv|os\.LookupEnv|parseBoolEnv|getEnv|getEnvDuration)\(\s*"(LENS_[A-Z0-9_]+)"`)
+	found := map[string]string{} // name -> first file that reads it
+	for _, root := range []string{"..", "../../internal"} {
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			if strings.HasSuffix(path, "_test.go") {
+				return nil // a test reading an env var says nothing about the deployment
+			}
+			b, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return nil
+			}
+			for _, m := range pat.FindAllStringSubmatch(string(b), -1) {
+				if _, seen := found[m[1]]; !seen {
+					found[m[1]] = path
+				}
+			}
+			return nil
+		})
+	}
+	return found
+}
+
+// TestEveryCredentialTheProcessReadsIsForwarded is the guard proper.
+func TestEveryCredentialTheProcessReadsIsForwarded(t *testing.T) {
+	compose := readCompose(t)
+	lensEnv := lensServiceEnv(t, compose)
+	reads := readsLensEnvVars(t)
+
+	// The enumeration must actually find things; a broken regex would make this vacuously green.
+	if len(reads) < 100 {
+		t.Fatalf("only %d LENS_* reads found in the tree — the enumeration is broken, and a "+
+			"guard that enumerates nothing passes everything", len(reads))
+	}
+
+	var missing []string
+	for name, file := range reads {
+		if !looksLikeCredential(name) {
+			continue
+		}
+		if _, exempt := credentialExemptions[name]; exempt {
+			continue
+		}
+		if !forwards(lensEnv, name) {
+			missing = append(missing, name+"  (read at "+file+")")
+		}
+	}
+	sort.Strings(missing)
+	for _, m := range missing {
+		t.Errorf("%s is a CREDENTIAL the process reads and docker-compose.yaml does not forward "+
+			"to the lens service.\n"+
+			"    It can be set in .env, look right in review, and reach nothing: compose reads .env "+
+			"only for ${} substitution and this stack declares no env_file. The container starts "+
+			"healthy and the feature is inert with no log line.\n"+
+			"    Add `- NAME=${NAME:-}` to the lens service's environment, or add it to "+
+			"credentialExemptions WITH ITS REASON.", m)
+	}
+}
+
+// TestCredentialGuardIsNotVacuous — the class must DISTINGUISH. If the rule matched nothing, or
+// matched everything, the test above would be theatre either way.
+func TestCredentialGuardIsNotVacuous(t *testing.T) {
+	compose := readCompose(t)
+	lensEnv := lensServiceEnv(t, compose)
+	reads := readsLensEnvVars(t)
+
+	var creds, forwarded int
+	for name := range reads {
+		if !looksLikeCredential(name) {
+			continue
+		}
+		creds++
+		if forwards(lensEnv, name) {
+			forwarded++
+		}
+	}
+	if creds == 0 {
+		t.Fatalf("the credential rule matched NOTHING — it cannot catch anything")
+	}
+	if forwarded == 0 {
+		t.Fatalf("the credential rule matched %d names and NONE is forwarded — the rule is "+
+			"selecting the wrong thing", creds)
+	}
+	t.Logf("credential class: %d read, %d forwarded, %d exempt", creds, forwarded, len(credentialExemptions))
+}
+
+// TestCredentialExemptionsAreStillRead keeps the exemptions honest in the other direction: an
+// exemption for a name nothing reads any more is dead weight that hides the next real one.
+func TestCredentialExemptionsAreStillRead(t *testing.T) {
+	reads := readsLensEnvVars(t)
+	for name, reason := range credentialExemptions {
+		if _, ok := reads[name]; !ok {
+			t.Errorf("credentialExemptions lists %s (%q) but nothing in the tree reads it any "+
+				"more — remove the exemption rather than carrying it", name, reason)
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("%s is exempt with no reason — every exemption carries its reason", name)
+		}
+	}
 }
