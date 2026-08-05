@@ -2,9 +2,13 @@ package buildverify
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,11 +48,38 @@ var containerEnv = []string{
 	"HOME=/tmp",
 }
 
+// sandboxContainerPrefix is the name prefix every sandbox container carries, so a reaper (and an
+// operator with `docker ps`) can identify them without guessing.
+const sandboxContainerPrefix = "lens-buildverify-"
+
+// sandboxReapTimeout bounds the cleanup call itself. Short: if the daemon is wedged, blocking a
+// verification on the reaper would turn a leaked container into a hung request.
+const sandboxReapTimeout = 20 * time.Second
+
+// newSandboxContainerName returns a unique container name. Uniqueness matters twice: a collision
+// makes `docker run` fail outright ("name already in use"), and the reaper must never remove a
+// DIFFERENT verification's container that is still legitimately running.
+func newSandboxContainerName() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fall back to the clock rather than a fixed string: a constant name would make
+		// concurrent verifications collide, which is worse than a weaker random.
+		return sandboxContainerPrefix + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return sandboxContainerPrefix + hex.EncodeToString(b[:])
+}
+
 // dockerRunArgs builds the FULL hardened `docker run` argument vector for one contained command. Every
 // containment control lives here; there is no code path that runs the command without these.
-func dockerRunArgs(srcDir, image string, lim Limits, argv []string, extraEnv ...string) []string {
+func dockerRunArgs(srcDir, image, name string, lim Limits, argv []string, extraEnv ...string) []string {
 	args := []string{
+		// ⚠ --rm STAYS, and is NOT sufficient on its own. It is implemented by the CLI: the client
+		// waits for the container to exit, then removes it. runContained enforces its wall clock by
+		// SIGKILLing that client (exec.CommandContext), so on a timeout the remover dies and the
+		// container — a child of the DAEMON — keeps running with nothing to reap it. --rm still
+		// cleans every non-timeout path promptly, so it is belt; --name is braces.
 		"run", "--rm",
+		"--name", name,
 		"--network=none",        // NO network egress
 		"--user", "65534:65534", // nobody:nogroup — non-root
 		"--security-opt=no-new-privileges",                      // no privilege escalation
@@ -98,7 +129,36 @@ func (v *Verifier) runContained(ctx context.Context, srcDir string, argv []strin
 	// never enters argv — it is mounted read-only at /src and built INSIDE the container — so no untrusted
 	// input can alter the command. Running a container runtime is the entire purpose of this package.
 	//nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd := exec.CommandContext(cctx, v.docker, dockerRunArgs(srcDir, v.image, v.limits, argv, extraEnv...)...)
+	// ⚠ NAME IT AND REAP IT. `--rm` alone leaks: it is the CLI that removes the container, and the
+	// wall-clock kill above SIGKILLs exactly that CLI — so on a timeout the remover dies and the
+	// container, a child of the DAEMON, runs forever at its full --cpus allowance with nothing to
+	// stop it. Observed in the wild: a sandbox container 3.7 hours old at 100.91% CPU with
+	// AutoRemove=true still set on it.
+	name := newSandboxContainerName()
+
+	// The reap runs on EVERY exit path — timeout, parent cancellation, panic, and the happy path
+	// where --rm already did the job (a `docker rm` on an absent container is a harmless error we
+	// ignore). It deliberately uses a FRESH context: cctx is already expired on the timeout path,
+	// which is precisely the path that needs the reap to work.
+	defer func() {
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), sandboxReapTimeout)
+		defer rcancel()
+		//nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+		rm := exec.CommandContext(rctx, v.docker, "rm", "--force", name)
+		rm.Env = hostCLIEnv()
+		if rmErr := rm.Run(); rmErr != nil {
+			// Absent (already reaped by --rm) is the common case and not worth a line. A real
+			// failure IS worth one: it means a container is still out there burning a core, and
+			// silence is how this went unnoticed for hours in the first place.
+			if rctx.Err() != nil {
+				slog.Warn("buildverify: sandbox container reap timed out — it may still be running",
+					slog.String("container", name), slog.String("err", rmErr.Error()))
+			}
+		}
+	}()
+
+	//nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	cmd := exec.CommandContext(cctx, v.docker, dockerRunArgs(srcDir, v.image, name, v.limits, argv, extraEnv...)...)
 	cmd.Env = hostCLIEnv() // host CLI env is a minimal allow-list, never os.Environ
 
 	out, err := cmd.CombinedOutput()

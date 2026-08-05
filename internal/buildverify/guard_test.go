@@ -74,7 +74,7 @@ func TestBuildVerify_EnvAllowlist_NoHostSecrets(t *testing.T) {
 	for k, v := range secrets {
 		t.Setenv(k, v)
 	}
-	args := dockerRunArgs("/tmp/src", "img", defaultLimits(), goBuildArgv)
+	args := dockerRunArgs("/tmp/src", "img", "guard-test", defaultLimits(), goBuildArgv)
 	joined := strings.Join(args, "\x00")
 	for k, v := range secrets {
 		if strings.Contains(joined, v) {
@@ -117,7 +117,7 @@ func containsStr(ss []string, want string) bool {
 
 // CONTAINMENT FLAGS: every hardening control is present in the docker command.
 func TestBuildVerify_ContainmentFlags_Present(t *testing.T) {
-	args := strings.Join(dockerRunArgs("/tmp/src", "img", defaultLimits(), goBuildArgv), " ")
+	args := strings.Join(dockerRunArgs("/tmp/src", "img", "guard-test", defaultLimits(), goBuildArgv), " ")
 	for _, must := range []string{
 		"--network=none",     // no egress
 		"--user 65534:65534", // non-root
