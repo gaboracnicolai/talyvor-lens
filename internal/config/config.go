@@ -1024,7 +1024,7 @@ func Load() (*Config, error) {
 		GoogleAPIKey:      os.Getenv("LENS_GOOGLE_API_KEY"),
 		EmbeddingModel:    getEnv("LENS_EMBEDDING_MODEL", DefaultEmbeddingModel),
 		EmbeddingBaseURL:  os.Getenv("LENS_EMBEDDING_BASE_URL"),
-		SemanticThreshold: 0.92,
+		SemanticThreshold: DefaultSemanticThreshold,
 		MaxCacheTTL:       24 * time.Hour,
 		LogLevel:          getEnv("LENS_LOG_LEVEL", "info"),
 		OllamaURL:         getEnv("LENS_OLLAMA_URL", "http://localhost:11434"),
@@ -2005,6 +2005,19 @@ func defaultDistillWorkerBin() string {
 // been changed while pooling is on — and that comparison must use the same value as the default
 // here, not a copy that can drift away from it.
 const DefaultEmbeddingModel = "text-embedding-3-small"
+
+// DefaultSemanticThreshold is the cosine similarity a pooled cache entry must reach before it may
+// be served. Exported for the same reason as DefaultEmbeddingModel: it was stated in THREE places
+// — this default, `.env.example` (the file operators copy), and a bare literal in cmd/conscheck
+// whose comment cited `config.DefaultSemanticThreshold`, a symbol that did not exist. Three copies
+// of one decision with nothing between them, so the checker could keep measuring a threshold
+// production no longer ran.
+//
+// ⚠ CHANGING THIS IS NOT A TUNING DECISION. It is bounded by the pool-safety attestation
+// (poolsafety.Attestation.MatchesLive), which refuses to serve when the live threshold is LOWER
+// than the value poolcheck measured. Raising it is the conservative direction and needs no
+// re-attestation; lowering it below the attested value turns pooling off until poolcheck is re-run.
+const DefaultSemanticThreshold = 0.98
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

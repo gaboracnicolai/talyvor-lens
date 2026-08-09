@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/discriminator"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/poolsafety"
@@ -42,7 +43,7 @@ func main() {
 		os.Exit(1)
 	}
 	model := envOr("LENS_EMBEDDING_MODEL", "text-embedding-3-small")
-	th := 0.92 // config.DefaultSemanticThreshold — production
+	th := config.DefaultSemanticThreshold // the value production boots with, not a copy of it
 
 	emb := embedder.NewOpenAIEmbedder(key, model, os.Getenv("LENS_EMBEDDING_BASE_URL"))
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
