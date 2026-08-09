@@ -2611,6 +2611,13 @@ func run() error {
 				scope = budgets.ScopeWorkspace
 			}
 			fc, err := forecaster.ProjectScope(req.Context(), wsID, scope, q.Get("scope_id"), q.Get("period"))
+			// An unsupported ?scope= is the CALLER's mistake, not the server's:
+			// 400 with the supported set, never 500. (It used to be neither —
+			// an unknown scope was projected as the whole workspace's spend.)
+			if errors.Is(err, budgets.ErrUnknownScope) {
+				writeJSONErr(w, http.StatusBadRequest, "unknown scope: must be one of workspace, team, sprint")
+				return
+			}
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return

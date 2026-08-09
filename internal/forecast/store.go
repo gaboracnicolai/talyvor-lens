@@ -71,12 +71,21 @@ func (s *Store) Budgets(ctx context.Context, ws string) ([]budgets.Budget, error
 // reconciliation and forecasting agree. Days with no spend are simply absent
 // from the result.
 func (s *Store) DailyBuckets(ctx context.Context, ws string, scope budgets.Scope, scopeID string, sinceDays int, now time.Time) ([]DayBucket, error) {
+	// Fail CLOSED on an unknown scope, exactly as budgets.ReconcileSpent does
+	// and for the same reason — and BEFORE the no-database short circuit, so
+	// the refusal is unconditional. Dropping the predicate would bucket the
+	// WHOLE workspace's daily spend and present it as this scope's history, so
+	// a forecast for a scope nobody supports would look like a busy one.
+	col, known := budgets.ScopeColumn(scope)
+	if !known {
+		return nil, fmt.Errorf("forecast: daily buckets: %w: %q", budgets.ErrUnknownScope, scope)
+	}
 	if s.db == nil {
 		return nil, nil
 	}
 	where := "workspace_id = $1"
 	args := []any{ws}
-	if col := budgets.ScopeColumn(scope); col != "" {
+	if col != "" {
 		where += fmt.Sprintf(" AND %s = $%d", col, len(args)+1)
 		args = append(args, scopeID)
 	}

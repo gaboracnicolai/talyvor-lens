@@ -273,6 +273,14 @@ func countDaysWithSpend(buckets []DayBucket, from, to time.Time) int {
 // Workspace scope defaults scope_id to the workspace id; empty period
 // defaults to monthly.
 func (f *Forecaster) ProjectScope(ctx context.Context, ws string, scope budgets.Scope, scopeID, period string) (Forecast, error) {
+	// Refuse an unsupported scope HERE, before the cache key is built from it.
+	// The scope arrives straight off a query parameter, so without this an
+	// unrecognised value was projected as though it named something: every
+	// spend read silently widened to the whole workspace, and the answer was
+	// then CACHED under that scope's key. Reject at the door instead.
+	if _, known := budgets.ScopeColumn(scope); !known {
+		return Forecast{}, fmt.Errorf("forecast: %w: %q", budgets.ErrUnknownScope, scope)
+	}
 	if scope == budgets.ScopeWorkspace && scopeID == "" {
 		scopeID = ws
 	}
