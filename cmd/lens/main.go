@@ -714,8 +714,14 @@ func run() error {
 	// per-workspace token and nothing else. Unset ⇒ absent, and minting stays admin-only exactly as
 	// before. It is deliberately NOT defaulted to the global key — a default that silently grants
 	// admin is the failure this exists to remove.
+	// LENS_OPERATOR_READ_KEY is the read-side sibling: the credential the suite BFF presents for the
+	// cross-tenant admin READS behind its operator boundary (suite #87). Unset ⇒ absent, and those
+	// reads stay reachable only by the global key exactly as before. Also deliberately NOT defaulted
+	// to LENS_API_KEY: the whole point is that a session gateway never holds a credential that can
+	// mint LXC, approve a conversion rate or revoke a payout.
 	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), jwtKey, keyStore, tenantStore).
-		WithMintKey(os.Getenv("LENS_MINT_KEY"))
+		WithMintKey(os.Getenv("LENS_MINT_KEY")).
+		WithOperatorReadKey(os.Getenv("LENS_OPERATOR_READ_KEY"))
 
 	// requireAdmin (admin-gate) is now a package-level helper in
 	// authz_admin_handlers.go — it takes authManager explicitly so it is
@@ -1879,28 +1885,28 @@ func run() error {
 	// `cfg` here is the same *config.Config every gate above reads, so this is observation, not
 	// a re-read of the environment and not a default. If it could not be read the payload says
 	// so and carries no values — see internal/econflags.
-	r.Handle("/v1/admin/economy/flags", requireAdmin(authManager,
+	r.Handle("/v1/admin/economy/flags", requireAdminOrOperatorRead(authManager,
 		econflags.Handler(cfg, lensVersion, poolFlagOverride(cfg, poolGate))))
 
-	r.Handle("/v1/admin/keel/findings", requireAdmin(authManager,
+	r.Handle("/v1/admin/keel/findings", requireAdminOrOperatorRead(authManager,
 		newKeelFindingsHandler(keelFindingsReader)))
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
 	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
 	// unchanged).
-	r.Handle("/v1/admin/keel/haircuts", requireAdmin(authManager,
+	r.Handle("/v1/admin/keel/haircuts", requireAdminOrOperatorRead(authManager,
 		newKeelHaircutsHandler(haircutobs.NewReader(pool), time.Now)))
 
 	// K4 output verdicts — admin forensic read (all workspaces), requireAdmin-gated. Reads the PRIMARY
 	// pool (non-money read; keeps the U8/U9 ExactlySix replica-reader invariant unchanged).
-	r.Handle("/v1/admin/output-verdicts", requireAdmin(authManager,
+	r.Handle("/v1/admin/output-verdicts", requireAdminOrOperatorRead(authManager,
 		newOutputVerdictsAdminHandler(outputVerdictReader)))
 	// Full tenant roster — admin forensic/ops read (requireAdmin), sibling of the admin reads here.
 	// Backed by the in-memory workspace.Manager (no DB read; U8/U9 replica-reader invariant unchanged).
-	r.Handle("/v1/admin/workspaces", requireAdmin(authManager,
+	r.Handle("/v1/admin/workspaces", requireAdminOrOperatorRead(authManager,
 		newAdminListWorkspacesHandler(wsManager)))
 	// KEEL ECONOMY go/no-go: the routing-decision summary (override rate + estimated cost delta). Admin-only,
 	// descriptive; the estimate is NOT money.
-	r.Handle("/v1/admin/routing-decisions/summary", requireAdmin(authManager,
+	r.Handle("/v1/admin/routing-decisions/summary", requireAdminOrOperatorRead(authManager,
 		newRoutingDecisionsSummaryHandler(routeDecisionReader, time.Now)))
 
 	// H5.β — settle a provenance bond (slash-or-release; deadline-guarded + CAS-safe + idempotent).
@@ -2198,7 +2204,7 @@ func run() error {
 		// rows; ?view=pairs returns the condition-(b) materiality aggregate. The
 		// Reader is Query-only (no write capability — see distillattrib.Reader).
 		econ.get(authed, "/v1/admin/distill/attribution",
-			requireAdmin(authManager, http.HandlerFunc(newDistillAttributionAdminHandler(distillattrib.NewReader(dbrouting.ReadPool(pool, replicaPool))))))
+			requireAdminOrOperatorRead(authManager, http.HandlerFunc(newDistillAttributionAdminHandler(distillattrib.NewReader(dbrouting.ReadPool(pool, replicaPool))))))
 
 		// Stage-3 pool-mint adjudication gate — the Revoker's FIRST and ONLY
 		// production caller. Admin-gated (mirrors ApproveRate); the operator
@@ -2253,9 +2259,9 @@ func run() error {
 		poolRoyaltyDetector := poolroyalty.NewDetectorReader(pool, thresholdsFromConfig(cfg))
 		poolRoyaltyResolver := poolroyalty.NewResolver(pool)
 		poolRoyaltyMargin := poolroyalty.NewMarginReader(pool)
-		authed.Get("/v1/admin/pool-royalty/detect", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyDetectHandler(poolRoyaltyDetector))))
-		authed.Get("/v1/admin/pool-royalty/resolve", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyResolveHandler(poolRoyaltyResolver))))
-		authed.Get("/v1/admin/pool-royalty/margin", requireAdmin(authManager, http.HandlerFunc(newPoolRoyaltyMarginHandler(poolRoyaltyMargin))))
+		authed.Get("/v1/admin/pool-royalty/detect", requireAdminOrOperatorRead(authManager, http.HandlerFunc(newPoolRoyaltyDetectHandler(poolRoyaltyDetector))))
+		authed.Get("/v1/admin/pool-royalty/resolve", requireAdminOrOperatorRead(authManager, http.HandlerFunc(newPoolRoyaltyResolveHandler(poolRoyaltyResolver))))
+		authed.Get("/v1/admin/pool-royalty/margin", requireAdminOrOperatorRead(authManager, http.HandlerFunc(newPoolRoyaltyMarginHandler(poolRoyaltyMargin))))
 
 		// WorkTier ANALYTICS (read-only, admin-gated, NOT economy-gated) — surfaces ONE
 		// workspace's descriptive tier distribution from worktier.Store.Aggregate (Query-only;
@@ -2263,7 +2269,7 @@ func run() error {
 		// mode). Registered on `authed` (NOT econ.get) to match the WorkTier capture's
 		// kill-switch-EXEMPT posture — the read survives LENS_ECONOMY_ENABLED, like the capture
 		// it surfaces. MONEY-DECOUPLED: WorkTier never feeds mint/earn/billing.
-		authed.Get("/v1/admin/worktier/distribution", requireAdmin(authManager, http.HandlerFunc(newWorkTierDistributionHandler(worktierStore))))
+		authed.Get("/v1/admin/worktier/distribution", requireAdminOrOperatorRead(authManager, http.HandlerFunc(newWorkTierDistributionHandler(worktierStore))))
 
 		// Annotation reputation ADMIN RE-ENTRY (PR2) — un-bench a sub-floor annotator by appending
 		// an admin_reset event (append-only; restores to baseline). Admin-gated (requireAdmin →
@@ -2280,9 +2286,9 @@ func run() error {
 		distillRoyaltyDetector := poolroyalty.NewDistillDetectorReader(pool, thresholdsFromConfig(cfg))
 		distillRoyaltyMargin := poolroyalty.NewDistillMarginReader(pool)
 		distillRoyaltyResolver := poolroyalty.NewDistillResolver(pool)
-		authed.Get("/v1/admin/distill-royalty/detect", requireAdmin(authManager, http.HandlerFunc(newDistillRoyaltyDetectHandler(distillRoyaltyDetector))))
-		authed.Get("/v1/admin/distill-royalty/resolve", requireAdmin(authManager, http.HandlerFunc(newDistillRoyaltyResolveHandler(distillRoyaltyResolver))))
-		authed.Get("/v1/admin/distill-royalty/margin", requireAdmin(authManager, http.HandlerFunc(newDistillRoyaltyMarginHandler(distillRoyaltyMargin))))
+		authed.Get("/v1/admin/distill-royalty/detect", requireAdminOrOperatorRead(authManager, http.HandlerFunc(newDistillRoyaltyDetectHandler(distillRoyaltyDetector))))
+		authed.Get("/v1/admin/distill-royalty/resolve", requireAdminOrOperatorRead(authManager, http.HandlerFunc(newDistillRoyaltyResolveHandler(distillRoyaltyResolver))))
+		authed.Get("/v1/admin/distill-royalty/margin", requireAdminOrOperatorRead(authManager, http.HandlerFunc(newDistillRoyaltyMarginHandler(distillRoyaltyMargin))))
 
 		authed.Post("/v1/auth/refresh", func(w http.ResponseWriter, req *http.Request) {
 			if authManager.PrivateKey() == nil {
@@ -2868,7 +2874,7 @@ func run() error {
 		// means the customer was CHARGED and NOT credited — v1 resolution is a manual
 		// refund in the Stripe dashboard.
 		bill.get(authed, "/v1/admin/billing/purchases",
-			requireAdmin(authManager, newBillingPurchasesHandler(billingSvc)))
+			requireAdminOrOperatorRead(authManager, newBillingPurchasesHandler(billingSvc)))
 
 		econ.post(authed, "/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")

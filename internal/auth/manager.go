@@ -69,6 +69,27 @@ const (
 	// key "should only be used for minting".
 	ScopeMint = "mint"
 	ScopeKeys = "keys"
+
+	// ScopeOperatorRead authorises ONE thing: GET on the cross-tenant admin READS the operator
+	// screen is built from. It is the read-side sibling of ScopeMint and exists for the same
+	// reason — a consumer that needed one capability was obliged to hold every capability.
+	//
+	// ⚠ WHY IT EXISTS. suite #87 shipped the operator boundary (OPERATOR_SUBS, an (issuer, sub)
+	// allowlist) and every route behind it answers 501, because the BFF holds no credential Lens's
+	// admin reads accept. The only credential that reaches them today is LENS_API_KEY, which is
+	// IsAdmin — it mints LXC, approves conversion rates, revokes payouts and mints tokens for every
+	// tenant. Giving a session gateway that key to render a six-row table is the trade #402 already
+	// refused once for the content services.
+	//
+	// ⚠ IT IS A SCOPE, NOT A SECOND GLOBAL KEY. A credential bearing it authenticates with
+	// IsAdmin=false, so all 29 requireAdmin gates refuse it by the check they already perform.
+	// Reach is granted ONLY where a registration site opts in by name, and which sites those are is
+	// asserted against the router source in cmd/lens/admin_route_classification_test.go.
+	//
+	// ⚠ IT IS NOT IN tenant.ValidScopes, AND MUST NOT BE. Workspace API keys are tenant-created; a
+	// scope a tenant can name for itself is a scope a tenant can grant itself, and this one reads
+	// across every workspace. operator_read_scope_is_not_tenant_grantable is the guard.
+	ScopeOperatorRead = "operator_read"
 )
 
 // AuthMethod values shipped on AuthContext.AuthMethod.
@@ -79,8 +100,13 @@ const (
 	// MethodMintKey is the narrow mint credential (LENS_MINT_KEY). Named distinctly from
 	// MethodGlobalKey so a log line, an audit export or a future policy can tell them apart —
 	// "which credential minted this token" is exactly the question an incident asks.
-	MethodMintKey      = "mint_key"
-	MethodLegacyHeader = "legacy_header"
+	MethodMintKey = "mint_key"
+	// MethodOperatorReadKey is the narrow operator READ credential (LENS_OPERATOR_READ_KEY).
+	// Distinct from MethodGlobalKey and MethodMintKey for the same reason those are distinct from
+	// each other: "which credential read every tenant's finances" is exactly the question an
+	// incident asks, and a shared method name cannot answer it.
+	MethodOperatorReadKey = "operator_read_key"
+	MethodLegacyHeader    = "legacy_header"
 )
 
 // ─── errors ──────────────────────────────────────
@@ -206,12 +232,13 @@ func ValidateToken(tokenString string, key *ecdsa.PublicKey) (*TokenClaims, erro
 // Lifecycle: build once at startup, share across goroutines —
 // the JWT cache uses RWMutex.
 type Manager struct {
-	globalKey   string
-	mintKey     string
-	privateKey  *ecdsa.PrivateKey
-	publicKey   *ecdsa.PublicKey
-	keyStore    *KeyStore
-	tenantStore *tenant.Store
+	globalKey       string
+	mintKey         string
+	operatorReadKey string
+	privateKey      *ecdsa.PrivateKey
+	publicKey       *ecdsa.PublicKey
+	keyStore        *KeyStore
+	tenantStore     *tenant.Store
 
 	mu       sync.RWMutex
 	jwtCache map[string]*jwtCacheEntry
@@ -226,6 +253,11 @@ type jwtCacheEntry struct {
 // credential exists and the only way to mint stays the global key, i.e. today's behaviour exactly.
 // A deployment that never sets it is unchanged by this feature.
 func (m *Manager) WithMintKey(k string) *Manager { m.mintKey = k; return m }
+
+// WithOperatorReadKey attaches the narrow operator READ credential (LENS_OPERATOR_READ_KEY).
+// Optional: unset ⇒ the credential does not exist, every admin read stays reachable only by the
+// global key, and a deployment that never sets it is byte-for-byte unchanged by this feature.
+func (m *Manager) WithOperatorReadKey(k string) *Manager { m.operatorReadKey = k; return m }
 
 func NewManager(globalKey string, privateKey *ecdsa.PrivateKey, keyStore *KeyStore, tenantStore *tenant.Store) *Manager {
 	var pub *ecdsa.PublicKey
@@ -341,6 +373,27 @@ func (m *Manager) Authenticate(r *http.Request) (*AuthContext, error) {
 			WorkspaceID: "",
 			Scopes:      []string{ScopeMint},
 			AuthMethod:  MethodMintKey,
+			IsAdmin:     false,
+		}, nil
+	}
+
+	// Narrow operator READ credential. IsAdmin is FALSE and the scope set is exactly
+	// {operator_read}, so HasScope(ScopeAdmin) is false and every requireAdmin gate refuses it;
+	// only the sites that opted into requireAdminOrOperatorRead admit it, and only for GET.
+	//
+	// ⚠ ORDERED LAST ON PURPOSE, and the two collisions differ:
+	//   · same value as LENS_API_KEY  ⇒ the admin branch wins. A silent DEMOTION would take admin
+	//     away from a deployment that already worked, which is worse than the gap this closes —
+	//     the same argument #402 made for the mint key.
+	//   · same value as LENS_MINT_KEY ⇒ the mint branch wins, so the operator reads 401 and the
+	//     screen is visibly broken rather than silently over-privileged. Neither key is a superset
+	//     of the other, so one of them has to lose; losing loudly on the read side is the safer
+	//     half. Both are asserted in cmd/lens/operator_read_credential_test.go.
+	if m.operatorReadKey != "" && raw == m.operatorReadKey {
+		return &AuthContext{
+			WorkspaceID: "",
+			Scopes:      []string{ScopeOperatorRead},
+			AuthMethod:  MethodOperatorReadKey,
 			IsAdmin:     false,
 		}, nil
 	}

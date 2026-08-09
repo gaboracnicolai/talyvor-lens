@@ -111,6 +111,26 @@ services:
       # It is deliberately NOT defaulted to LENS_API_KEY: a default that silently grants admin is
       # the failure #402 exists to remove.
       - LENS_MINT_KEY=${LENS_MINT_KEY:-}
+      # LENS_OPERATOR_READ_KEY (W1.3) is the READ-SIDE SIBLING of LENS_MINT_KEY: the credential the
+      # suite BFF presents for the cross-tenant admin READS behind its operator boundary (suite
+      # #87, whose routes answer 501 today because the BFF holds no credential Lens accepts).
+      #
+      # It authenticates with IsAdmin=FALSE and exactly one scope, `operator_read`, so it reaches
+      # the fifteen admin GETs that opted in by name and nothing else — every requireAdmin gate
+      # refuses it, every {wsID} route 403s it (it owns no workspace), the proxy scope gate refuses
+      # it, and POST /v1/auth/token refuses it so it cannot mint its way out.
+      # cmd/lens/operator_read_credential_test.go asserts each of those, each against a control.
+      #
+      # Empty ⇒ absent: the admin reads stay reachable only by LENS_API_KEY, exactly as before.
+      # Deliberately NOT defaulted to LENS_API_KEY, for the reason directly above — and the reason
+      # is sharper here: this credential's whole purpose is that a SESSION GATEWAY, the most
+      # exposed process in the estate, never holds a key that can mint LXC, approve a conversion
+      # rate or revoke a payout.
+      #
+      # ⚠ SET IT TO A DIFFERENT VALUE FROM LENS_MINT_KEY. Neither is a superset of the other, so a
+      # collision has to resolve one way: mint wins, and the operator screen 401s. That is the safe
+      # direction (visibly broken beats silently over-privileged) but it is still broken.
+      - LENS_OPERATOR_READ_KEY=${LENS_OPERATOR_READ_KEY:-}
       - LENS_JWT_PRIVATE_KEY=${LENS_JWT_PRIVATE_KEY:-}
       - LENS_POVI_CHALLENGE_KEY=${LENS_POVI_CHALLENGE_KEY:-}
       - LENS_ADMIN_LXC_GRANT_ENABLED=${LENS_ADMIN_LXC_GRANT_ENABLED:-}
