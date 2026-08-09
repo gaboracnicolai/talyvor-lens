@@ -486,16 +486,37 @@ services:
       TRACK_LENS_MINT_KEY: ${LENS_MINT_KEY:-}
       # ⚠ DECLARED SO IT CAN BE SET, AND IT MUST STAY EMPTY TODAY. This is Track's READ
       # client (cmd/track/main.go:246): per-workspace spend summaries and anomalies.
-      # Those reads hit /v1/api/spend/* with ?workspace_id=, and Lens's
-      # effectiveWorkspaceID (internal/api/server.go:1204) honours that parameter ONLY
-      # for an ADMIN credential; a non-admin gets its own workspace, and the mint key
-      # has none, so the read resolves to forbidden.
+      # Track is multi-tenant, so it reads /v1/api/spend/*?workspace_id=<ws> once per
+      # workspace — whatever sits here must be able to read ANY of them. Nothing can:
       #
-      # So no correct value exists right now: the mint key cannot read, and the admin
-      # key is exactly what #402 keeps out of Track. Empty ⇒ IsConfigured() is false and
-      # the cost sync stays off, which is the honest state. Closing it needs Track to use
-      # a minted per-workspace token for its reads the way Docs already does (lenscreds),
-      # or Lens to grow a read scope the mint key can carry.
+      #   the MINT key   → 403. Lens's effectiveWorkspaceID (internal/api/server.go:1204)
+      #                    honours ?workspace_id= only for an ADMIN credential; the mint
+      #                    key resolves to no workspace at all.
+      #   a tlv_ KEY     → ⚠ 200, WITH THE WRONG WORKSPACE'S NUMBERS. A non-admin does not
+      #                    get its request REFUSED — the parameter is IGNORED and its own
+      #                    workspace is read, under the caller's label. Track would land
+      #                    workspace B's spend on workspace A's issues as their AI cost.
+      #   the ADMIN key  → works, and is precisely what #402 keeps out of Track.
+      #
+      # All three are asserted over real HTTP in internal/api/track_read_credential_test.go,
+      # because a money-path claim an operator cannot run is prose.
+      #
+      # ⚠ AND EMPTY IS NOT THE SAME AS OFF — the earlier draft of this comment said the
+      # cost sync "stays off", and that is FALSE. Track's IsConfigured() keys on the URL
+      # ALONE (talyvor-track internal/lensintegration/client.go:78,
+      # `return c != nil && c.lensURL != ""`), so declaring TRACK_LENS_URL above STARTS
+      # the 15-minute syncer with no credential: its client omits the Authorization header
+      # entirely when the key is empty (client.go:107). What makes that harmless is that
+      # Lens REFUSES an unauthenticated spend read (401) — pinned by
+      # TestTrackRead_NoCredentialNeverReachesTheData, because if that ever stops being
+      # true the poller starts attributing the "default" workspace's spend to every
+      # tenant. Measured behaviour today: one WARN per workspace per tick
+      # ("lensintegration: sync failed"), and NOTHING written — the syncer returns before
+      # any store call (syncer.go SyncFeatureSpend).
+      #
+      # Closing this needs Track to mint a per-workspace token for its reads the way Docs
+      # already does (lenscreds), or Lens to grow a read scope the mint key can carry.
+      # That is a decision and a code change, not a value in .env.
       TRACK_LENS_API_KEY: ${TRACK_LENS_API_KEY:-}
       # HMAC secret for the INBOUND Lens→Track spend-alert webhook (POST /v1/lens/webhook,
       # gwExempt and signature-verified). ⚠ MUST be the SAME VALUE as the lens service's
