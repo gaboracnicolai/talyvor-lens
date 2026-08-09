@@ -28,6 +28,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/audit"
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/backpressure"
 	"github.com/talyvor/lens/internal/batch"
 	"github.com/talyvor/lens/internal/budget"
@@ -2461,8 +2462,19 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 	// The round-trip body moved VERBATIM to internal/inference.RunUpstream (PR-3b A′) — header-copy
 	// skip-Host + setAuth-overwrite + retry.Do/httpClient.Do, exactly as forward_authheaders_test.go and
 	// forward_retry_test.go pin it. forward keeps its signature + the deferred RecordUpstream above and
-	// passes the closures cfg already holds (the ProviderConfig type does NOT move). r.Header is the
-	// inbound client headers (a scorer passes nil).
+	// passes the closures cfg already holds (the ProviderConfig type does NOT move).
+	//
+	// ⚠ THE INBOUND CREDENTIAL IS REMOVED HERE AND NOWHERE ELSE. RunUpstream copies every header it
+	// is given onto the provider request and then runs setAuth — which is a PER-PROVIDER closure, so
+	// "setAuth overwrites the client's Authorization" holds only for the branches that write
+	// Authorization. Measured across all nine shapes of that switch: google's setAuth is empty (its
+	// key rides the URL), vllm's is conditional on an operator key, bedrock's discards its own error
+	// when AWS credentials are absent — and NO branch touches X-Talyvor-Key, while only anthropic's
+	// collides with X-API-Key. The caller's `tlv_` workspace key (or, via the legacy X-API-Key path,
+	// the global admin key) was therefore forwarded verbatim to the provider. Sanitising the header
+	// set at this seam keeps RunUpstream the byte-for-byte round-trip its oracles pin.
+	// upstream_credential_leak_test.go drives all nine shapes × all three locations.
+	// A scorer passes nil; StripCredentialHeaders answers nil for nil.
 	// THE URL IS ENDPOINT-DEPENDENT. Every provider config returns a fixed chat URL regardless of
 	// the inbound path (see endpoint.go), so an embeddings request was forwarded to
 	// /v1/chat/completions and 400'd. Non-chat endpoints resolve their own URL from the same
@@ -2477,7 +2489,7 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 		}
 		upstreamURL = eu
 	}
-	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, upstreamURL, cfg.ApplyAuth, body, r.Header)
+	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, upstreamURL, cfg.ApplyAuth, body, auth.StripCredentialHeaders(r.Header))
 	return resp, respBody, attempts, err
 }
 

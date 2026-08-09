@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/retry"
@@ -332,7 +333,12 @@ func (s *StreamHandler) serve(
 		if err != nil {
 			return nil, err
 		}
-		for name, values := range r.Header {
+		// ⚠ THE SECOND HEADER-COPY SEAM. This loop is streaming's own copy of forward's — it does not
+		// go through RunUpstream — so the caller's Talyvor credential has to be removed HERE TOO. A
+		// fix applied only at forward would have been inert on every streamed request, and streaming
+		// is not a corner of the serving path. StripCredentialHeaders is the single stripper both
+		// seams share; upstream_credential_leak_test.go drives this one through the real handler.
+		for name, values := range auth.StripCredentialHeaders(r.Header) {
 			// Skip Host, and Accept-Encoding: forwarding the client's Accept-Encoding disables Go's
 			// transparent gzip decoding, so a gzipped upstream stream would be relayed as compressed
 			// bytes under text/event-stream — garbage to a streaming client. Let the transport decode.
