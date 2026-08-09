@@ -48,6 +48,19 @@ func (s *Store) UnitCosts(ctx context.Context, ws, unitKind string, since time.T
 	return s.UnitCostsWindow(ctx, ws, unitKind, since, time.Time{})
 }
 
+// scopeCol adapts budgets.ScopeColumn's (column, known) pair to the single
+// column string this closed whitelist stores. An unknown scope yields "",
+// which allowedQueries' `tc.col == ""` check below turns into the same
+// fail-closed refusal an unrecognised unit kind already gets — so this file
+// keeps the fail-closed behaviour it already had.
+func scopeCol(s budgets.Scope) string {
+	col, ok := budgets.ScopeColumn(s)
+	if !ok {
+		return ""
+	}
+	return col
+}
+
 // UnitCostsWindow returns per-unit summed cost over [since, until). A zero
 // `until` means "no upper bound" (up to now), preserving UnitCosts'
 // behaviour exactly (same SQL, same args). The bounded form exists so the
@@ -68,8 +81,8 @@ func (s *Store) UnitCostsWindow(ctx context.Context, ws, unitKind string, since,
 	type tableCol struct{ table, col string }
 	allowedQueries := map[string]tableCol{
 		UnitIssue:  {"request_attribution", "issue_id"},
-		UnitTeam:   {"token_events", budgets.ScopeColumn(budgets.ScopeTeam)},
-		UnitSprint: {"token_events", budgets.ScopeColumn(budgets.ScopeSprint)},
+		UnitTeam:   {"token_events", scopeCol(budgets.ScopeTeam)},
+		UnitSprint: {"token_events", scopeCol(budgets.ScopeSprint)},
 	}
 	tc, ok := allowedQueries[unitKind]
 	if !ok || tc.col == "" {

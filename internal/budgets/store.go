@@ -46,6 +46,7 @@ var (
 	ErrScopeIDRequired    = errors.New("budgets: scope_id required for team/sprint scope")
 	ErrInvalidThreshold   = errors.New("budgets: alert thresholds must be in (0, 1]")
 	ErrNotFound           = errors.New("budgets: not found")
+	ErrUnknownScope       = errors.New("budgets: unknown scope — refusing to sum spend without a scope predicate")
 )
 
 func validScope(s Scope) bool {
@@ -285,18 +286,28 @@ func (s *Store) UpdateSpent(ctx context.Context, workspaceID, id string, spent f
 }
 
 // ScopeColumn returns the token_events column that identifies a scope for
-// spend aggregation: "" for workspace (no predicate beyond workspace_id),
-// "team" for team, "sprint_id" for sprint. Centralized so reconciliation
-// here and the forecasting reads (internal/forecast) agree on the mapping
-// rather than each hard-coding the switch.
-func ScopeColumn(scope Scope) string {
+// spend aggregation, and whether the scope is one this mapping KNOWS.
+// Centralized so reconciliation here and the forecasting reads
+// (internal/forecast) agree on the mapping rather than each hard-coding the
+// switch.
+//
+// ⚠ THE TWO RETURN VALUES ARE NOT REDUNDANT. The workspace scope is known and
+// deliberately has NO column — workspace_id is already the predicate — so it
+// answers ("", true). An UNKNOWN scope answers ("", false). Before this split
+// both cases were the single answer "", and a caller writing `if col != ""`
+// silently dropped the predicate for an unknown scope: the query then summed
+// the whole workspace and returned it as that scope's spend. Callers MUST
+// branch on ok, never on col being empty.
+func ScopeColumn(scope Scope) (col string, ok bool) {
 	switch scope {
+	case ScopeWorkspace:
+		return "", true
 	case ScopeTeam:
-		return "team"
+		return "team", true
 	case ScopeSprint:
-		return "sprint_id"
+		return "sprint_id", true
 	default:
-		return ""
+		return "", false
 	}
 }
 
@@ -323,12 +334,23 @@ func periodWindow(b Budget) string {
 // budgets sum by workspace_id (now correctly populated; see migration
 // 0028), team by team, sprint by sprint_id.
 func (s *Store) ReconcileSpent(ctx context.Context, b Budget) (float64, error) {
+	// Fail CLOSED on a scope this mapping does not know, BEFORE the no-database
+	// short circuit — an unknown scope is a caller error either way, and a
+	// refusal that only happens when a pool is configured is a refusal that
+	// tests cannot reach. Falling through to "no predicate" would sum the
+	// ENTIRE workspace and return it as this scope's spend, silently and with a
+	// nil error, which on a hard_block budget rejects every request in the
+	// workspace.
+	col, known := ScopeColumn(b.Scope)
+	if !known {
+		return 0, fmt.Errorf("%w: %q", ErrUnknownScope, b.Scope)
+	}
 	if s.pool == nil {
 		return b.SpentUSD, nil
 	}
 	where := "workspace_id = $1"
 	args := []any{b.WorkspaceID}
-	if col := ScopeColumn(b.Scope); col != "" {
+	if col != "" {
 		where += fmt.Sprintf(" AND %s = $%d", col, len(args)+1)
 		args = append(args, b.ScopeID)
 	}
