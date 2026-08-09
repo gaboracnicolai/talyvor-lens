@@ -36,6 +36,17 @@ func TestSemanticCache_SetPooled_TagsContributor(t *testing.T) {
 // GetPooled filters is_poolable=true and returns the response + contributor +
 // the matched row's id (Stage 2.1 attribution: the entry identity rides on the
 // royalty claim row as DATA — it is NOT part of the idempotency key).
+// pooledFixturePrompt names an entity (a technology and a version), which these three tests need
+// for a reason that is NOT what they are testing.
+//
+// They exercise the pooled SQL's plumbing — contributor filtering, the returned entry id, the
+// similarity handed to the royalty claim — and used to pass the prompt "hello". "hello" extracts no
+// discriminator at all, and GetPooled now refuses an unverifiable prompt BEFORE it queries, so the
+// mock's expected query was never issued and all three failed. The tests encoded no expectation
+// about the entity gate; the entity-less prompt was incidental. Naming an entity restores what they
+// were written to check.
+const pooledFixturePrompt = "How do I write a validator in Pydantic v2?"
+
 func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 
@@ -52,7 +63,7 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 		WithArgs(id).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	body, owner, entryID, sim, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
+	body, owner, entryID, sim, err := c.GetPooled(context.Background(), "openai", "gpt-4", pooledFixturePrompt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +92,7 @@ func TestSemanticCache_GetPooled_BelowThreshold(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
 				AddRow("id1", "x", "wsA", 0.5),
 		)
-	body, owner, entryID, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
+	body, owner, entryID, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", pooledFixturePrompt)
 	if err != nil || body != nil || owner != "" || entryID != "" {
 		t.Fatalf("below threshold must miss; got (%q,%q,%q,%v)", body, owner, entryID, err)
 	}
@@ -103,7 +114,7 @@ func TestSemanticCache_GetPooled_EmptyContributor(t *testing.T) {
 				AddRow("id1", "x", "", 0.99),
 		)
 	mock.ExpectExec(`UPDATE prompt_embeddings`).WithArgs("id1").WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	body, owner, _, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", "hello")
+	body, owner, _, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", pooledFixturePrompt)
 	if err != nil {
 		t.Fatal(err)
 	}

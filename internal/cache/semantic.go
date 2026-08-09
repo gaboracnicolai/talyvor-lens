@@ -174,7 +174,7 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
 // prefixed prompt (the caller's job), provably disjoint from any private hash.
 const semanticUpsertPooledSQL = `INSERT INTO prompt_embeddings
   (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators)
-VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), $8)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''))
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
@@ -316,7 +316,7 @@ RETURNING id`
 
 const semanticUpsertVariantSQL = `INSERT INTO prompt_embeddings
   (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, variant_of)
-VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), $8, $9)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
@@ -336,6 +336,21 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
 // royalty claim row — NOT an idempotency key (a retried request can re-match a
 // different row: ORDER BY similarity LIMIT 1 over a moving 24h window).
 func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt string) ([]byte, string, string, float64, error) {
+	// ⚠ AN UNVERIFIABLE PROMPT CANNOT BE SERVED FROM THE POOL, AND THIS IS CHECKED BEFORE THE
+	// QUERY RATHER THAN INSIDE IT. Canon returns "" for a prompt naming no version, code,
+	// identifier, proper noun or listed technology — most consumer traffic — and `discriminators
+	// = $6` then compares '' to '' and reports a match having verified nothing. Measured: 28 of
+	// the 29 consumer DANGER pairs the gate passed went through this door, including
+	// notice-direction (a landlord question and a tenant question, 0.9770, same entities,
+	// opposite meaning).
+	//
+	// It sits ahead of Embed deliberately: a prompt that can never be served must not cost a
+	// paid embedding call to discover that.
+	canon := discriminator.Canon(prompt)
+	if !canon.Verifiable() {
+		return nil, "", "", 0, nil
+	}
+
 	vec, err := c.embedder.Embed(ctx, prompt)
 	if err != nil {
 		return nil, "", "", 0, err
@@ -348,7 +363,7 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt s
 		similarity  float64
 	)
 	err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
-		string(discriminator.Canon(prompt))).
+		string(canon)).
 		Scan(&id, &response, &contributor, &similarity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", "", 0, nil

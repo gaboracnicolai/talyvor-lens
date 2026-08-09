@@ -316,10 +316,35 @@ func Canon(prompt string) Canonical {
 	return Canonical(strings.Join(parts, "|"))
 }
 
+// Verifiable reports whether a canonical form actually names something.
+//
+// ⚠ THIS IS THE PACKAGE'S OWN FAIL-CLOSED RULE, WHICH IT STATED AND DID NOT ENFORCE. The doc at
+// the top of this file says "every path that cannot positively verify a match must refuse", and
+// the empty canonical form is exactly such a path: Extract finds no version, code, identifier,
+// proper noun or listed technology, Canon renders "", and two empty strings compare EQUAL. The
+// gate then answered "match" having compared nothing.
+//
+// ⚠ IT IS NOT A RARE CASE. Measured with cmd/hitrate against the live embedder: on consumer
+// traffic 30/30 of the rephrase pairs the gate passed and 28/29 of the DANGER pairs it passed were
+// equal-because-empty. The gate was not weak on that lane, it was inert.
+//
+// Exported so the SQL read path can ask the same question the Go comparison asks, rather than
+// re-deriving "is this empty" beside it — the two seams disagreeing is how this defect survived.
+func (c Canonical) Verifiable() bool { return c != "" }
+
 // Match reports whether two prompts name the same entities and may therefore share an answer.
 //
 // Equality is STRICT: a token present on one side and absent on the other is a mismatch, not a
 // partial credit. Asymmetry is the dangerous direction in both orientations — serving a
 // Pydantic-v1 answer to an unversioned "how do I write a Pydantic validator?" is as wrong as the
 // reverse, because the general question deserves an answer that says which version it is about.
-func Match(a, b string) bool { return Canon(a) == Canon(b) }
+//
+// ⚠ AND AN UNVERIFIABLE SIDE IS A REFUSAL. "Neither prompt named anything I can check" is not
+// evidence that they are the same question; it is the absence of evidence either way.
+func Match(a, b string) bool {
+	ca, cb := Canon(a), Canon(b)
+	if !ca.Verifiable() || !cb.Verifiable() {
+		return false
+	}
+	return ca == cb
+}
