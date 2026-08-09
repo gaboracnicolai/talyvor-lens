@@ -317,3 +317,163 @@ func TestCredentialExemptionsAreStillRead(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE OTHER TWO SERVICES IN THIS FILE.
+//
+// ⚠ EVERYTHING ABOVE COVERS `lens:` ONLY, and that is a guard that READS as covering the file.
+// docker-compose.yaml now runs three Talyvor binaries — lens, track and docs (#408 committed the
+// track/track-migrate/docs blocks that had existed only on the server for twelve days). Track and
+// Docs are DIFFERENT BINARIES from DIFFERENT REPOS, so their os.Getenv calls are invisible to the
+// tree-walking enumeration above, and their undeclared variables went unnoticed for exactly the
+// reason the Lens ones did.
+//
+// Measured on main before this change: DOCS_LENS_URL, DOCS_LENS_API_KEY, TRACK_LENS_URL and
+// TRACK_LENS_API_KEY each appeared ZERO times. Docs' and Track's Lens integration has never been
+// configured — third and fourth instances of the trap #406 closed for Lens.
+//
+// ⚠ WHY A DECLARED CONTRACT AND NOT CROSS-REPO ENUMERATION. The honest options were:
+//
+//	(a) walk ../talyvor-docs and ../talyvor-track for os.Getenv. Works on a developer's laptop
+//	    with all three repos checked out as siblings. In CI it does NOT: this workflow checks out
+//	    ONE repository, the others are not on disk, and a guard that silently no-ops when a path
+//	    is missing is worse than no guard — it reports coverage it does not have.
+//	(b) a git submodule or a vendored copy of their config. Real coupling and a new update
+//	    burden, to read two constants.
+//	(c) this: a small DECLARED contract per service, in this file, with the source line each
+//	    entry was read from.
+//
+// (c) is chosen, and its weakness is stated rather than hidden: it is hand-maintained, which is
+// the failure mode that produced this very bug. What makes it survivable is that it is SMALL and
+// PINNED TO A CITATION — each entry names the file and line in the other repo it came from, so a
+// reviewer can check it in one grep, and TestOtherServiceContractsCiteTheirSource fails if an
+// entry has no citation. It is a contract, not a memory: if Docs renames a variable, this file is
+// wrong in a way a person can see, rather than a test that quietly passes.
+//
+// ⚠ THIS IS NOT EQUIVALENT TO THE LENS GUARD ABOVE and must not be read as such. The Lens half
+// cannot go stale because the code IS its input. This half can. It catches the failure that
+// actually happened — a variable never declared at all — and not the failure where the other repo
+// adds a new one. Closing that would need (a), and (a) needs all three repos in CI.
+
+// otherServiceVar is one variable another service's binary reads, with the citation that proves it.
+type otherServiceVar struct {
+	name   string
+	source string // repo-relative file:line the name was read from
+	why    string
+}
+
+// docsMustDeclare — read from talyvor-docs @ origin/main.
+var docsMustDeclare = []otherServiceVar{
+	{"DOCS_LENS_URL", "talyvor-docs internal/config/config.go:168",
+		"the Lens base URL. Empty ⇒ lensintegration.IsConfigured() is false and EVERY AI feature is a silent no-op"},
+	{"DOCS_LENS_API_KEY", "talyvor-docs internal/config/config.go:169",
+		"the ADMIN/MINTING credential (cmd/docs/main.go:186 hands it to lenscreds, which exchanges it at POST /v1/auth/token for a per-workspace JWT). ⚠ MUST hold LENS_MINT_KEY's value, never LENS_API_KEY's"},
+}
+
+// trackMustDeclare — read from talyvor-track @ origin/main.
+//
+// ⚠ FIVE, NOT FOUR. The brief said Track reads four; its config reads TRACK_LENS_URL,
+// TRACK_LENS_API_KEY, TRACK_LENS_MINT_KEY, TRACK_LENS_WEBHOOK_SECRET and TRACK_LENS_DASHBOARD_URL
+// (config.go:134-138), plus TRACK_LENS_WEBHOOK_FRESHNESS which has a 5m default and is a tuning
+// knob, not a credential. The extra one matters: Track has a SEPARATE mint slot, so the mint key
+// does NOT go in its API-key slot — see the comment on TRACK_LENS_API_KEY in the compose file.
+var trackMustDeclare = []otherServiceVar{
+	{"TRACK_LENS_URL", "talyvor-track internal/config/config.go:134",
+		"the Lens base URL. Empty ⇒ the whole Lens integration is inert"},
+	{"TRACK_LENS_MINT_KEY", "talyvor-track internal/config/config.go:136",
+		"the narrow mint credential (cmd/track/main.go:259 → ai.New). ⚠ MUST hold LENS_MINT_KEY's value; Track's own config comment says 'Never set this to Lens's global LENS_API_KEY'"},
+	{"TRACK_LENS_API_KEY", "talyvor-track internal/config/config.go:135",
+		"the READ client (cmd/track/main.go:246). Declared so it CAN be set; see the compose comment for why it must stay EMPTY today"},
+	{"TRACK_LENS_WEBHOOK_SECRET", "talyvor-track internal/config/config.go:137",
+		"HMAC secret for the inbound Lens spend-alert webhook. MUST equal Lens's own LENS_TRACK_WEBHOOK_SECRET — different names, one value"},
+	{"TRACK_LENS_DASHBOARD_URL", "talyvor-track internal/config/config.go:138",
+		"where the AI-cost API links a human. Unset ⇒ no link is emitted (deliberate; talyvor-track #66)"},
+}
+
+// declaresMapForm reports whether a MAP-form service block declares `NAME:`.
+//
+// ⚠ MAP FORM, NOT LIST FORM. The lens service uses `- NAME=${NAME}`; track and docs use
+// `NAME: ${NAME}`. forwards() above matches only the list shape, so reusing it here would return
+// false for a correctly-declared variable and the test would be unfixable.
+//
+// It anchors on line-start + optional indent + the name + a colon, so a COMMENT mentioning the
+// name does not satisfy it — the same distinction forwards() exists to make, and the reason this
+// asserts against the parsed block rather than grepping the file.
+func declaresMapForm(block, name string) bool {
+	re := regexp.MustCompile(`(?m)^\s+` + regexp.QuoteMeta(name) + `\s*:`)
+	return re.MatchString(block)
+}
+
+// serviceEnv returns one top-level service block by name. Generalises lensServiceEnv, which was
+// hard-coded to `lens:` — the hard-coding is part of why this gap existed.
+func serviceEnv(t *testing.T, compose, service string) string {
+	t.Helper()
+	start := strings.Index(compose, "\n  "+service+":")
+	if start < 0 {
+		t.Fatalf("no `%s:` service in docker-compose.yaml — this guard has drifted from the file "+
+			"it protects, or the service was renamed", service)
+	}
+	rest := compose[start+1:]
+	end := len(rest)
+	for i := 1; i < len(rest)-3; i++ {
+		if rest[i] == '\n' && rest[i+1] == ' ' && rest[i+2] == ' ' && rest[i+3] != ' ' && rest[i+3] != '#' {
+			end = i
+			break
+		}
+	}
+	return rest[:end]
+}
+
+func TestDocsServiceDeclaresItsLensConfig(t *testing.T) {
+	block := serviceEnv(t, readCompose(t), "docs")
+	for _, v := range docsMustDeclare {
+		if !declaresMapForm(block, v.name) {
+			t.Errorf("the `docs` service does not declare %s — %s.\n"+
+				"    Read from %s. Docs is a DIFFERENT BINARY: this compose file is the only thing "+
+				"that puts a value in front of it, and a variable set in .env but not named in its "+
+				"`environment:` map reaches nothing.", v.name, v.why, v.source)
+		}
+	}
+}
+
+func TestTrackServiceDeclaresItsLensConfig(t *testing.T) {
+	block := serviceEnv(t, readCompose(t), "track")
+	for _, v := range trackMustDeclare {
+		if !declaresMapForm(block, v.name) {
+			t.Errorf("the `track` service does not declare %s — %s.\n"+
+				"    Read from %s.", v.name, v.why, v.source)
+		}
+	}
+}
+
+// TestOtherServiceContractsCiteTheirSource is what makes a hand-maintained contract checkable: an
+// entry with no citation cannot be verified by a reviewer, and an uncheckable entry is how the
+// list rots into the thing it was meant to replace.
+func TestOtherServiceContractsCiteTheirSource(t *testing.T) {
+	for _, set := range [][]otherServiceVar{docsMustDeclare, trackMustDeclare} {
+		for _, v := range set {
+			if !strings.Contains(v.source, ".go:") {
+				t.Errorf("%s cites %q, which is not a file:line in the owning repo — every entry "+
+					"must be checkable in one grep", v.name, v.source)
+			}
+			if strings.TrimSpace(v.why) == "" {
+				t.Errorf("%s has no reason; an entry nobody can justify is an entry nobody can remove", v.name)
+			}
+		}
+	}
+}
+
+// TestMapFormMatcherIsNotSatisfiedByAComment — the assertion above is only worth anything if a
+// comment mentioning the variable does NOT satisfy it. Pinned directly, because the list-form
+// matcher exists precisely because that mistake was made once already.
+func TestMapFormMatcherIsNotSatisfiedByAComment(t *testing.T) {
+	commentOnly := "    environment:\n      # DOCS_LENS_URL: intentionally not set here\n      DOCS_LOG_LEVEL: info\n"
+	if declaresMapForm(commentOnly, "DOCS_LENS_URL") {
+		t.Error("a COMMENT mentioning DOCS_LENS_URL satisfied the matcher — that is the exact " +
+			"failure the list-form matcher was written to avoid")
+	}
+	real := "    environment:\n      DOCS_LENS_URL: http://lens:8080\n"
+	if !declaresMapForm(real, "DOCS_LENS_URL") {
+		t.Error("a real map-form declaration did not satisfy the matcher — it would be unfixable")
+	}
+}
