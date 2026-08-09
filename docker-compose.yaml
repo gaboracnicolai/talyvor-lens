@@ -469,6 +469,44 @@ services:
       # OPTIONAL to Track (unset ⇒ Track boots and both endpoints 401 everything), but
       # REQUIRED for Docs membership to work at all. >= 16 chars, enforced at boot.
       TRACK_MEMBER_SYNC_SECRET: ${MEMBER_SYNC_SECRET:?MEMBER_SYNC_SECRET must be set — see FULL-STACK-DEPLOY.md STEP 1}
+      # ── Lens: Track's AI + per-issue cost ─────────────────────────────────────
+      # ⚠ THE THIRD AND FOURTH INSTANCES OF THE TRAP #406 CLOSED FOR LENS. None of the
+      # lines below existed, so Track's Lens client has never been configured and every
+      # AI feature has been a silent no-op since it shipped. Same mechanism as
+      # LENS_PROVISION_SECRET and LENS_MINT_KEY: this service has an explicit
+      # `environment:` map and no `env_file:`, so a variable set in .env that is not
+      # named here reaches nothing, and the container still starts healthy.
+      TRACK_LENS_URL: http://lens:8080
+      # ⚠ THE NARROW MINT CREDENTIAL, AND THE WHOLE POINT OF #402. It can mint a
+      # per-workspace token and nothing else: Lens gives it scope {mint} with
+      # IsAdmin=false (internal/auth/manager.go:339), so every admin gate refuses it.
+      # ⚠ NEVER put LENS_API_KEY's value here. Track's own config says so verbatim —
+      # "Never set this to Lens's global LENS_API_KEY" (config.go:29) — because the
+      # global admin key must not enter one of the two most exposed services.
+      TRACK_LENS_MINT_KEY: ${LENS_MINT_KEY:-}
+      # ⚠ DECLARED SO IT CAN BE SET, AND IT MUST STAY EMPTY TODAY. This is Track's READ
+      # client (cmd/track/main.go:246): per-workspace spend summaries and anomalies.
+      # Those reads hit /v1/api/spend/* with ?workspace_id=, and Lens's
+      # effectiveWorkspaceID (internal/api/server.go:1204) honours that parameter ONLY
+      # for an ADMIN credential; a non-admin gets its own workspace, and the mint key
+      # has none, so the read resolves to forbidden.
+      #
+      # So no correct value exists right now: the mint key cannot read, and the admin
+      # key is exactly what #402 keeps out of Track. Empty ⇒ IsConfigured() is false and
+      # the cost sync stays off, which is the honest state. Closing it needs Track to use
+      # a minted per-workspace token for its reads the way Docs already does (lenscreds),
+      # or Lens to grow a read scope the mint key can carry.
+      TRACK_LENS_API_KEY: ${TRACK_LENS_API_KEY:-}
+      # HMAC secret for the INBOUND Lens→Track spend-alert webhook (POST /v1/lens/webhook,
+      # gwExempt and signature-verified). ⚠ MUST be the SAME VALUE as the lens service's
+      # LENS_TRACK_WEBHOOK_SECRET — different names, one value, the same shape as
+      # GATEWAY_AUTH_SECRET. Empty ⇒ Track answers 401 WEBHOOK_DISABLED and fails closed.
+      TRACK_LENS_WEBHOOK_SECRET: ${LENS_TRACK_WEBHOOK_SECRET:-}
+      # Where Track's AI-cost API links a human for request-level detail. Unset ⇒ NO link
+      # is emitted, deliberately: it used to be derived as <lens>/dashboard, a route Lens
+      # registers only under LENS_DASHBOARD_ENABLED (default off) and does not forward at
+      # all, so it 404'd for everyone (talyvor-track #66).
+      TRACK_LENS_DASHBOARD_URL: ${TRACK_LENS_DASHBOARD_URL:-}
       TRACK_LOG_LEVEL: info
     depends_on:
       postgres:
@@ -513,9 +551,30 @@ services:
       # .env key feeds both, so they cannot drift.
       DOCS_TRACK_URL: http://track:3000
       DOCS_TRACK_MEMBER_SYNC_SECRET: ${MEMBER_SYNC_SECRET:?MEMBER_SYNC_SECRET must be set — see FULL-STACK-DEPLOY.md STEP 1}
-      # NOT set: DOCS_TRACK_API_KEY. It gates the COST sync (page ai_cost roll-up),
-      # not membership — MemberSyncConfigured() does not look at it. Leaving it unset
-      # keeps SyncPageCosts off, which is deliberate for the trial.
+      # ⚠ NOT set: DOCS_TRACK_API_KEY — AND IT COULD NOT WORK IF IT WERE, which is a
+      # stronger statement than "deliberately off". It gates the COST sync (page
+      # ai_cost roll-up) and the editor's issue embeds; MemberSyncConfigured() does not
+      # look at it. But the client it configures sends `Authorization: Bearer <key>`
+      # (talyvor-docs internal/trackintegration/client.go:229) to
+      # /v1/workspaces/{ws}/issues/{id} and .../issues/search — paths INSIDE Track's
+      # gatewayauth boundary, which demands X-Gateway-Auth == Track's GATEWAY_AUTH_SECRET
+      # before any identity is trusted and does not accept a bearer at all. Member sync
+      # works only because /v1/service/* is gwExempt with its own bearer secret.
+      # Setting this would turn "silently off" into "silently 403ing". Making it work is
+      # a code change in Docs (send the transit proof + identity headers, as the BFF
+      # does) or a new gwExempt service endpoint in Track — not a value in .env.
+      # ── Lens: Docs' AI ────────────────────────────────────────────────────────
+      # ⚠ SAME TRAP AS THE TRACK BLOCK ABOVE. Neither line existed, so Docs' AI —
+      # ask-AI, summarise, translate, title suggestion, changelog generation and the
+      # semantic page search — has been a silent no-op since it shipped.
+      DOCS_LENS_URL: http://lens:8080
+      # ⚠ THE MINTING CREDENTIAL, AND ONLY THAT. cmd/docs/main.go:186 hands it to
+      # lenscreds, which exchanges it at POST /v1/auth/token for a per-workspace JWT and
+      # caches one per workspace, so every Lens DATA call is attributed and rate-limited
+      # to its real tenant. Scope {mint} is sufficient for that exchange and nothing
+      # else. ⚠ NEVER put LENS_API_KEY's value here — before lenscreds, Docs sent the
+      # admin key on the data path and every tenant collapsed into one rate-limit bucket.
+      DOCS_LENS_API_KEY: ${LENS_MINT_KEY:-}
       DOCS_LOG_LEVEL: info
     depends_on:
       postgres:
