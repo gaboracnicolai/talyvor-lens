@@ -36,6 +36,50 @@ func requireAdmin(am adminAuthenticator, next http.Handler) http.HandlerFunc {
 	}
 }
 
+// requireAdminOrOperatorRead gates a CROSS-TENANT ADMIN READ. Admin reaches it exactly as before;
+// the narrow operator read credential (auth.ScopeOperatorRead, LENS_OPERATOR_READ_KEY) reaches it
+// too, but ONLY with a read method.
+//
+// ⚠ THE METHOD CHECK IS THE POINT, NOT DECORATION. Eight admin routes are registered with
+// `r.Handle`, which mounts EVERY verb, and exactly one of them gates its own method
+// (internal/econflags 405s a non-GET; `MethodNotAllowed` appears in one non-test file in the whole
+// repository). So "read vs write" cannot be answered per PATH for them — granting a path would
+// grant POST, PUT and DELETE on it as well. Answering per (path, METHOD) is what makes the grant
+// describable: whatever the router mounted, this credential can only GET.
+//
+// Admin is deliberately NOT method-restricted. The gate must not change what the global key can do
+// on any route it already reached — a narrowing that breaks admin costs more than the gap it
+// closes, which is why every refusal in the tests is paired with an admin control.
+//
+// FAILS CLOSED like requireAdmin: missing, invalid or nil ⇒ 401.
+func requireAdminOrOperatorRead(am adminAuthenticator, next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actx, err := am.Authenticate(r)
+		if err != nil || actx == nil {
+			writeJSONErr(w, http.StatusUnauthorized, "admin credentials required")
+			return
+		}
+		if actx.IsAdmin {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// ⚠ HasScope short-circuits to true for admin, so this branch is only ever reached by a
+		// non-admin — a workspace key carrying the "admin" scope is NOT admin and lands here, where
+		// it does not carry operator_read and is refused.
+		if !actx.HasScope(auth.ScopeOperatorRead) {
+			writeJSONErr(w, http.StatusUnauthorized, "admin credentials required")
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writeJSONErr(w, http.StatusMethodNotAllowed,
+				"this credential may only read: GET or HEAD")
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
 // poolKeyRemover is the slice of *keypool.Pool the delete handler needs.
 type poolKeyRemover interface {
 	Remove(keyID string) bool
