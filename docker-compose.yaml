@@ -422,6 +422,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # Your public hostname (or `localhost` for a local run). Required — the
       # stack fails closed rather than silently serving on the wrong name. Caddy
@@ -438,8 +440,93 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # ── Track ──────────────────────────────────────────────────────────────────
+  # Schema first. restart:"no" + service_completed_successfully is the same
+  # gate the lens stack uses for its own `migrate` service, so `up -d` cannot
+  # start the API against an unmigrated database.
+  track-migrate:
+    image: ghcr.io/gaboracnicolai/talyvor-track:latest
+    command: ["migrate", "up"]
+    environment:
+      TRACK_DATABASE_URL: postgres://lens:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/talyvor_track?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  track:
+    image: ghcr.io/gaboracnicolai/talyvor-track:latest
+    environment:
+      TRACK_DATABASE_URL: postgres://lens:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/talyvor_track?sslmode=disable
+      TRACK_LISTEN_ADDR: 0.0.0.0:3000
+      # Track's copy of the transit proof. MUST equal the BFF's
+      # TRACK_GATEWAY_SECRET — different names, one value. Boot-required and
+      # >= 16 chars (internal/config/config.go:106).
+      GATEWAY_AUTH_SECRET: ${TRACK_GATEWAY_AUTH_SECRET:?TRACK_GATEWAY_AUTH_SECRET must be set — see deploy/README.md}
+      # Serves the two gwExempt service endpoints Docs pulls: GET /v1/service/members
+      # (rosters) and GET /v1/service/workspaces (which workspaces exist — track #64).
+      # ONE secret gates both; Docs sends it as `Authorization: Bearer`.
+      # OPTIONAL to Track (unset ⇒ Track boots and both endpoints 401 everything), but
+      # REQUIRED for Docs membership to work at all. >= 16 chars, enforced at boot.
+      TRACK_MEMBER_SYNC_SECRET: ${MEMBER_SYNC_SECRET:?MEMBER_SYNC_SECRET must be set — see FULL-STACK-DEPLOY.md STEP 1}
+      TRACK_LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      track-migrate:
+        condition: service_completed_successfully
+    # Host loopback only. Not internet-facing, no Caddy hostname.
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+  # ── Docs ───────────────────────────────────────────────────────────────────
+  # No migrate service: Docs applies pending migrations on boot, fail-closed.
+  docs:
+    image: ghcr.io/gaboracnicolai/talyvor-docs:latest
+    environment:
+      DOCS_DATABASE_URL: postgres://lens:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/talyvor_docs?sslmode=disable
+      DOCS_LISTEN_ADDR: 0.0.0.0:4000
+      # Docs' copy of the transit proof. MUST equal the BFF's DOCS_GATEWAY_SECRET.
+      # Boot-required, >= 16 chars, AND permanently rejects the published
+      # placeholder "dev-only-insecure-gateway-secret-change-me" regardless of
+      # length (internal/config/config.go:137,196) — it is in git history, so it
+      # is public forever.
+      GATEWAY_AUTH_SECRET: ${DOCS_GATEWAY_AUTH_SECRET:?DOCS_GATEWAY_AUTH_SECRET must be set — see deploy/README.md}
+      # ⚠ NOT TENANCY ANY MORE — do not pair this with anything on the BFF.
+      # It used to have to equal the BFF's DOCS_WORKSPACE_ID, which pinned one Docs
+      # workspace for everyone. suite #59 (030ea53) removed that variable: every Docs
+      # route now resolves the SESSION's Track workspace (docsWorkspaceFor).
+      # What still reads it, both single-workspace background jobs:
+      #   · the COST syncer's scope (off here — DOCS_TRACK_API_KEY is unset)
+      #   · the daily 09:00 UTC stale-page freshness digest
+      # Optional, defaults to "default" in Docs' own config. Left explicit so the
+      # value is visible rather than implied.
+      DOCS_DEFAULT_WORKSPACE: ${DOCS_DEFAULT_WORKSPACE:-default}
+      # ── Member sync: Docs pulls tenancy from Track ────────────────────────────
+      # Track is the tenancy source of truth (it mints a workspace per identity at
+      # login), so Docs asks it which workspaces exist rather than deriving the set
+      # from its own content — the cold-start deadlock docs #46 / track #64 closed.
+      # Both are required together: MemberSyncConfigured() is trackURL && secret, and
+      # either one missing makes SyncMembers a SILENT no-op.
+      # ⚠ THE SAME VALUE as the track service's TRACK_MEMBER_SYNC_SECRET above — one
+      # .env key feeds both, so they cannot drift.
+      DOCS_TRACK_URL: http://track:3000
+      DOCS_TRACK_MEMBER_SYNC_SECRET: ${MEMBER_SYNC_SECRET:?MEMBER_SYNC_SECRET must be set — see FULL-STACK-DEPLOY.md STEP 1}
+      # NOT set: DOCS_TRACK_API_KEY. It gates the COST sync (page ai_cost roll-up),
+      # not membership — MemberSyncConfigured() does not look at it. Leaving it unset
+      # keeps SyncPageCosts off, which is deliberate for the trial.
+      DOCS_LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4000:4000"
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
   caddy_data:
   caddy_config:
+
