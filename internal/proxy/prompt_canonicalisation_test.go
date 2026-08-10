@@ -159,6 +159,12 @@ func TestLowercasingOpensTheEntityGateOnDangerPairs(t *testing.T) {
 
 // W2.5 asked for the micro sign to be pinned. It is not one question but three, and the three
 // disagree — which is the finding, since no committed corpus contains a micro sign at all.
+//
+// ⚠ STATED AS A LIMIT, NOT SOLD AS COVERAGE: this test pins the Go standard library, not this
+// product. No mutation of anything in this repository can red it — only a change to Go's case
+// tables can. It is here because "lowercasing" is three different functions with three different
+// answers on U+00B5, and an implementer who reaches for the wrong one gets a different key set
+// with nothing to tell them. The three product-behaviour tests above are the ones with controls.
 func TestMicroSignIsNotUnifiedByLowercasing(t *testing.T) {
 	const microSign = "µ" // MICRO SIGN — what a keyboard and the µLENS/µLXC unit names produce
 	const greekMu = "μ"   // GREEK SMALL LETTER MU
@@ -170,7 +176,12 @@ func TestMicroSignIsNotUnifiedByLowercasing(t *testing.T) {
 	if strings.ToLower(greekMu) != greekMu {
 		t.Errorf("ToLower(U+03BC) = %U, want U+03BC unchanged", []rune(strings.ToLower(greekMu)))
 	}
-	// The trap, stated three ways.
+	// The trap, stated three ways. ⚠ staticcheck SA6005 wants strings.EqualFold here and the
+	// linter's suggestion is precisely the substitution this assertion exists to refute: for
+	// U+00B5 vs U+03BC the two are NOT interchangeable, and the very next check proves it by
+	// asserting EqualFold returns the opposite answer. Rewriting this to EqualFold would make
+	// the two assertions contradict each other and silently delete the finding.
+	//nolint:staticcheck // SA6005: ToLower-comparison vs EqualFold is the measured disagreement
 	if strings.ToLower(microSign) == strings.ToLower(greekMu) {
 		t.Error("ToLower unified µ and μ — it does not in this Go version, and W2.5's note that " +
 			"lowercasing does NOT fix the micro-sign split would no longer hold")
