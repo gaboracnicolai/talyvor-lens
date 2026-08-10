@@ -37,6 +37,7 @@ import (
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/compressor"
+	"github.com/talyvor/lens/internal/discriminator"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
@@ -2436,7 +2437,22 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 		// the NUL-sentinel pooled prompt (disjoint hash) but embedding the RAW
 		// prompt so cross-tenant similar prompts match cleanly; tagged with the
 		// contributor + is_poolable=true.
-		if p.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+		// ⚠ AND AN UNVERIFIABLE PROMPT BUYS NOTHING. GetPooled refuses ahead of Embed for the
+		// reason stated at that seam — "a prompt that can never be served must not cost a paid
+		// embedding call to discover that" — and the WRITE owes the same answer. Since the
+		// empty-extraction fix, a pooled row whose canonical form is empty is unreachable from
+		// BOTH directions: the reader refuses on an empty canon, and `discriminators = $6` never
+		// matches the NULL stored here. So this call bought a billed embedding, and a row, for an
+		// entry with a structurally zero chance of ever being served.
+		//
+		// Measured over the poolsafety corpora (Canon is pure Go, so measuring costs nothing):
+		// 118/150 deduped CONSUMER prompts and 19/146 ENGINEERING prompts have an empty canonical
+		// form — on the consumer lane, four in five pooled writes.
+		//
+		// ⚠ SCOPED TO THE SEMANTIC WRITE ON PURPOSE. The exact pooled write above is keyed on
+		// byte-identical prompt text, so it is servable without an entity gate. Gating it too
+		// would drop real cross-tenant exact hits.
+		if p.poolGate.DecidePoolableOnWrite(ctx, wsID) && discriminator.Canon(rawPrompt).Verifiable() {
 			if vec, err := p.embedder.Embed(ctx, rawPrompt); err == nil {
 				_ = p.semantic.SetPooled(ctx, provider, model, pooledPromptKey(rawPrompt), wsID, response, vec)
 			}
