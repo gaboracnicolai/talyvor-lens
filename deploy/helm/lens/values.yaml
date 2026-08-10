@@ -7,11 +7,32 @@
 replicaCount: 1
 
 image:
-  # -- Gateway image repository. Published by .github/workflows/images.yaml.
-  repository: ghcr.io/talyvor/talyvor-lens
-  # -- Image tag. Empty string defaults to the chart appVersion.
-  tag: ""
-  # -- imagePullPolicy.
+  # -- Gateway image repository. Published by .github/workflows/images.yaml, which
+  # pushes to ghcr.io/${{ github.repository_owner }}/talyvor-lens — the OWNER of
+  # this GitHub repository. Note that this is NOT the Go module path: go.mod says
+  # `github.com/talyvor/lens`, and `talyvor` is not a GitHub organisation at all.
+  # The chart used to name it here and every `helm install` died on ImagePullBackOff.
+  repository: ghcr.io/gaboracnicolai/talyvor-lens
+  # -- Image tag.
+  #
+  # ⚠ `latest` IS NOT REPRODUCIBLE. Two `helm install`s a week apart can deploy
+  # DIFFERENT CODE under the same chart version, and with the `IfNotPresent`
+  # policy below a node that has already cached `latest` never picks up a new
+  # one at all — so a cluster can run a mix. A PRODUCTION SELF-HOST SHOULD PIN A
+  # COMMIT SHA HERE (`tag: <40-char sha>`, and set pullPolicy: Always if you want
+  # a re-pull on every restart). `lens version`, /healthz and /status report the
+  # sha the image was built from, so a pinned deployment can be verified in one
+  # command against the registry tag.
+  #
+  # Why `latest` is nonetheless the default: images.yaml publishes exactly two
+  # kinds of tag — `latest` and the commit sha — and it is not tag-driven. There
+  # are no semver image tags and no git tags in this repository, so the previous
+  # default (empty = the chart appVersion, 0.1.0) named a tag NOTHING EVER
+  # PUBLISHES: a guaranteed manifest 404. An empty tag can only become correct
+  # once a release process publishes the appVersion; until then this default is
+  # the one that resolves.
+  tag: latest
+  # -- imagePullPolicy. See the reproducibility warning above before changing.
   pullPolicy: IfNotPresent
 
 # -- Secrets for pulling private images (list of {name: ...}).
@@ -326,6 +347,15 @@ podDisruptionBudget:
 # (talyvor-node / -cachenode / -embednode), NOT part of a standard gateway
 # deploy. Off by default. Each needs its own published image (the default
 # gateway image contains only the gateway binary).
+#
+# ⚠ THE THREE `repository` VALUES BELOW ARE PLACEHOLDERS, NOT PULLABLE IMAGES.
+# Measured 2026-08-10 against the live registry: all three return a token-endpoint
+# 403 under `talyvor` AND under this repository's real owner — they exist nowhere.
+# images.yaml builds exactly ONE image (talyvor-lens), so nothing is going to
+# publish them. SETTING `nodes.enabled: true` WITHOUT ALSO SETTING YOUR OWN
+# `repository` FOR EACH ENABLED NODE GIVES YOU ImagePullBackOff. They are
+# deliberately left outside the real image org so they cannot be mistaken for
+# something you can pull; cmd/lens/chart_image_reach_test.go enforces that.
 nodes:
   # -- Master switch for all node workloads.
   enabled: false

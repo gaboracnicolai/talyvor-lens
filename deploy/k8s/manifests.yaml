@@ -36,6 +36,10 @@ data:
   LENS_HA_HEARTBEAT_SEC: "5"
   LENS_HA_INSTANCE_TTL_SEC: "15"
   LENS_HA_DRAIN_TIMEOUT_SEC: "30"
+  # Billing (U18b) — FIAT. Stripe SECRETS live in the Secret, never in this ConfigMap.
+  LENS_BILLING_ENABLED: "false"
+  LENS_BILLING_SUCCESS_URL: "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"
+  LENS_BILLING_CANCEL_URL: "https://app.talyvor.com/billing/cancel"
 
 ---
 # Source: lens/templates/service.yaml
@@ -91,7 +95,7 @@ spec:
         app.kubernetes.io/component: gateway
       annotations:
         # Roll pods automatically when the non-secret config changes.
-        checksum/config: 2af8dbc12f8a7bf875c43503c8b4ae05e5d0ecb9058c937313f7b660e950c54a
+        checksum/config: 11a6af67b38f29a998fc52a839324b8862ae58443bba8538ae06fd64189e1a0d
     spec:
       serviceAccountName: lens
       securityContext:
@@ -103,7 +107,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: lens
-          image: "ghcr.io/talyvor/talyvor-lens:0.1.0"
+          image: "ghcr.io/gaboracnicolai/talyvor-lens:latest"
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -157,14 +161,16 @@ spec:
 # Source: lens/templates/job-migrate.yaml
 # Database migration hook. Runs as a pre-install AND pre-upgrade hook so the
 # schema is migrated BEFORE new gateway pods roll out (ordering: this Job must
-# complete successfully before the Deployment is created/updated).
+# complete successfully before the Deployment is created/updated). If the Job
+# fails (non-zero exit), Helm fails the install/upgrade — so a server is never
+# rolled out against an unmigrated DB.
 #
-# IMPORTANT: the default Lens gateway image ships neither a `migrate`
-# subcommand nor the SQL files, so there is no working default command. You
-# MUST set migrations.command to your migration mechanism (a dedicated
-# migrations image, a `migrate`/flyway tool, etc.) — see the chart README
-# "Migrations". With no command set, this Job intentionally fails closed rather
-# than pretend migrations ran. Set migrations.enabled=false to skip entirely.
+# The default command is the gateway image's own `lens migrate` subcommand,
+# which applies the embedded SQL migrations idempotently (tracked in a
+# schema_migrations table) using the same LENS_DATABASE_URL the server uses.
+# Override migrations.command to use a different mechanism, or set
+# migrations.enabled=false to skip the hook entirely and run migrations
+# externally.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -201,7 +207,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: migrate
-          image: "ghcr.io/talyvor/talyvor-lens:0.1.0"
+          image: "ghcr.io/gaboracnicolai/talyvor-lens:latest"
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -211,13 +217,11 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
           command:
-            - /bin/sh
-            - -c
-            - >-
-              echo 'ERROR: migrations.command is not set. Lens ships no migrate
-              subcommand and the SQL is not in the gateway image, so there is no
-              safe default. Configure migrations.command (see chart README →
-              Migrations) or set migrations.enabled=false.' >&2; exit 1
+            # The gateway image's built-in migrator. Applies embedded SQL
+            # idempotently; exits non-zero on failure so this hook Job fails
+            # and Helm holds back the rollout.
+            - /lens
+            - migrate
           envFrom:
             - configMapRef:
                 name: lens-config

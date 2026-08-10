@@ -223,7 +223,7 @@ The key never grants admin, and a workspace can only ever see its own data.
 
 ## Not covered here
 
-The Helm chart under `deploy/helm/lens/` is **uninvoked scaffolding** with a placeholder image
-(`ghcr.io/talyvor/talyvor-lens`, empty tag) — it is not part of this compose-based path and is not
-wired up. Use compose for a single-VM host; the Helm chart would need real image/values work before it
-runs, which is out of scope here.
+The Helm chart under `deploy/helm/lens/` is **not exercised by this compose-based path**. Its
+default image now resolves (`ghcr.io/gaboracnicolai/talyvor-lens:latest`, verified against the live
+registry), but no live-cluster install has been run from it — treat it as static-validated only. Use
+compose for a single-VM host.
