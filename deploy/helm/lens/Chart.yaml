@@ -1,8 +1,11 @@
 apiVersion: v2
 name: lens
 description: |
-  Talyvor Lens — the AI gateway. This is the REFERENCE Helm chart for the
-  Talyvor platform; Track/Docs/Code charts follow the same pattern.
+  Talyvor Lens — the AI gateway. This is the ONLY Helm chart in the Talyvor
+  platform: talyvor-track, talyvor-docs, talyvor-code and talyvor-suite ship
+  no Chart.yaml at all (checked 2026-08-10). An earlier version of this line
+  said Track/Docs/Code charts "follow the same pattern", which read as though
+  they exist.
 
   Default install = a single gateway replica, external Postgres/Redis/NATS,
   secrets supplied by reference, and a pre-upgrade migration hook. HA,
@@ -16,9 +19,14 @@ version: 0.1.0
 # (used as the default image tag). Keep in sync with the Lens release.
 appVersion: "0.1.0"
 
-home: https://github.com/talyvor/lens
+# Both of these were https://github.com/talyvor/lens, which 404s — the `talyvor`
+# GitHub organisation does not exist (checked 2026-08-10; the real repository
+# returns 200). `github.com/talyvor/lens` survives as the Go module path in
+# go.mod, which is an import identifier and need not resolve; these two fields
+# are links a chart consumer clicks, and they must.
+home: https://github.com/gaboracnicolai/talyvor-lens
 sources:
-  - https://github.com/talyvor/lens
+  - https://github.com/gaboracnicolai/talyvor-lens
 maintainers:
   - name: Talyvor Platform
 keywords:

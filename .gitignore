@@ -14,3 +14,7 @@ docker-compose.override.yml
 
 # Operator-local env forwarded to the lens container (see lens.env.example).
 lens.env
+
+# Python bytecode from the by-hand chart probe (deploy/helm/lens/check-image-reach.py).
+__pycache__/
+*.pyc
