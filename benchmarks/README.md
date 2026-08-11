@@ -32,7 +32,7 @@ Generated automatically on every push to `main` by `.github/workflows/benchmark.
 | `BenchmarkInjectionDetection` | 100-word clean prompt. |
 | `BenchmarkConcurrentRequests` | `b.RunParallel` with `GOMAXPROCS` goroutines. |
 | `BenchmarkRateLimitCheck` | Lua-backed atomic ops against miniredis. |
-| `BenchmarkFullProxyStack` | Headline number: PII + injection + budget + cache + route + forward + cache-write. **No longer includes compress** — 0117 gated the prompt rewriter behind a per-workspace policy that defaults to `disabled`, and this benchmark wires a nil workspace manager, so it now measures the default serving path. A step down at that commit is the gate, not an optimisation. |
+| `BenchmarkFullProxyStack` | Headline number: PII + injection + budget + cache + route + forward + cache-write. **No longer includes compress** — 0117 gated the prompt rewriter behind a per-workspace policy that defaults to `disabled`, and this benchmark wires a nil workspace manager, so it now measures the default serving path. The gate is visible at `fd38044` as **allocs/op 390 → 354** (and `ExactCacheMiss` identically), *not* in ns/op — see Methodology. |
 
 ## Methodology
 
@@ -41,6 +41,7 @@ Generated automatically on every push to `main` by `.github/workflows/benchmark.
 - Memory measured with the `-benchmem` flag.
 - Concurrent benchmark uses `GOMAXPROCS` parallel goroutines via `b.RunParallel`.
 - Each benchmark uses `b.ResetTimer()` after setup so init time (cache priming, fixture build) doesn't count.
+- **`ns/op` cannot carry a single-commit claim; `allocs/op` can.** This suite runs on shared GitHub-hosted runners. Measured between two consecutive main runs (`34afe59` → `fd38044`), `BenchmarkExactCacheHit` moved **+31.7%** in ns/op while its allocation profile stayed byte-identical (98 allocs, 10477 B) and nothing on its code path had changed. Wall clock here is a trend across many runs. When you need to show that a specific change did or did not take effect, point at the allocation count — as the `BenchmarkFullProxyStack` row above does for the 0117 compression gate.
 
 ## vs Competitors
 
