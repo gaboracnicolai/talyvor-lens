@@ -173,6 +173,18 @@ func main() {
 		}
 		return
 	}
+	// canoncheck measures W2.6's tier-2 proposal: rewrite each prompt into a canonical question
+	// with a cheap model, hash THAT, match exactly — no threshold anywhere in the path. It reports
+	// key stability FIRST (an unstable key makes every later number a fact about one sample), then
+	// the collapse rate on rephrasings and on danger pairs. Read-only; it is not on any serve path
+	// and internal/canonq's no_serve_path_test.go asserts that.
+	if len(os.Args) > 1 && os.Args[1] == "canoncheck" {
+		if err := runCanonCheck(); err != nil {
+			slog.Error("canoncheck failed", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	// realdist measures the nearest-neighbour similarity of REAL stored prompts. Read-only; reads
 	// no prompt content (there is none stored).
 	if len(os.Args) > 1 && os.Args[1] == "realdist" {
