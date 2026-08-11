@@ -44,7 +44,7 @@ client = LensClient(lens_url="http://your-lens:8080", api_key="tlv_...").openai
 | Semantic cache (pgvector) | No | Yes |
 | Exact cache (Redis) | Yes | Yes |
 | Quality scoring | No | Yes |
-| Prompt compression | No | Yes |
+| Prompt compression | No | Seam only — shipped OFF (see below) |
 | Prompt versioning | No | Yes |
 | A/B model testing | No | Yes (shadow traffic) |
 | MCP server | No | Yes |
@@ -59,6 +59,8 @@ client = LensClient(lens_url="http://your-lens:8080", api_key="tlv_...").openai
 | March 2026 supply-chain compromise | Yes (1.82.7, 1.82.8) | No |
 
 Notes: LiteLLM "RPS struggles past ~2,000" and "memory under load can exceed 8 GB" come from community reports and stress-test write-ups — not vendor marketing. Reproduce against any current LiteLLM release; numbers vary by Python version and async backend.
+
+**Prompt compression** used to read "Yes" in that table and it was not earning it. `internal/compressor` is a fixed regex list for conversational filler; measured against this repo's own committed corpora it modified **0 of 308** prompts (2717 → 2717 estimated tokens, 0.000%), and it modified **8 of 8** prompts in the corpus that stands in for real coding-agent traffic — because its space-run collapse rewrites leading indentation outside a ``` fence, so two Python nesting levels arrive at the provider as one. As of migration 0117 the request path is gated per workspace (`compression_policy`, default `disabled`; `PUT /v1/workspaces/{id}/compression`), so nothing is rewritten unless you ask. The seam is kept because a real reduction layer will live there; the current technique is what measured worthless. Streaming requests were never compressed at all.
 
 ## Migration steps
 
