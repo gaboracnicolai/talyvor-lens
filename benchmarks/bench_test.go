@@ -226,9 +226,29 @@ func BenchmarkRateLimitCheck(b *testing.B) {
 // — a nil manager answers "do not rewrite" (internal/proxy/compression_gate.go).
 // So this measures the DEFAULT serving path, which is the honest headline: the
 // rewriter measured 0.000% saving on 308 corpus prompts and is off for every
-// workspace unless one asks. Expect this benchmark to have got slightly FASTER
-// at 0117 for that reason and not because anything was optimised. The rewriter's
-// own cost, when a workspace does opt in, is BenchmarkPromptCompression below.
+// workspace unless one asks. The rewriter's own cost, when a workspace does opt
+// in, is BenchmarkPromptCompression below.
+//
+// ⚠ READ allocs/op TO SEE THE GATE. NOT ns/op. Measured across the two Benchmark
+// workflow runs either side of 0117 (34afe59 run 31447228386 -> fd38044 run
+// 31461507149, same runner type, -benchtime=5s):
+//
+//	                    allocs/op        B/op            ns/op
+//	FullProxyStack    390 -> 354   27612 -> 27115   356751 -> 387161
+//	ExactCacheMiss    390 -> 354   27589 -> 27074   351272 -> 394400
+//	ExactCacheHit      98 ->  98   10477 -> 10477    73678 ->  97012
+//	ConcurrentReq      98 ->  98   10603 -> 10603    22819 ->  27961
+//
+// The two benchmarks that traverse the upstream MISS path each lost EXACTLY the
+// same 36 allocations; the two that short-circuit on a cache hit — which cannot
+// reach the compressor at all — lost none. That separation is the gate, and it is
+// a deterministic counter.
+//
+// Wall clock says nothing here and pointed the wrong way: it rose on all four,
+// including on the two whose allocation profile is byte-identical, and
+// ExactCacheHit moved +31.7% between those same two runs. An earlier version of
+// this comment predicted "slightly faster" from the reasoning alone. The
+// measurement refused it, which is the whole reason to take one.
 func BenchmarkFullProxyStack(b *testing.B) {
 	srv := canned200(b)
 	p, _ := newBenchProxy(b, srv.URL)
