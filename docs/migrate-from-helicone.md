@@ -92,7 +92,7 @@ The `/oai/*` and `/anthropic/*` paths are first-class routes — they're not a d
 
 - **Semantic caching** — pgvector-backed similarity matching catches near-duplicate prompts that an exact cache misses. We do not publish a typical-reduction figure: we have not measured one across real customer traffic, and it depends entirely on how repetitive your traffic is. Read your own hit rate off `/v1/api/usage` once you are running.
 - **Model routing** — `internal/router` picks the cheapest model that can handle the prompt's complexity. Opt-in per workspace.
-- **Prompt compression** — `internal/compressor` removes redundancy from verbose prompts before they hit the LLM.
+- **Prompt compression** — a SEAM, shipped OFF, and we would rather say so than let you find out. `internal/compressor` strips conversational filler with a fixed regex list. Measured against our own committed corpora it changed 0 of 308 prompts (0.000%), and it changed 8 of 8 prompts in the corpus that models coding-agent traffic — by collapsing the leading indentation of code that is not inside a ``` fence. Since migration 0117 it is per-workspace and defaults to `disabled` (`PUT /v1/workspaces/{id}/compression`, or `X-Talyvor-Compress: true` under `opt_in`). Do not migrate here for this; migrate for the rest of the list.
 - **Quality scoring** — pure-Go heuristics gate cache writes so a low-quality response doesn't get served to the next caller.
 - **A/B model testing** — shadow-traffic comparison between models on the same prompts.
 - **Prompt versioning** — `lens:prompt:<name>` references resolve to versioned, rollback-able prompts.

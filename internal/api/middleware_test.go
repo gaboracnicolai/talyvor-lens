@@ -515,6 +515,43 @@ func TestCORSMiddleware_AllowedOrigin_SetsHeaders(t *testing.T) {
 	}
 }
 
+// THE PER-REQUEST OPT-IN HEADERS ARE NOT BROWSER-REACHABLE, AND THAT IS PINNED
+// RATHER THAN LEFT TO BE DISCOVERED.
+//
+// COORDINATION.md already records this for X-Talyvor-Distill ("per-request
+// distill header not in his #63 allowlist … works S2S; adding the header = a
+// 1-line sync on his CORS file, not a unilateral edit"). X-Talyvor-Compress, the
+// opt-in header for the prompt rewriter (0117), lands in exactly the same place:
+// a cross-origin browser preflight will not permit it, so for a browser client
+// the WORKSPACE policy is the only lever and `opt_in` is effectively "off". S2S
+// callers — which is every caller today, since LENS_CORS_ALLOWED_ORIGINS is unset
+// by default and CORS is then a no-op — are unaffected.
+//
+// This asserts the hole rather than the fix on purpose: the allowlist is a
+// coordinated file. When the 1-line sync happens, THIS TEST FAILS, and the
+// comment above plus internal/proxy/compression_gate.go are what needs updating.
+func TestCORSMiddleware_PerRequestOptInHeadersAreNotAllowlisted(t *testing.T) {
+	h := CORSMiddleware("https://app.example.com")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/x", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	allow := rec.Header().Get("Access-Control-Allow-Headers")
+	// PREMISE: the allowlist is actually being emitted. Without this the two
+	// absence checks below pass just as well against an empty string.
+	if !strings.Contains(allow, "Authorization") {
+		t.Fatalf("premise: Access-Control-Allow-Headers = %q — it does not carry the allowlist, so the absences below measure nothing", allow)
+	}
+	for _, hdr := range []string{"X-Talyvor-Compress", "X-Talyvor-Distill"} {
+		if strings.Contains(allow, hdr) {
+			t.Errorf("%s IS now in the CORS allowlist (%q) — the browser limit recorded in COORDINATION.md and in internal/proxy/compression_gate.go is stale and both need updating", hdr, allow)
+		}
+	}
+}
+
 func TestCORSMiddleware_DisallowedOrigin_NoHeaders(t *testing.T) {
 	h := CORSMiddleware("https://app.example.com")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

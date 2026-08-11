@@ -1,0 +1,31 @@
+-- 0117_workspace_compression_policy.sql — per-workspace gate for the request-path
+-- PROMPT REWRITER (internal/compressor), which until now ran unconditionally on
+-- every non-streaming request with no env var, no policy and no header.
+--
+--   compression_policy — 'disabled' (the default) never rewrites; 'opt_in'
+--                        rewrites only when the request also carries
+--                        X-Talyvor-Compress: true; 'always' rewrites every
+--                        non-streaming request. Mirrors distill_policy (0039),
+--                        with the OPPOSITE default.
+--
+-- WHY THE DEFAULT IS OFF, measured over this repo's own committed corpora rather
+-- than argued: 0 of the 308 poolsafety rephrase/danger prompts are modified at all
+-- (2717 -> 2717 tokens, 0.000%), while 8 of 8 prompts in poolsafety.Corpus() — the
+-- corpus that stands in for real coding-agent traffic, a system preamble plus an
+-- UNFENCED code diff — are modified, because the space-run collapse rewrites
+-- leading indentation outside a ``` fence. Zero measured saving against a measured
+-- content change is not a trade, so the seam is kept and the technique is gated.
+--
+-- Backfill is deliberately 'disabled' for EVERY existing workspace: nobody opted
+-- into the rewrite, so nobody keeps it by inheritance. The column is additive and
+-- idempotent (ADD COLUMN IF NOT EXISTS), no row rewrite — it lands on the same
+-- workspaces table that already holds distill_policy (0039), cache_poolable (0041)
+-- and cost_optimize_routing (0104).
+--
+-- NOT A BILLING CHANGE, and this was checked rather than assumed: no pre-serve
+-- money estimate reads the rewriter's output. The LXC gate, the agent reservation
+-- hold and the estimated post-serve settle all read the ORIGINAL prompt and all run
+-- BEFORE the rewrite exists on the request path. Turning it off moves no hold.
+
+ALTER TABLE workspaces
+  ADD COLUMN IF NOT EXISTS compression_policy TEXT NOT NULL DEFAULT 'disabled';

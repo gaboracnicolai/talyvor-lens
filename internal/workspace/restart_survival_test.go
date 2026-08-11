@@ -9,8 +9,15 @@ import (
 )
 
 // restartTestPool builds a real-PG pool and a fresh `workspaces` table mirroring
-// the production schema (migrations 0005/0039/0041/0104). Skips when
+// the production schema (migrations 0005/0039/0041/0104/0117). Skips when
 // LENS_TEST_DATABASE_URL is unset.
+//
+// ⚠ THIS FIXTURE IS A CLAIM ABOUT THE MIGRATIONS, and it is the reason 0117 had to
+// touch this file: manager.go's INSERT and LoadAll name every column, so a column
+// the migrations add and this CREATE TABLE omits fails every test in the package
+// with an "undefined column" error rather than with the assertion that was written.
+// The pre-0117 shape has not been lost — TestMigration0117_ExistingWorkspacesBackfill
+// Disabled drops the column back off and applies the shipped migration file to it.
 func restartTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("LENS_TEST_DATABASE_URL")
@@ -36,6 +43,7 @@ func restartTestPool(t *testing.T) *pgxpool.Pool {
 			active BOOLEAN NOT NULL DEFAULT true,
 			logging_policy TEXT NOT NULL DEFAULT 'metadata',
 			distill_policy TEXT NOT NULL DEFAULT 'disabled',
+			compression_policy TEXT NOT NULL DEFAULT 'disabled',
 			cache_poolable BOOLEAN NOT NULL DEFAULT false,
 			distill_poolable BOOLEAN NOT NULL DEFAULT false,
 			cost_optimize_routing BOOLEAN NOT NULL DEFAULT false,

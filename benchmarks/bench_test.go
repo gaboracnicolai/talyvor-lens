@@ -218,7 +218,17 @@ func BenchmarkRateLimitCheck(b *testing.B) {
 
 // BenchmarkFullProxyStack is the headline number: full request through
 // the proxy with cache miss, PII scan, injection scan, model routing,
-// compression, upstream forward (mocked), cache write, span emit.
+// upstream forward (mocked), cache write, span emit.
+//
+// ⚠ COMPRESSION IS NO LONGER IN THIS NUMBER, and the omission is deliberate.
+// newBenchProxy passes a nil workspace manager, and since migration 0117 the
+// prompt rewriter is gated on a per-workspace policy whose default is `disabled`
+// — a nil manager answers "do not rewrite" (internal/proxy/compression_gate.go).
+// So this measures the DEFAULT serving path, which is the honest headline: the
+// rewriter measured 0.000% saving on 308 corpus prompts and is off for every
+// workspace unless one asks. Expect this benchmark to have got slightly FASTER
+// at 0117 for that reason and not because anything was optimised. The rewriter's
+// own cost, when a workspace does opt in, is BenchmarkPromptCompression below.
 func BenchmarkFullProxyStack(b *testing.B) {
 	srv := canned200(b)
 	p, _ := newBenchProxy(b, srv.URL)

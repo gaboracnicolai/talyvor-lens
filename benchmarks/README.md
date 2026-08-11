@@ -26,13 +26,13 @@ Generated automatically on every push to `main` by `.github/workflows/benchmark.
 | `BenchmarkExactCacheHit` | Full proxy request, exact cache pre-warmed. Should be `< 1 ms`. |
 | `BenchmarkExactCacheMiss` | Full proxy request, cold cache. Should be `< 5 ms` excluding real LLM. |
 | `BenchmarkSemanticCacheHit` | Reserved slot — exercises the proxy path. Full pgvector run requires a real Postgres. |
-| `BenchmarkPromptCompression` | Pure compressor throughput. Target `> 10,000 ops/sec`. |
+| `BenchmarkPromptCompression` | Pure compressor throughput. Target `> 10,000 ops/sec`. Measures the function, which since migration 0117 only runs for a workspace that opted in (`compression_policy`, default `disabled`). |
 | `BenchmarkModelRouting` | Pure router throughput. Target `> 100,000 ops/sec`. |
 | `BenchmarkPIIDetection` | 200-word text with three PII items. Target `> 50,000 ops/sec`. |
 | `BenchmarkInjectionDetection` | 100-word clean prompt. |
 | `BenchmarkConcurrentRequests` | `b.RunParallel` with `GOMAXPROCS` goroutines. |
 | `BenchmarkRateLimitCheck` | Lua-backed atomic ops against miniredis. |
-| `BenchmarkFullProxyStack` | Headline number: PII + injection + budget + cache + route + compress + forward + cache-write. |
+| `BenchmarkFullProxyStack` | Headline number: PII + injection + budget + cache + route + forward + cache-write. **No longer includes compress** — 0117 gated the prompt rewriter behind a per-workspace policy that defaults to `disabled`, and this benchmark wires a nil workspace manager, so it now measures the default serving path. A step down at that commit is the gate, not an optimisation. |
 
 ## Methodology
 
