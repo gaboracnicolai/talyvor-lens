@@ -1239,9 +1239,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// Compress the prompt before forwarding upstream — ONLY when this workspace
 	// asked for it (compression_policy, migration 0117; see compression_gate.go
 	// for the measurement that made it opt-in). Cache lookups above still key on
-	// the uncompressed prompt so repeat callers hit cache. With the gate closed
-	// compressedPrompt IS prompt, so rebuildBody below forwards the caller's
-	// bytes unchanged and the router sees what the caller actually sent.
+	// the uncompressed prompt so repeat callers hit cache. With the gate closed the
+	// REWRITER changes nothing — ⚠ but NOT "the caller's bytes are forwarded", which
+	// this said: rebuildBody collapses them (message_collapse_wire_test.go).
 	compressedPrompt := prompt
 	var savingsPct float64
 	// compressionGateOpened is the POPULATION BOUNDARY for the durable measurement

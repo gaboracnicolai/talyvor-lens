@@ -30,7 +30,13 @@ import (
 //
 // The upstream prompt is read back out of the captured request body: rebuildBody
 // re-writes messages as a single user message whose content is the prompt that was
-// actually forwarded (rebuildBody, proxy.go:1834).
+// actually forwarded (proxy.go#rebuildBody — cited by SYMBOL because the line number
+// this used to carry, 1834, had already decayed onto an unrelated comment).
+//
+// ⚠ AND THE COLLAPSE IN THAT SENTENCE IS NOT A DETAIL OF THE READ-BACK. Every fixture
+// in this file sends ONE message, the shape in which a collapse and a pass-through
+// produce identical bytes, so nothing here can see it. message_collapse_wire_test.go
+// sends a conversation and pins what the provider actually receives.
 
 // capturingUpstream records every request body the "provider" received.
 type capturingUpstream struct {
@@ -143,8 +149,9 @@ func dispatchCompress(t *testing.T, p *Proxy, wsID, prompt string, hdr map[strin
 
 // THE RED-FIRST ASSERTION. A workspace that has set NO compression policy — every
 // workspace that exists today — must have its prompt reach the provider BYTE-FOR-BYTE.
-// Before the gate this failed: compressor.Compress ran unconditionally at
-// proxy.go:1242 and rebuildBody forwarded the rewrite.
+// Before the gate this failed: compressor.Compress ran unconditionally in
+// proxy.go#serve and rebuildBody forwarded the rewrite. ⚠ "THE PROMPT", NOT "THE
+// BODY" — see the header above.
 func TestUpstream_DefaultWorkspaceSendsThePromptUnchanged(t *testing.T) {
 	p, up := newCompressionProxy(t, workspace.Workspace{
 		ID: "ws-default", Name: "no policy set", Active: true,
