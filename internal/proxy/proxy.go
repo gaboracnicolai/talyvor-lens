@@ -220,6 +220,12 @@ type Proxy struct {
 	nodeLatencySink    nodeLatencySink
 	nodeLatencyEnabled func() bool
 
+	// compressionSink is the durable record of what the prompt rewriter did to
+	// the bytes a provider received. No enable flag rides beside it on purpose —
+	// see SetCompressionSink for why the measurement is bound to the 0117 gate
+	// rather than to a switch of its own.
+	compressionSink compressionSink
+
 	// K4 intrinsic output verifier (optional, nil-safe post-serve). Shares the obsLimiter budget;
 	// default-off; mint-free (import-guarded). See output_verdict_capture.go.
 	outputVerdictSink    outputVerdictSink
@@ -1238,7 +1244,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// bytes unchanged and the router sees what the caller actually sent.
 	compressedPrompt := prompt
 	var savingsPct float64
+	// compressionGateOpened is the POPULATION BOUNDARY for the durable measurement
+	// below: it is true iff the rewriter actually ran on this request, whether or
+	// not it changed a byte. The zeroes belong in the record — they are the
+	// denominator, and 0-of-308 is what this rewriter measured — but the requests
+	// it never saw do not.
+	var compressionGateOpened bool
 	if p.compressor != nil && p.shouldCompress(r, wsID) {
+		compressionGateOpened = true
 		result := p.compressor.Compress(ctx, prompt)
 		compressedPrompt = result.CompressedPrompt
 		savingsPct = result.SavingsPct
@@ -1753,6 +1766,24 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// records a verdict (hashes only). Cannot affect the already-flushed response. See
 			// output_verdict_capture.go.
 			p.captureOutputVerdict(ctx, wsID, upstreamModel, cfg.ProviderName(), body, upstreamBody, prompt, requestStart)
+			// COMPRESSION MEASUREMENT (W6.1 step 2) — POST-FLUSH, off-path, void,
+			// obsLimiter-shed. Fires ONLY when the 0117 gate opened, and then whether
+			// or not a byte changed: the unmodified rows ARE the denominator.
+			//
+			// It is written HERE, and not beside the rewrite at ~1240, for one
+			// reason: inT and costEstimated do not exist yet up there. Those two are
+			// what stop this from being a saving nobody received — with no provider
+			// usage block the spend row is len(ORIGINAL)/4, so the bytes the
+			// rewriter removed moved no money at all. Recording the wire delta
+			// without recording which basis billed it would be the more flattering
+			// number and the less true one.
+			if compressionGateOpened {
+				p.captureCompression(ctx, compressionObservation{
+					requestID: requestID, workspaceID: wsID, model: upstreamModel,
+					original: prompt, sent: compressedPrompt,
+					billedInputTokens: inT, costEstimated: costEstimated,
+				})
+			}
 			// S1 distill attribution (MINT-FREE) — record any consented
 			// cross-tenant pooled-distill serves surfaced from MaybeDistill.
 			// Post-flush, void, detached, swallowed (mirrors capturePattern);

@@ -50,6 +50,7 @@ import (
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/cohort"
 	"github.com/talyvor/lens/internal/compat"
+	"github.com/talyvor/lens/internal/compressmeasure"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/controlplane"
@@ -467,6 +468,15 @@ func run() error {
 	if pool != nil {
 		distillUsageStore = api.NewDistillUsageStore(pool)
 	}
+
+	// W6.1 step 2 — the durable record of what the PROMPT REWRITER actually
+	// removed from the wire, and of whether it reached the bill. Wired
+	// unconditionally: on a nil pool the write side is a no-op and the read side
+	// answers ErrUnwired, which the route turns into 503. Assigned to the
+	// concrete *Store rather than to an interface variable on purpose — a
+	// typed-nil in an interface is not == nil, and this reader's whole job is to
+	// keep "not wired" distinguishable from "measured nothing".
+	compressionStore := compressmeasure.NewStore(pool)
 	go batchRouter.StartPoller(ctx)
 	sessionTracker := session.New(pool)
 	go sessionTracker.StartCleanup(ctx)
@@ -1664,6 +1674,13 @@ func run() error {
 	// future latency mint reads; RunOnce/capture no-ops while the flag is off).
 	nodeLatencyStore := nodelatency.NewStore(pool)
 	p.SetNodeLatencySink(nodeLatencyStore, func() bool { return cfg.NodeLatencyCaptureEnabled })
+
+	// W6.1 step 2: the compression measurement sink — the SAME store the
+	// /compression/savings route reads, so the writer and the reader cannot
+	// drift onto different tables. No enable flag beside it: it fires only when
+	// the 0117 gate opens, and a flag here would let the rewriter run unobserved
+	// again (see proxy.SetCompressionSink).
+	p.SetCompressionSink(compressionStore)
 
 	// Proof-of-Confidential-Compute step (b): the gateway attestation VERIFY sweep. INERT unless the
 	// capability flag + the pinned NVIDIA root CA are configured; records a verified hardware class to
@@ -3876,6 +3893,44 @@ func run() error {
 				"ok":                 true,
 				"compression_policy": ws.CompressionPolicy,
 			})
+		})
+
+		// COMPRESSION EVIDENCE — what the rewriter actually removed from THIS
+		// workspace's wire, and how much of it reached THIS workspace's bill.
+		//
+		// ⚠ BYTES AND COUNTS, NEVER A PERCENTAGE. token_events.savings_pct is
+		// tombstoned (migration 0114) after producing a wrong customer-facing
+		// number three times, and the rewriter's own SavingsPct cannot see a
+		// change that len/4 integer division swallows. The honest figures are the
+		// byte totals and the DENOMINATOR beside them.
+		//
+		// ⚠ AND estimated_path_requests IS NOT PADDING. On a request the provider
+		// reported no usage for, the spend row is len(ORIGINAL)/4 — those bytes
+		// left the wire and moved no money. Reporting bytes_removed without it
+		// would describe a saving the customer never received.
+		//
+		// Expect zeroes: no workspace has the gate open (0117 backfilled every
+		// one to 'disabled'), so requests=0 is the correct answer today — and it
+		// is a DIFFERENT answer from the 503 an unwired reader gives.
+		// Same auth + #84 workspace-isolation middleware as the PUT above.
+		authed.Get("/v1/workspaces/{wsID}/compression/savings", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			days := 30
+			if v := req.URL.Query().Get("days"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil {
+					days = n
+				}
+			}
+			savings, err := api.ReadCompressionSavings(req.Context(), compressionStore, wsID, days, time.Now())
+			if errors.Is(err, api.ErrNoCompressionSavingsStore) {
+				writeJSONErr(w, http.StatusServiceUnavailable, "compression savings reader not configured")
+				return
+			}
+			if err != nil {
+				writeJSONErr(w, http.StatusBadGateway, "could not read compression savings")
+				return
+			}
+			writeJSONOK(w, http.StatusOK, savings)
 		})
 
 		// DISTILL EVIDENCE — a workspace-scoped COUNT of documents this workspace had converted.

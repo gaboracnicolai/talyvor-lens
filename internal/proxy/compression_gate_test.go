@@ -104,8 +104,10 @@ func newCompressionProxyWithUpstream(t *testing.T, ws workspace.Workspace, respB
 		fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())),
 		"openai-key", "anthropic-key", "",
 	)
-	p.openAIURL = srv.URL
-	p.anthropicURL = srv.URL
+	// EVERY provider, not just the two this test dispatches to. proxy.New()
+	// defaults each URL to the real endpoint, so leaving one alone leaves a live
+	// fallback hop to a third party — measured, see hermetic_upstreams_test.go.
+	pointEveryProviderAt(p, srv.URL)
 	sink := &recordingAlertSink{}
 	p.setAlertSink(sink)
 	return p, up, sink

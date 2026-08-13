@@ -86,6 +86,7 @@ var Manifest = map[string]Entry{
 	"billing_customers":             {Delete, ""},
 	"budgets":                       {Delete, ""},
 	"cache_nodes":                   {Delete, ""},
+	"compression_measurements":      {Delete, "per-request prompt lengths for one workspace; a byte count is not content, but it is still that customer's traffic"},
 	"embedding_nodes":               {Delete, ""},
 	"eval_datasets":                 {Delete, ""},
 	"eval_runs":                     {Delete, ""},
