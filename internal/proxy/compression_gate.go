@@ -26,6 +26,19 @@ import (
 // stale cache or a garbage stored value all answer "do not rewrite". The one thing
 // a client cannot do is turn it on by header alone.
 //
+// ⚠⚠ BUT THIS GATE DECIDES WHETHER THE REWRITER RUNS, NOT WHAT THE CALLER
+// RECEIVES, AND THE TWO COME APART AT THE CACHE. proxy.go#serve builds cachePrompt
+// from the prompt BEFORE the rewrite, so a response produced from the REWRITTEN
+// prompt is stored under the UNREWRITTEN one's key with nothing recording that
+// the rewriter ran. One request carrying X-Talyvor-Compress: true therefore
+// answers every later identical request in that workspace, header or no header —
+// so the per-request opt-in is per-request in its CONSENT and workspace-wide in
+// its EFFECT, and flipping a policy back to `disabled` does not restore the
+// caller's own bytes for anything already cached. Measured through the wire, not
+// inferred: TestCompressionCache_AnOptedInRewriteAnswersARequestThatDidNotOptIn.
+// Not fixed — the cache key is the hit rate W2.1 measured, so splitting it is a
+// decision about the pooling economics rather than a repair.
+//
 // ⚠ X-Talyvor-Compress IS NOT BROWSER-REACHABLE, measured not assumed:
 // api.CORSMiddleware emits Access-Control-Allow-Headers = "Authorization,
 // Content-Type, X-Request-ID, X-Talyvor-Key" and nothing else, so a cross-origin
