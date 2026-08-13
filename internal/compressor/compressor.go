@@ -78,8 +78,57 @@ func buildPatternReplacements(raw []struct{ from, to string }) []compiledPattern
 	return out
 }
 
+// placeholderByte is the delimiter of the code-block placeholder this file writes
+// into the prompt while the text techniques run (see the "\x00CODE%d\x00" format
+// below). It is IN-BAND SIGNALLING: the marker travels inside the very string it
+// describes, and the splice back is strings.Replace(..., 1) on the FIRST
+// occurrence — which is the caller's, not ours, if the caller sent one too.
+const placeholderByte = "\x00"
+
+// Compress rewrites a prompt with the phase-1 lossless techniques.
+//
+// ⚠ IT REFUSES OUTRIGHT ON A PROMPT CONTAINING A NUL, AND THAT REFUSAL IS LOAD-
+// BEARING RATHER THAN DEFENSIVE. Measured through the wire before it was written
+// down: with the 0117 gate open, "before <NUL>CODE0<NUL> after\n```python…```\n"
+// reached the provider as "before ```python…``` after\n<NUL>CODE0<NUL>". The
+// fenced block was RELOCATED ahead of the word that used to follow it — a change
+// of meaning, not a compression — and this package's own internal marker was
+// transmitted to a third party as the customer's content. The response was 200
+// and the result claimed an 8.33% saving on it.
+//
+// A NUL is reachable without an attacker: prompts arrive as JSON strings, and a
+// backslash-u-0000 escape decodes to a real NUL byte, as does any pasted log,
+// hexdump or NUL-separated tool output.
+//
+// Refusing rather than escaping is the phase-1 answer on purpose. The design is
+// LOSSLESS ONLY, so when this package cannot represent a prompt in its own
+// encoding the honest output is the caller's bytes, untouched: a rewriter that
+// returns the original cannot corrupt. Escaping would mean inventing a second
+// encoding on a money path to protect the first. The cost is the saving on
+// NUL-bearing prompts — from a rewriter measured at 0.000% over 308 corpus
+// prompts.
+//
+// The refusal reports NO techniques and NO saving: crediting itself for a rewrite
+// it correctly declined to make is how a technique-attribution number stops being
+// evidence. See placeholder_collision_test.go, red-first, positive-controlled by
+// w61-placeholder-controls-4f2b.py.
 func (c *Compressor) Compress(_ context.Context, prompt string) CompressionResult {
 	original := prompt
+
+	if strings.Contains(prompt, placeholderByte) {
+		tokens := len(original) / 4
+		return CompressionResult{
+			OriginalPrompt:   original,
+			CompressedPrompt: original,
+			OriginalTokens:   tokens,
+			CompressedTokens: tokens,
+			SavingsPct:       0,
+			// nil, not []string{}: "no technique applied" and "an empty list of
+			// techniques" must serialise the same way they do for any other
+			// unmodified prompt (TestCompress_AlreadyCompressedReturnsEmptyTechniques).
+			TechniquesApplied: nil,
+		}
+	}
 
 	// Extract code blocks so the text techniques don't touch them.
 	type codeBlock struct {
