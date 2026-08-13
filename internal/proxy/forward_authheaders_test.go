@@ -9,7 +9,8 @@ import (
 	"testing"
 )
 
-// CHARACTERIZATION TEST (PR-3b step a) — pins the CURRENT header/auth behavior of forward (proxy.go:1883)
+// CHARACTERIZATION TEST (PR-3b step a) — pins the CURRENT header/auth behavior of forward
+// (proxy.go#forward — was cited as line 1883, which had decayed 620 lines)
 // on the credential path, which recon flagged as untested. It encodes what forward DOES today (not what
 // it "should" do): the header-copy loop forwards client headers EXCEPT Host, then cfg.setAuth runs AFTER
 // the copy and OVERWRITES the Authorization with the configured provider key. When forward's round-trip
