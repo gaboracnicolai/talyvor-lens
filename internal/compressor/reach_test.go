@@ -154,8 +154,15 @@ func TestReach_LeadingIndentationIsCollapsedOutsideAFence(t *testing.T) {
 
 // PYTHON IS THE WORST CASE AND IT IS NOT HYPOTHETICAL: indentation is the syntax.
 // Two nesting levels collapse to the SAME level, so the program the provider is
-// asked about is not the program the caller sent. The ``` fence is the boundary —
-// fenced code keeps its indentation, unfenced does not.
+// asked about is not the program the caller sent. The ``` fence is the boundary
+// FOR INDENTATION — fenced code keeps its indentation, unfenced does not.
+//
+// ⚠ AND FOR INDENTATION ONLY, which this comment used to overstate. Inside the
+// fence, compressCodeBlock still deletes every blank line and right-trims every
+// line, so a Python triple-quoted literal loses content while its indentation is
+// faithfully preserved. Measured and pinned in fence_reach_test.go — and no corpus
+// this package measures could have shown it, because 0 of the 316 corpus prompts
+// contain a fence at all.
 func TestReach_UnfencedPythonNestingCollapsesButFencedSurvives(t *testing.T) {
 	c := New()
 	ctx := context.Background()
