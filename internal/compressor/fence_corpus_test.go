@@ -47,6 +47,18 @@ type fencedPrompt struct {
 	// and can move on its own — C34 credits code_blocks everywhere without
 	// changing a byte.
 	wantTechniques []string
+	// literals lists, VERBATIM, the source spellings of string literals in this
+	// prompt whose value a line-oriented rewrite could alter — a Python
+	// triple-quoted block, a Go backtick raw string, or a one-line literal whose
+	// trailing run of spaces is inside the quotes. Each is asserted to appear in
+	// `in` before anything is concluded from it (TestFenceCorpus_LiteralCensus),
+	// because a literal that is not in the prompt SURVIVES VACUOUSLY: a typo in
+	// this field would otherwise read as evidence of losslessness.
+	//
+	// Empty for the prompts that carry no such literal, which is most of them.
+	// The two lossless entries (JSON, SQL) carry none BY DESIGN — that is the
+	// difference this field exists to measure.
+	literals []string
 	// why names what the outcome means for the caller. A corruption says so.
 	why string
 }
@@ -107,6 +119,7 @@ func fencedCorpus() []fencedPrompt {
 			in:             "explain:\n```python\ns = \"\"\"a\n\nb\"\"\"\nprint(s)\n```",
 			wantOut:        "explain:\n```python\ns = \"\"\"a\nb\"\"\"\nprint(s)\n```",
 			wantTechniques: []string{"code_blocks"},
+			literals:       []string{"\"\"\"a\n\nb\"\"\""},
 			why:            "CORRUPTION: the literal's value changes from \"a\\n\\nb\" to \"a\\nb\" — a different program",
 		},
 		{
@@ -114,6 +127,7 @@ func fencedCorpus() []fencedPrompt {
 			in:             "explain:\n```python\ns = \"\"\"a   \nb\"\"\"\nprint(s)\n```",
 			wantOut:        "explain:\n```python\ns = \"\"\"a\nb\"\"\"\nprint(s)\n```",
 			wantTechniques: []string{"code_blocks"},
+			literals:       []string{"\"\"\"a   \nb\"\"\""},
 			why:            "CORRUPTION: right-trim removes bytes that are part of the literal's value",
 		},
 		{
@@ -121,6 +135,7 @@ func fencedCorpus() []fencedPrompt {
 			in:             "```go\nconst s = `line1\n\nline2`\n```",
 			wantOut:        "```go\nconst s = `line1\nline2`\n```",
 			wantTechniques: []string{"code_blocks"},
+			literals:       []string{"`line1\n\nline2`"},
 			why:            "CORRUPTION: Go backtick literals are multi-line too; the same deletion applies",
 		},
 		{
@@ -128,6 +143,7 @@ func fencedCorpus() []fencedPrompt {
 			in:             "```go\nwant := \"line one   \\nline two\"\nx := 1   \n```",
 			wantOut:        "```go\nwant := \"line one   \\nline two\"\nx := 1\n```",
 			wantTechniques: []string{"code_blocks"},
+			literals:       []string{"\"line one   \\nline two\""},
 			why:            "the trailing-space run on a real code line is a fair saving; the one inside the literal is escaped and survives",
 		},
 

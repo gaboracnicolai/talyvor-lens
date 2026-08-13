@@ -55,7 +55,15 @@ func TestFenceReach_TheFencedPopulationIsMeasured(t *testing.T) {
 
 	// AND THE MEASUREMENT THE OLD TEST ASKED FOR: how many of the population reach
 	// the code_blocks technique at all. Seven — every one of them from the fenced
-	// corpus, and five of those seven change the value of a multi-line literal.
+	// corpus, and THREE of those seven change the value of a string literal.
+	//
+	// ⚠ THIS SENTENCE SAID FIVE, AND NOTHING IN THE PACKAGE COMPUTED EITHER NUMBER.
+	// It is the figure that decides how the count below reads — seven touched
+	// prompts are harmless if the touches are the JSON and SQL blank lines this
+	// corpus calls a REAL saving, and are a content corruption if they are string
+	// literals. It is now measured, per prompt, from literals declared verbatim on
+	// the corpus entries and checked to be present before they are called
+	// survivors: TestFenceCorpus_LiteralCensus in fence_literal_census_test.go.
 	if got := reachingCodeBlocks(prompts); got != 7 {
 		t.Errorf("%d of %d prompts reach the code_blocks technique, pinned at 7 — this is the number the "+
 			"old census existed to make nonzero, so a move here is the headline, not a stale constant",
