@@ -154,15 +154,25 @@ func TestReach_LeadingIndentationIsCollapsedOutsideAFence(t *testing.T) {
 
 // PYTHON IS THE WORST CASE AND IT IS NOT HYPOTHETICAL: indentation is the syntax.
 // Two nesting levels collapse to the SAME level, so the program the provider is
-// asked about is not the program the caller sent. The ``` fence is the boundary
-// FOR INDENTATION — fenced code keeps its indentation, unfenced does not.
+// asked about is not the program the caller sent. In THIS prompt the ``` fence is
+// the boundary for indentation — fenced code keeps its indentation, unfenced does
+// not.
 //
-// ⚠ AND FOR INDENTATION ONLY, which this comment used to overstate. Inside the
-// fence, compressCodeBlock still deletes every blank line and right-trims every
-// line, so a Python triple-quoted literal loses content while its indentation is
-// faithfully preserved. Measured and pinned in fence_reach_test.go — and no corpus
-// this package measures could have shown it, because 0 of the 316 corpus prompts
-// contain a fence at all.
+// ⚠ AND THIS COMMENT HAS NOW OVERSTATED THE FENCE TWICE, EACH TIME IN A WAY A
+// CORPUS WOULD HAVE CAUGHT. It first said the fence was the boundary, full stop;
+// that was narrowed to "for indentation" when compressCodeBlock turned out to
+// delete blank lines and right-trim inside the fence, changing the value of a
+// multi-line literal (fence_reach_test.go). It is now narrowed again, and this is
+// the larger of the two: the fence is the boundary for indentation ONLY WHEN THE
+// PAIRING IS RIGHT. codeBlockRE pairs backtick runs in document order with no
+// notion of which one opens a block, so a single stray ``` earlier in the prompt —
+// a sentence that mentions one, a README containing one, a truncated paste —
+// swaps the protected and unprotected regions for the whole remainder, and the
+// python below collapses INSIDE a fence the caller wrote. Measured and pinned in
+// fence_pairing_test.go against the corpus in fence_corpus_test.go, which is the
+// population that had to exist first: 0 of the previous 316 corpus prompts
+// contained a fence at all, so none of the three narrowings could have come from
+// a measurement rather than from someone happening to look.
 func TestReach_UnfencedPythonNestingCollapsesButFencedSurvives(t *testing.T) {
 	c := New()
 	ctx := context.Background()

@@ -2,62 +2,124 @@ package compressor
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/talyvor/lens/internal/poolsafety"
 )
 
-// EVERY CORPUS THIS PACKAGE MEASURES THE REWRITER AGAINST HAS ZERO FENCED CODE
-// BLOCKS IN IT, SO ONE OF THE FOUR ADVERTISED TECHNIQUES IS MEASURED BY NOTHING.
+// THE TECHNIQUE THAT WAS MEASURED BY NOTHING NOW HAS A POPULATION — AND THE FIRST
+// THING THAT POPULATION SHOWED IS THAT THE FENCE IS NOT THE BOUNDARY.
 //
-// reach_test.go's headline is "308 prompts, 0 modified", and beside it "8 of 8
-// agent-traffic prompts rewritten". Both are true. Neither population contains a
-// ``` fence — measured below, 0 of 316 — so the code_blocks technique never runs
-// on either. The reach measurement's boundary excludes the technique whose own
-// machinery (the "\x00CODE<n>\x00" placeholder) turned out to relocate a
-// customer's code block and transmit the gateway's marker to a provider
-// (placeholder_collision_test.go).
+// ⚠ WHAT THIS TEST USED TO SAY, AND WHY IT WAS REPLACED RATHER THAN DELETED. It
+// pinned "0 of 316 corpus prompts contain a ``` fence" and instructed its own
+// successor: "That is GOOD NEWS and this test must be rewritten to measure what
+// the code_blocks technique does to them, not deleted." fence_corpus_test.go is
+// that population — 17 ordinary prompts, a review request, a README, a truncated
+// log paste, a numbered list of steps — and this is that measurement. Adding the
+// corpus turned the old pins red (333 prompts, 15 fenced) before a line of it was
+// rewritten.
 //
-// ⚠ THIS IS THE POPULATION PROBLEM, NOT A COVERAGE COMPLAINT. "0 of 308 modified"
-// reads as a statement about the rewriter. It is a statement about the rewriter
-// ON PROSE. The corpora are rephrase/danger pairs and agent diffs; nobody chose
-// to exclude fenced code, and that is exactly why nothing noticed.
+// reach_test.go's headline is still "308 prompts, 0 modified" and beside it "8 of
+// 8 agent-traffic prompts rewritten". Both were, and remain, statements about the
+// rewriter ON PROSE. Nobody chose to exclude fenced code; that is exactly why
+// nothing noticed for as long as it did.
 //
-// The count is PINNED rather than asserted to be zero, so that adding fenced
-// prompts to a corpus fails this test and forces the number in the comment above
-// to be restated rather than silently outgrown.
-func TestFenceReach_NoCorpusPromptReachesTheCodeBlockTechnique(t *testing.T) {
+// ⚠ TWO OF THE 17 CARRY NO ``` AT ALL, AND THAT GAP IS THE POINT RATHER THAN AN
+// OVERSIGHT: a ~~~ fence and a four-space indented block are both code to
+// CommonMark and neither is code to this rewriter (fence_pairing_test.go). Fenced
+// coverage is counted at 15 so the corpus cannot claim them.
+//
+// ⚠ THIS TEST AND THE ONE BELOW PIN CONSTANTS, WHICH IS THE SHAPE THAT CANNOT BE
+// RED-FIRST. Their controls are C30-C33 of w61-fencecorpus-controls-9d72.py:
+// C30 shrinks the corpus to four entries, C31 and C32 blind the two counting
+// instruments to the very constants pinned here (7 and 15), and C33 blinds the
+// cross-check. C23-C26 of w61-fencereach-controls-4f2b.py cover the same tests
+// from the compressCodeBlock side.
+func TestFenceReach_TheFencedPopulationIsMeasured(t *testing.T) {
 	prompts, fenced := allCorpusPrompts()
 
-	if len(prompts) != 316 {
-		t.Errorf("the measured corpora total %d prompts, pinned at 316 (308 filler0 + 8 agent) — "+
-			"the population moved, so the zero below is no longer the zero that was measured", len(prompts))
+	if len(prompts) != 333 {
+		t.Errorf("the measured corpora total %d prompts, pinned at 333 (308 filler0 + 8 agent + 17 fenced) — "+
+			"the population moved, so the numbers below are no longer the numbers that were measured", len(prompts))
 	}
-	if fenced != 0 {
-		t.Errorf("%d corpus prompts now contain a fenced block, pinned at 0. That is GOOD NEWS and this "+
-			"test must be rewritten to measure what the code_blocks technique does to them, not deleted", fenced)
+	if fenced != 15 {
+		t.Errorf("%d corpus prompts carry a ``` fence, pinned at 15 (17 fenced-corpus entries less the "+
+			"~~~ fence and the four-space indented block, which carry no backticks by design)", fenced)
+	}
+	if got := fencedCorpusCarryingAFence(); got != 15 {
+		t.Errorf("all 15 fenced prompts must come from the fenced corpus, but it contributes %d — "+
+			"if a prose corpus grew a fence, the split above is wrong", got)
+	}
+
+	// AND THE MEASUREMENT THE OLD TEST ASKED FOR: how many of the population reach
+	// the code_blocks technique at all. Seven — every one of them from the fenced
+	// corpus, and THREE of those seven change the value of a string literal.
+	//
+	// ⚠ THIS SENTENCE SAID FIVE, AND NOTHING IN THE PACKAGE COMPUTED EITHER NUMBER.
+	// It is the figure that decides how the count below reads — seven touched
+	// prompts are harmless if the touches are the JSON and SQL blank lines this
+	// corpus calls a REAL saving, and are a content corruption if they are string
+	// literals. It is now measured, per prompt, from literals declared verbatim on
+	// the corpus entries and checked to be present before they are called
+	// survivors: TestFenceCorpus_LiteralCensus in fence_literal_census_test.go.
+	if got := reachingCodeBlocks(prompts); got != 7 {
+		t.Errorf("%d of %d prompts reach the code_blocks technique, pinned at 7 — this is the number the "+
+			"old census existed to make nonzero, so a move here is the headline, not a stale constant",
+			got, len(prompts))
 	}
 }
 
-// THE POSITIVE CONTROL FOR THE COUNT ABOVE, THROUGH THE SAME LOOP.
+// THE POSITIVE CONTROL FOR BOTH COUNTS, THROUGH THE SAME LOOPS.
 //
-// A census that reports zero is indistinguishable from a census that reads
-// nothing, and this one reports zero on every input it has. Splice one fenced
-// prompt into the same counting loop and it must report exactly one — otherwise
-// the zero above is a property of the loop rather than of the corpora.
-func TestFenceReach_TheFenceCountingLoopCanRegisterAHit(t *testing.T) {
+// A census stuck at a constant is indistinguishable from a census that measures,
+// once the constant stops being zero — which is exactly what changed when the
+// fenced corpus arrived. So both directions are exercised: the prose-only
+// population must still read 0 fenced and 0 code_blocks, and splicing one more
+// fenced prompt in must move the count by exactly one.
+func TestFenceReach_TheFenceCountingLoopMovesInBothDirections(t *testing.T) {
 	prompts, fenced := allCorpusPrompts()
-	if fenced != 0 {
-		t.Fatalf("premise: the corpora must start at 0 fenced, got %d", fenced)
+	if fenced != 15 {
+		t.Fatalf("premise: the corpora must start at 15 fenced, got %d", fenced)
 	}
 
 	spiked := append(append([]string(nil), prompts...), "explain:\n```go\nfunc a() {}\n```\n")
-	if got := countFenced(spiked); got != 1 {
-		t.Fatalf("splicing one fenced prompt into the census must report exactly 1, got %d", got)
+	if got := countFenced(spiked); got != 16 {
+		t.Fatalf("splicing one fenced prompt into the census must report exactly 16, got %d", got)
 	}
-	if got := countFenced(prompts); got != 0 {
-		t.Errorf("the real corpora must return to 0 fenced, got %d", got)
+	if got := countFenced(prompts); got != 15 {
+		t.Errorf("the real corpora must return to 15 fenced, got %d", got)
+	}
+
+	// The prose-only half — the population the old "0 fenced" was measured on. It
+	// must still read zero on both instruments, or the 15 above is the loop rather
+	// than the corpus.
+	//
+	// ⚠ IT IS DERIVED FROM allCorpusPrompts BY SUBTRACTION, NOT REBUILT. The first
+	// draft assembled it from filler0Corpora and poolsafety.Corpus directly, and
+	// C26 of w61-fencereach-controls-4f2b.py — which deletes the agent-traffic
+	// corpus from allCorpusPrompts — caught that: the rebuilt copy still counted
+	// 316 while the census population had shrunk to 325. A second copy of a corpus
+	// is not the corpus, which is the warning allCorpusPrompts' own doc carries.
+	fencedTail := fencedCorpusPrompts()
+	if len(prompts) <= len(fencedTail) {
+		t.Fatalf("the census population (%d) does not exceed the fenced corpus (%d)", len(prompts), len(fencedTail))
+	}
+	prose := prompts[:len(prompts)-len(fencedTail)]
+	if !reflect.DeepEqual(prompts[len(prose):], fencedTail) {
+		t.Fatalf("the fenced corpus is no longer the TAIL of the census population, so subtracting it " +
+			"does not yield the prose-only half — re-derive it rather than adjusting the numbers")
+	}
+	if len(prose) != 316 {
+		t.Errorf("the prose-only population is %d prompts, pinned at 316", len(prose))
+	}
+	if got := countFenced(prose); got != 0 {
+		t.Errorf("the prose-only population reports %d fenced, want 0", got)
+	}
+	if got := reachingCodeBlocks(prose); got != 0 {
+		t.Errorf("the prose-only population reaches code_blocks %d times, want 0 — this is the zero the "+
+			"old census reported, and it must survive the corpus being added beside it", got)
 	}
 }
 
@@ -140,6 +202,7 @@ func allCorpusPrompts() (prompts []string, fenced int) {
 	for _, p := range poolsafety.Corpus() {
 		prompts = append(prompts, p.Full(p.A), p.Full(p.B))
 	}
+	prompts = append(prompts, fencedCorpusPrompts()...)
 	return prompts, countFenced(prompts)
 }
 
@@ -147,6 +210,23 @@ func countFenced(prompts []string) int {
 	n := 0
 	for _, p := range prompts {
 		if strings.Contains(p, "```") {
+			n++
+		}
+	}
+	return n
+}
+
+// reachingCodeBlocks counts prompts the rewriter credits the code_blocks technique
+// on — i.e. prompts where compressCodeBlock actually changed a block's bytes.
+// Counted from TechniquesApplied rather than from the presence of a fence,
+// because a fence the pairing gets wrong produces no code_blocks hit at all: that
+// difference is the finding, not an implementation detail.
+func reachingCodeBlocks(prompts []string) int {
+	c := New()
+	ctx := context.Background()
+	n := 0
+	for _, p := range prompts {
+		if contains(c.Compress(ctx, p).TechniquesApplied, "code_blocks") {
 			n++
 		}
 	}
