@@ -13,7 +13,7 @@ import (
 )
 
 // CHARACTERIZATION TEST (PR-3b step a2) — pins the CURRENT same-provider retry-then-success behavior of
-// forward (proxy.go:1883). Recon flagged this branch as untested. forward wraps the upstream call in
+// forward (proxy.go#forward — was cited as line 1883, decayed 620 lines). Recon flagged this branch as untested. forward wraps the upstream call in
 // retry.Do(p.retryConfig, …): a retryable status (in RetryableCodes) re-sends to the SAME provider until
 // MaxAttempts; a success returns immediately (NO fallback — this is the single-provider forward, not
 // forwardWithFallback). retry.Do sets result.Attempts = the attempt number reached, which forward returns.
@@ -25,7 +25,8 @@ import (
 // PINNED TRUTH (assert what it does, not what we'd guess): fail-once-then-succeed ⇒ the request recovers
 // (200, nil err), forward returns attempts == 2, the upstream is hit exactly twice, and the SAME body is
 // re-sent on the retry. NOTE/flag: forward RETURNS `attempts`, but both call sites currently DISCARD it
-// (`resp, rb, _, err := p.forward(...)` at proxy.go:2307 and vision_dispatch.go:67) — the count is computed
+// (`resp, rb, _, err := p.forward(...)` in proxy.go#forwardWithFallback and
+// vision_dispatch.go#newVisionDispatcher — both were cited by line and both had moved) — the count is computed
 // and correct but presently unconsumed. We pin the returned value's correctness regardless, so step (b)
 // can't silently regress it.
 func TestForward_SameProviderRetryThenSuccess_Characterization(t *testing.T) {

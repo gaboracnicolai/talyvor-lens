@@ -8,7 +8,8 @@ import (
 )
 
 // TestApplyKey_CredentialSubstitution_Characterization pins the CURRENT observable behavior of applyKey
-// (proxy.go:2466) — the key-pool credential override — BEFORE PR-3c relocates its logic to
+// (proxy.go#applyKey — was cited as line 2466, which had decayed 577 lines) — the key-pool
+// credential override — BEFORE PR-3c relocates its logic to
 // inference.ConfigForKey. Recon found applyKey is a credential-path BLIND SPOT (no test asserted its
 // key-substitution), so this is the behavior oracle for the move, exactly as #255 pinned forward's
 // header/auth ordering.
