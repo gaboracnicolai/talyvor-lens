@@ -74,6 +74,15 @@ type Summary struct {
 	// minus observational sheds. A gated request whose upstream answered non-200
 	// still had its rewritten prompt sent to a provider and is absent here. See
 	// proxy.captureCompression for the enumeration and the tests that pin it.
+	//
+	// ⚠⚠ AND TWO WHOLE CLASSES OF REQUEST NEVER REACH THE GATE, so they are
+	// absent for a reason no narrowing of "gated" can express: a STREAMING
+	// request and a CACHE HIT both return from proxy.serve above the gate. A
+	// workspace whose policy is `always` therefore compresses none of its
+	// streamed traffic and measures none of it, and its cache hits are missing
+	// from this count entirely. Measured through the wire in
+	// proxy/compression_population_test.go. Read this field as
+	// UPSTREAM-SERVED, NON-STREAMED, BILLED gated requests.
 	Requests int `json:"requests"`
 	// Modified is how many of those had bytes on the wire differing from the
 	// bytes the caller sent.
