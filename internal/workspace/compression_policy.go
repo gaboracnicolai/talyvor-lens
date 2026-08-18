@@ -32,21 +32,55 @@ import (
 // real reduction layer will live here; the current TECHNIQUE is what measured
 // worthless.
 //
-// ⚠ WHAT THIS DOES NOT TOUCH — MEASURED, NOT ASSUMED: no money seam on the serving
-// path reads the rewriter's output. All four read `prompt`, the ORIGINAL, and the
-// three pre-serve ones run before the rewrite exists at all:
+// ⚠ WHAT THIS DOES NOT TOUCH — MEASURED, NOT ASSUMED: every seam that consumes a
+// TOKEN COUNT reads `prompt`, the ORIGINAL, and the three pre-serve ones run
+// before the rewrite exists at all:
 //
-//	proxy.go:849   budget gate         alerts.CostUSD(model, len(prompt)/4, 0)
-//	proxy.go:861   LXC gate            p.lxcGateBlocks(..., prompt, ...)
-//	proxy.go:879   reservation hold    p.agentReserveBlocks(..., prompt, ...)   (:892 the non-reservation form)
+//	proxy.go:855   budget gate         alerts.CostUSD(model, len(prompt)/4, 0)
+//	proxy.go:867   LXC gate            p.lxcGateBlocks(..., prompt, ...)
+//	proxy.go:885   reservation hold    p.agentReserveBlocks(..., prompt, ...)   (:898 the non-reservation form)
 //	proxy.go:1239  ── the rewrite is created here ──
-//	proxy.go:1620  post-serve estimate inT := len(prompt)/4
+//	proxy.go:1633  post-serve estimate inT := len(prompt)/4
 //
-// Turning the rewriter off therefore moves no hold and no charge. Asserted end to
-// end through the wire by proxy.TestBilling_TheEstimateIsTheSameWithTheGateOpenOr
+// Turning the rewriter off therefore moves no hold and no token count. Asserted end
+// to end through the wire by proxy.TestBilling_TheEstimateIsTheSameWithTheGateOpenOr
 // Closed, which also pins the other half of that fact: an opted-IN workspace is
 // billed for the bytes it did NOT send. Distill is the layer that does shrink a
 // prompt before those seams (see DistillPolicy); the two are not interchangeable.
+//
+// ⚠⚠ AND THAT SENTENCE USED TO READ "no money seam on the serving path reads the
+// rewriter's output ... turning the rewriter off moves no hold and no CHARGE",
+// WHICH WAS FALSE IN THE DIRECTION THAT FLATTERS. The five entries above are the
+// seams that read a LENGTH; the conclusion drawn from them was about MONEY, and
+// those are different sets. On the DELEGATED routing path — an auto-route request,
+// or a workspace that opted in to cost-optimised routing — the base router is
+// handed the REWRITE, scores it, picks a cost tier from that score, and
+// substitutes the model when the pick ranks cheaper than the caller's. A model is
+// a rate card, so the charge moves without the token count moving at all.
+//
+// MEASURED THROUGH THE WIRE, on a prompt whose rewrite is nothing but collapsed
+// double spaces and whose only moving score component is the router's
+// TokenEstimate>500 threshold: with the gate CLOSED the provider was asked for
+// claude-sonnet-4-6, with it OPEN for claude-haiku-4-5 — a 3x difference in the
+// input rate, on bytes the customer sent either way. proxy's
+// TestCompressionRouting_TheGateSelectsADifferentModelAndThereforeADifferentRate
+// pins that pair; its companion pins the SCOPE, which is narrower than "every
+// request" — a caller who names a model on a non-delegated workspace never reaches
+// the base router, so the rewriter cannot touch their model.
+//
+// ⚠ NOT FIXED, AND IT IS A DECISION ABOUT A PRICE. Scoring the rewrite is
+// defensible: it is the string the provider actually receives. Scoring the
+// original is equally defensible: consent to a LOSSLESS rewrite is not consent to
+// a model downgrade, and this rewriter's measured saving is 0.000% on the 308
+// corpus prompts, so on that path the trade is a cheaper model in exchange for
+// nothing. Choosing silently changes what a customer is charged.
+//
+// ⚠ THE LINE NUMBERS ABOVE WERE ALSO WRONG AND ARE RE-MEASURED HERE: 849→855,
+// 861→867, 879→885, 892→898, 1620→1633. Only 1239 had survived, and 849/879 had
+// previously been recorded as "plausible" rather than checked. A pointer decays
+// with no commit in this file, which is what internal/pointeraudit exists to slow
+// down — it pins how MANY line citations each file carries, not whether they are
+// right, so a table can rot inside a green guard.
 type CompressionPolicy string
 
 const (
