@@ -10,15 +10,23 @@ import (
 //
 // W6.1 handed this down as a caveat to check rather than to trust: "the
 // compressor also feeds the pre-serve len/4 estimate, so turning it off slightly
-// raises the HOLD." It does not, and the reason is positional. Every money seam
-// on this path reads `prompt`, the ORIGINAL, and every one of them runs BEFORE
-// the rewrite exists:
+// raises the HOLD." It does not, and the reason is positional. Every seam that
+// consumes a TOKEN COUNT reads `prompt`, the ORIGINAL, and every one of them runs
+// BEFORE the rewrite exists:
 //
-//	budget gate           alerts.CostUSD(model, len(prompt)/4, 0)        proxy.go:849
-//	LXC gate              p.lxcGateBlocks(..., prompt, ...)              proxy.go:861
-//	agent reservation     p.agentReserveBlocks(..., prompt, ...)         proxy.go:879
+//	budget gate           alerts.CostUSD(model, len(prompt)/4, 0)        proxy.go:855
+//	LXC gate              p.lxcGateBlocks(..., prompt, ...)              proxy.go:867
+//	agent reservation     p.agentReserveBlocks(..., prompt, ...)         proxy.go:885
 //	   ── the rewrite is created here ──                                 proxy.go:1239
-//	post-serve estimate   inT := len(prompt)/4                           proxy.go:1620
+//	post-serve estimate   inT := len(prompt)/4                           proxy.go:1633
+//
+// ⚠ THIS TABLE SAID "every MONEY seam" AND THAT WAS FALSE — the entries are the
+// seams that read a LENGTH, and one seam reads the rewrite and turns it into a
+// PRICE: on the delegated routing path the base router scores compressedPrompt and
+// substitutes a cheaper model. The charge claim this file measures survives intact
+// (the billed COUNT does not move with the gate); what moves is the RATE. Measured
+// and pinned in compression_routing_money_test.go. The five line numbers above are
+// re-measured too — four of them had decayed.
 //
 // Reading that is not the same as measuring it, so this drives the CHARGE end
 // through the wire: the same prompt, once with the gate closed and once with it
