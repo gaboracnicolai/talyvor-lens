@@ -1,5 +1,15 @@
-// Package econflags reports the LIVE value of every economy and minting flag as the running
+// Package econflags reports the LIVE value of the economy, minting and LXC flags as the running
 // binary holds it.
+//
+// ⚠ WHAT "THE FLAGS" MEANS HERE IS ENFORCED, NOT PROMISED. The sentence above used to read
+// "every economy and minting flag", and measured against config.go that was false: four
+// money-path flags were absent, one of them named ...MintingEnabled and one of them the ADMIN
+// LXC GRANT — the only switch in the process that lets credit come into existence without
+// revenue. The population is now pinned by forceoff_transcription_test.go, which derives it from
+// config.go's own force-off block plus a Mint-or-LXC name rule, and that file records in its own
+// doc comment what the name rule CANNOT see (KeelRoyaltyHaircutEnabled, NodeAutoRouteEnabled).
+// Read this readout as: the economy master switch, everything config.go force-offs with it, the
+// default-on mint arming loop, the adjacent gates named below, and every Mint-or-LXC flag.
 //
 // WHY IT EXISTS. Nothing on the box showed whether a money-path flag was on. The available
 // answer was "read config.go and infer the default", which is inference, not observation — and
@@ -185,10 +195,30 @@ func Report(cfg *config.Config, binaryVersion string, overrides ...Override) Sna
 		// POVI is NOT paying. Reported adjacent to the mints it neutralises for exactly that reason.
 		{"ShadowMintsEnabled", "LENS_SHADOW_MINTS_ENABLED", cfg.ShadowMintsEnabled},
 
+		// A MINT MODULATOR, not a mint gate: the reputation bond can only REDUCE or block a
+		// PoVI/pool-royalty mint the floor and rate cap already allowed. config.go keeps it out
+		// of the force-off block for that reason. It is reported because an operator asking
+		// "what is affecting the mint amount" gets a wrong answer from the mint gates alone —
+		// the ledger reads it live (cmd/lens/main.go SetReputationGate).
+		{"ReputationBondedMintingEnabled", "LENS_REPUTATION_BONDED_MINTING_ENABLED", cfg.ReputationBondedMintingEnabled},
+
 		// LXC: fiat usage credit, NOT force-off'd with the economy. Reported so the readout is
 		// complete, and so its absence from the forced-off group is visible rather than assumed.
 		{"LXCGatingEnabled", "LENS_LXC_GATING_ENABLED", cfg.LXCGatingEnabled},
 		{"LXCShadowSpendEnabled", "LENS_LXC_SHADOW_SPEND_ENABLED", cfg.LXCShadowSpendEnabled},
+		// The LXC CREATION path. GrantLXC is the same atomic ledger+balance move as a purchase,
+		// recorded as an admin_grant — so this is the one flag in the readout that lets credit
+		// come into existence without revenue. Off ⇒ the route is never registered. Reporting the
+		// two LXC flags above and not this one described the spending of LXC while staying silent
+		// about its minting.
+		{"AdminLXCGrantEnabled", "LENS_ADMIN_LXC_GRANT_ENABLED", cfg.AdminLXCGrantEnabled},
+		// The two DEFAULT-TRUE LXC spend-path flags. Both are money behaviour an operator reading
+		// this page would otherwise have to infer from source: Reservation decides whether the
+		// customer is billed the DELIVERED cost or a pre-serve estimate, and AgentAllocation is
+		// the per-scoped-key sub-budget bound. Their default-on state is precisely why omitting
+		// them mattered — a readout of mostly-off flags reads as "the money paths are quiet".
+		{"LXCReservationEnabled", "LENS_LXC_RESERVATION_ENABLED", cfg.LXCReservationEnabled},
+		{"LXCAgentAllocationEnabled", "LENS_LXC_AGENT_ALLOCATION_ENABLED", cfg.LXCAgentAllocationEnabled},
 	}
 
 	byName := make(map[string]Override, len(overrides))
