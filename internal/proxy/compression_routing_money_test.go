@@ -152,7 +152,7 @@ func TestCompressionRouting_TheGateSelectsADifferentModelAndThereforeADifferentR
 		cOff.RequiresReason != cOn.RequiresReason {
 		t.Fatalf("premise: only the length may move; keyword components differ\n closed=%+v\n open  =%+v", cOff, cOn)
 	}
-	if !(cOff.TokenEstimate > 500 && cOn.TokenEstimate <= 500) {
+	if cOff.TokenEstimate <= 500 || cOn.TokenEstimate > 500 {
 		t.Fatalf("premise: the rewrite must cross the router's TokenEstimate>500 threshold; closed=%d open=%d", cOff.TokenEstimate, cOn.TokenEstimate)
 	}
 	if cOff.Score() == cOn.Score() {
