@@ -297,6 +297,16 @@ func TestReportedFlagSetIsPinned(t *testing.T) {
 		"RoutingTierCohortsEnabled",
 		"ShadowMintsEnabled",
 		"TrustfulComputeMintEnabled",
+		// ── Added by rule F (default_armed_census_test.go): THE SETTLEMENT CHAIN. Every one of
+		// these is TRUE on a deployment whose environment says nothing, and every one was
+		// outside rules A–E — not in the force-off block, not Mint-or-LXC named, gating no route
+		// registration. Rule F found them by OBSERVING the loaded struct with a cleared
+		// environment rather than by parsing a source shape, which is why it could.
+		"DetectorSweepEnabled",
+		"KeelEnabled",
+		"KeelHardenedEnabled",
+		"KeelRoyaltyHaircutEnabled",
+		"SettlementFailClosedEnabled",
 	}
 	reported := reportedNames(t)
 
