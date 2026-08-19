@@ -204,9 +204,30 @@ func buildQuery(filter ExportFilter) (string, []any) {
 	}
 	args = append(args, limit)
 
+	// ⚠ `cached` IS DERIVED FROM serve_source AND MUST NOT GO BACK TO THE COLUMN.
+	// token_events.cached is BOOLEAN NOT NULL DEFAULT false (0001_init.sql) and has
+	// never had a writer — neither production INSERT in alerts.go names it — so
+	// selecting it shipped a literal `false` on every row of every export since
+	// 0001, including rows that WERE served from cache. Migration 0100 added
+	// serve_source for exactly this reason and it IS written on every serve;
+	// `LIKE 'cache_hit%'` is that migration's own documented hit predicate, already
+	// used verbatim by mcp/server.go#cacheStatsSQL. `<> 'upstream'` would be the
+	// wrong rule: 0101 added 'node', and a node serve is a MISS (RecordNodeServe's
+	// own doc says so — the node did the compute, no cache produced the bytes).
+	// Pinned through the production writers by
+	// TestExport_CachedReflectsTheServeThatActuallyHappened.
+	//
+	// ⚠ pii_detected BELOW IS THE SAME SHAPE AND IS **NOT** FIXED HERE, because
+	// nothing writes it and no column of this table carries the answer: the value
+	// is computed per request (proxy.go passes piiDetected to the learner) and
+	// dropped before the billing insert. Deriving it is impossible; giving it a
+	// writer means changing the token_events INSERT path. Measured and recorded
+	// rather than guessed — see TestExport_PIIDetectedIsAConstant, which pins it as
+	// a KNOWN constant so the day it gains a writer, the pin fails and says so.
 	sql := `SELECT created_at, workspace_id, team, feature,
             provider, model, input_tokens, output_tokens,
-            cost_usd, cached, pii_detected, session_id, request_id
+            cost_usd, (serve_source LIKE 'cache_hit%') AS cached, pii_detected,
+            session_id, request_id
         FROM token_events` + where.String() +
 		fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", argIdx+1)
 	return sql, args
