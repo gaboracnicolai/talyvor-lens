@@ -4926,7 +4926,8 @@ func run() error {
 // []catalog.Model. A reprice states a price; decoded into a fresh Model, every fact the operator did
 // not restate arrived as its zero value and replaced the seeded truth. MEASURED: a price-only
 // override of gpt-4o blanked its capabilities and turned a 200 streaming vision request into a 422
-// (internal/proxy/reprice_override_vision_test.go), and dropped it out of ByProvider("openai").
+// (internal/proxy/reprice_override_vision_test.go), and dropped it out of ByProvider("openai") — the
+// fallback-anchor population, NOT the redirect's (that walks modality.providerPreference).
 //
 // ⚠ AND IT IS A FUNCTION SO THE BOOT BEHAVIOUR IS TESTABLE. Inline in main() this block ran only on a
 // real process start, which is exactly the shape #157 called out: the closure that matters is the
