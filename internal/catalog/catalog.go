@@ -19,6 +19,7 @@
 package catalog
 
 import (
+	"encoding/json"
 	"sort"
 	"sync"
 )
@@ -197,6 +198,64 @@ func (r *Registry) LoadOverrides(models []Model) {
 	}
 }
 
+// DecodeOverrides decodes the operator override document — a JSON array of Model, the exact
+// shape LENS_MODEL_CATALOG_OVERRIDES carries — into the batch LoadOverrides applies.
+//
+// ⚠ IT EXISTS BECAUSE `json.Unmarshal` INTO A FRESH Model MAKES "UNSAID" AND "FALSE" THE SAME BYTE,
+// AND put REPLACES THE WHOLE ENTRY. cmd/lens advertises this variable as the way to "reprice models
+// without a rebuild"; a reprice states a price and nothing else, so every FACT the catalog holds
+// about that model — provider, capabilities, context window, aliases, display name — decoded as its
+// zero value and overwrote the seeded truth. MEASURED through the proxy's real entry point, not
+// inferred: `[{"id":"gpt-4o","input_per_1m":3.75,"output_per_1m":15.00}]` turned a 200 streaming
+// vision request to gpt-4o into a 422 "model gpt-4o does not support it", dropped gpt-4o out of
+// ByProvider("openai") (19 models → 18, so it stops anchoring that provider's fallback bound and
+// stops being a redirect target), and emptied its capability entry in the introspection API. A price
+// change silently withdrew a capability.
+//
+// So an override for an id the registry ALREADY holds is decoded ON TOP OF that entry: an absent
+// field means "unchanged", a present one means what it says. `"capabilities":{"vision":false}` still
+// turns vision off — the operator can still state a fact, they simply can no longer erase one by
+// omission. An id the registry does not hold decodes from the zero Model exactly as before, because
+// there is no truth to preserve and inventing one would be worse.
+//
+// ⚠ THE FOUR PRICE FIELDS ARE DELIBERATELY NOT PRESERVED, so this change moves NO money. They are
+// zeroed before the decode, which leaves an omitted price reading exactly as it does today: unpriced,
+// which ResolveRates routes to the loud fallback arm (see resolve.go#unpriced) rather than to a
+// silent zero. Carrying the OLD rates forward would look tidier and would be a pricing decision —
+// a model repriced 2.50 → 3.75 with cached_input_per_1m omitted would keep billing cache reads at
+// the 1.25 that was 50% of the OLD list price and is 33% of the new one. That is a real question
+// and it is not this function's to answer.
+//
+// ⚠ Lookup is by EXACT id, never through resolve(): an override written against a dated-snapshot
+// ALIAS registers a new entry keyed by that alias, exactly as it does today. Merging an alias onto
+// its canonical entry would rewrite the alias index as a side effect of a reprice, which is the
+// class of silent consequence this function exists to remove.
+func (r *Registry) DecodeOverrides(raw []byte) ([]Model, error) {
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Model, 0, len(elems))
+	for _, e := range elems {
+		var probe struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(e, &probe); err != nil {
+			return nil, err
+		}
+		base := r.byID[probe.ID] // zero Model when the id is new — the pre-existing behaviour
+		base.InputPer1M, base.OutputPer1M = 0, 0
+		base.CachedInputPer1M, base.CacheWritePer1M = 0, 0
+		if err := json.Unmarshal(e, &base); err != nil {
+			return nil, err
+		}
+		out = append(out, base)
+	}
+	return out, nil
+}
+
 func sortModels(ms []Model, byPrice bool) {
 	sort.Slice(ms, func(i, j int) bool {
 		if byPrice && ms[i].InputPer1M != ms[j].InputPer1M {
@@ -226,3 +285,6 @@ func All() []Model                          { return defaultRegistry.All() }
 func ByProvider(provider string) []Model    { return defaultRegistry.ByProvider(provider) }
 func Override(m Model)                      { defaultRegistry.Override(m) }
 func LoadOverrides(models []Model)          { defaultRegistry.LoadOverrides(models) }
+func DecodeOverrides(raw []byte) ([]Model, error) {
+	return defaultRegistry.DecodeOverrides(raw)
+}
