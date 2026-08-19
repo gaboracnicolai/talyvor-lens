@@ -795,7 +795,7 @@ func run() error {
 			keel.Config{MinWorkspaces: keel.DefaultMinWorkspaces, DeviationSigma: cfg.KeelDeviationSigma},
 			cfg.KeelWindowSeconds, cfg.KeelLookback,
 		)
-		// K3 money-grade hardened emission — DEFAULT-OFF (cfg.KeelHardenedEnabled). Reuses the same sweep's
+		// K3 money-grade hardened emission — DEFAULT-ON (cfg.KeelHardenedEnabled). Reuses the same sweep's
 		// single corpus read + primary-pool writer; adds NO new replica reader. PLACEHOLDER thresholds —
 		// NO MONEY MAY MOVE ON THESE UNTIL N3 CALIBRATION.
 		if cfg.KeelHardenedEnabled {
@@ -916,9 +916,10 @@ func run() error {
 	// live; OFF (default) ⇒ the mint path is byte-identical (no reputation read). An ADDITIVE
 	// constraint downstream of the U6 floor/rate-cap — only ever reduces or blocks a mint.
 	tokenLedger.SetReputationGate(func() bool { return cfg.ReputationBondedMintingEnabled })
-	// KE-2: Keel HARDENED idiosyncratic drift → a REDUCE-ONLY haircut on bonded reuse royalties. DEFAULT-OFF
-	// (it changes money — off until N3 calibration). When off the seam is never wired, so the mint path is
-	// byte-identical. The oracle reads keel_findings via the mint's tx (mining imports no keel); the money-path
+	// KE-2: Keel HARDENED idiosyncratic drift → a REDUCE-ONLY haircut on bonded reuse royalties. DEFAULT-ON
+	// (closed-test — see the flag's own doc in config.go; LENS_KEEL_ROYALTY_HAIRCUT_ENABLED can force it off).
+	// ⚠ SO ON A DEFAULT DEPLOYMENT THIS SEAM IS WIRED AND THE MINT PATH IS NOT BYTE-IDENTICAL. Only when the
+	// flag is forced off is the seam never wired and the mint path byte-identical. The oracle reads keel_findings via the mint's tx (mining imports no keel); the money-path
 	// floor/clamp/fail-open is enforced in mining.reputationBondedAmount. minWindowBucket restricts to findings
 	// within the recent keel-persistence horizon (a few windows), so a long-ago drift does not penalise forever.
 	if cfg.KeelRoyaltyHaircutEnabled {
