@@ -498,15 +498,7 @@ func run() error {
 	// Model-catalog runtime overrides (Upgrade 16): an operator can add or
 	// reprice models without a rebuild via LENS_MODEL_CATALOG_OVERRIDES (a
 	// JSON array of catalog.Model), layered on top of the embedded default.
-	if raw := os.Getenv("LENS_MODEL_CATALOG_OVERRIDES"); raw != "" {
-		var overrides []catalog.Model
-		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
-			logger.Warn("catalog: invalid LENS_MODEL_CATALOG_OVERRIDES", slog.String("err", err.Error()))
-		} else {
-			catalog.LoadOverrides(overrides)
-			logger.Info("catalog: applied model overrides", slog.Int("count", len(overrides)))
-		}
-	}
+	applyCatalogOverrides(os.Getenv("LENS_MODEL_CATALOG_OVERRIDES"), logger)
 
 	guardrailsEngine := guardrails.New(piiDetector, injectionDetector)
 	// Output-stage guardrails (Upgrade 13) are OFF by default; when off the
@@ -4927,6 +4919,31 @@ func run() error {
 // Coordination note: if the JWT-key work lands a shared helper for "load this key or fail", move
 // BOTH call sites onto it. This block is kept deliberately small and local so that rebase is a
 // deletion rather than a merge.
+// applyCatalogOverrides layers LENS_MODEL_CATALOG_OVERRIDES (Upgrade 16) onto the embedded model
+// catalog, so an operator can add or reprice a model without a rebuild.
+//
+// ⚠ IT DECODES THROUGH catalog.DecodeOverrides, NEVER THROUGH A BARE json.Unmarshal INTO
+// []catalog.Model. A reprice states a price; decoded into a fresh Model, every fact the operator did
+// not restate arrived as its zero value and replaced the seeded truth. MEASURED: a price-only
+// override of gpt-4o blanked its capabilities and turned a 200 streaming vision request into a 422
+// (internal/proxy/reprice_override_vision_test.go), and dropped it out of ByProvider("openai").
+//
+// ⚠ AND IT IS A FUNCTION SO THE BOOT BEHAVIOUR IS TESTABLE. Inline in main() this block ran only on a
+// real process start, which is exactly the shape #157 called out: the closure that matters is the
+// WIRING, and a rule nothing can execute is a rule nothing can red.
+func applyCatalogOverrides(raw string, logger *slog.Logger) {
+	if raw == "" {
+		return
+	}
+	overrides, err := catalog.DecodeOverrides([]byte(raw))
+	if err != nil {
+		logger.Warn("catalog: invalid LENS_MODEL_CATALOG_OVERRIDES", slog.String("err", err.Error()))
+		return
+	}
+	catalog.LoadOverrides(overrides)
+	logger.Info("catalog: applied model overrides", slog.Int("count", len(overrides)))
+}
+
 func loadOrGenChallengeKey(b64 string, logger *slog.Logger) (ed25519.PublicKey, ed25519.PrivateKey) {
 	if b64 != "" {
 		if raw, err := base64.StdEncoding.DecodeString(b64); err == nil {
