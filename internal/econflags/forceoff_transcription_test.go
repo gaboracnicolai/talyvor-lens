@@ -269,6 +269,11 @@ func TestReportedFlagSetIsPinned(t *testing.T) {
 	want := []string{
 		"AdminLXCGrantEnabled",
 		"AnnotationMintingEnabled",
+		// Added by rule D (route_gate_census_test.go): both gate whether a money surface is
+		// registered at all, and no rule in THIS file could see either — BillingEnabled is
+		// outside the force-off block by design and neither name is Mint-or-LXC.
+		"BatchEnabled",
+		"BillingEnabled",
 		"CachePoolableEnabled",
 		"CacheSharingEnabled",
 		"ConfidentialMintingEnabled",

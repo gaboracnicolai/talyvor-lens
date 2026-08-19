@@ -9,7 +9,16 @@
 // config.go's own force-off block plus a Mint-or-LXC name rule, and that file records in its own
 // doc comment what the name rule CANNOT see (KeelRoyaltyHaircutEnabled, NodeAutoRouteEnabled).
 // Read this readout as: the economy master switch, everything config.go force-offs with it, the
-// default-on mint arming loop, the adjacent gates named below, and every Mint-or-LXC flag.
+// default-on mint arming loop, the adjacent gates named below, every Mint-or-LXC flag, and every
+// flag that gates whether a MONEY SURFACE is registered at all (route_gate_census_test.go, rule D).
+//
+// ⚠ RULE D EXISTS BECAUSE THE READOUT WAS SILENT ABOUT WHETHER THE PROCESS COULD TAKE MONEY.
+// BillingEnabled gates the FIAT intake path — the Stripe webhook that credits a paid purchase and
+// the checkout that charges for it. It is outside the force-off block BY DESIGN (fiat billing must
+// run with the economy off), so rules A and B cannot see it, and "Billing" matches neither "Mint"
+// nor "LXC", so rule C cannot either. A readout of mint flags that says nothing about the fiat
+// door reads as "the money paths are quiet" while the only path that takes revenue is unaccounted
+// for. Rule D keys on cmd/lens's own gate types rather than on a name, and it caught this one.
 //
 // WHY IT EXISTS. Nothing on the box showed whether a money-path flag was on. The available
 // answer was "read config.go and infer the default", which is inference, not observation — and
@@ -219,6 +228,22 @@ func Report(cfg *config.Config, binaryVersion string, overrides ...Override) Sna
 		// them mattered — a readout of mostly-off flags reads as "the money paths are quiet".
 		{"LXCReservationEnabled", "LENS_LXC_RESERVATION_ENABLED", cfg.LXCReservationEnabled},
 		{"LXCAgentAllocationEnabled", "LENS_LXC_AGENT_ALLOCATION_ENABLED", cfg.LXCAgentAllocationEnabled},
+
+		// THE FIAT DOOR. Off ⇒ cmd/lens never registers POST /v1/billing/webhook (the Stripe
+		// callback that CREDITS a paid purchase), the checkout that CHARGES for it, or the admin
+		// purchases list — chi answers 404. This is the one flag in the readout that decides
+		// whether REVENUE can arrive, the mirror of AdminLXCGrantEnabled above (credit without
+		// revenue). Deliberately NOT force-off'd with the economy: a pure fiat-SaaS deployment
+		// runs EconomyEnabled=false + BillingEnabled=true, which is exactly why every other rule
+		// in this package is blind to it.
+		{"BillingEnabled", "LENS_BILLING_ENABLED", cfg.BillingEnabled},
+		// THE UNBILLED BATCH LANE. batch_routes.go opens it only when the operator asked AND a
+		// billing settle hook is wired, because a completed job on an unhooked lane "would debit
+		// nothing while Talyvor pays the provider". The flag alone is therefore NOT the effective
+		// state — cmd/lens passes the gate's real decision as an Override, so an operator who set
+		// LENS_BATCH_ENABLED=true and got a refused lane reads forced_off_at_runtime here instead
+		// of an "on" that is not true.
+		{"BatchEnabled", "LENS_BATCH_ENABLED", cfg.BatchEnabled},
 	}
 
 	byName := make(map[string]Override, len(overrides))
