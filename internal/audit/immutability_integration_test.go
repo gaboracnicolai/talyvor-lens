@@ -61,10 +61,21 @@ type guarded struct {
 	updateSet string
 }
 
+// ⚠ team/feature ARE BOUND EVEN THOUGH THIS TEST DOES NOT CARE ABOUT THEM, for the
+// reason retention_integration_test.go#seedTokenEvent already states in this same
+// package: alerts.go binds them as Go strings and never NULL, so omitting them
+// leaves NULLs that the off-box exporter — which scans into non-nullable string
+// fields — CANNOT READ. These rows outlive this test, and
+// TestScheduledExport_AdvancesWatermarkOnSuccess pins the watermark at EPOCH and
+// exports EVERY row above it, so a NULL here is inside that test's subject.
+// It stayed invisible only because a later retention sweep happened to remove
+// these rows before the export test ran; that is an ordering accident, not
+// isolation. Measured: with the NULLs restored, that test fails with
+// "cannot scan NULL into *string (col: team)".
 func guardedTables() []guarded {
 	return []guarded{
 		{"token_events",
-			`INSERT INTO token_events (provider,model,input_tokens,output_tokens,workspace_id) VALUES ('p','m',1,1,$1)`,
+			`INSERT INTO token_events (provider,model,input_tokens,output_tokens,workspace_id,team,feature) VALUES ('p','m',1,1,$1,'','')`,
 			"ws_imm_te", "WHERE workspace_id=$1", "SET provider='x'"},
 		{"lens_token_ledger",
 			`INSERT INTO lens_token_ledger (workspace_id,amount,balance_after,type) VALUES ($1,1,1,'t')`,
@@ -113,7 +124,7 @@ func TestAuditImmutability_BlocksDirectPartitionMutation(t *testing.T) {
 	ctx := context.Background()
 	const ws = "ws_imm_part"
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO token_events (provider,model,input_tokens,output_tokens,workspace_id) VALUES ('p','m',1,1,$1)`, ws); err != nil {
+		`INSERT INTO token_events (provider,model,input_tokens,output_tokens,workspace_id,team,feature) VALUES ('p','m',1,1,$1,'','')`, ws); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	var part string
