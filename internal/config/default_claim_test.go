@@ -92,14 +92,22 @@ package config
 // cfg.SettlementFailClosedEnabled }` — is on the THIRD, so documentedLine returned
 // `poolClearer := poolroyalty.NewSettlementClearer(`, which names no flag at all.
 //
-//	cmd/lens/main.go:1265  "DEFAULT OFF; fail-closed on a detector error"   ⇒ the flag is TRUE
-//	cmd/lens/main.go:1286  "Same default-off/fail-closed/scan-window …"     ⇒ the flag is TRUE
+//	cmd/lens/main.go, at the poolClearer/distillClearer wire-up:
+//	                  "DEFAULT OFF; fail-closed on a detector error"        ⇒ the flag is TRUE
+//	cmd/lens/main.go, at the routingClearer/evalClearer wire-up:
+//	                  "Same default-off/fail-closed/scan-window discipline" ⇒ the flag is TRUE
+//
+// ⚠ CITED BY SYMBOL, NOT BY LINE, for the reason this file's own header already gives — and
+// I proved it on myself: my first cut of this block cited both by line, and correcting the
+// FIRST comment shifted the SECOND by two, so one of the two pointers was stale inside the
+// same commit that wrote it. The pointer audit reds a new citing file, and it was right to.
 //
 // ⚠ THIS IS THE SAME FLAG, IN THE SAME FILE, AS THE "one file, one flag, two answers" DEFECT
-// THE PARAGRAPH ABOVE NAMED — and the count was not two. After that commit corrected the
-// finalize sweepers to DEFAULT-ON at :1010 and :1045, cmd/lens/main.go said DEFAULT-ON about
-// SettlementFailClosedEnabled twice and DEFAULT OFF about it twice, and the instrument
-// written for exactly that contradiction could reach only the half it had already fixed.
+// THE PARAGRAPH ABOVE NAMED — and the count was not two. After that commit corrected the two
+// finalize sweepers (the pool-royalty and traffic-mint SetSettleStatus("cleared") calls) to
+// DEFAULT-ON, cmd/lens/main.go said DEFAULT-ON about SettlementFailClosedEnabled twice and
+// DEFAULT OFF about it twice, and the instrument written for exactly that contradiction
+// could reach only the half it had already fixed.
 //
 // ⚠ WHAT THE FALSE HALF CLAIMS, AND WHY IT IS THE EXPENSIVE DIRECTION: the SettlementClearer
 // is, in its own file's words, "the ONLY thing that promotes held→cleared", and the
@@ -381,6 +389,14 @@ func documentedStmt(f *ast.File, fset *token.FileSet, raw []byte, g *ast.Comment
 	// ADJACENCY. A comment group that documents nothing — a trailing block at the end of a
 	// function, or a note separated from what follows — must bind to nothing rather than to
 	// whatever statement happens to come next.
+	//
+	// ⚠ MEASURED, AND IT IS NOT LOAD-BEARING TODAY — SAID HERE SO THE NEXT READER DOES NOT
+	// CREDIT IT WITH WORK IT IS NOT DOING. C6 in the control harness deletes this clause and
+	// the gate stays GREEN with the binding totals UNCHANGED (25 checked, 2 ambiguous). It is
+	// not dead code — instrumented, it fires 25 times — but in all 25 the wider bind resolves
+	// to NO cfg.<Field> anyway, so it is never decisive. It is kept as a bound on a scope that
+	// is genuinely wider than documentedLine's (a statement can be a whole if-block, and
+	// documentedLine has no distance limit of its own), not because anything here needs it.
 	if fset.Position(best).Line-fset.Position(g.End()).Line > 1 {
 		return ""
 	}
