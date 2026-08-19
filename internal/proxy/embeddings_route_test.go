@@ -130,6 +130,14 @@ func TestEmbeddings_TwoDifferentInputsAreNotCacheCollided(t *testing.T) {
 // (3) EVERY EXTRACTOR STILL SEES AN EMPTY PROMPT — that is not fixed here, and the cache guard is
 // what makes it safe. Pinned so a future change that starts caching embeddings has to confront
 // the collision rather than inherit it.
+//
+// ⚠ "THE CACHE GUARD IS WHAT MAKES IT SAFE" WAS TRUE OF THE CACHE AND OF NOTHING ELSE. Three MONEY
+// seams read this same extractor's output — lxcGateBlocks (admission), agentAllocationBlocks
+// (immediate debit) and agentReserveBlocks (the conservative hold) — and each converts it with
+// len(prompt)/4, so an empty prompt is zero tokens, zero µLXC, and each one's `<= 0 ⇒ allow` branch.
+// MEASURED on real Postgres in lxc_estimate_embeddings_test.go: a 40 KB embeddings request is served
+// by a FULLY EXHAUSTED agent ceiling, books no lxc_spend_claims row and takes no reservation. The
+// fact this test pins was right; only its blast radius was scoped to one consumer.
 func TestEmbeddings_PromptExtractionIsStillEmpty_WhichIsWhyTheyAreNotCached(t *testing.T) {
 	_, promptA, _ := extractPrompt([]byte(`{"model":"text-embedding-3-small","input":"A"}`))
 	_, promptB, _ := extractPrompt([]byte(`{"model":"text-embedding-3-small","input":"B"}`))

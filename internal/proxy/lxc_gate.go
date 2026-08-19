@@ -84,6 +84,15 @@ func (p *Proxy) SetLXCGate(reader lxcBalanceReader, enabled func() bool) {
 // workspace with no credit, since a zero can never exceed a balance. The boundary is pinned from both
 // sides in lxc_estimate_short_prompt_test.go; closing it re-prices or refuses live traffic and is a
 // decision rather than a repair.
+//
+// ⚠ AND "UNDER FOUR BYTES" IS STILL TOO SMALL A DESCRIPTION OF THE FREE PATH. The estimate is not floored
+// on the bytes the CLIENT SENT, it is floored on the bytes extractPrompt CAN SEE — and extractPrompt reads
+// `messages[]` only. An OpenAI EMBEDDINGS body carries `input`, so every embeddings request yields the empty
+// prompt and prices at 0 no matter how large it is: 40 KB of source code, measured, on ANY model. That route
+// is live (`/v1/proxy/openai/*` is a wildcard to HandleOpenAI) and a released client uses it. The empty
+// prompt was already pinned by embeddings_route_test.go — but only as a CACHE fact, with the cache guard
+// named as what makes it safe; nothing was ever asked about the three money seams reading the same
+// extractor. Pinned from both sides in lxc_estimate_embeddings_test.go.
 func lxcEstimate(model, prompt string) int64 {
 	estUSD, prov := alerts.CostUSDResolved(model, catalog.PurposeCharge, len(prompt)/4, 0, 0, 0)
 	if prov == catalog.ProvenanceFallback && len(prompt) > 0 {
@@ -103,6 +112,14 @@ func lxcEstimate(model, prompt string) int64 {
 // settle had nothing to charge against, and the sub-budget ceiling was never consulted. A hold falls back
 // to the provider's most expensive known model: over-holding is refunded by the settle, under-holding
 // leaks the ceiling, so HIGH is the conservative direction here.
+//
+// ⚠ "A TRUE UPPER BOUND ON THE DELIVERED COST" IS FALSE FOR AN EMBEDDING MODEL, AND MEASURED SO
+// (lxc_estimate_embeddings_test.go). The bound is input + maxOutTokens × the OUTPUT rate, and for the three
+// seeded embedding models that rate is 0 — correctly, embeddings emit no output tokens. So the output term
+// vanishes, the whole hold reduces to the input term, and the input term is itself 0 because extractPrompt
+// reads `messages[]` while an embeddings body carries `input`. A 40 KB embeddings request therefore holds
+// NOTHING on every allowance a caller can supply (1, 512, 4096, 128000 all measured), and takes
+// agentReserveBlocks' `heldLXC <= 0 → no hold` branch. maxOut is never the way in — it cannot be 0.
 func reserveEstimateLXC(model, prompt string, maxOutTokens int) int64 {
 	if maxOutTokens < 0 {
 		maxOutTokens = 0
@@ -132,7 +149,10 @@ func (p *Proxy) lxcGateBlocks(ctx context.Context, workspaceID, model, prompt st
 	}
 	estLXC := lxcEstimate(model, prompt)
 	if estLXC <= 0 {
-		return false // nothing to charge against (unknown model / empty) → allow
+		// ⚠ "nothing to charge against" is the ESTIMATOR's opinion, not the request's size: every
+		// embeddings request lands here at any size, and so does any prompt under four bytes. The
+		// return is ABOVE the balance read, so no balance can ever refuse them. Both pinned.
+		return false
 	}
 	balance, err := p.lxcGate.GetLXCBalance(ctx, workspaceID)
 	if err != nil {
