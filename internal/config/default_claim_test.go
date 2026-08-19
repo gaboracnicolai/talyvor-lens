@@ -81,6 +81,44 @@ package config
 //     traffic-mint sweeper below it said "DEFAULT-ON". One file, one flag, two answers.
 //
 // This commit corrects five comments and changes NO default; the product diff is comment-only.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// ⚠⚠ WIDENED AGAIN, AND RULE H WAS GREEN OVER TWO MORE FALSE CLAIMS ABOUT THE SAME FLAG IT
+// HAD JUST BEEN WRITTEN TO CATCH.
+//
+// THE THIRD BLINDNESS IS THE BINDING'S WIDTH: documentedLine reads EXACTLY ONE LINE. A
+// wire-up written as a multi-line call puts the flag beyond it. Measured: the settlement
+// CLEARERS are constructed over three lines and their only gate — `func() bool { return
+// cfg.SettlementFailClosedEnabled }` — is on the THIRD, so documentedLine returned
+// `poolClearer := poolroyalty.NewSettlementClearer(`, which names no flag at all.
+//
+//	cmd/lens/main.go, at the poolClearer/distillClearer wire-up:
+//	                  "DEFAULT OFF; fail-closed on a detector error"        ⇒ the flag is TRUE
+//	cmd/lens/main.go, at the routingClearer/evalClearer wire-up:
+//	                  "Same default-off/fail-closed/scan-window discipline" ⇒ the flag is TRUE
+//
+// ⚠ CITED BY SYMBOL, NOT BY LINE, for the reason this file's own header already gives — and
+// I proved it on myself: my first cut of this block cited both by line, and correcting the
+// FIRST comment shifted the SECOND by two, so one of the two pointers was stale inside the
+// same commit that wrote it. The pointer audit reds a new citing file, and it was right to.
+//
+// ⚠ THIS IS THE SAME FLAG, IN THE SAME FILE, AS THE "one file, one flag, two answers" DEFECT
+// THE PARAGRAPH ABOVE NAMED — and the count was not two. After that commit corrected the two
+// finalize sweepers (the pool-royalty and traffic-mint SetSettleStatus("cleared") calls) to
+// DEFAULT-ON, cmd/lens/main.go said DEFAULT-ON about SettlementFailClosedEnabled twice and
+// DEFAULT OFF about it twice, and the instrument written for exactly that contradiction
+// could reach only the half it had already fixed.
+//
+// ⚠ WHAT THE FALSE HALF CLAIMS, AND WHY IT IS THE EXPENSIVE DIRECTION: the SettlementClearer
+// is, in its own file's words, "the ONLY thing that promotes held→cleared", and the
+// fail-closed FinalizeSweeper settles ONLY 'cleared' rows. So these two comments told a
+// reader auditing what can move money on a default deployment that the promotion step is
+// inert. Measured, every switch above them is armed: the clearers sit inside `if
+// cfg.EconomyEnabled` (default TRUE) and their gate is SettlementFailClosedEnabled (default
+// TRUE, and pinned as a default-ARMED money flag by econflags/default_armed_census_test.go).
+//
+// ⚠ THE FIX IS A FALLBACK, NOT A REPLACEMENT, AND THAT IS MEASURED — see documentedStmt.
+// This commit corrects two comments and changes NO default; the product diff is comment-only.
 
 import (
 	"go/ast"
@@ -304,6 +342,71 @@ func documentedLine(src []string, endLine int) string {
 	return ""
 }
 
+// documentedStmt returns the source of the WHOLE declaration or statement a comment sits
+// above, rather than its first line — the smallest node that starts on the line right after
+// the group, taken whole.
+//
+// ⚠ WHY IT EXISTS: documentedLine reads EXACTLY ONE LINE, and a wire-up written as a
+// multi-line call puts the flag out of its reach. Measured on the commit that added this:
+// the settlement CLEARER is constructed over three lines and its only gate — `func() bool
+// { return cfg.SettlementFailClosedEnabled }` — is on the THIRD. documentedLine returned
+// `poolClearer := poolroyalty.NewSettlementClearer(`, which names no flag, so the comment
+// above it went unbound and its "DEFAULT OFF" was never compared to anything. That is not
+// a claim the prose binding could rescue either: it names the field BARE, and a bare name
+// is the binding this rule rejected on five measured counterexamples.
+//
+// ⚠ IT IS APPLIED AS A FALLBACK, NOT A REPLACEMENT, AND THAT IS A MEASUREMENT NOT A
+// PREFERENCE. Swapping documentedLine FOR this loses coverage: a statement is wider than a
+// line, so it can pull in a SECOND cfg.<Field> and make an already-checked claim ambiguous.
+// Measured over the tree, the straight swap bound 21 where the line bound 20 but turned
+// FOUR checked claims into skips (main.go's keel wiring gained KeelHardenedEnabled beside
+// KeelEnabled; econflags.go's two readouts lost theirs entirely). Used only when the line
+// binding resolved NOTHING, it is strictly additive: +5 claims bound, 0 lost, 0 newly
+// ambiguous. C3 in the control harness is the assertion that keeps it that way.
+func documentedStmt(f *ast.File, fset *token.FileSet, raw []byte, g *ast.CommentGroup) string {
+	best, bestEnd := token.NoPos, token.NoPos
+	ast.Inspect(f, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		switch n.(type) {
+		case ast.Stmt, ast.Decl, ast.Spec:
+		default:
+			return true
+		}
+		if n.Pos() < g.End() {
+			return true
+		}
+		// the smallest node starting earliest after the comment
+		if best == token.NoPos || n.Pos() < best || (n.Pos() == best && n.End() < bestEnd) {
+			best, bestEnd = n.Pos(), n.End()
+		}
+		return true
+	})
+	if best == token.NoPos {
+		return ""
+	}
+	// ADJACENCY. A comment group that documents nothing — a trailing block at the end of a
+	// function, or a note separated from what follows — must bind to nothing rather than to
+	// whatever statement happens to come next.
+	//
+	// ⚠ MEASURED, AND IT IS NOT LOAD-BEARING TODAY — SAID HERE SO THE NEXT READER DOES NOT
+	// CREDIT IT WITH WORK IT IS NOT DOING. C6 in the control harness deletes this clause and
+	// the gate stays GREEN with the binding totals UNCHANGED (25 checked, 2 ambiguous). It is
+	// not dead code — instrumented, it fires 25 times — but in all 25 the wider bind resolves
+	// to NO cfg.<Field> anyway, so it is never decisive. It is kept as a bound on a scope that
+	// is genuinely wider than documentedLine's (a statement can be a whole if-block, and
+	// documentedLine has no distance limit of its own), not because anything here needs it.
+	if fset.Position(best).Line-fset.Position(g.End()).Line > 1 {
+		return ""
+	}
+	so, eo := fset.Position(best).Offset, fset.Position(bestEnd).Offset
+	if so < 0 || eo > len(raw) || so >= eo {
+		return ""
+	}
+	return string(raw[so:eo])
+}
+
 // TestDefaultClaimsAtTheWiringSitesMatchTheLoader — RULE H. The same falsifiable claim as
 // the rule above, checked where the flag is USED rather than where it is declared.
 //
@@ -408,6 +511,10 @@ func TestDefaultClaimsAtTheWiringSitesMatchTheLoader(t *testing.T) {
 			bound := boundFlags(text, defaults)
 			for name := range boundFlags(documentedLine(src, end), defaults) {
 				bound[name] = true
+			}
+			// FALLBACK, only where the line binding found nothing — see documentedStmt.
+			if len(bound) == 0 {
+				bound = boundFlags(documentedStmt(f, fset, raw, g), defaults)
 			}
 			if len(bound) != 1 {
 				if len(bound) > 1 {

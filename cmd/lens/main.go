@@ -1267,8 +1267,10 @@ func run() error {
 		// SettlementFailClosedEnabled) can settle them; a held row the ring detector never
 		// examined is never cleared → never settles (the fail-closed money guarantee). Reuses
 		// the SAME read-only RingDetector as the auto-adjudicator (examined = the held rows it
-		// scanned this tick; flagged rings excluded). DEFAULT OFF; fail-closed on a detector
-		// error. Same scan window as anti-gaming (MUST exceed the 72h holdback so every held
+		// scanned this tick; flagged rings excluded). DEFAULT ON — the same flag that arms the
+		// finalize sweepers above, so on a deployment whose environment says nothing these
+		// clearers RUN and held rows do reach 'cleared'; fail-closed on a detector error.
+		// Same scan window as anti-gaming (MUST exceed the 72h holdback so every held
 		// row is examined before it is due). Over both cross-tenant reuse tables.
 		poolClearer := poolroyalty.NewSettlementClearer(
 			poolroyalty.NewRingDetector(pool, "pool_royalty_mints"), pool, "pool_royalty_mints",
@@ -1288,7 +1290,7 @@ func run() error {
 		// a per-workspace VELOCITY concentration detector examines them (mirrors pattern's
 		// single-party guard). CRITICAL: without these clearers, arming their finalize
 		// sweepers fail-closed (below) would STRAND every held row (nothing would ever
-		// clear them). Same default-off/fail-closed/scan-window discipline; velocity
+		// clear them). Same default-on/fail-closed/scan-window discipline; velocity
 		// threshold shared with pattern (PatternConcentrationVelocityMax placeholder).
 		routingClearer := poolroyalty.NewSettlementClearer(
 			poolroyalty.NewSinglePartyConcentrationDetector(pool, "routing_prediction_mints", cfg.PatternConcentrationVelocityMax, time.Hour),
