@@ -2,12 +2,31 @@
 //
 // Every LENS mint funnels through exactly two kernels: applyTx (spendable
 // Credit/CreditTx) and heldInner (CreditHeldTx). The verified-to-earn gate is
-// placed in BOTH, discriminated by the txType against mintTypes, so it covers
-// all mint paths at once and a new mint track CANNOT skip it — while
-// conservation credits (marketplace_*, *unstake, transfer) and the held
-// finalize/revoke pass through untouched. The covered set is mintTypeList below
-// (currently ELEVEN mint-moment types — the SINGLE SOURCE OF TRUTH; do not
-// hand-count it in prose, it drifts: this comment used to say "seven").
+// placed in BOTH, discriminated by the txType against mintTypes — while
+// conservation credits (marketplace_*, transfer) and the held finalize/revoke
+// pass through untouched. The covered set is mintTypeList below (currently
+// ELEVEN mint-moment types — the SINGLE SOURCE OF TRUTH; do not hand-count it
+// in prose, it drifts: this comment used to say "seven").
+//
+// ⚠ THIS HEADER USED TO SAY THE GATE "covers all mint paths at once and a new
+// mint track CANNOT skip it", AND THAT WAS FALSE WHEN IT WAS WRITTEN. Placement
+// at both kernels makes the gate UNSKIPPABLE BY POSITION, not by membership: a
+// credit is gated only if its txType is in the set below, so a mint track skips
+// the gate simply by not being added to it — silently, with no call-site change
+// and nothing to review. `stake_yield` is exactly that: LENS that computeYield()
+// creates at unstake, counted by GetTotalSupply as minted, and absent from this
+// list — so both U6 controls no-op for it (MEASURED, not read: an unverified
+// workspace mints yield through a REFUSING verifier, and the rolling cap neither
+// bounds it nor counts it). The old wording also listed "*unstake" among the
+// conservation credits, which is how it slipped: MarketplaceStore.Unstake writes
+// TWO rows from one call site and only the principal half is conservation.
+//
+// The completeness check is TestEveryCountedMintHasAGatedMintMoment
+// (counted_mint_gating_test.go), which drives both kernels and OBSERVES which
+// controls fire, so this claim is now checkable rather than asserted. Whether
+// stake_yield should be gated is an open product decision (QUEUE.md W6.1):
+// gating it makes an over-cap or unverified workspace unable to unstake its own
+// PRINCIPAL, because the yield credit shares the tx that returns it.
 package mining
 
 import (

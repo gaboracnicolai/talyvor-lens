@@ -635,6 +635,13 @@ var burnedSupplyTypeList = []string{
 // then). The fix could NOT be "count unstake": the principal was already in supply when it was
 // staked, so counting its return would inflate supply on every unstake — a worse error. The row
 // is split instead, and only this half is counted.
+//
+// ⚠ AND IT IS THE ONE COUNTED MINT WITH NO GATED MINT MOMENT. It has no _held
+// stage and is not in mintTypeList, so neither U6 control sees it: measured, an
+// unverified workspace mints yield through a refusing verifier and past the
+// rolling rate cap, which does not count it either. Pinned (with the reason it
+// is not simply gated) in TestEveryCountedMintHasAGatedMintMoment; the decision
+// is open in QUEUE.md W6.1.
 const TypeStakeYield = "stake_yield"
 
 // BurnedSupplyTypes returns the ledger types that reduce circulating supply. Exported so a
