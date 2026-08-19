@@ -39,7 +39,7 @@ func TestApplyCatalogOverrides_RepriceDoesNotBlankTheModel(t *testing.T) {
 		t.Error("boot blanked gpt-4o's vision capability — a price change withdrew a capability")
 	}
 	if m.Provider != "openai" {
-		t.Errorf("boot blanked the provider (%q) — the model drops out of ByProvider and out of its own fallback anchor set", m.Provider)
+		t.Errorf("boot blanked the provider (%q) — the model drops out of its own fallback anchor set (fallbackRates filters on m.Provider)", m.Provider)
 	}
 	if m.ContextTokens != seeded.ContextTokens || len(m.Aliases) != len(seeded.Aliases) {
 		t.Errorf("boot blanked context/aliases: %d/%v, want %d/%v", m.ContextTokens, m.Aliases, seeded.ContextTokens, seeded.Aliases)

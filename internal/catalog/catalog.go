@@ -167,8 +167,22 @@ func (r *Registry) All() []Model {
 	return out
 }
 
-// ByProvider returns a provider's models sorted by input price (cheapest
-// first) — the order the modality redirect uses to pick a capable model.
+// ByProvider returns a provider's models sorted by input price (cheapest first).
+//
+// ⚠ ITS DOC COMMENT USED TO SAY "the order the modality redirect uses to pick a capable model" AND
+// THAT WAS FALSE. MEASURED: `grep -rn ByProvider` over every .go file in this repo finds the
+// declaration, the package-level alias, this comment, and FOUR call sites that are all in _test.go —
+// zero production callers. The modality redirect walks modality.providerPreference, a HARDCODED
+// per-provider list, and takes capability facts (not order) from the catalog; the fallback bound in
+// resolve.go#fallbackRates iterates r.byID directly and filters on m.Provider. Neither ever calls
+// this. The consequence of believing the comment is pinned in
+// internal/proxy/modality_redirect_reach_test.go: the redirect's reachable set is SIX openai models,
+// not the sixteen this catalog records as vision-capable.
+//
+// It is kept rather than deleted because the fallback-anchor half of the claim IS a real population
+// (fallbackRates selects exactly the set this returns, by the same predicate) and because a
+// provider-scoped, price-ordered view is the shape any future redirect widening would want. What it
+// is NOT is a description of what runs today.
 func (r *Registry) ByProvider(provider string) []Model {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -210,8 +224,10 @@ func (r *Registry) LoadOverrides(models []Model) {
 // zero value and overwrote the seeded truth. MEASURED through the proxy's real entry point, not
 // inferred: `[{"id":"gpt-4o","input_per_1m":3.75,"output_per_1m":15.00}]` turned a 200 streaming
 // vision request to gpt-4o into a 422 "model gpt-4o does not support it", dropped gpt-4o out of
-// ByProvider("openai") (19 models → 18, so it stops anchoring that provider's fallback bound and
-// stops being a redirect target), and emptied its capability entry in the introspection API. A price
+// ByProvider("openai") (19 models → 18, so it stops anchoring that provider's fallback bound — ⚠ and
+// stops being a redirect target for the SEPARATE reason that its capabilities were blanked, NOT
+// because ByProvider is what the redirect reads; it has no production caller at all, see its own
+// doc), and emptied its capability entry in the introspection API. A price
 // change silently withdrew a capability.
 //
 // So an override for an id the registry ALREADY holds is decoded ON TOP OF that entry: an absent

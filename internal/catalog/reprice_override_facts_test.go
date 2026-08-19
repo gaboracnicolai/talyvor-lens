@@ -52,7 +52,7 @@ func TestDecodeOverrides_RepriceKeepsEveryFactItDidNotState(t *testing.T) {
 		t.Error("vision was WITHDRAWN by a price change — modality.Supports now refuses image requests to this model")
 	}
 	if m.Provider != "openai" {
-		t.Errorf("provider = %q, want openai — an empty provider drops the model out of ByProvider and out of its own fallback anchor set", m.Provider)
+		t.Errorf("provider = %q, want openai — an empty provider drops the model out of its own fallback anchor set (fallbackRates filters on m.Provider)", m.Provider)
 	}
 	if m.ContextTokens != 128000 || m.MaxOutput != 16384 {
 		t.Errorf("context/max-output = %d/%d, want 128000/16384", m.ContextTokens, m.MaxOutput)
@@ -64,7 +64,10 @@ func TestDecodeOverrides_RepriceKeepsEveryFactItDidNotState(t *testing.T) {
 		t.Errorf("aliases = %v, want [gpt-4o-2024-11-20]", m.Aliases)
 	}
 
-	// ByProvider is the redirect + fallback-anchor population. A stripped provider removes the model
+	// ByProvider mirrors the FALLBACK-ANCHOR population (fallbackRates selects by the same m.Provider
+	// predicate). ⚠ NOT the redirect's — that walks modality.providerPreference, a hardcoded list, and
+	// ByProvider has no production caller; the reachable-set gap that follows from that is pinned in
+	// internal/proxy/modality_redirect_reach_test.go. A stripped provider removes the model
 	// from it silently, which is why this is asserted from the population and not from the field alone.
 	byProv := r.ByProvider("openai")
 	if len(byProv) != 1 || byProv[0].ID != "gpt-4o" {
