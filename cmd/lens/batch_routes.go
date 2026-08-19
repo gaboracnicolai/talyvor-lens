@@ -5,6 +5,9 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/talyvor/lens/internal/config"
+	"github.com/talyvor/lens/internal/econflags"
 )
 
 // batch_routes.go — the /v1/batch/* lane switch, the ROUTE chokepoint.
@@ -46,6 +49,31 @@ func newBatchReg(wantOn, settleWired bool) batchReg {
 		return batchReg{on: false}
 	}
 	return batchReg{on: wantOn}
+}
+
+// batchFlagOverride reports the lane's REAL state to the money-flag readout.
+//
+// newBatchReg can refuse a lane the operator asked for — the flag is necessary and not
+// sufficient — and that refusal is taken at wiring time, so *config.Config still holds
+// BatchEnabled=true afterwards. Reporting the struct value alone would tell an operator the
+// unbilled lane is open when it is closed, which is the exact failure internal/econflags exists
+// to prevent, and the same shape as the pooling gate's override next door.
+//
+// Nil is returned when config and behaviour agree: an override is only meaningful as a
+// disagreement, and a "override: same value" entry would be noise on a money surface.
+func batchFlagOverride(cfg *config.Config, gate batchReg) func() []econflags.Override {
+	return func() []econflags.Override {
+		if cfg.BatchEnabled == gate.on {
+			return nil
+		}
+		return []econflags.Override{{
+			Name:      "BatchEnabled",
+			Effective: gate.on,
+			Reason: "LENS_BATCH_ENABLED is set but the lane is CLOSED: no billing settle hook is " +
+				"wired in this binary, so every completed batch job would debit nothing while " +
+				"Talyvor pays the provider. See newBatchReg in cmd/lens/batch_routes.go.",
+		}}
+	}
 }
 
 func (b batchReg) get(r chi.Router, pattern string, h http.HandlerFunc) {

@@ -1915,7 +1915,8 @@ func run() error {
 	// a re-read of the environment and not a default. If it could not be read the payload says
 	// so and carries no values — see internal/econflags.
 	r.Handle("/v1/admin/economy/flags", requireAdminOrOperatorRead(authManager,
-		econflags.Handler(cfg, lensVersion, poolFlagOverride(cfg, poolGate))))
+		econflags.Handler(cfg, lensVersion, poolFlagOverride(cfg, poolGate),
+			batchFlagOverride(cfg, batchGate))))
 
 	r.Handle("/v1/admin/keel/findings", requireAdminOrOperatorRead(authManager,
 		newKeelFindingsHandler(keelFindingsReader)))
