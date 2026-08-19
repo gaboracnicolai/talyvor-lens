@@ -466,3 +466,36 @@ func TestMeasure_ASinkErrorDoesNotAffectTheServedResponse(t *testing.T) {
 		t.Errorf("the write was still attempted exactly once, got %d", len(sink.all()))
 	}
 }
+
+// ⚠ THE DEDUP KEY IS THE CALLER'S STRING, AND THIS IS THE ASSERTION THAT SAYS SO.
+// compression_measurements.request_id is the row's uniqueness key, and proxy.serve
+// takes it from `r.Header.Get("X-Talyvor-Request-ID")` VERBATIM — no length cap,
+// no charset filter, and in particular no server-side derivation. api.
+// sanitizeRequestID exists for exactly this hazard on the X-Request-ID header
+// ("preventing a client from storing an arbitrarily large string in the DB",
+// middleware.go) and the proxy path does not reach it.
+//
+// It matters because the key's SCOPE is a schema decision made downstream of this
+// value: with a bare global key, whoever presents a string first owns it for every
+// tenant. compressmeasure.TestRealPG_ASharedRequestIDDoesNotSuppressAnother
+// WorkspacesMeasurement is the other half, against real Postgres.
+//
+// A HARDCODED literal, never read back from the request — the test must not be
+// able to agree with the product by construction.
+func TestMeasure_TheRecordedRequestIDIsTheCallersHeaderVerbatim(t *testing.T) {
+	const callerChosen = "not-a-uuid: chosen by whoever sent this"
+	p, _, sink := newMeasuredProxy(t, workspace.Workspace{
+		ID: "ws-caller-id", Name: "always on", Active: true,
+		LoggingPolicy: workspace.LoggingMetadata, CompressionPolicy: workspace.CompressionAlways,
+	}, measuredUsageResponse)
+
+	dispatchCompress(t, p, "ws-caller-id", "hello world", map[string]string{
+		"X-Talyvor-Request-ID": callerChosen,
+	})
+
+	m := sink.only(t)
+	if m.RequestID != callerChosen {
+		t.Errorf("request_id = %q, want the caller's header %q verbatim — if this ever stops being true, "+
+			"re-read whether the row's uniqueness key still needs the workspace in it", m.RequestID, callerChosen)
+	}
+}

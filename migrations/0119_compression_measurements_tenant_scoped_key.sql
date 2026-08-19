@@ -1,0 +1,63 @@
+-- 0119_compression_measurements_tenant_scoped_key.sql — THE DENOMINATOR'S
+-- UNIQUENESS KEY WAS GLOBAL, AND THE STRING IN IT IS THE CALLER'S.
+--
+-- 0118 created compression_measurements with `request_id TEXT PRIMARY KEY` and
+-- the writer inserts ON CONFLICT DO NOTHING, so the FIRST row to present a given
+-- request_id owns that key for EVERY tenant. request_id is not server-derived: it
+-- is `r.Header.Get("X-Talyvor-Request-ID")` verbatim (proxy.go, the value a client
+-- may send to retain its own trace id — no length cap, no charset filter, and it
+-- never passes through api.sanitizeRequestID, which exists for precisely this
+-- hazard on the neighbouring X-Request-ID header). So the key is a string the
+-- caller chooses.
+--
+-- CONSEQUENCE, MEASURED AGAINST REAL POSTGRES rather than reasoned about
+-- (compressmeasure.TestRealPG_ASharedRequestIDDoesNotSuppressAnotherWorkspaces
+-- Measurement, red before this migration): workspace B records a gated request
+-- that was rewritten, sent to a provider and billed — and Summarise answers
+-- `requests: 0`. Record returns nil. Nothing is logged. A workspace can therefore
+-- zero ANOTHER workspace's compression evidence by reusing a request id, and can
+-- zero its OWN by pinning a constant one, which is an ordinary client bug.
+--
+-- ⚠ THE DIRECTION IS THE ONE THAT MATTERS FOR THIS TABLE SPECIFICALLY. 0118's
+-- whole argument is that `requests` IS THE DENOMINATOR — "the rewriter ran 10,000
+-- times and saved nothing" and "the rewriter never ran" are opposite answers that
+-- a bytes-only summary renders identically. A suppressed row does not distort the
+-- saving; it deletes the evidence that the rewriter ran at all, in the direction
+-- that makes a worthless rewriter look unused rather than measured.
+--
+-- ⚠ THIS RULE IS NOT NEW HERE — 0049 WROTE IT DOWN FOR pattern_mine_credits and
+-- this table did not inherit it: "a bare global UNIQUE would let whichever
+-- workspace earns first suppress every other workspace's legitimate earn on the
+-- same work (their ON CONFLICT DO NOTHING returns 0 → they silently earn
+-- nothing). Scoping uniqueness per-workspace blocks that, while still deduping a
+-- retry/replay WITHIN a workspace." There the colliding key is a SERVER-derived
+-- content hash, so a collision needs identical work. Here it is a caller-supplied
+-- header, so a collision needs no work at all. The bare key was strictly weaker in
+-- the place it was strictly less defensible.
+--
+-- WHAT CHANGES: the primary key becomes (request_id, workspace_id). A retry or
+-- replay within one workspace still collapses to one row — the property 0118
+-- wanted and the only one it actually needs — while two tenants presenting the
+-- same string now hold two rows.
+--
+-- ⚠ NOT ATTEMPTED HERE, AND SAID RATHER THAN IMPLIED: this does not sanitise or
+-- bound request_id. A caller can still store an arbitrary string of its choosing
+-- in this column (api.sanitizeRequestID caps the neighbouring header at 64 bytes
+-- of [A-Za-z0-9_-] and cites ISO 27001 A.12 for doing so). Applying that to
+-- X-Talyvor-Request-ID would change the id on the spend row, the PoVI receipt and
+-- every structured log at once — a wider blast radius than one measurement table,
+-- so it is measured and reported rather than ridden on this migration.
+--
+-- SAFE ON A LIVE TABLE: no workspace has the 0117 compression gate open (0117
+-- backfilled every existing row to 'disabled'), so compression_measurements is
+-- empty by construction today and the PK swap cannot fail on a duplicate. The
+-- statements are re-runnable as a pair — DROP ... IF EXISTS then ADD — so applying
+-- this file twice leaves the same end state.
+--
+-- The reader's index is unchanged: (workspace_id, created_at DESC) is still the
+-- only query shape Summarise issues, and it is not the uniqueness key.
+ALTER TABLE compression_measurements
+    DROP CONSTRAINT IF EXISTS compression_measurements_pkey;
+
+ALTER TABLE compression_measurements
+    ADD CONSTRAINT compression_measurements_pkey PRIMARY KEY (request_id, workspace_id);
