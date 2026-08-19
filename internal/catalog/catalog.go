@@ -20,7 +20,9 @@ package catalog
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -230,6 +232,27 @@ func (r *Registry) LoadOverrides(models []Model) {
 // ALIAS registers a new entry keyed by that alias, exactly as it does today. Merging an alias onto
 // its canonical entry would rewrite the alias index as a side effect of a reprice, which is the
 // class of silent consequence this function exists to remove.
+//
+// ⚠⚠ AN ELEMENT THAT NAMES NO MODEL IS REFUSED, AND WITH IT THE WHOLE DOCUMENT. `id` is the only
+// field that says WHICH model the element is about, and an absent one used to decode to "" and be
+// handed to put, which keys byID by exactly that string. Two things then happened and neither was
+// said out loud: the reprice the operator wrote did NOT happen (cmd/lens still logged "applied model
+// overrides count=1"), and a PHANTOM entry entered the catalog under the empty id — which the money
+// path reads. MEASURED at 3fa1196 through the real functions, on 1M input + 1M output: proxy
+// extractPrompt returns req.Model with no non-empty check and HandleOpenAI serves a body carrying no
+// `model` key with 200, so ResolveRates("") is a live call; it billed charge $0.02 / hold $210.00 as
+// `fallback` with an ERROR and a metric on every request, and with the phantom registered it billed
+// $18.75 on BOTH arms as `exact` — silently, and invisibly to modelwatch, which skips exact. An
+// over-bill on the charge, a collapsed ceiling on the hold, and the loud instrument switched off, all
+// from writing `model` where the document wants `id`.
+//
+// ⚠ THE WHOLE DOCUMENT, NOT JUST THE ELEMENT, is a choice: cmd/lens#applyCatalogOverrides already
+// applies NOTHING when the document does not parse, so "Lens could not read this" keeps one meaning
+// and one outcome. It costs nothing on the money axis — every model the document meant to price falls
+// to the fallback arm, which is non-zero by construction, defensible, and screams once per request.
+// Loud-and-unpriced beats silent-and-wrong. The alternative (apply the named elements, skip the rest)
+// keeps more pricing and leaves a half-applied document; it is a defensible answer and it is not the
+// one taken here.
 func (r *Registry) DecodeOverrides(raw []byte) ([]Model, error) {
 	var elems []json.RawMessage
 	if err := json.Unmarshal(raw, &elems); err != nil {
@@ -238,12 +261,20 @@ func (r *Registry) DecodeOverrides(raw []byte) ([]Model, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]Model, 0, len(elems))
-	for _, e := range elems {
+	for i, e := range elems {
 		var probe struct {
 			ID string `json:"id"`
 		}
 		if err := json.Unmarshal(e, &probe); err != nil {
 			return nil, err
+		}
+		// Whitespace is folded in with absence deliberately: an id of spaces can never match a
+		// request either, so it is the same failure wearing a different byte.
+		if strings.TrimSpace(probe.ID) == "" {
+			return nil, fmt.Errorf(`element %d names no model: every override element needs a non-empty "id" `+
+				`(the field is "id" here — the wire calls the same thing "model", which is the usual way to `+
+				`write this wrong). Refusing the whole document: an element with no id registers a catalog `+
+				`entry under the empty string, which is what prices a request that names no model`, i)
 		}
 		base := r.byID[probe.ID] // zero Model when the id is new — the pre-existing behaviour
 		base.InputPer1M, base.OutputPer1M = 0, 0
