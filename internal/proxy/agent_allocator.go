@@ -107,9 +107,24 @@ func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model
 	}
 	estLXC := lxcEstimate(model, prompt)
 	if estLXC <= 0 {
-		// Empty prompt only: zero TOKENS is genuinely zero cost. An UNKNOWN MODEL no longer lands here —
-		// lxcEstimate prices it on the derived floor — which is the whole point: this branch used to serve
-		// unpriced traffic with no debit at all, and it is the path taken whenever reservations are off.
+		// An UNKNOWN MODEL no longer lands here — lxcEstimate prices it on the derived floor — which is
+		// the whole point: this branch used to serve unpriced traffic with no debit at all, and it is
+		// the path taken whenever reservations are off.
+		//
+		// ⚠ IT IS NOT "EMPTY PROMPT ONLY", WHICH IS WHAT THIS SAID. lxcEstimate converts bytes to
+		// tokens with len(prompt)/4, which FLOORS, so ANY prompt under 4 bytes is zero tokens, prices
+		// at zero on every model, and takes this branch. MEASURED against a FULLY EXHAUSTED sub-budget
+		// on real Postgres (TestRealPG_AnExhaustedAgentCeilingStillServesASubFourBytePrompt): a
+		// 77-byte prompt is BLOCKED and "ok?" / "go" / "y" are SERVED, booking no lxc_spend_claims row
+		// at all. So the "airtight ceiling" above — "the serve path is entered IFF a debit was booked"
+		// — holds for every prompt except the short ones, and an agent at its ceiling keeps drawing
+		// completions whose OUTPUT this input-only estimate never bounded.
+		//
+		// ⚠ NOT REPAIRED HERE BECAUSE EVERY REPAIR MOVES A NUMBER: ceil-ing the token count re-prices
+		// every prompt whose length is not a multiple of 4; a 1 µLXC floor invents a charge;
+		// blocking short prompts refuses traffic that is served today. That is a pricing/product
+		// decision. The boundary is pinned in lxc_estimate_short_prompt_test.go so it cannot widen
+		// silently, and the same free path exists in lxc_gate.go#lxcGateBlocks.
 		return false
 	}
 	debitKey, err := deriveAgentDebitKey(p.agentDebitSalt, apiKeyID)

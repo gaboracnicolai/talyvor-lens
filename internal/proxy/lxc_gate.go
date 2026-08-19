@@ -73,8 +73,17 @@ func (p *Proxy) SetLXCGate(reader lxcBalanceReader, enabled func() bool) {
 // over-charging on a rate we admit is a guess is the indefensible direction; and for the gate a floor
 // starts blocking a zero-balance workspace without over-blocking a paying one.
 //
-// An EMPTY prompt still yields 0, correctly — zero tokens really is zero cost — so the callers' `<= 0`
-// branches remain reachable for that case and only that case.
+// An EMPTY prompt still yields 0, correctly — zero tokens really is zero cost.
+//
+// ⚠ BUT IT IS NOT THE ONLY CASE, WHICH IS WHAT THIS SAID ("for that case and only that case"). The
+// ceil above is applied to the µLXC conversion; the TOKEN conversion one line below is len(prompt)/4,
+// which FLOORS. Every prompt of 1, 2 or 3 bytes is therefore zero tokens and zero µLXC on ANY model,
+// known or unknown, and takes both callers' `<= 0` branch: agentAllocationBlocks serves it without
+// debiting (measured against an exhausted sub-budget on real Postgres — see
+// TestRealPG_AnExhaustedAgentCeilingStillServesASubFourBytePrompt) and lxcGateBlocks admits it on a
+// workspace with no credit, since a zero can never exceed a balance. The boundary is pinned from both
+// sides in lxc_estimate_short_prompt_test.go; closing it re-prices or refuses live traffic and is a
+// decision rather than a repair.
 func lxcEstimate(model, prompt string) int64 {
 	estUSD, prov := alerts.CostUSDResolved(model, catalog.PurposeCharge, len(prompt)/4, 0, 0, 0)
 	if prov == catalog.ProvenanceFallback && len(prompt) > 0 {
