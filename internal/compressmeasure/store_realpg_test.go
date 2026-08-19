@@ -209,3 +209,68 @@ func TestRealPG_ARetriedWriteDoesNotDoubleCount(t *testing.T) {
 			got.OriginalBytes, got.SentBytes, first.OriginalBytes, first.SentBytes)
 	}
 }
+
+// ⚠ THE DEDUP KEY IS GLOBAL AND THE VALUE IN IT IS THE CALLER'S. `request_id` is
+// `r.Header.Get("X-Talyvor-Request-ID")` verbatim (proxy.go), so two workspaces
+// can present the same one — by collision, by a client that pins a constant, or
+// deliberately. With a BARE key the second one's measurement is swallowed by
+// ON CONFLICT DO NOTHING and its denominator undercounts with nothing logged.
+//
+// This is the rule migration 0049 already wrote down for pattern_mine_credits:
+// "a bare global UNIQUE would let whichever workspace earns first suppress every
+// other workspace's legitimate earn ... Scoping uniqueness per-workspace blocks
+// that, while still deduping a retry/replay WITHIN a workspace." There the key is
+// SERVER-derived; here it is the caller's header, which is strictly weaker.
+func TestRealPG_ASharedRequestIDDoesNotSuppressAnotherWorkspacesMeasurement(t *testing.T) {
+	pool := measurePool(t)
+	s := NewStore(pool)
+	ctx := context.Background()
+
+	const shared = "req-both-sent-this"
+	mustRecord(t, s, Measurement{RequestID: shared, WorkspaceID: "ws-first", Model: "m", OriginalBytes: 100, SentBytes: 90, Modified: true, BilledInputTokens: 25})
+	mustRecord(t, s, Measurement{RequestID: shared, WorkspaceID: "ws-second", Model: "m", OriginalBytes: 400, SentBytes: 400, BilledInputTokens: 100})
+
+	first, err := s.Summarise(ctx, "ws-first", time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("summarise ws-first: %v", err)
+	}
+	// The FLOOR: an absence is evidence only when something is proved to have
+	// happened beside it. If this reds, the fixture never landed and the
+	// assertion below would be vacuous.
+	if first.Requests != 1 || first.OriginalBytes != 100 {
+		t.Fatalf("ws-first summarised as %+v, want 1 request / 100 bytes — the control row is not where it was put", first)
+	}
+	second, err := s.Summarise(ctx, "ws-second", time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("summarise ws-second: %v", err)
+	}
+	if second.Requests != 1 || second.OriginalBytes != 400 {
+		t.Errorf("ws-second summarised as %+v, want 1 request / 400 bytes — its measurement was suppressed by ws-first's identical caller-supplied request id", second)
+	}
+}
+
+// The other half of the same key, and it must STAY green: scoping uniqueness per
+// workspace must not stop a retry WITHIN one workspace from deduping. Without
+// this, widening the key to (request_id, workspace_id) could be "fixed" by
+// dropping uniqueness altogether and the denominator would inflate instead.
+func TestRealPG_ARetryWithinOneWorkspaceStillDedupes(t *testing.T) {
+	pool := measurePool(t)
+	s := NewStore(pool)
+	ctx := context.Background()
+
+	m := Measurement{RequestID: "same-req", WorkspaceID: "ws-retry", Model: "m", OriginalBytes: 200, SentBytes: 150, Modified: true, BilledInputTokens: 50}
+	mustRecord(t, s, m)
+	mustRecord(t, s, Measurement{RequestID: "same-req", WorkspaceID: "ws-retry", Model: "m", OriginalBytes: 7, SentBytes: 7, BilledInputTokens: 1})
+
+	got, err := s.Summarise(ctx, "ws-retry", time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("summarise: %v", err)
+	}
+	if got.Requests != 1 {
+		t.Errorf("requests = %d after a same-workspace retry, want 1 — the retry inflated the denominator", got.Requests)
+	}
+	if got.OriginalBytes != m.OriginalBytes || got.SentBytes != m.SentBytes {
+		t.Errorf("bytes = (%d, %d), want the FIRST measurement (%d, %d) — the retry overwrote it",
+			got.OriginalBytes, got.SentBytes, m.OriginalBytes, m.SentBytes)
+	}
+}

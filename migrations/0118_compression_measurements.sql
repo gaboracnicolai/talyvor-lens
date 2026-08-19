@@ -70,6 +70,17 @@
 -- request_id is the gateway X-Talyvor-Request-ID (proxy.go assigns one when the
 -- caller sends none). PK + ON CONFLICT DO NOTHING = one measurement per request,
 -- so a retried write cannot double-count the denominator.
+--
+-- ⚠ COMMENT CORRECTED BY 0119 — THE BARE `request_id PRIMARY KEY` BELOW WAS WRONG
+-- AND THE PARAGRAPH ABOVE IS WHY IT LOOKED RIGHT. "one measurement per request"
+-- is true; what it omits is that request_id is a string the CALLER supplies, so
+-- the key was global over a value no tenant owns and the first workspace to
+-- present one silently swallowed every other workspace's measurement of its own
+-- request (ON CONFLICT DO NOTHING → Record returns nil → that workspace's
+-- denominator reads 0). 0049 had already written the rule down for
+-- pattern_mine_credits. 0119 moves the key to (request_id, workspace_id); read
+-- that file before this one. The DDL below is left as applied — it is the record
+-- of what shipped, not a description of the current schema.
 CREATE TABLE IF NOT EXISTS compression_measurements (
     request_id          TEXT        PRIMARY KEY,          -- gateway request id; one measurement per request
     workspace_id        TEXT        NOT NULL,             -- tenant scope; the reader filters on this

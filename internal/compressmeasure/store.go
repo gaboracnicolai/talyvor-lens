@@ -124,10 +124,26 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // ON CONFLICT DO NOTHING: the FIRST measurement for a request stands. A retried
 // write cannot inflate the denominator, and it cannot rewrite what was already
 // observed about a request that has already been served.
+//
+// ⚠ THE CONFLICT TARGET IS (request_id, workspace_id) AND THE WORKSPACE IN IT IS
+// LOAD-BEARING, NOT DECORATION. request_id is the caller's X-Talyvor-Request-ID
+// header verbatim (proxy.go; proxy.TestMeasure_TheRecordedRequestIDIsTheCallers
+// HeaderVerbatim pins that), so it is a string a client chooses rather than one
+// the server derives. Against the bare `ON CONFLICT (request_id)` this used to
+// carry, the first workspace to present a string swallowed every other
+// workspace's measurement of its own request — Record returning nil, nothing
+// logged, and Summarise answering `requests: 0` for a request that really was
+// rewritten, sent and billed. Migration 0119 moved the key and states the case;
+// 0049 had already written the same rule down for pattern_mine_credits, where
+// the colliding value is at least server-derived.
+//
+// A retry or replay WITHIN one workspace still collapses to one row — that is the
+// only dedup this table needs, and TestRealPG_ARetryWithinOneWorkspaceStillDedupes
+// is what stops "scope the key" from being satisfied by dropping uniqueness.
 const recordSQL = `INSERT INTO compression_measurements
     (request_id, workspace_id, model, original_bytes, sent_bytes, modified, billed_input_tokens, cost_estimated)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT (request_id) DO NOTHING`
+ON CONFLICT (request_id, workspace_id) DO NOTHING`
 
 // Record persists one gated request's measurement. Inert on a nil store.
 func (s *Store) Record(ctx context.Context, m Measurement) error {
