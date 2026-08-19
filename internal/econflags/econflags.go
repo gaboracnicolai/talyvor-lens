@@ -9,8 +9,21 @@
 // config.go's own force-off block plus a Mint-or-LXC name rule, and that file records in its own
 // doc comment what the name rule CANNOT see (KeelRoyaltyHaircutEnabled, NodeAutoRouteEnabled).
 // Read this readout as: the economy master switch, everything config.go force-offs with it, the
-// default-on mint arming loop, the adjacent gates named below, every Mint-or-LXC flag, and every
-// flag that gates whether a MONEY SURFACE is registered at all (route_gate_census_test.go, rule D).
+// default-on mint arming loop, the adjacent gates named below, every Mint-or-LXC flag, every
+// flag that gates whether a MONEY SURFACE is registered at all (route_gate_census_test.go, rule D),
+// and every flag the process ARMS BY DEFAULT unless a written reason excuses it
+// (default_armed_census_test.go, rule F).
+//
+// ⚠ RULE F EXISTS BECAUSE RULES A-E ALL KEY ON HOW A FLAG IS WRITTEN. A force-off block, a name
+// shape, a gate type, a pinned set: each is a property of the SOURCE, and none can express the one
+// an operator actually needs — is this thing running on a box where nobody set anything? Rule F
+// answers it by OBSERVATION (clear every LENS_*, call config.Load, read the struct) rather than by
+// parsing, and on the commit that added it that found SEVEN default-armed flags outside this
+// readout where the handover had named one. Five were the settlement chain and are now reported;
+// the other two carry written reasons in rule F's own allowlist. ⚠ NOTE WHAT IT MEANS THAT
+// SettlementFailClosedEnabled WAS ONE OF THEM: it is not in the force-off block, is not Mint-or-LXC
+// named, gates no route, and is not even written with parseBoolEnvDefaultTrue — so it was invisible
+// to every rule AND to a grep. Only reading the loaded struct sees a flag like that.
 //
 // ⚠ RULE D EXISTS BECAUSE THE READOUT WAS SILENT ABOUT WHETHER THE PROCESS COULD TAKE MONEY.
 // BillingEnabled gates the FIAT intake path — the Stripe webhook that credits a paid purchase and
@@ -244,6 +257,46 @@ func Report(cfg *config.Config, binaryVersion string, overrides ...Override) Sna
 		// LENS_BATCH_ENABLED=true and got a refused lane reads forced_off_at_runtime here instead
 		// of an "on" that is not true.
 		{"BatchEnabled", "LENS_BATCH_ENABLED", cfg.BatchEnabled},
+
+		// ── THE SETTLEMENT CHAIN. Five DEFAULT-ARMED flags that decide whether a cross-tenant
+		// reuse-royalty mint ever settles, and for how much. Every one of them was outside every
+		// rule in this package until rule E (default_armed_census_test.go) measured the ARMED set
+		// by clearing the environment and calling Load() instead of reading a source shape.
+		//
+		// ⚠ WHY THE OMISSION WAS THE EXPENSIVE KIND: rules A–D all key on how a flag is WRITTEN
+		// (config.go's force-off block, a Mint-or-LXC name, cmd/lens's gate types). None of them
+		// can express the property an operator actually needs — "is this armed when I set
+		// nothing?" — and these five are armed for a fresh deployment. A readout of mostly-off
+		// flags reads as "the money paths are quiet"; five of the loudest were simply not on it.
+
+		// Off ⇒ the finalize sweeper settles 'held' rows as before, so a royalty mint the ring
+		// detector NEVER EXAMINED settles anyway. On ⇒ only 'cleared' rows settle, and an
+		// unexamined hold never does. Read at 13 sites in cmd/lens. This is the flag that answers
+		// "can money move without being looked at", and the readout could not answer it.
+		{"SettlementFailClosedEnabled", "LENS_SETTLEMENT_FAIL_CLOSED_ENABLED", cfg.SettlementFailClosedEnabled},
+		// The EXAMINATION half of the same decision, and the two are only meaningful together.
+		// Off ⇒ the leader-elected ring-detector sweep does not run, so with fail-closed ON
+		// nothing is ever examined, nothing is ever cleared, and every held mint holds forever.
+		// config.go calls this "only a manual off-switch" — which is exactly the operator action
+		// whose consequence this readout exists to make visible.
+		{"DetectorSweepEnabled", "LENS_DETECTOR_SWEEP_ENABLED", cfg.DetectorSweepEnabled},
+		// KE-2: a REDUCE-ONLY haircut that LOWERS a reuse-royalty mint on a sustained hardened
+		// drift finding. It can never slash, never increase, never go below the floor — but it
+		// changes what a contributor is paid, on an admittedly UNCALIBRATED placeholder threshold.
+		// It matches neither the force-off block nor a Mint-or-LXC name, which is how it stayed off
+		// a readout of mint flags while modulating a mint.
+		{"KeelRoyaltyHaircutEnabled", "LENS_KEEL_ROYALTY_HAIRCUT_ENABLED", cfg.KeelRoyaltyHaircutEnabled},
+		// The DETECTOR whose findings the haircut above consumes. Reported because "the haircut is
+		// armed" and "anything can produce a finding for it to act on" are different facts, and the
+		// first alone is the more reassuring half.
+		{"KeelHardenedEnabled", "LENS_KEEL_HARDENED_ENABLED", cfg.KeelHardenedEnabled},
+		// ⚠ THE PARENT GATE, AND IT IS REPORTED FOR THIS PACKAGE'S OWN RULE 1 REASON. The two Keel
+		// entries above are nested inside `if cfg.KeelEnabled` in cmd/lens, so reporting them ON
+		// while this is OFF would describe two armed mechanisms that are doing nothing — the
+		// precise failure StateForcedOffAtRuntime exists to prevent, one level up. config.go
+		// declares this one mint-free and read-only; it is here as the enclosing condition of two
+		// flags that are not.
+		{"KeelEnabled", "LENS_KEEL_ENABLED", cfg.KeelEnabled},
 	}
 
 	byName := make(map[string]Override, len(overrides))
