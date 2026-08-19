@@ -49,12 +49,46 @@ package config
 // their premise is in this package, so a rule over that file is possible, but it is a
 // different file walk resting on a different measurement and one merge should not smuggle it
 // in. What is guarded here is the file where the loader and the claim live together.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// ⚠⚠ WIDENED, AND THE RULE ABOVE WAS GREEN OVER FIVE FALSE CLAIMS WHEN IT WAS.
+//
+// Everything above this line was true when it was written and TWO PARTS OF IT ARE NOW STALE,
+// which is why they are struck through here rather than edited away: the "SCOPE" paragraph
+// no longer holds (TestDefaultClaimsAtTheWiringSitesMatchTheLoader below reads every other
+// non-test .go file in the tree), and "the full red set was" understated itself by two.
+//
+// THE INSTRUMENT HAD TWO BLINDNESSES AND EACH HID A DIFFERENT PAIR OF LIVE FALSE CLAIMS:
+//
+//  1. THE LINE WRAP. commentText joined c.Text — which still carries the leading `//` — so a
+//     claim written across a line break was scanned as `Default // false`, and the separator
+//     class `[-: ]*` has no slash in it. Not merely unmatched: UNMATCHABLE. It hid
+//     PoolRoyaltyMintingEnabled ("DEFAULT\n// FALSE — with this off ... NOTHING mints") and
+//     DistillPoolableEnabled ("Default\n// false ... Inert by default"). ⚠ BOTH SIT IN THE
+//     SAME DEFAULT-ON LOOP IN Load AS CachePoolableEnabled, WHICH THE COMMIT ABOVE CORRECTED
+//     BY HAND THREE LINES AWAY. That loop has four entries; that commit fixed two of them and
+//     its guard could not see the other two. A hand audit does not close this class, and the
+//     guard written to close it was green over half the loop it was written for.
+//     ⚠ THE EXPENSIVE ONE IS THE ROYALTY MINT: "NOTHING mints" is a claim about a DEFAULT
+//     DEPLOYMENT, and measured, every switch in that chain is armed — the flag, the pooling
+//     gate CachePoolableEnabled, and migration 0106's workspaces.cache_poolable DEFAULT true.
+//
+//  2. THE FILE SCOPE, which the paragraph above declared and did not close. Three more, all
+//     in cmd/lens/main.go, all stating the CONSEQUENCE backwards as well as the default —
+//     see TestDefaultClaimsAtTheWiringSitesMatchTheLoader's own doc for the list. One of
+//     them, SettlementFailClosedEnabled, was contradicted by ANOTHER comment about the SAME
+//     flag in the SAME file — the pool-royalty finalize sweeper said "Default OFF", the
+//     traffic-mint sweeper below it said "DEFAULT-ON". One file, one flag, two answers.
+//
+// This commit corrects five comments and changes NO default; the product diff is comment-only.
 
 import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -63,6 +97,11 @@ import (
 
 const configSource = "config.go"
 
+// repoRoot is where the wiring-site walk starts. config.go is this package's own file;
+// the flags it declares are READ a thousand lines away in another package, and that is
+// where the claims this rule was widened for live.
+const repoRoot = "../.."
+
 // FLOORS. Both halves below are comparisons over a parsed set, and a comparison over an empty
 // set passes. Measured at the commit that introduced this file by raising each floor above
 // reality and reading what it reported: 60 bool fields on the loaded Config, 43 of them
@@ -70,6 +109,17 @@ const configSource = "config.go"
 const (
 	floorDerivedDefaults = 45
 	floorDefaultClaims   = 15
+)
+
+// FLOORS FOR THE WIRING-SITE RULE. Same argument, different walk: it reads every non-test
+// .go file in the tree, and a walk that parsed none of them, or a binding that resolved
+// none of them, reports a clean product. Measured at the commit that widened this file:
+// 377 files scanned, 20 claims bound to exactly one cfg.<Field>, 2 skipped as ambiguous.
+// Set below today's numbers so an ordinary edit does not red them, far enough above zero
+// that a walk reading nothing does.
+const (
+	floorWiringFilesScanned = 200
+	floorWiringClaims       = 12
 )
 
 // defaultClaim matches the ways this file's comments state a default. Deliberately broad on
@@ -195,13 +245,207 @@ func TestDefaultClaimsInCommentsMatchTheLoader(t *testing.T) {
 	}
 }
 
+// commentText returns a comment group as one line of prose, with the `//` markers
+// REMOVED and every run of whitespace collapsed to a single space.
+//
+// ⚠ BOTH HALVES ARE THE REPAIR, AND THE FIRST CUT OF THIS FUNCTION HAD NEITHER. It
+// joined c.Text — which still carries the leading `//` — with a space, so a claim that
+// WRAPPED across a line break was scanned as `Default // false` and the separator class
+// `[-: ]*` does not contain a slash. Not merely unmatched: unmatchable. Measured, that is
+// exactly how DistillPoolableEnabled's "Default\n// false" survived the commit that
+// corrected CachePoolableEnabled three lines above it.
+//
+// ast.CommentGroup.Text() is what strips the markers, and it is the right instrument
+// rather than a hand-rolled TrimPrefix: it is the same text godoc renders, which is what
+// this rule's attribution argument already leans on. It joins lines with "\n", so the
+// whitespace collapse is what lets a claim be matched across the wrap it was written at.
 func commentText(g *ast.CommentGroup) string {
 	if g == nil {
 		return ""
 	}
-	var parts []string
-	for _, c := range g.List {
-		parts = append(parts, c.Text)
+	return strings.Join(strings.Fields(g.Text()), " ")
+}
+
+// cfgFieldRef finds every `cfg.<Name>` in a chunk of text whose Name is a Config bool
+// field. It is the ONLY binding this rule accepts, and the two it rejects were each
+// rejected on a measurement rather than on taste — see the rule's doc comment.
+var cfgFieldRef = regexp.MustCompile(`\bcfg\.([A-Za-z0-9_]+)\b`)
+
+func boundFlags(text string, fields map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range cfgFieldRef.FindAllStringSubmatch(text, -1) {
+		if _, ok := fields[m[1]]; ok {
+			out[m[1]] = true
+		}
 	}
-	return strings.Join(parts, " ")
+	return out
+}
+
+// documentedLine returns the first line of real code a comment group sits above: the next
+// non-blank line that is not itself a comment. Empty when the group documents nothing
+// (a trailing block at end of file, or two groups separated by a blank line).
+//
+// ⚠ THIS IS HALF THE BINDING AND THE RULE IS BLIND WITHOUT IT. Measured: of the three
+// wiring-site claims that were false at the commit that widened this file, only ONE named
+// its flag inside the comment prose. The other two — the fail-closed settlement posture and
+// the pattern-earning wire-up — name it only on the `if cfg.X {` line the comment is
+// written about, which is exactly where a reader looks and where a text-only scan does not.
+func documentedLine(src []string, endLine int) string {
+	for i := endLine; i < len(src); i++ {
+		s := strings.TrimSpace(src[i])
+		if s == "" {
+			continue
+		}
+		if strings.HasPrefix(s, "//") || strings.HasPrefix(s, "/*") {
+			return ""
+		}
+		return s
+	}
+	return ""
+}
+
+// TestDefaultClaimsAtTheWiringSitesMatchTheLoader — RULE H. The same falsifiable claim as
+// the rule above, checked where the flag is USED rather than where it is declared.
+//
+// ⚠ WHY A SECOND RULE, AND WHY THE FIRST ONE COULD NOT JUST BE POINTED AT MORE FILES. The
+// rule above attributes a comment to a field with the PARSER: a doc comment belongs to the
+// field it is attached to, no heuristic involved. Outside config.go there is no field to
+// attach to — a comment sits above an `if cfg.X {` or a wire-up call — so the subject has
+// to be resolved from the text, and resolving it wrongly is how a guard starts accusing
+// innocent code and gets weakened. The binding here is therefore the narrowest one that
+// works: `cfg.<Field>`, a reference to the loaded struct itself.
+//
+// ⚠ THE TWO WIDER BINDINGS WERE TRIED AND MEASURED, NOT REJECTED ON TASTE:
+//
+//   - A LENS_* variable named in the prose: THREE false accusations. All three are the
+//     poolable pair, where the comment states the default of the per-WORKSPACE column
+//     (`cache_poolable` / `distill_poolable`, a row value) and names the GLOBAL flag's
+//     environment variable in the very next clause — "Default false (private), so the
+//     request path stays inert until an admin opts a workspace in here AND the global
+//     LENS_CACHE_POOLABLE_ENABLED switch is on". Two subjects, one sentence; the env var
+//     belongs to the one the claim is not about.
+//   - A bare field name in the prose: TWO more. "so it is DEFAULT-OFF: this EconomyEnabled
+//     block" is about the anti-gaming revoker, and "Default FALSE. Independent of
+//     EconomyEnabled" is about the batch lane. In both the named flag is the neighbour the
+//     claim distinguishes itself FROM.
+//
+// So a claim whose only nearby flag reference is an env var or a bare name is NOT checked.
+// That is a real coverage hole and it is stated rather than hidden: at the widening commit
+// 77 default claims across the repo name no cfg.<Field> at all and this rule cannot see one
+// of them. It is the safe direction — the alternative is five accusations against correct
+// comments, and a rule nobody trusts checks nothing.
+//
+// ⚠ WHAT IT CAUGHT, on the commit that widened it — three, all in cmd/lens/main.go, all
+// about flags that are ARMED on a deployment whose environment says nothing, and every one
+// stating the CONSEQUENCE backwards as well as the default:
+//
+//	KeelEnabled                 "DEFAULT-OFF (cfg.KeelEnabled) ... so a fresh deployment
+//	                            records nothing" — it records.
+//	SettlementFailClosedEnabled "Default OFF ⇒ 'held' (byte-identical)" — and the SAME FILE
+//	                            says "DEFAULT-ON for the closed test" about the SAME flag
+//	                            at the traffic-mint sweeper below it. One file, two answers.
+//	PatternEarningEnabled       "Default off; flag-off the serve path is byte-identical to
+//	                            capture-only" — the serve path is not byte-identical.
+func TestDefaultClaimsAtTheWiringSitesMatchTheLoader(t *testing.T) {
+	defaults := observedDefaults(t)
+	if len(defaults) < floorDerivedDefaults {
+		t.Fatalf("observed only %d bool fields on the loaded Config (floor %d) — the struct walk "+
+			"read nothing and every comparison below would pass vacuously",
+			len(defaults), floorDerivedDefaults)
+	}
+
+	selfPath, err := filepath.Abs(filepath.Join(".", configSource))
+	if err != nil {
+		t.Fatalf("abs %s: %v", configSource, err)
+	}
+
+	filesScanned, checked, ambiguous := 0, 0, 0
+	walkErr := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "bin", "testdata":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		if abs == selfPath {
+			return nil // the parser-attributed rule above owns this file
+		}
+
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, raw, parser.ParseComments)
+		if err != nil {
+			// A file this package cannot parse is not silently skipped: an unparseable
+			// file is a file whose claims were never read.
+			t.Errorf("parse %s: %v", path, err)
+			return nil
+		}
+		filesScanned++
+		src := strings.Split(string(raw), "\n")
+
+		for _, g := range f.Comments {
+			text := commentText(g)
+			claims := defaultClaim.FindAllStringSubmatch(text, -1)
+			if len(claims) == 0 {
+				continue
+			}
+			end := fset.Position(g.End()).Line // 1-based; src is 0-based, so this indexes the line AFTER
+			bound := boundFlags(text, defaults)
+			for name := range boundFlags(documentedLine(src, end), defaults) {
+				bound[name] = true
+			}
+			if len(bound) != 1 {
+				if len(bound) > 1 {
+					ambiguous++
+				}
+				continue
+			}
+			var flag string
+			for n := range bound {
+				flag = n
+			}
+			checked++
+			want := defaults[flag]
+			for _, c := range claims {
+				if got := claimIsTrue(c[1]); got != want {
+					t.Errorf("%s:%d cfg.%s: the comment says %q, and the loader gives %v when the "+
+						"environment is unset. This comment sits on the line that USES the flag, so "+
+						"it is what a reader auditing this wiring believes about a default deployment",
+						path, fset.Position(g.Pos()).Line, flag, strings.TrimSpace(c[0]), want)
+				}
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk %s: %v", repoRoot, walkErr)
+	}
+
+	if filesScanned < floorWiringFilesScanned {
+		t.Fatalf("FLOOR: parsed %d non-test .go files (want >= %d) — the walk read almost nothing, "+
+			"so a clean result here is the walk's silence and not the product's",
+			filesScanned, floorWiringFilesScanned)
+	}
+	if checked < floorWiringClaims {
+		t.Fatalf("FLOOR: bound only %d default claims to a cfg.<Field> (want >= %d) — the binding "+
+			"resolved nothing and this rule would pass over every stale claim in the repo",
+			checked, floorWiringClaims)
+	}
+	t.Logf("wiring-site default claims: %d files scanned, %d claims checked, %d skipped as ambiguous "+
+		"(more than one cfg.<Field> in scope)", filesScanned, checked, ambiguous)
 }
