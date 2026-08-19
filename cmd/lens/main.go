@@ -785,8 +785,9 @@ func run() error {
 	})
 
 	// Keel (U25) cross-tenant DRIFT ATTRIBUTION — the population axis alongside the temporal anomaly
-	// monitor above. DEFAULT-OFF (cfg.KeelEnabled): the whole sweep + emission is gated here, so a fresh
-	// deployment records nothing. Read-only over the consented corpus (routing_patterns opted_in=TRUE),
+	// monitor above. DEFAULT-ON (cfg.KeelEnabled — see the flag's own doc in config.go): the whole
+	// sweep + emission is gated here, so ⚠ A FRESH DEPLOYMENT DOES RECORD; only LENS_KEEL_ENABLED=false
+	// makes it record nothing. Read-only over the consented corpus (routing_patterns opted_in=TRUE),
 	// append-only into keel_findings, NEVER touches money (import-guarded). Leader-elected, NOT a ticker.
 	if cfg.KeelEnabled {
 		keelSweep := keel.NewSweep(
@@ -1008,7 +1009,11 @@ func run() error {
 	finalizeSweeper := poolroyalty.NewFinalizeSweeper(pool, tokenLedger, "pool_royalty_mints")
 	// Phase-3 Item 3: when the settlement fail-closed layer is armed, the sweeper
 	// settles ONLY adjudicated-clean ('cleared') rows — an un-examined held row never
-	// finalizes. Default OFF ⇒ 'held' (byte-identical). Paired with the SettlementClearer below.
+	// finalizes. DEFAULT ON ⇒ 'cleared'; only with the flag forced off is it 'held'
+	// (byte-identical). ⚠ SO ON A FRESH DEPLOYMENT THIS SWEEPER IS ALREADY FAIL-CLOSED: a
+	// pool-royalty mint the ring detector never examined holds instead of settling. The
+	// traffic-mint sweeper below says DEFAULT-ON about this same flag; they agree now.
+	// Paired with the SettlementClearer below.
 	if cfg.SettlementFailClosedEnabled {
 		finalizeSweeper.SetSettleStatus("cleared")
 	}
@@ -1688,7 +1693,9 @@ func run() error {
 	// node_attestations, mints nothing (the mint is step c). Flag-off ⇒ no scheduler, no dials, no writes.
 	startAttestationVerify(ctx, cfg, pool, haComps.leader)
 	// S4 routing-pattern EARNING wire-up — the same miner, separate sink + flag.
-	// Default off; flag-off the serve path is byte-identical to capture-only.
+	// DEFAULT ON (the default-on loop in Load; force-off'd with EconomyEnabled). ⚠ SO ON A
+	// FRESH DEPLOYMENT AN OPTED-IN WORKSPACE'S SERVED REQUEST ROUTES INTO RecordPattern AND
+	// CREDITS LENS. Only with the flag off is the serve path byte-identical to capture-only.
 	p.SetPatternEarn(patternMiner, func() bool { return cfg.PatternEarningEnabled })
 
 	r := chi.NewRouter()

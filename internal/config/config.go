@@ -194,11 +194,14 @@ type Config struct {
 	CachePoolableEnabled bool
 
 	// DistillPoolableEnabled is the GLOBAL switch for cross-tenant DISTILL-cache
-	// sharing (the document-artifact analogue of CachePoolableEnabled). Default
-	// false: a distill artifact is served only within its producing workspace
-	// unless this is on AND both the owner and requester have
-	// distill_poolable=true. Inert by default — with this off the distill cache
-	// is strictly per-workspace (LENS_DISTILL_POOLABLE_ENABLED).
+	// sharing (the document-artifact analogue of CachePoolableEnabled). DEFAULT
+	// TRUE — it sits in the same default-on loop in Load as CachePoolableEnabled
+	// above, and is force-off'd to false whenever EconomyEnabled is false. A
+	// distill artifact is served only within its producing workspace unless this
+	// is on AND both the owner and requester have distill_poolable=true, so the
+	// per-workspace consent is what keeps a default deployment from sharing — the
+	// GLOBAL switch is not. Only when this is off is the distill cache strictly
+	// per-workspace by configuration. Env: LENS_DISTILL_POOLABLE_ENABLED.
 	DistillPoolableEnabled bool
 
 	// Pattern mining (Batch 2 Item 5). Deployment-level gate;
@@ -230,11 +233,18 @@ type Config struct {
 
 	// PoolRoyaltyMintingEnabled gates the Phase-2 Stage 2.1 Pool-B royalty
 	// mint: a served cross-tenant pooled cache hit mints s × avoided_COGS to
-	// the contributing tenant, exactly once per serving request. DEFAULT
-	// FALSE — with this off, pooled hits serve exactly as Stage 2.0 left
-	// them and NOTHING mints. Minting additionally requires the pooling
-	// gate itself (LENS_CACHE_POOLABLE_ENABLED + both workspaces opted in)
-	// to produce a pooled hit in the first place.
+	// the contributing tenant, exactly once per serving request. DEFAULT TRUE
+	// — it is the first entry in the default-on loop in Load (the three live
+	// traffic mints, closed-test), and force-off'd with EconomyEnabled. ⚠ SO ON
+	// A DEFAULT DEPLOYMENT THIS MINT IS ARMED. Only when it is forced off do
+	// pooled hits serve exactly as Stage 2.0 left them with nothing minting.
+	// ⚠ AND EVERY OTHER SWITCH IN THE CHAIN IS ARMED TOO, so "it still needs a
+	// pooled hit" is not a second safety: minting needs CachePoolableEnabled
+	// (also in the default-on loop) AND both workspaces opted in, and migration
+	// 0106 set workspaces.cache_poolable DEFAULT true for rows created from then
+	// on. A fresh deployment serving two newly-registered workspaces mints.
+	// Existing rows keep their stored value (0106 rewrote no row).
+	// Env: LENS_POOL_ROYALTY_MINTING_ENABLED.
 	PoolRoyaltyMintingEnabled bool
 
 	// LXCShadowSpendEnabled gates the Phase-2 Stage 2.4/2.5 SHADOW LXC spend
