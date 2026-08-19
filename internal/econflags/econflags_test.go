@@ -120,9 +120,19 @@ func TestReport_ForcedOffIsNotTheSameAsOff(t *testing.T) {
 	}
 }
 
-// Coverage: every flag in config.go's force-off block, plus the four in the default-on loop.
-// Named explicitly so a flag added to config without being added here fails the build's tests
-// rather than silently going unobserved.
+// Coverage FLOOR: these named flags must be reported. Nothing more.
+//
+// ⚠ THIS COMMENT USED TO CLAIM SOMETHING THIS TEST CANNOT DO — "Named explicitly so a flag added
+// to config without being added here fails the build's tests rather than silently going
+// unobserved." MEASURED (harness ~/talyvor-queue/w61-econflags-controls.py, control D1): a new
+// flag added to config.go's force-off block and NOT to econflags leaves this test — and the whole
+// package — green. The want-list below is a literal IN THIS FILE; it reads nothing from config.go,
+// so no edit to config.go can red it. A test cannot enforce a property of a file it never opens.
+//
+// The rule it described now exists and is derived from the source that performs the force-off:
+// see forceoff_transcription_test.go (rules A and B). This test is kept as a plain floor — it is
+// subsumed, not load-bearing — because a named list that reds with an obvious message is still
+// worth having when the parser-driven rules are the ones under repair.
 func TestReport_CoversEveryForceOffAndDefaultOnFlag(t *testing.T) {
 	want := []string{
 		// the default-on loop
