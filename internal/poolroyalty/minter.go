@@ -216,6 +216,17 @@ type ledgerCreditTx interface {
 // CONFLICT (request_id) DO NOTHING + a RowsAffected check is the exactly-once
 // guard (povi_challenges pattern). $1 is mintClaimKey's output, never the client
 // header. id and created_at take their column defaults.
+//
+// ⚠ minted_amount ($10) AND the CreditHeldTx below are TWO RECORDS OF ONE MINT, and only
+// one of them can be reduced. The finalize sweeper settles minted_amount out of the held
+// balance CreditHeldTx wrote, so the two must agree — nothing enforces that, and the P1 #9
+// reputation bond / KE-2 drift haircut scale the held credit INSIDE CreditHeldTx, after
+// this row is already written with the unreduced base. MEASURED with the bond armed: held
+// 5_000_000 against minted_amount 10_000_000, and the mint then fails ErrInsufficientHeld
+// on every sweep forever. Both reducers default OFF, so this is latent, not live. See
+// bonded_settlement_integration_test.go. FIXING IT IS A MONEY DECISION, NOT A TYPO:
+// minted_amount is also the gaming detectors' and margin views' input, so it means either
+// "what the serve was worth" or "what was actually minted" and somebody has to choose.
 const insertClaimSQL = `INSERT INTO pool_royalty_mints
     (request_id, requester_workspace_id, contributor_workspace_id, layer, entry_id, provider, model, similarity, avoided_cogs_usd, minted_amount, answer_sha256, prompt_sha256, status, finalize_after)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'held', now() + ($13::bigint * interval '1 microsecond'))
