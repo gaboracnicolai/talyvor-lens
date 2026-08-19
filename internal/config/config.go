@@ -656,6 +656,16 @@ type Config struct {
 	// kill-switch force-off block (a mint-reducer, not a mint-enabler; when the economy is off all
 	// bonded mints are already force-off'd). Off → the mint path is byte-identical to today (no
 	// reputation read, no emitter). Env: LENS_REPUTATION_BONDED_MINTING_ENABLED.
+	//
+	// ⚠ THE REDUCER/ENABLER ARGUMENT ABOVE IS TRUE AND IT IS NOT THE ONE THAT DECIDES WHETHER
+	// FLIPPING THIS IS SAFE. MEASURED (real minter + real finalize sweeper, real PG): on the
+	// pool-royalty / distill track, reducing a mint does not pay a contributor less — it makes the
+	// mint UNSETTLEABLE. The bond reduces the HELD credit inside CreditHeldTx, while the claim row
+	// the sweeper settles (minted_amount) was already written with the unreduced base, so finalize
+	// asks for more than was ever held and fails ErrInsufficientHeld every tick, forever. See
+	// internal/poolroyalty/bonded_settlement_integration_test.go, which pins the measurement and
+	// expires the day the two agree. THE REPAIR IS A MONEY DECISION (minted_amount also feeds the
+	// gaming detectors and the margin views), so it is reported, not guessed — QUEUE.md W6.1.
 	ReputationBondedMintingEnabled bool
 
 	// ProofOfBenchmarkEnabled (P1 #10, PR-A) gates the proof-of-benchmark probe SCHEDULER: a verifier
