@@ -22,11 +22,30 @@ const retentionBatch = 5000
 // Delete queries for the sweeper. The export-gated variant (U14 #187) additionally
 // bounds the delete by the off-box export watermark: a row is removed only once its
 // created_at is at/below last_exported_at — proof-of-export-before-delete.
+//
+// ⚠⚠ THE VICTIM SET IS KEYED ON THE PRIMARY KEY AND MUST NEVER GO BACK TO `ctid`.
+// Both statements used to read `WHERE ctid IN (SELECT ctid FROM token_events …)`.
+// ctid is unique within a PHYSICAL RELATION, and migration 0034 made this table 8
+// HASH partitions on workspace_id — the first row of every partition is (0,1) — so
+// the inner SELECT nominated ctids from one partition and the outer DELETE matched
+// them in ALL of them. An aged row in p4 therefore deleted a BRAND-NEW row in p1,
+// with no error and no log line, on the table the 0055 append-only triggers exist
+// to make unrewritable, through the one door this sweeper holds the only key to.
+// Under the export-gated variant it destroyed rows that had not been exported
+// off-box, which is exactly what proof-of-export-before-delete promises to keep.
+//
+// (id, workspace_id) is 0034's declared PRIMARY KEY, so it is unique across the
+// whole partitioned table by construction rather than by luck of layout — and
+// because workspace_id is the partition key, the planner still prunes to one
+// partition per candidate row. Measured, not reasoned about:
+// TestRetention_DoesNotSweepAcrossPartitionsOnACollidingCtid builds the collision,
+// asserts it really built it, and fails if a fresh row is swept.
 const (
 	deleteAgedSQL = `DELETE FROM ` + retentionTable +
-		` WHERE ctid IN (SELECT ctid FROM ` + retentionTable + ` WHERE created_at < $1 LIMIT $2)`
+		` WHERE (id, workspace_id) IN (SELECT id, workspace_id FROM ` + retentionTable +
+		` WHERE created_at < $1 LIMIT $2)`
 	deleteAgedExportedSQL = `DELETE FROM ` + retentionTable +
-		` WHERE ctid IN (SELECT ctid FROM ` + retentionTable +
+		` WHERE (id, workspace_id) IN (SELECT id, workspace_id FROM ` + retentionTable +
 		` WHERE created_at < $1 AND created_at <= $2 LIMIT $3)`
 )
 
