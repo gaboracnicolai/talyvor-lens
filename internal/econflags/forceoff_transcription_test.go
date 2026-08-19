@@ -322,48 +322,14 @@ func TestReportedFlagSetIsPinned(t *testing.T) {
 	}
 }
 
-// Env strings are part of the readout's usefulness: a flag reported without the
-// variable that sets it cannot be acted on. Pinned against config.go's own reads so a
-// copy-paste that names the wrong variable reds here rather than sending an operator
-// to edit a variable the process never looks at.
-func TestReportedEnvNamesMatchConfig(t *testing.T) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, configPath, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", configPath, err)
-	}
-	// Collect every string literal argument to parseBoolEnv(...) in config.go.
-	envs := map[string]bool{}
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		id, ok := call.Fun.(*ast.Ident)
-		if !ok || id.Name != "parseBoolEnv" || len(call.Args) != 1 {
-			return true
-		}
-		lit, ok := call.Args[0].(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
-			return true
-		}
-		envs[strings.Trim(lit.Value, `"`)] = true
-		return true
-	})
-	if len(envs) < floorConfigBools {
-		t.Fatalf("found only %d parseBoolEnv call sites in %s (floor %d) — the scan read nothing",
-			len(envs), configPath, floorConfigBools)
-	}
-
-	snap := Report(&config.Config{EconomyEnabled: true}, "abc1234")
-	for _, fl := range snap.Flags {
-		if fl.Env == "" {
-			t.Errorf("flag %q reports no env var", fl.Name)
-			continue
-		}
-		if !envs[fl.Env] {
-			t.Errorf("flag %q reports env %q and config.go never reads that variable — an "+
-				"operator setting it would change nothing", fl.Name, fl.Env)
-		}
-	}
-}
+// ⚠ TestReportedEnvNamesMatchConfig LIVED HERE AND IS DELETED. Its docstring claimed to
+// catch "a copy-paste that names the wrong variable", and MEASURED it made that catch in
+// 1 of 27 entries: it compared the reported env against the SET of every parseBoolEnv
+// literal in config.go, and another flag's real variable is a member of that set. Its
+// scan also knew only parseBoolEnv, so its failure message — "config.go never reads that
+// variable" — was false for any flag read through parseBoolEnvDefaultTrue, which is why
+// it was green rather than right.
+//
+// entry_triple_test.go's rule G replaces it and is a strict superset: it checks the env
+// against the variable config.go reads INTO THAT FIELD, so an env var nothing reads at all
+// fails there too. That subsumption is positively controlled (C4), not assumed.
