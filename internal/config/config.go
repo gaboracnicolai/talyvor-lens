@@ -185,10 +185,12 @@ type Config struct {
 	CacheSharingEnabled bool
 
 	// CachePoolableEnabled is the GLOBAL switch for the Phase-2 Stage 2.0
-	// shared-cache governance gate (exact cache). Default false: cross-tenant
+	// shared-cache governance gate (exact cache). DEFAULT TRUE (it is in the default-on
+	// loop in Load, and force-off'd to false whenever EconomyEnabled is false): cross-tenant
 	// pooling is impossible unless this is on AND both the contributing and
 	// requesting workspaces have cache_poolable=true. Inert by default — the
-	// request path is byte-for-byte unchanged when this is off.
+	// request path is byte-for-byte unchanged when this is off, which on a default
+	// deployment means: when the economy is off or the env disables it.
 	CachePoolableEnabled bool
 
 	// DistillPoolableEnabled is the GLOBAL switch for cross-tenant DISTILL-cache
@@ -278,8 +280,8 @@ type Config struct {
 	// (S4) — the FIRST pattern-earning stage that touches the serve path. When
 	// ON, an opted-in, authenticated workspace's served request routes into
 	// RecordPattern (credits LENS) instead of the mint-free capture write.
-	// DEFAULT FALSE — flag-off, the serve path is byte-identical to capture-only
-	// today. SEPARATE from PatternCaptureEnabled (capture and earn gate
+	// DEFAULT TRUE (the default-on loop in Load), force-off'd with EconomyEnabled — the
+	// serve path is byte-identical to capture-only only when the flag is off. SEPARATE from PatternCaptureEnabled (capture and earn gate
 	// independently). Env: LENS_PATTERN_EARNING_ENABLED.
 	PatternEarningEnabled bool
 
@@ -423,25 +425,25 @@ type Config struct {
 	// cross-tenant reuse tables (pool_royalty_mints / distill_royalty_mints). When ON: the finalize
 	// sweeper settles ONLY status='cleared' rows, and the settlement clearer promotes ONLY examined-clean-
 	// and-due held rows to 'cleared' — so a held mint the ring detector never examined (detector down /
-	// lagging / the 72h window closed first) is NEVER cleared and NEVER settles (it holds). DEFAULT FALSE
+	// lagging / the 72h window closed first) is NEVER cleared and NEVER settles (it holds). DEFAULT TRUE
 	// and byte-identical when off (the sweeper settles 'held' as before, the clearer is a total no-op).
 	// Scheduler starts iff EconomyEnabled. Env: LENS_SETTLEMENT_FAIL_CLOSED_ENABLED.
-	SettlementFailClosedEnabled bool // LENS_SETTLEMENT_FAIL_CLOSED_ENABLED (default FALSE)
+	SettlementFailClosedEnabled bool // LENS_SETTLEMENT_FAIL_CLOSED_ENABLED (default TRUE)
 
-	// Keel* gate the U25 cross-tenant DRIFT-ATTRIBUTION sweep — DEFAULT-OFF capability flag (mint-free,
+	// Keel* gate the U25 cross-tenant DRIFT-ATTRIBUTION sweep — DEFAULT-ON capability flag (mint-free,
 	// descriptive, read-only; NOT force-off because it never touches money). Thresholds are PLACEHOLDERS —
 	// calibrate at N3 turn-on; synthetic data proved only the mechanism, never these values.
-	KeelEnabled        bool          // LENS_KEEL_ENABLED (default FALSE)
+	KeelEnabled        bool          // LENS_KEEL_ENABLED (default TRUE)
 	KeelDeviationSigma float64       // LENS_KEEL_DEVIATION_SIGMA (default 3.0, placeholder)
 	KeelWindowSeconds  int64         // LENS_KEEL_WINDOW_SECONDS (default 3600, placeholder)
 	KeelInterval       time.Duration // LENS_KEEL_INTERVAL (sweep tick, default 1h)
 	KeelLookback       time.Duration // LENS_KEEL_LOOKBACK (corpus read-back, default 48h)
 
-	// Keel HARDENED (K3) money-grade detection — ADDITIVE, DEFAULT-OFF. Leave-one-out + median/MAD +
+	// Keel HARDENED (K3) money-grade detection — ADDITIVE, DEFAULT-ON. Leave-one-out + median/MAD +
 	// money-grade floors + persistence + drop-direction, so findings can LATER gate money (H5). ALL
 	// thresholds are PLACEHOLDERS — calibrate at N3 against real-scale distribution; NO MONEY MAY MOVE ON
 	// AN UNCALIBRATED THRESHOLD.
-	KeelHardenedEnabled    bool    // LENS_KEEL_HARDENED_ENABLED (default FALSE)
+	KeelHardenedEnabled    bool    // LENS_KEEL_HARDENED_ENABLED (default TRUE)
 	KeelMoneyCohortFloor   int     // LENS_KEEL_MONEY_COHORT_FLOOR (PLACEHOLDER 10, >> the privacy floor of 3)
 	KeelMinSamples         int     // LENS_KEEL_MIN_SAMPLES (PLACEHOLDER 30, per-workspace requests/window)
 	KeelPersistenceWindows int     // LENS_KEEL_PERSISTENCE_WINDOWS (PLACEHOLDER 3, consecutive windows)
@@ -746,6 +748,7 @@ type Config struct {
 	// env value), and main.go does not register the economy route surface — the
 	// deployment runs as pure fiat SaaS. NOT economy (untouched by this switch):
 	// LENS_HA_ENABLED, LENS_GUARDRAILS_ENABLED.
+
 	// BatchEnabled turns on the /v1/batch/* lane. DEFAULT FALSE, and deliberately so.
 	//
 	// ⚠ THE LANE BILLS NOTHING. /v1/batch/submit calls Anthropic directly and never enters
