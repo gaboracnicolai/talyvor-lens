@@ -180,13 +180,26 @@ func (p *Proxy) reservationActive() bool {
 // (returns ctx, false — no hold) for a non-agent request or a zero estimate. Fail-CLOSED: any hold error
 // blocks (a bounded agent must not serve on an unverifiable budget). maxOut is the caller-BOUNDED output
 // allowance (explicit max_tokens else the configured cap) so the hold is a conservative upper bound.
+//
+// ⚠ THE ZERO-ESTIMATE CASE IS NOT WHAT THIS FILE USED TO SAY IT WAS ("unknown model / empty"). MEASURED, in
+// lxc_estimate_embeddings_test.go: the unknown model was closed (it holds a large positive amount), and what
+// is left is not an empty prompt but an ENTIRE ENDPOINT AT ANY SIZE. extractPrompt reads `messages[]`; an
+// OpenAI embeddings body carries `input`, so a 40 KB embeddings request derives the EMPTY prompt, and for
+// the three seeded embedding models the output rate is 0 — so the maxOut term that is supposed to make this
+// a true upper bound contributes exactly nothing and the hold collapses to 0. The request then carries NO
+// reservation: the settle has nothing to bill against and the sub-budget ceiling is never consulted.
+//
+// maxOut itself is NEVER 0 — every branch of boundedMaxOut is positive, and that is pinned. The zero comes
+// from the rate and from the extractor, not from the allowance. NOT REPAIRED HERE: teaching extractPrompt to
+// read `input` is blocked on the cross-tenant pooling decision recorded in embeddings_route_test.go, and
+// pricing embeddings at this seam starts refusing traffic that is served today. Both are product decisions.
 func (p *Proxy) agentReserveBlocks(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string, maxOut int) (context.Context, bool) {
 	if apiKeyID == "" || p.agentSpender == nil {
 		return ctx, false
 	}
 	heldLXC := reserveEstimateLXC(model, prompt, maxOut)
 	if heldLXC <= 0 {
-		return ctx, false // unknown model / empty → allow, like the old estimate path
+		return ctx, false // ⚠ every embeddings request reaches here, at any size — see the docstring
 	}
 	reservationID, err := deriveAgentDebitKey(p.agentDebitSalt, apiKeyID)
 	if err != nil {
