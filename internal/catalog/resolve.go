@@ -14,6 +14,12 @@ import "strings"
 // zero will eventually be spent. So the money path does not use those functions at all — it uses
 // ResolveRates, which HAS NO ZERO OUTCOME. There is nothing to mishandle: every return is chargeable,
 // and the Provenance says whether it was measured or guessed.
+//
+// ⚠ THAT PARAGRAPH WAS WRITTEN AS A DESCRIPTION AND WAS ONLY EVER TRUE OF ONE ARM. The fallback arm
+// enforces it carefully; the exact arm forwarded whatever PriceDetailed reported for a model the catalog
+// KNOWS, and an operator override registers a model by name with no price at all — so ResolveRates did
+// have a zero outcome, and reported it as `exact`. Both arms enforce the invariant now (see unpriced),
+// and it is measured from the money path and the drift detector, not asserted here.
 
 // Rates is a model's per-1M-token prices. It is only ever produced by ResolveRates, and never with
 // zero values — see the package invariant above.
@@ -71,16 +77,42 @@ const (
 // ResolveRates returns chargeable rates for any model id, ALWAYS non-zero, plus how they were derived.
 //
 // ⚠ It has no failure mode by construction. That is the point: a caller cannot accidentally spend an
-// "unknown" as free, because there is no unknown to receive. When the catalog does not know the model,
-// the rates are a bound derived from the same provider's known models (see Purpose), and Provenance is
+// "unknown" as free, because there is no unknown to receive. When the catalog does not know the model's
+// price — whether it has never heard of the id, or knows the id and nothing else (see unpriced) — the
+// rates are a bound derived from the same provider's known models (see Purpose), and Provenance is
 // ProvenanceFallback so the caller can mark, alert on, and later reprice the charge.
 func (r *Registry) ResolveRates(id string, purpose Purpose) (Rates, Provenance) {
-	if in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); ok {
+	if in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); ok && !unpriced(in, out) {
 		return Rates{InputPer1M: in, CachedInputPer1M: cachedIn, CacheWritePer1M: cacheWrite, OutputPer1M: out},
 			ProvenanceExact
 	}
 	return r.fallbackRates(id, purpose), ProvenanceFallback
 }
+
+// unpriced reports whether a catalog entry carries no price at all — which is a model the catalog knows
+// the NAME of and not the COST of, and is therefore an unknown for every purpose this file serves.
+//
+// ⚠ IT IS "BOTH", NEVER "EITHER", AND THAT IS LOAD-BEARING. Three seeded models (text-embedding-3-small,
+// -3-large, ada-002) carry OutputPer1M == 0 as their PUBLISHED price: embeddings emit no output tokens, so
+// billing any is wrong. An either-rate rule would reprice every embeddings request in production onto a
+// fallback. Measured over all 45 seeded models: three have a zero OUTPUT rate, NONE has both zero — so the
+// only population this predicate can reach is an operator override, and no shipped model changes.
+//
+// ⚠ WHY AN OVERRIDE ARRIVES PRICELESS, AND WHY IT IS THE LIKELY CASE RATHER THAN THE EXOTIC ONE: the
+// remedy WarnUnpricedModel prints on every unpriced request is "add the model NOW via
+// LENS_MODEL_CATALOG_OVERRIDES". That JSON is decoded without DisallowUnknownFields, so omitting the price
+// fields — or mistyping input_per_1m as inputPer1M — registers the model with 0.00 and no error. Before the
+// operator followed the advice the request billed a defensible floor, loudly, with a metric and a drift
+// finding. Without this predicate, following it billed ZERO, silently, reported as `exact`.
+//
+// Zero-means-unset is this package's existing reading of a zero rate, not a new one: PriceDetailed already
+// treats a zero cache rate as "unset" and falls it back to the input rate ("never free"), and fallbackRates
+// already refuses to let a zero-priced entry anchor a bound. This applies the same rule to the exact arm.
+//
+// The consequence is deliberately LOUD, not silent: an unpriced override now takes the fallback arm, so it
+// bills a real floor, emits WarnUnpricedModel's ERROR + metric on every request, and reappears in
+// modelwatch's drift findings. An operator who genuinely meant "free" learns so on the first request.
+func unpriced(in, out float64) bool { return in <= 0 && out <= 0 }
 
 // fallbackRates derives a bound from the models this catalog DOES know for the same provider, so the
 // number is anchored in real published prices rather than invented. Provider is inferred from the id
