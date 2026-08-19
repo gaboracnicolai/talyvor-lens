@@ -1,10 +1,25 @@
 # BUILD_STATE.md — Talyvor Lens canonical build-state manifest
 
-**Single source of truth for "what is built," derived from the actual code at the SHA below — never from the roadmap, notes, or assumptions.** Regenerated (never hand-edited) whenever it goes stale.
+**Single source of truth for "what is built," derived from the actual code at the SHA below — never from the roadmap, notes, or assumptions.**
+
+> ⚠ **"Regenerated (never hand-edited) whenever it goes stale" USED TO STAND HERE, AND THERE IS NO GENERATOR.**
+> Measured: nothing in this repository writes this file — `git grep -l BUILD_STATE` outside it returns only
+> `COORDINATION.md` and `ROADMAP.md`, both of which merely cite it. The only mechanism this document named for
+> staying true did not exist, so it could only ever decay, and the §B decay below is what that looked like.
+> §B is now held to `config.go` by a TEST (`internal/config/buildstate_manifest_test.go`) rather than by a
+> regeneration promise. The rest of this file is still hand-maintained and still carries the SHA it was
+> derived from — read it accordingly.
 
 - **Derived from main:** `7f2ebd2`
 - **Latest migration:** `0076_node_latency_mints.sql`
-- **Config:** all `config.go:LINE` citations are `internal/config/config.go`.
+- **Config:** citations into `internal/config/config.go` are **SYMBOLS (the Go field name), never line numbers.**
+  ⚠ MEASURED, NOT ASSUMED: §B previously cited by line, and at the time of the repair **30 of 30 citations were
+  wrong** — median 221 lines off, none within ±2, because `config.go` grew ~500 lines after `7f2ebd2`. The failure
+  was worse than stale: `LENS_POVI_MINTING_ENABLED` pointed at `ProofOfImprovementEnabled bool` and
+  `LENS_REPUTATION_BONDED_MINTING_ENABLED` at `RoutingPredictionEnabled bool`, so a reader following a money-flag
+  citation landed on a **different money flag** and read its rules. A line number cannot be fixed by being
+  recomputed — it rots identically the next time the file moves. A symbol survives an edit and cannot come to
+  point at another declaration.
 - **Method:** every cell was grep'd / read from code. Where code and a note/roadmap disagree, **the code wins** — see [§C Discrepancies](#c-discrepancies-code-wins).
 
 ## Status legend
@@ -17,9 +32,17 @@
 
 ## The master kill-switch (read this first)
 
-`LENS_ECONOMY_ENABLED` — **default TRUE** (`config.go` sets `c.EconomyEnabled = true`, overridden only if the env var is explicitly set). When **false**, the force-off block force-sets **14** flags false regardless of their own env:
+`LENS_ECONOMY_ENABLED` — **default TRUE** (`config.go` sets `c.EconomyEnabled = true`, overridden only if the env var is explicitly set). When **false**, the force-off block force-sets **16** flags false regardless of their own env:
 
-`PatternMiningEnabled · PatternCaptureEnabled · PatternEarningEnabled · PoolRoyaltyMintingEnabled · POVIMintingEnabled · TrustfulComputeMintEnabled · CacheSharingEnabled · CachePoolableEnabled · DistillPoolableEnabled · RoutingIntelligenceEnabled · RoutingTierCohortsEnabled · EvalContributionMintingEnabled · RoutingPredictionMintingEnabled · LatencyMintingEnabled`
+`PatternMiningEnabled · PatternCaptureEnabled · PatternEarningEnabled · PoolRoyaltyMintingEnabled · POVIMintingEnabled · AnnotationMintingEnabled · TrustfulComputeMintEnabled · CacheSharingEnabled · CachePoolableEnabled · DistillPoolableEnabled · RoutingIntelligenceEnabled · RoutingTierCohortsEnabled · EvalContributionMintingEnabled · RoutingPredictionMintingEnabled · LatencyMintingEnabled · ConfidentialMintingEnabled`
+
+> ⚠ **THIS COUNT WAS 14 AND THE LIST WAS TWO SHORT, AND BOTH WERE RIGHT WHEN WRITTEN.** At `7f2ebd2` — the SHA
+> this file declares — the force-off block held EXACTLY these 14 and the sentence was true. `#269` added
+> `ConfidentialMintingEnabled` and `#354` added `AnnotationMintingEnabled` to the block, and this paragraph became
+> false **with no commit to this file at all** — the same decay a cross-repo line citation suffers, one file over.
+> Two **mint** gates were missing from the only list an operator reads to learn what `LENS_ECONOMY_ENABLED=false`
+> actually turns off, and the count and the list agreed with each other the whole time, so nothing in the document
+> disclosed it. Now enforced against `config.go` by `internal/config/buildstate_manifest_test.go`.
 
 The **12th + 13th + 14th** are the three **Proof-of-Improvement EARNING gates** — `EvalContributionMintingEnabled` (instance 1, #250, `config.go:1268`), `RoutingPredictionMintingEnabled` (instance 2, #260), and `LatencyMintingEnabled` (instance 3, #265) — all MINT LENS, so all join the block. **Deliberately NOT force-offed** (documented exceptions): `LXCGatingEnabled` / `LXCShadowSpendEnabled` (fiat-pegged, not the token economy), the **U6 floor + rate cap** (safety restrictions), `WorkTierEnabled` / `GuardrailsEnabled` / `NodeLatencyCaptureEnabled` (non-economic descriptive/measurement), and the **measurement/routing/capability** flags — `NodeAutoRouteEnabled`, `ReputationBondedMintingEnabled`, `ProofOfBenchmarkEnabled`, `ProofOfImprovementEnabled` (anchor-selection capability, #248), `RoutingPredictionEnabled` (prediction-submission capability, #252), `RoutingPredictionScoringEnabled` (scorer/measurement, #254) — each only ever *reduces/blocks/redistributes/measures* a mint or routes traffic; none CREATES a mint, so none belongs in the force-off block. The manifest test `cmd/lens/economy_killswitch_test.go` asserts **`len(checks) == 14`** (`:69`) for the force-off set and that LXC stays wired.
 
@@ -219,52 +242,54 @@ Challenge-verified per-node QUALITY → routing weight → emergent PoVI earning
 
 ---
 
-## §B — Every economy / feature flag: default + force-off membership (current lines)
+## §B — Every economy / feature flag: default + force-off membership
 
 All booleans are `parseBoolEnv` (**false** when unset) unless noted; **force-false** by `LENS_ECONOMY_ENABLED=false` unless marked **(exempt)**.
 
-| Flag | Default | parse line | In force-off block? | Flipping ON does… |
+| Flag | Default | config.go field | In force-off block? | Flipping ON does… |
 |---|---|---|---|---|
-| `LENS_ECONOMY_ENABLED` | **TRUE** | set in `Load()` | n/a (the block itself) | Master switch; **false** force-offs the 14 gates below + unregisters the economy route surface. |
-| `LENS_POOL_ROYALTY_MINTING_ENABLED` | false | :664 | **yes** | Arms the cache + distill reuse-royalty mint (held → finalized). |
-| `LENS_POVI_MINTING_ENABLED` | false | :662 | **yes** | Lets a verified, staked node's receipt mint LENS. |
-| `LENS_PATTERN_MINING_ENABLED` | false | :661 | **yes** | Opens the per-workspace pattern opt-in route. |
-| `LENS_PATTERN_CAPTURE_ENABLED` | false | :667 | **yes** | Post-serve mint-free pattern capture. |
-| `LENS_PATTERN_EARNING_ENABLED` | false | :668 | **yes** | The pattern earn path (mints). |
-| `LENS_TRUSTFUL_COMPUTE_MINT_ENABLED` | false | :1031 | **yes** | Legacy trust-mint — dead (`NotifyServed` has no caller). |
-| `LENS_CACHE_SHARING_ENABLED` | false | :658 | **yes** | Cross-tenant cache sharing. |
-| `LENS_CACHE_POOLABLE_ENABLED` | false | :659 | **yes** | Cross-tenant cache pooling (cache-royalty substrate). |
-| `LENS_DISTILL_POOLABLE_ENABLED` | false | :660 | **yes** | Cross-tenant OCR pooling (distill-royalty substrate). |
-| `LENS_ROUTING_INTELLIGENCE_ENABLED` | false | :675 | **yes** | Pattern-aggregate auto-route model selection. |
-| `LENS_ROUTING_TIER_COHORTS_ENABLED` | false | :676 | **yes** | Tier-conditioned cohorts (#238); needs routing-intelligence on. |
-| `LENS_EVAL_CONTRIBUTION_MINTING_ENABLED` | false | field :448, force-off `:1268` | **yes** | The proof-of-eval-contribution EARNING gate (§A18). MINTS LENS ⇒ in the force-off block (the 12th). Needs a positive rate too. |
-| `LENS_ROUTING_PREDICTION_MINTING_ENABLED` | false | field, force-off block | **yes** | The proof-of-routing-prediction EARNING gate (§A23, #260). MINTS LENS ⇒ in the force-off block (the **13th**). Needs a positive rate too. |
-| `LENS_LATENCY_MINTING_ENABLED` | false | field, force-off block | **yes** | The proof-of-latency-locality EARNING gate (§A26, #265). MINTS LENS ⇒ in the force-off block (the **14th**). Needs a positive rate too. |
-| `LENS_NODE_AUTOROUTE_ENABLED` | false | :677 | **no** | Gateway auto-route to a registered node (§A16). Routing, not a mint. |
-| `LENS_NODE_LATENCY_CAPTURE_ENABLED` | false | field | **(exempt)** | Descriptive per-(node,cohort,model) latency EWMA capture (§A26, #263). Mint-free ⇒ off=safe, NOT force-off. |
-| `LENS_REPUTATION_BONDED_MINTING_ENABLED` | false | :678 | **no** | `f(R)` bond on PoVI/royalty mints (§A13). Reduces/blocks, never enables. |
-| `LENS_PROOF_OF_BENCHMARK_ENABLED` | false | :679 | **no** | Probe scheduler + quality routing bias + probe-mint suppression (§A14). Measurement/routing. |
-| `LENS_PROOF_OF_IMPROVEMENT_ENABLED` | false | field :440 | **no** | Capability to SELECT the held-benchmark anchor; now has a reachable caller (the §A18 eval-contribution mint, gated by the earning flag above). Capability, cannot outrun U6. |
-| `LENS_ROUTING_PREDICTION_ENABLED` | false | field :456 | **no** | Capability gating routing-PREDICTION submission (§A19). Inert data substrate, no mint. |
-| `LENS_ROUTING_PREDICTION_SCORING_ENABLED` | false | field :464 | **no** | Capability/measurement gating the routing-prediction SCORER sweep (§A21). Produces a score, mints nothing. The real provider-backed Inferer is now wired (#259), but the scorer stays inert until this flag flips (capability built, not armed). |
-| `LENS_WORKTIER_ENABLED` | false | :673 | **(exempt)** | Descriptive work-tier capture (mint-free). |
-| `LENS_GUARDRAILS_ENABLED` | false | :672 | **(exempt)** | Output-stage guardrails (input always runs). |
-| `LENS_QUALITY_AUTO_RETRY` | false | :656 | **(exempt)** | One-shot re-call on low quality (provider COGS). |
-| `LENS_BILLING_ENABLED` | false | :681 | **(exempt)** | Stripe checkout/webhook/refund (requires both Stripe keys). |
-| `LENS_LXC_GATING_ENABLED` | false | :666 | **(exempt)** | Pre-serve 402 when LXC exhausted. |
-| `LENS_LXC_SHADOW_SPEND_ENABLED` | false | :665 | **(exempt)** | Post-serve observational LXC debit. |
+| `LENS_ECONOMY_ENABLED` | **TRUE** | `EconomyEnabled` | n/a (the block itself) | Master switch; **false** force-offs the 14 gates below + unregisters the economy route surface. |
+| `LENS_POOL_ROYALTY_MINTING_ENABLED` | false | `PoolRoyaltyMintingEnabled` | **yes** | Arms the cache + distill reuse-royalty mint (held → finalized). |
+| `LENS_POVI_MINTING_ENABLED` | false | `POVIMintingEnabled` | **yes** | Lets a verified, staked node's receipt mint LENS. |
+| `LENS_ANNOTATION_MINTING_ENABLED` | false | `AnnotationMintingEnabled` | **yes** | The annotation mint (credits LENS). **Was absent from this table entirely** until the force-off census below was enforced. |
+| `LENS_CONFIDENTIAL_MINTING_ENABLED` | false | `ConfidentialMintingEnabled` | **yes** | The proof-of-confidential-compute EARNING gate (P-o-I #4, §A27). MINTS LENS. **Was absent from this table entirely.** |
+| `LENS_PATTERN_MINING_ENABLED` | false | `PatternMiningEnabled` | **yes** | Opens the per-workspace pattern opt-in route. |
+| `LENS_PATTERN_CAPTURE_ENABLED` | false | `PatternCaptureEnabled` | **yes** | Post-serve mint-free pattern capture. |
+| `LENS_PATTERN_EARNING_ENABLED` | false | `PatternEarningEnabled` | **yes** | The pattern earn path (mints). |
+| `LENS_TRUSTFUL_COMPUTE_MINT_ENABLED` | false | `TrustfulComputeMintEnabled` | **yes** | Legacy trust-mint — dead (`NotifyServed` has no caller). |
+| `LENS_CACHE_SHARING_ENABLED` | false | `CacheSharingEnabled` | **yes** | Cross-tenant cache sharing. |
+| `LENS_CACHE_POOLABLE_ENABLED` | false | `CachePoolableEnabled` | **yes** | Cross-tenant cache pooling (cache-royalty substrate). |
+| `LENS_DISTILL_POOLABLE_ENABLED` | false | `DistillPoolableEnabled` | **yes** | Cross-tenant OCR pooling (distill-royalty substrate). |
+| `LENS_ROUTING_INTELLIGENCE_ENABLED` | false | `RoutingIntelligenceEnabled` | **yes** | Pattern-aggregate auto-route model selection. |
+| `LENS_ROUTING_TIER_COHORTS_ENABLED` | false | `RoutingTierCohortsEnabled` | **yes** | Tier-conditioned cohorts (#238); needs routing-intelligence on. |
+| `LENS_EVAL_CONTRIBUTION_MINTING_ENABLED` | false | `EvalContributionMintingEnabled` | **yes** | The proof-of-eval-contribution EARNING gate (§A18). MINTS LENS ⇒ in the force-off block (the 12th). Needs a positive rate too. |
+| `LENS_ROUTING_PREDICTION_MINTING_ENABLED` | false | `RoutingPredictionMintingEnabled` | **yes** | The proof-of-routing-prediction EARNING gate (§A23, #260). MINTS LENS ⇒ in the force-off block (the **13th**). Needs a positive rate too. |
+| `LENS_LATENCY_MINTING_ENABLED` | false | `LatencyMintingEnabled` | **yes** | The proof-of-latency-locality EARNING gate (§A26, #265). MINTS LENS ⇒ in the force-off block (the **14th**). Needs a positive rate too. |
+| `LENS_NODE_AUTOROUTE_ENABLED` | false | `NodeAutoRouteEnabled` | **no** | Gateway auto-route to a registered node (§A16). Routing, not a mint. |
+| `LENS_NODE_LATENCY_CAPTURE_ENABLED` | false | `NodeLatencyCaptureEnabled` | **(exempt)** | Descriptive per-(node,cohort,model) latency EWMA capture (§A26, #263). Mint-free ⇒ off=safe, NOT force-off. |
+| `LENS_REPUTATION_BONDED_MINTING_ENABLED` | false | `ReputationBondedMintingEnabled` | **no** | `f(R)` bond on PoVI/royalty mints (§A13). Reduces/blocks, never enables. |
+| `LENS_PROOF_OF_BENCHMARK_ENABLED` | false | `ProofOfBenchmarkEnabled` | **no** | Probe scheduler + quality routing bias + probe-mint suppression (§A14). Measurement/routing. |
+| `LENS_PROOF_OF_IMPROVEMENT_ENABLED` | false | `ProofOfImprovementEnabled` | **no** | Capability to SELECT the held-benchmark anchor; now has a reachable caller (the §A18 eval-contribution mint, gated by the earning flag above). Capability, cannot outrun U6. |
+| `LENS_ROUTING_PREDICTION_ENABLED` | false | `RoutingPredictionEnabled` | **no** | Capability gating routing-PREDICTION submission (§A19). Inert data substrate, no mint. |
+| `LENS_ROUTING_PREDICTION_SCORING_ENABLED` | false | `RoutingPredictionScoringEnabled` | **no** | Capability/measurement gating the routing-prediction SCORER sweep (§A21). Produces a score, mints nothing. The real provider-backed Inferer is now wired (#259), but the scorer stays inert until this flag flips (capability built, not armed). |
+| `LENS_WORKTIER_ENABLED` | false | `WorkTierEnabled` | **(exempt)** | Descriptive work-tier capture (mint-free). |
+| `LENS_GUARDRAILS_ENABLED` | false | `GuardrailsEnabled` | **(exempt)** | Output-stage guardrails (input always runs). |
+| `LENS_QUALITY_AUTO_RETRY` | false | `QualityAutoRetry` | **(exempt)** | One-shot re-call on low quality (provider COGS). |
+| `LENS_BILLING_ENABLED` | false | `BillingEnabled` | **(exempt)** | Stripe checkout/webhook/refund (requires both Stripe keys). |
+| `LENS_LXC_GATING_ENABLED` | false | `LXCGatingEnabled` | **(exempt)** | Pre-serve 402 when LXC exhausted. |
+| `LENS_LXC_SHADOW_SPEND_ENABLED` | false | `LXCShadowSpendEnabled` | **(exempt)** | Post-serve observational LXC debit. |
 
 ### Numeric / non-boolean knobs
 | Env | Default | config.go | Effect |
 |---|---|---|---|
-| `LENS_POOL_ROYALTY_SHARE` | **0.5** | field :335 | Contributor share `s` of avoided-COGS; clamped [0,1]. |
-| `LENS_POOL_HOLDBACK_WINDOW` | **72h** | field :308 | Held→final settlement delay. |
-| `LENS_MINT_RATE_CAP_LENS_24H` | **1000** | set :917 | U6 per-identity rate cap (0 disables). **(exempt)** safety. |
-| `LENS_POVI_MIN_STAKE` | **100.0** | set :823 | Min LENS a node stakes to be mint-eligible. |
-| `LENS_DETECTOR_SWEEP_ENABLED` | **TRUE** | set :988 | Scheduled cache+distill detector sweep. Net gate = `EconomyEnabled && DetectorSweepEnabled`. |
-| `LENS_EVAL_CONTRIBUTION_RATE_PER_POINT` | **0** (inert) | set :877 | LENS-per-discrimination-point for the §A18 mint. 0 ⇒ `NewHeldBenchmarkAnchor` refuses ⇒ minter no-ops. A deliberate later flip. |
-| `LENS_ROUTING_PREDICTION_RATE_PER_POINT` | **0** (inert) | parsed in `Load()` | LENS-per-skill-margin-point for the §A23 mint. 0 ⇒ `NewHeldBenchmarkAnchor` refuses ⇒ minter no-ops. A deliberate later flip. |
-| `LENS_LATENCY_RATE_PER_POINT` | **0** (inert) | parsed in `Load()` | LENS-per-latency-skill-point for the §A26 mint. 0 ⇒ `NewHeldBenchmarkAnchor` refuses ⇒ minter no-ops. A deliberate later flip. |
+| `LENS_POOL_ROYALTY_SHARE` | **0.5** | `PoolRoyaltyShare` | Contributor share `s` of avoided-COGS; clamped [0,1]. |
+| `LENS_POOL_HOLDBACK_WINDOW` | **72h** | `PoolHoldbackWindow` | Held→final settlement delay. |
+| `LENS_MINT_RATE_CAP_LENS_24H` | **1000** | `MintRateCapLENS24h` | U6 per-identity rate cap (0 disables). **(exempt)** safety. |
+| `LENS_POVI_MIN_STAKE` | **100.0** | `POVIMinStake` | Min LENS a node stakes to be mint-eligible. |
+| `LENS_DETECTOR_SWEEP_ENABLED` | **TRUE** | `DetectorSweepEnabled` | Scheduled cache+distill detector sweep. Net gate = `EconomyEnabled && DetectorSweepEnabled`. |
+| `LENS_EVAL_CONTRIBUTION_RATE_PER_POINT` | **0** (inert) | `EvalContributionRatePerPoint` | LENS-per-discrimination-point for the §A18 mint. 0 ⇒ `NewHeldBenchmarkAnchor` refuses ⇒ minter no-ops. A deliberate later flip. |
+| `LENS_ROUTING_PREDICTION_RATE_PER_POINT` | **0** (inert) | `RoutingPredictionRatePerPoint` | LENS-per-skill-margin-point for the §A23 mint. 0 ⇒ `NewHeldBenchmarkAnchor` refuses ⇒ minter no-ops. A deliberate later flip. |
+| `LENS_LATENCY_RATE_PER_POINT` | **0** (inert) | `LatencyRatePerPoint` | LENS-per-latency-skill-point for the §A26 mint. 0 ⇒ `NewHeldBenchmarkAnchor` refuses ⇒ minter no-ops. A deliberate later flip. |
 
 ---
 
