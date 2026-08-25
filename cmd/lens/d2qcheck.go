@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/talyvor/lens/internal/config"
@@ -33,6 +34,16 @@ type d2qResult struct {
 	BestVia    string
 	GateAllows bool
 	NumVars    int
+
+	// VarScores is this pair's B-vs-variant score, one per derived variant, in derivation order.
+	//
+	// ⚠ IT LIVES ON THE RESULT BECAUSE IT USED TO LIVE IN A PACKAGE-LEVEL MAP KEYED BY Pair.Name,
+	// and pair names are unique only WITHIN a corpus. poolsafety has one collision today —
+	// "notice-direction" is in both ConsumerDangerPairs and ConsumerUnrelatedPairs, the two lanes
+	// W2.7 adds — so the second corpus measured silently overwrote the first and BestAtN reported
+	// one lane's variants under the other lane's pair. Carrying the scores with the result makes
+	// that unrepresentable rather than merely fixed.
+	VarScores []float64
 }
 
 func runD2QCheck() error {
@@ -85,17 +96,37 @@ func runD2QCheck() error {
 
 	// ⚠ THE VARIANT-COUNT SWEEP. More vectors buy recall and cost precision; the point where the
 	// second stops being worth the first is a measurement, not a guess.
-	fmt.Printf("\n=== VARIANT-COUNT SWEEP ===\n")
-	fmt.Printf("  N   rephrasings served    danger admitted (gate-allowed only)\n")
-	for _, n := range []int{0, 1, 3, 5, 8} {
-		for _, th := range []float64{0.92, 0.85, 0.83} {
-			served := countAt(all["REPHRASINGS (recall)"], n, th, true)
-			d1 := countAt(all["DANGER design (precision)"], n, th, true)
-			d2 := countAt(all["DANGER held-out (precision)"], n, th, true)
-			fmt.Printf("  %d   @%.2f  %2d/28              %d\n", n, th, served, d1+d2)
+	danger := append(append([]d2qResult{}, all["DANGER design (precision)"]...), all["DANGER held-out (precision)"]...)
+	renderSweep(os.Stdout, all["REPHRASINGS (recall)"], danger)
+	return nil
+}
+
+// sweepNs and sweepThresholds are the sweep's two axes.
+var (
+	sweepNs         = []int{0, 1, 3, 5, 8}
+	sweepThresholds = []float64{0.92, 0.85, 0.83}
+)
+
+// renderSweep prints the variant-count sweep.
+//
+// ⚠ EVERY DENOMINATOR IS len() OF THE SLICE THAT WAS COUNTED, never a literal. #393 published this
+// table as "0/28 … 1/28" with the 28 typed into the format string; EngineeringRephrasePairs() has
+// held 30 pairs since, so those figures are stated over a population two pairs smaller than the one
+// they were measured on, and no code path could notice. A rate whose denominator is not derived
+// from its own population is a claim about a corpus that may no longer exist.
+//
+// The danger column carries a denominator for the same reason: W2.7 asks how many OF 44+42 danger
+// pairs are falsely recalled, and a bare count does not answer that question.
+func renderSweep(w io.Writer, reph, danger []d2qResult) {
+	fmt.Fprintf(w, "\n=== VARIANT-COUNT SWEEP ===\n")
+	fmt.Fprintf(w, "  N   rephrasings served    danger admitted (gate-allowed only)\n")
+	for _, n := range sweepNs {
+		for _, th := range sweepThresholds {
+			served := countAt(reph, n, th, true)
+			adm := countAt(danger, n, th, true)
+			fmt.Fprintf(w, "  %d   @%.2f  %2d/%-14d %d/%d\n", n, th, served, len(reph), adm, len(danger))
 		}
 	}
-	return nil
 }
 
 func countAt(rs []d2qResult, n int, th float64, gated bool) int {
@@ -120,18 +151,11 @@ func countAt(rs []d2qResult, n int, th float64, gated bool) int {
 	return c
 }
 
-// varScores retains per-variant scores so the sweep is a real measurement rather than an
-// interpolation between "none" and "all".
-var varScores sync.Map // pairName -> []float64
-
+// BestAtN is the best match this pair reaches with only the FIRST n derived variants indexed —
+// a real measurement at each sweep point rather than an interpolation between "none" and "all".
 func (r d2qResult) BestAtN(n int) float64 {
-	v, ok := varScores.Load(r.Pair.Name)
-	if !ok {
-		return r.Baseline
-	}
-	ss := v.([]float64)
 	best := r.Baseline
-	for i, s := range ss {
+	for i, s := range r.VarScores {
 		if i >= n {
 			break
 		}
@@ -183,10 +207,9 @@ func measureCorpus(ctx context.Context, emb poolsafety.Embedder, der, gen doc2qu
 				best, via = s, q
 			}
 		}
-		varScores.Store(p.Name, scores)
 		out = append(out, d2qResult{
 			Pair: p, Baseline: base, Best: best, BestVia: via,
-			GateAllows: discriminator.Match(p.A, p.B), NumVars: len(qs),
+			GateAllows: discriminator.Match(p.A, p.B), NumVars: len(qs), VarScores: scores,
 		})
 	}
 	return out, nil
