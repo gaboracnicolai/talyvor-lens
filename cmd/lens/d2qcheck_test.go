@@ -15,27 +15,28 @@ import (
 //
 // #393 reported doc2query's recall as "0/28 … 1/28" across the whole sweep. The denominator was
 // typed into the format string when EngineeringRephrasePairs() held 28 pairs. The corpus has since
-// grown to 30 and the literal did not move, so the sweep reports a rate over a population that is
-// two pairs smaller than the one it measured — and nothing in the program can notice, because the
-// number it prints is not derived from the slice it counted.
+// grown to 30 and the literal did not move, so the sweep reported a rate over a population two
+// pairs smaller than the one it measured — and nothing in the program could notice, because the
+// number it printed was not derived from the slice it counted.
 //
-// This asserts the rendered denominator against the corpus the harness actually feeds the renderer.
-// It is deliberately a check on the RENDERED BYTES rather than on a variable: the defect lived
-// entirely in the gap between what was counted and what was printed, and an assertion on the count
-// would have passed throughout.
-// The danger fraction is OPTIONAL in this pattern on purpose: today the renderer prints a bare
-// count there, and a pattern that required a denominator would simply not match the row, turning a
-// wrong-population defect into a silent zero-row pass. Matching the current shape is what lets the
-// assertion below name the missing denominator instead of skipping it.
-var sweepRow = regexp.MustCompile(`^\s+(\d+)\s+@(\d\.\d+)\s+(\d+)/(\d+)\s+(\d+)(?:/(\d+))?\s*$`)
+// This asserts the rendered denominators against the corpora the harness actually feeds the
+// renderer. It is deliberately a check on the RENDERED BYTES rather than on a variable: the defect
+// lived entirely in the gap between what was counted and what was printed, and an assertion on the
+// count would have passed throughout.
+//
+// ⚠ WHICH MAKES THE GUARD REGEX-SHAPED, AND THAT IS ITS OWN HAZARD. A row shape that moves matches
+// nothing, every assertion inside the loop stops running, and the test passes by non-execution.
+// The row-count assertion at the bottom is what makes that impossible; the control harness mutates
+// the row shape specifically to prove it reds.
+var sweepRow = regexp.MustCompile(
+	`^\s+(\d+)\s+@(\d\.\d+)\s+(\d+)/(\d+)\s+(\d+)/(\d+)\s+\x{2502}\s+(\d+)/(\d+)\s+(\d+)/(\d+)\s*$`)
 
 func TestRenderSweep_DenominatorsEqualTheCorpusItWasGiven(t *testing.T) {
-	reph := resultsFor(poolsafety.EngineeringRephrasePairs())
-	danger := resultsFor(append(append([]poolsafety.RephrasePair{},
-		poolsafety.EngineeringDangerPairs()...), poolsafety.HeldOutDangerPairs()...))
+	reph := resultsFor(laneNamed(t, "ENGINEERING rephrase"))
+	danger := resultsFor(laneNamed(t, "ENGINEERING danger"))
 
 	var buf bytes.Buffer
-	renderSweep(&buf, reph, danger)
+	renderSweep(&buf, "ENGINEERING", reph, danger)
 
 	rows := 0
 	for _, line := range bytes.Split(buf.Bytes(), []byte("\n")) {
@@ -44,24 +45,57 @@ func TestRenderSweep_DenominatorsEqualTheCorpusItWasGiven(t *testing.T) {
 			continue
 		}
 		rows++
-		if got, _ := strconv.Atoi(m[4]); got != len(reph) {
-			t.Errorf("rephrase denominator = %d, want %d (the corpus the renderer was handed)\n  row: %q",
-				got, len(reph), line)
-		}
-		if m[6] == "" {
-			t.Errorf("danger column states no population at all — %q is a bare count, and W2.7 asks "+
-				"how many OF 44+42 danger pairs are falsely recalled\n  row: %q", m[5], line)
-			continue
-		}
-		if got, _ := strconv.Atoi(m[6]); got != len(danger) {
-			t.Errorf("danger denominator = %d, want %d (the corpus the renderer was handed)\n  row: %q",
-				got, len(danger), line)
+		for _, c := range []struct {
+			group int
+			want  int
+			what  string
+		}{
+			{4, len(reph), "HIT prod"}, {6, len(reph), "HIT sim"},
+			{8, len(danger), "FALSE prod"}, {10, len(danger), "FALSE sim"},
+		} {
+			if got, _ := strconv.Atoi(m[c.group]); got != c.want {
+				t.Errorf("%s denominator = %d, want %d (the corpus the renderer was handed)\n  row: %q",
+					c.what, got, c.want, line)
+			}
 		}
 	}
 	if want := len(sweepNs) * len(sweepThresholds); rows != want {
 		t.Fatalf("parsed %d sweep rows, want %d — the row shape moved and every assertion above "+
 			"silently stopped running", rows, want)
 	}
+}
+
+// The gate-allowed line is the sweep's binding number, so it is rendered and asserted rather than
+// left to the reader: production recall cannot exceed it at any threshold or any variant count.
+func TestRenderSweep_StatesTheGateAllowedCeiling(t *testing.T) {
+	reph := resultsFor(laneNamed(t, "CONSUMER rephrase"))
+	danger := resultsFor(laneNamed(t, "CONSUMER danger"))
+	for i := range reph {
+		reph[i].GateAllows = i < 3 // 3 of 38, chosen so it matches no other number on the line
+	}
+	for i := range danger {
+		danger[i].GateAllows = false
+	}
+
+	var buf bytes.Buffer
+	renderSweep(&buf, "CONSUMER", reph, danger)
+	want := fmt.Sprintf("gate-allowed: rephrase 3/%d · danger 0/%d", len(reph), len(danger))
+	if !bytes.Contains(buf.Bytes(), []byte(want)) {
+		t.Errorf("sweep does not state its ceiling as %q\n---\n%s", want, buf.String())
+	}
+}
+
+// laneNamed reads the population from the shared definition rather than re-deriving it: a guard
+// over a corpus nothing reports on pins nothing.
+func laneNamed(t *testing.T, name string) []poolsafety.RephrasePair {
+	t.Helper()
+	for _, l := range poolsafety.Lanes() {
+		if l.Name() == name {
+			return l.Pairs
+		}
+	}
+	t.Fatalf("no lane named %q in poolsafety.Lanes()", name)
+	return nil
 }
 
 // resultsFor builds one result per pair with a similarity nothing clears, so the counts are zero
@@ -94,11 +128,11 @@ func TestMeasureCorpus_SameNameInTwoCorporaKeepsItsOwnVariantScores(t *testing.T
 	lane1 := []poolsafety.RephrasePair{{Name: "notice-direction", A: "l1a", B: "l1b"}}
 	lane2 := []poolsafety.RephrasePair{{Name: "notice-direction", A: "l2a", B: "l2b"}}
 
-	r1, err := measureCorpus(ctx, emb, fakeDeriver{q: "l1 variant question?"}, fakeDeriver{q: "l1 variant question?"}, lane1, 8)
+	r1, err := measureCorpus(ctx, emb, fakeDeriver{q: "l1 variant question?"}, fakeDeriver{q: "l1 variant question?"}, lane1, 8, nil)
 	if err != nil {
 		t.Fatalf("lane1: %v", err)
 	}
-	if _, err := measureCorpus(ctx, emb, fakeDeriver{q: "l2 variant question?"}, fakeDeriver{q: "l2 variant question?"}, lane2, 8); err != nil {
+	if _, err := measureCorpus(ctx, emb, fakeDeriver{q: "l2 variant question?"}, fakeDeriver{q: "l2 variant question?"}, lane2, 8, nil); err != nil {
 		t.Fatalf("lane2: %v", err)
 	}
 

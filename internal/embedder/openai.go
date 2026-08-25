@@ -47,44 +47,59 @@ type embedResponse struct {
 	Data []struct {
 		Embedding []float32 `json:"embedding"`
 	} `json:"data"`
+	// ⚠ THE API ALREADY COUNTS THE TOKENS AND THIS STRUCT USED TO THROW THEM AWAY. Every caller
+	// that needed an embedding bill therefore had to estimate one, and W2.6 estimated ~50 tokens
+	// where the truth was 3.8x that. Decoding the block costs nothing and removes the estimate.
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
 }
 
 func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	v, _, err := e.EmbedWithUsage(ctx, text)
+	return v, err
+}
+
+// EmbedWithUsage is Embed plus the token count the API billed, so a caller measuring write-time
+// cost never has to estimate it. Embed delegates here: two request paths would be two places for
+// the endpoint, the headers and the error handling to drift.
+func (e *OpenAIEmbedder) EmbedWithUsage(ctx context.Context, text string) ([]float32, int, error) {
 	payload, err := json.Marshal(embedRequest{Model: e.model, Input: text})
 	if err != nil {
-		return nil, fmt.Errorf("openai embeddings: marshal request: %w", err)
+		return nil, 0, fmt.Errorf("openai embeddings: marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("openai embeddings: build request: %w", err)
+		return nil, 0, fmt.Errorf("openai embeddings: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+e.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("openai embeddings: read response: %w", err)
+		return nil, 0, fmt.Errorf("openai embeddings: read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai embeddings: status %d: %s", resp.StatusCode, body)
+		return nil, 0, fmt.Errorf("openai embeddings: status %d: %s", resp.StatusCode, body)
 	}
 
 	var parsed embedResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("openai embeddings: decode response: %w", err)
+		return nil, 0, fmt.Errorf("openai embeddings: decode response: %w", err)
 	}
 	if len(parsed.Data) == 0 {
-		return nil, errors.New("openai embeddings: empty data in response")
+		return nil, 0, errors.New("openai embeddings: empty data in response")
 	}
-	return parsed.Data[0].Embedding, nil
+	return parsed.Data[0].Embedding, parsed.Usage.PromptTokens, nil
 }
 
 // Model reports the embedding model this embedder sends to the API — the same value used in
