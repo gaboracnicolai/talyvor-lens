@@ -131,6 +131,7 @@ var Manifest = map[string]Entry{
 	"routing_patterns":              {Delete, ""},
 	"routing_predictions":           {Delete, ""},
 	"served_request_measurements":   {Delete, ""},
+	"session_keys":                  {Delete, ""},
 	"sessions":                      {Delete, ""},
 	"stake_positions":               {Delete, ""},
 	"traffic_mint_holds":            {Delete, ""},
