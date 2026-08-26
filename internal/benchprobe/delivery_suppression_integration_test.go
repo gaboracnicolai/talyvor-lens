@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -155,14 +156,51 @@ func TestProbe_RecordsButMintsZero_MintingOn_Integration(t *testing.T) {
 
 	// httptest node: asserts the probe row is ALREADY committed (happens-before), captures the wire
 	// body (node-blind), returns an answer.
+	//
+	// ⚠ THIS HANDLER SERVES TWO CALLERS AND ONLY ONE OF THEM IS THE PROBE. MEASURED, not assumed:
+	// the node is entered TWICE on every run —
+	//
+	//	[GET  /v1/models  reqid=""]                     ← mining.verifyNodeAsync
+	//	[POST /inference  reqid="bench_<hash>"]         ← the probe under test
+	//
+	// RegisterNode fires verifyNodeAsync IN A GOROUTINE ("best-effort", 10s timeout) and for
+	// provider "vllm" it probes /v1/models. It is unsequenced with respect to the probe, so both
+	// requests are in flight against this one handler.
+	//
+	// ⚠ IT USED TO CAPTURE BOTH INTO THE SAME THREE VARIABLES, AND THE TEST READ WHICHEVER LANDED
+	// LAST. `go test -race` caught it as a write/write race between two server goroutines at these
+	// lines (1 run in 12 locally — the intermittency is the interleaving, not the bug). The race
+	// warning is the mild half. The severe half is that ALL THREE assertions below are about the
+	// /inference probe, and if /v1/models won the write they read:
+	//
+	//	gotReqID        = ""     → the receipt below is signed for the empty request id
+	//	probeRowExisted = IsProbe(ctx, "") = false → "happens-before VIOLATED", falsely
+	//	gotBody         = ""     → "node-blind VIOLATED", falsely
+	//
+	// So a green here was the ordering being kind, not the property holding. Capturing ONLY the
+	// probe makes the assertions deterministic AND removes the race; a mutex alone would have
+	// silenced the detector and left the test reading an arbitrary request.
+	var mu sync.Mutex
 	var gotBody []byte
 	var gotReqID string
 	probeRowExisted := false
+	probeHits := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotReqID = r.Header.Get("X-Request-ID")
-		gotBody, _ = io.ReadAll(r.Body)
-		ex, _ := bench.IsProbe(r.Context(), gotReqID) // (B) the suppression key must already exist
-		probeRowExisted = ex
+		if r.URL.Path != "/inference" {
+			// The liveness probe. Answer it honestly — verifyNodeAsync flips
+			// verified=true on 200, which registerStakedVerifiedNode relies on — but
+			// capture nothing from it.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		reqID := r.Header.Get("X-Request-ID")
+		body, _ := io.ReadAll(r.Body)
+		ex, _ := bench.IsProbe(r.Context(), reqID) // (B) the suppression key must already exist
+		mu.Lock()
+		gotReqID, gotBody, probeRowExisted = reqID, body, ex
+		probeHits++
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"text":"4"}`))
 	}))
@@ -182,6 +220,17 @@ func TestProbe_RecordsButMintsZero_MintingOn_Integration(t *testing.T) {
 	sched := benchprobe.NewScheduler(bench, delivery, func() bool { return true })
 	if err := sched.RunOnceForNode(ctx, nodeID, model); err != nil {
 		t.Fatalf("RunOnceForNode: %v", err)
+	}
+
+	// The captures below are about the probe and nothing else. If the path filter above ever stops
+	// matching, every assertion would read a zero value and blame the product; this says which it is.
+	mu.Lock()
+	hits, gotReqID, gotBody, probeRowExisted := probeHits, gotReqID, gotBody, probeRowExisted
+	mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("the /inference probe was captured %d times, want exactly 1 — the handler is either "+
+			"missing the probe or capturing a request that is not it, and every assertion below "+
+			"would be about the wrong request", hits)
 	}
 
 	// (B) happens-before: the probe row existed when the node was called.
