@@ -99,6 +99,44 @@ is asking:
 settled income into **contribution** and **capital** so that "your answers earned this" can be true
 of a subtotal rather than approximately true of a total.
 
+## What was built on top of it (second merge)
+
+`GET /v1/workspaces/{wsID}/earnings` — the workspace-scoped read W4.6.1 step 7 needs, and the first
+non-admin royalty read in the product. Every existing royalty route
+(`/v1/admin/{pool,distill}-royalty/{detect,resolve,margin}`) is admin-gated, and a subscriber is not
+an admin.
+
+It reports, all named for exactly what they are:
+
+- `contribution_settled_ulens` — the number behind *"your answers earned this"*
+- `capital_settled_ulens` — settled income from locked capital (`stake_yield`), kept separate
+- `held_ulens` — **from `lens_token_balances.held_balance`, the column**
+- `revoked_ulens` — clawed back, so a fall in earnings has a name
+- `*_usd_at_peg` + `lens_per_usd` — the dollar framing, labelled as a peg conversion at every turn,
+  because LENS has one published peg and no market
+- `earning_enabled` + `disabled_gates` — so a zero can be told from an off switch
+- `by_type[]` with each line's **reason**, and `unclassified_types[]`
+
+**It deliberately does not carry `lifetime_earned`.** Offering both on one surface would invite
+"which is right", and only one of them is. That field is untouched.
+
+⚠ **The held trap, made executable.** `TestR3` computes what the naive surface would have reported —
+`SUM(amount) WHERE type='pool_royalty_held'` — and compares it against the column, rather than
+asserting about it. Hold 5 LENS, settle 4: the column says 1, the rows-sum says 5. Control R-C3
+swaps the query to the rows-sum and the test goes red naming the ratio.
+
+⚠ **The wiring is guarded separately from the arithmetic**, for the reason
+`cmd/lens/economy_wiring_test.go` gives: a money feature fails both by computing wrongly and by
+nothing calling it. `TestEarningsRoute_*` asserts on `main.go` itself that the route hangs off the
+`authed` group (the only one applying `workspaceIsolationMiddleware`) and that every
+`earnings.Gates` field is a `cfg.` selector rather than a literal — a hardcoded `true` there would
+make `earning_enabled` a claim about the source instead of about the deployment, and no behavioural
+test that supplies its own `Gates` could see it.
+
+⚠ **The gates are default-off**, so a stock deployment's honest answer is zero. That is why
+`disabled_gates` ships: a bare "you earned $0.00" over a disabled feature states an operator setting
+as a measurement.
+
 ## The census boundary, stated
 
 The ledger's type vocabulary spans **three packages in two representations**: 35 exported `Type*`
