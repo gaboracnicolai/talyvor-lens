@@ -61,6 +61,7 @@ import (
 	"github.com/talyvor/lens/internal/distill"
 	"github.com/talyvor/lens/internal/distillattrib"
 	"github.com/talyvor/lens/internal/distillpreview"
+	"github.com/talyvor/lens/internal/earnings"
 	"github.com/talyvor/lens/internal/earnverify"
 	"github.com/talyvor/lens/internal/econflags"
 	"github.com/talyvor/lens/internal/economy"
@@ -895,6 +896,7 @@ func run() error {
 
 	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
 	tokenLedger := mining.NewLedgerStore(pool)
+	earningsReader := earnings.NewReader(pool)
 	// U6 Sybil floor: wire the verified-to-earn gate UNCONDITIONALLY at the
 	// ledger chokepoint — a safety restriction must not be liftable by the
 	// economy toggle (mirrors the LXC-fiat unconditional wiring). Every
@@ -2871,6 +2873,33 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, snap)
+		})
+
+		// W4.6.1 step 7 — what this workspace has EARNED, as opposed to what it has been credited.
+		//
+		// ⚠ THIS IS NOT tokens/balance's lifetime_earned, AND THE DIFFERENCE IS THE POINT.
+		// lens_token_balances.lifetime_earned is raised by EVERY credit with no filter on the ledger
+		// type, so LENS a workspace was given, bought, or simply got back all count — measured at
+		// 27× on a five-row fixture, and unbounded across stake/unstake round trips
+		// (docs/lifetime-earned-measured.md, #472). That field is left exactly as it is, because it
+		// is already served and already read by cmd/node and cmd/cachenode; this route is the
+		// honest number beside it, not a replacement for it.
+		//
+		// Workspace-scoped by the {wsID} segment, so workspaceIsolationMiddleware applies — a caller
+		// cannot read another workspace's earnings. Economy-gated like its neighbours.
+		econ.get(authed, "/v1/workspaces/{wsID}/earnings", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			sum, err := earningsReader.ForWorkspace(req.Context(), wsID, earnings.Gates{
+				EconomyEnabled:            cfg.EconomyEnabled,
+				PoolRoyaltyMintingEnabled: cfg.PoolRoyaltyMintingEnabled,
+				CachePoolableEnabled:      cfg.CachePoolableEnabled,
+				DistillPoolableEnabled:    cfg.DistillPoolableEnabled,
+			})
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, sum)
 		})
 
 		econ.get(authed, "/v1/workspaces/{wsID}/tokens/history", func(w http.ResponseWriter, req *http.Request) {
