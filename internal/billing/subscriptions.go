@@ -326,7 +326,41 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 		s.fail(w, "commit", event.ID, err)
 		return
 	}
+
+	// MODEL 2 STEP 2 — GRANT THE PERIOD'S ALLOWANCE.
+	//
+	// ⚠ AFTER THE COMMIT, DELIBERATELY, AND NOT INSIDE IT. The subscription's state
+	// is the thing Stripe is telling us; the allowance is a consequence we derive. If
+	// the grant were in the same transaction, a failure to grant would roll back the
+	// STATE too, we would answer 5xx, and Stripe would redeliver an event whose only
+	// real content had already been correct. The grant is idempotent on
+	// (subscription, period_start), so a redelivery re-grants nothing and a grant
+	// that never happens is repaired by the next event for the same period.
+	//
+	// ⚠ ONLY WHEN THE EVENT WAS APPLIED and the subscription is actually live. A
+	// stale or refused event must not hand out an allowance — that would be the
+	// out-of-order bug wearing a different hat, and an expensive one.
+	if applied && (status == "active" || status == "trialing") {
+		if end := periodEnd(&sub); end != nil {
+			start := periodStart(&sub)
+			if _, err := s.Grant(ctx, wsID, sub.ID, start, *end); err != nil && !errors.Is(err, ErrNoAllowanceConfigured) {
+				// The state is committed and correct; the allowance is repairable.
+				// Log rather than 5xx, so Stripe is not asked to redeliver a fact we
+				// already have.
+				s.log.Error("billing: allowance grant failed (subscription state IS recorded)",
+					"event", event.ID, "workspace", wsID, "subscription", sub.ID, "err", err)
+			}
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
+}
+
+// periodStart reads the subscription's current period start, falling back to the
+// period end minus nothing — an absent start would make the grant's identity
+// ambiguous, so it is taken from the payload and only from there.
+func periodStart(sub *stripe.Subscription) time.Time {
+	return time.Unix(sub.CurrentPeriodStart, 0).UTC()
 }
 
 // handleInvoicePaymentFailed records the dunning signal.

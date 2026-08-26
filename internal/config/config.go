@@ -863,6 +863,23 @@ type Config struct {
 	// out of the codebase entirely rather than being written down in two places.
 	BillingSubscriptionPriceID string
 
+	// SubscriptionAllowanceULXC is D — the Model 2 allowance granted per billing
+	// period, in µLXC (W4.6.1 step 2). Env: LENS_SUBSCRIPTION_ALLOWANCE_ULXC,
+	// default 0.
+	//
+	// ⚠ ZERO IS A REAL STATE AND IT IS THE DEFAULT: "no allowance priced yet". No
+	// grant row is written and the allowance covers nothing, so a deployment that
+	// turns subscriptions on without deciding D sells a subscription that entitles
+	// the buyer to nothing — which is visible immediately, rather than a default
+	// somebody mistakes for a decision and ships.
+	//
+	// ⚠ F AND D ARE NICOLAI'S (W4.6.1). phi = F/D < 1 means the allowance is worth
+	// MORE than the fee; the HARD CAP is what makes that safe, because the worst
+	// case per subscriber is then EXACTLY D and can be priced rather than hoped for.
+	// See docs/model2-allowance-economics.md for what the measured hit rate
+	// requires of the pair — this value is not a recommendation.
+	SubscriptionAllowanceULXC int64
+
 	// ROIIncludeEngineerBreakdown gates the per-engineer (author) cost
 	// section of the executive ROI report (Upgrade 24). OFF by default:
 	// attributing cost to named people is SENSITIVE and easily misread as a
@@ -1924,6 +1941,19 @@ func Load() (*Config, error) {
 	c.BatchEnabled = false
 	if os.Getenv("LENS_BATCH_ENABLED") != "" {
 		c.BatchEnabled = parseBoolEnv("LENS_BATCH_ENABLED")
+	}
+
+	// D — the Model 2 allowance, in µLXC (W4.6.1 step 2). Default 0 = "no allowance
+	// priced yet", which leaves the mechanism inert. A malformed value is REFUSED
+	// rather than silently defaulted: a typo'd allowance that quietly becomes 0
+	// would sell a subscription entitling the buyer to nothing, and the operator
+	// would have no signal at all.
+	if v := os.Getenv("LENS_SUBSCRIPTION_ALLOWANCE_ULXC"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("config: LENS_SUBSCRIPTION_ALLOWANCE_ULXC must be a non-negative integer (µLXC), got %q", v)
+		}
+		c.SubscriptionAllowanceULXC = n
 	}
 
 	c.EconomyEnabled = true

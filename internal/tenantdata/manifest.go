@@ -109,6 +109,11 @@ var Manifest = map[string]Entry{
 	// projection of that — a workspace's subscription state and the events that moved
 	// it — so deleting them on erasure removes the customer's data here without
 	// destroying the financial record anyone would actually audit.
+	// W4.6.1 step 2 — the Model 2 allowance. Same reasoning as the two rows below:
+	// Stripe holds the authoritative billing record, this is Lens's local grant-and-
+	// consumption projection of it, so erasure removes the customer's data here without
+	// destroying anything an audit would reach for.
+	"subscription_allowance":        {Delete, ""},
 	"subscription_events":           {Delete, ""},
 	"subscriptions":                 {Delete, ""},
 	"lxc_reservations":              {Delete, ""},

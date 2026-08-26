@@ -93,6 +93,11 @@ type Service struct {
 	// calling Stripe with an empty price. See subscriptions.go.
 	subStripe subscriptionAPI
 	subPrice  string
+
+	// D, in µLXC — the Model 2 allowance per billing period (W4.6.1 step 2).
+	// ZERO is the default and means "no allowance configured": no grant row is ever
+	// written and Consume covers nothing. See allowance.go.
+	allowanceULXC int64
 }
 
 // WithSubscriptions enables the subscription surface. Separate from New so every
