@@ -19,6 +19,7 @@
 package catalog
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -295,8 +296,33 @@ func (r *Registry) DecodeOverrides(raw []byte) ([]Model, error) {
 		base := r.byID[probe.ID] // zero Model when the id is new — the pre-existing behaviour
 		base.InputPer1M, base.OutputPer1M = 0, 0
 		base.CachedInputPer1M, base.CacheWritePer1M = 0, 0
-		if err := json.Unmarshal(e, &base); err != nil {
-			return nil, err
+		// DisallowUnknownFields HERE and deliberately NOT on the id probe above: the
+		// probe reads one field on purpose, so refusing unknowns there would refuse
+		// every document ever written.
+		//
+		// ⚠ A FIELD encoding/json CANNOT PLACE IS A FIELD THE OPERATOR BELIEVES IS
+		// DOING SOMETHING, AND WHEN IT IS A RATE THE ZEROING TWO LINES UP MAKES IT
+		// COST MONEY SILENTLY. `[{"id":"gpt-4o","input_per_1m":3.75,"outputPer1M":15.00}]`
+		// used to decode with OutputPer1M 0.00 and resolve 3.75/0.00 as
+		// ProvenanceEXACT — every output token billed at zero, with no error, no
+		// metric, and no drift finding (modelwatch skips the exact arm). `unpriced`
+		// cannot catch it: it is BOTH-rates-zero by necessity, because three seeded
+		// embeddings models publish a zero OUTPUT rate. It has to be caught here,
+		// where the document is read.
+		//
+		// Case is NOT a typo — encoding/json matches field names case-insensitively,
+		// so `output_per_1M` still lands on OutputPer1M and keeps working.
+		//
+		// The WHOLE document is refused, which is #451's decision restated rather
+		// than re-litigated: applyCatalogOverrides applies nothing when the document
+		// does not parse, so "Lens could not read this" keeps one meaning.
+		dec := json.NewDecoder(bytes.NewReader(e))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&base); err != nil {
+			return nil, fmt.Errorf("element %d (id %q): %w — every key must be a field of the "+
+				"override document; a key Lens cannot place is silently ignored, and when it is a "+
+				"rate the model registers at 0.00 and bills as an exact price. Refusing the whole "+
+				"document", i, probe.ID, err)
 		}
 		out = append(out, base)
 	}
