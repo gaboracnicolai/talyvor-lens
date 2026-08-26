@@ -52,6 +52,15 @@ var mustForward = map[string]string{
 	"LENS_STRIPE_WEBHOOK_SECRET": "Mute ⇒ the webhook cannot verify signatures, so paid credit is never applied",
 	"LENS_BILLING_SUCCESS_URL":   "Mute ⇒ a paying customer is returned to the compiled-in default, not this deployment",
 	"LENS_BILLING_CANCEL_URL":    "Mute ⇒ same, on the cancel path",
+
+	// ── customer credentials in custody ───────────────────────────────────────
+	// Rule (b), and (c) with it. ⚠ ADDED BY HAND, WHICH IS THE POINT AND THE LIMIT: measured
+	// 2026-08-26 (W6.10, tab-h3n8) — with LENS_PROVIDER_SECRET_KEK absent from docker-compose.yaml
+	// ENTIRELY, this test was GREEN. mustForward is a list, so it is blind by construction to every
+	// variable added after it was written, including one that meets its own inclusion rule. The
+	// header above argues for the list over a 160-variable census and that argument still holds;
+	// what is recorded here is that the rule is enforced by whoever remembers it, not by this file.
+	"LENS_PROVIDER_SECRET_KEK": "the envelope KEK for CUSTOMER provider credentials (W6.10). Mute ⇒ Config.ProviderSecretsEnabled() is false, so BYOK custody is silently off — and the symptom is a capability that simply never works, with no error anywhere, which is inclusion rule (c) on top of (b)",
 }
 
 // TestComposeForwardsEveryCriticalConfigVar fails when a mustForward variable is not present in
