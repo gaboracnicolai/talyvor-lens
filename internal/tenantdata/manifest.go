@@ -138,9 +138,13 @@ var Manifest = map[string]Entry{
 	"work_tier_observations":        {Delete, ""},
 	"workspace_api_keys":            {Delete, ""},
 	"workspace_card_fingerprints":   {Delete, ""},
-	"workspace_owner_links":         {Delete, ""},
-	"workspace_pattern_optin":       {Delete, ""},
-	"workspaces":                    {Delete, "the mapping itself — deleting this is what makes the retained ledger rows unlinkable"},
+	// W1.9.1. Each row names a workspace and two of its keys. The keys themselves are Delete, so
+	// retaining pointers to deleted keys would preserve no audit anybody could read while still
+	// naming the customer.
+	"workspace_key_rotations": {Delete, ""},
+	"workspace_owner_links":   {Delete, ""},
+	"workspace_pattern_optin": {Delete, ""},
+	"workspaces":              {Delete, "the mapping itself — deleting this is what makes the retained ledger rows unlinkable"},
 }
 
 // DeleteOrder returns the tables to delete, parents only, in an order safe to run top to bottom.

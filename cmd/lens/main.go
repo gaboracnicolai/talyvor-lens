@@ -2416,6 +2416,124 @@ func run() error {
 			})
 		})
 
+		// ─── W1.9.1: rotation for a key a RUNNING SERVICE holds ──────────
+		//
+		// The route above is an ATOMIC REPLACE and stays: it is the right primitive for a key a
+		// person can paste immediately, and for a leaked key that must die now with downtime as
+		// the lesser harm. It is the wrong one for a key a PROCESS holds, because both rows change
+		// visibility at commit and the holder never has a moment in which both credentials work
+		// (internal/tenant/rotation_overlap_integration_test.go pins that against real Postgres).
+		//
+		// These three are the other path. The order is the design and must not invert: mint →
+		// BOTH VALID → the holder switches → the new key authenticates a real request → only then
+		// is the old one revoked. Completion is REFUSED until that request has happened, which is
+		// the one thing CreateAPIKey + RevokeAPIKey cannot enforce on their own.
+		authed.Post("/v1/workspaces/{wsID}/api-keys/{keyID}/rotate/begin", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			keyID := chi.URLParam(req, "keyID")
+			raw, fresh, rot, err := tenantStore.BeginRotation(req.Context(), wsID, keyID)
+			switch {
+			case errors.Is(err, tenant.ErrKeyNotFound):
+				writeJSONErr(w, http.StatusNotFound, "key not found")
+				return
+			case errors.Is(err, tenant.ErrRotationOpen):
+				writeJSONErr(w, http.StatusConflict, err.Error()+
+					" — complete or abandon it before starting another, or the holder cannot be told which key to take")
+				return
+			case err != nil:
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			logger.Info("auth: key rotation begun",
+				slog.String("workspace_id", wsID),
+				slog.String("rotation_id", rot.ID),
+				slog.String("old_key_id", keyID),
+				slog.String("new_key_id", fresh.ID),
+			)
+			writeJSONOK(w, http.StatusCreated, map[string]any{
+				"rotation_id": rot.ID,
+				"key":         raw,
+				"id":          fresh.ID,
+				"prefix":      fresh.KeyPrefix,
+				"started_at":  rot.StartedAt,
+				// ⚠ SAID ON THE RESPONSE, not only in a runbook. The old key is still live and the
+				// operator has to know that, or they will assume this call finished the job.
+				"old_key_still_valid": true,
+				"next_step": "put this key in front of the holder and let it make one real request, then POST " +
+					"/v1/workspaces/" + wsID + "/key-rotations/" + rot.ID + "/complete. The old key keeps working until you do.",
+			})
+		})
+
+		authed.Get("/v1/workspaces/{wsID}/key-rotations/{rotationID}", func(w http.ResponseWriter, req *http.Request) {
+			st, err := tenantStore.RotationStatus(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "rotationID"))
+			if errors.Is(err, tenant.ErrRotationNotFound) {
+				writeJSONErr(w, http.StatusNotFound, "rotation not found")
+				return
+			}
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, st)
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/key-rotations/{rotationID}/complete", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			rotID := chi.URLParam(req, "rotationID")
+			err := tenantStore.CompleteRotation(req.Context(), wsID, rotID)
+			switch {
+			case errors.Is(err, tenant.ErrRotationNotFound):
+				writeJSONErr(w, http.StatusNotFound, "rotation not found")
+				return
+			case errors.Is(err, tenant.ErrRotationClosed):
+				writeJSONErr(w, http.StatusConflict, err.Error())
+				return
+			case errors.Is(err, tenant.ErrNewKeyUnused):
+				// 412 and not 400: the request is well-formed and the SERVER's precondition is
+				// unmet. Nothing was changed — both keys are still live — and the message says
+				// what makes it true rather than only that it is false.
+				writeJSONErr(w, http.StatusPreconditionFailed, err.Error()+
+					" — nothing was revoked. Point the holder at the new key and let it make one real "+
+					"authenticated request; a health check does not count, because a health route answers "+
+					"200 with no credential at all.")
+				return
+			case err != nil:
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			logger.Info("auth: key rotation completed",
+				slog.String("workspace_id", wsID), slog.String("rotation_id", rotID))
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"rotation_id": rotID,
+				"outcome":     "completed",
+				"detail":      "the old key is revoked; the new key has already proven it authenticates",
+			})
+		})
+
+		authed.Post("/v1/workspaces/{wsID}/key-rotations/{rotationID}/abandon", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			rotID := chi.URLParam(req, "rotationID")
+			err := tenantStore.AbandonRotation(req.Context(), wsID, rotID)
+			switch {
+			case errors.Is(err, tenant.ErrRotationNotFound):
+				writeJSONErr(w, http.StatusNotFound, "rotation not found")
+				return
+			case errors.Is(err, tenant.ErrRotationClosed):
+				writeJSONErr(w, http.StatusConflict, err.Error())
+				return
+			case err != nil:
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			logger.Info("auth: key rotation abandoned",
+				slog.String("workspace_id", wsID), slog.String("rotation_id", rotID))
+			writeJSONOK(w, http.StatusOK, map[string]any{
+				"rotation_id": rotID,
+				"outcome":     "abandoned",
+				"detail":      "the NEW key is revoked; the key the holder is using is untouched",
+			})
+		})
+
 		authed.Get("/v1/workspaces/{wsID}/api-keys/{keyID}/usage", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			keyID := chi.URLParam(req, "keyID")
