@@ -848,6 +848,21 @@ type Config struct {
 	BillingSuccessURL string
 	BillingCancelURL  string
 
+	// BillingSubscriptionPriceID is the Stripe Price the Model 2 subscription bills
+	// (W4.6.1 step 1). Env: LENS_BILLING_SUBSCRIPTION_PRICE_ID, default EMPTY.
+	//
+	// ⚠ EMPTY IS A REAL STATE, NOT A MISSING CONFIG, and it is the default on purpose:
+	// billing (one-off LXC top-ups) and subscriptions are separate products, and a
+	// deployment that sells top-ups must not start offering a subscription because it
+	// set a Stripe key. With this empty the subscription routes are not registered and
+	// CreateSubscriptionCheckout refuses with billing.ErrNoSubscriptionPrice — it never
+	// calls Stripe with an empty price id.
+	//
+	// ⚠ NOT A SECRET, and not the FEE. `price_...` is a public identifier; the amount
+	// lives in Stripe. W4.6.1: "F AND D ARE NICOLAI'S" — this is how the number stays
+	// out of the codebase entirely rather than being written down in two places.
+	BillingSubscriptionPriceID string
+
 	// ROIIncludeEngineerBreakdown gates the per-engineer (author) cost
 	// section of the executive ROI report (Upgrade 24). OFF by default:
 	// attributing cost to named people is SENSITIVE and easily misread as a
@@ -1119,6 +1134,7 @@ func Load() (*Config, error) {
 		OperatorAlertWebhookSecret: os.Getenv("LENS_OPERATOR_ALERT_WEBHOOK_SECRET"),
 		TrackWebhookURL:            os.Getenv("LENS_TRACK_WEBHOOK_URL"),
 		TrackWebhookSecret:         os.Getenv("LENS_TRACK_WEBHOOK_SECRET"),
+		BillingSubscriptionPriceID: getEnv("LENS_BILLING_SUBSCRIPTION_PRICE_ID", ""),
 		BillingSuccessURL:          getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
 		BillingCancelURL:           getEnv("LENS_BILLING_CANCEL_URL", "https://app.talyvor.com/billing/cancel"),
 
