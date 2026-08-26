@@ -104,6 +104,7 @@ import (
 	"github.com/talyvor/lens/internal/royaltyhaircut"
 	"github.com/talyvor/lens/internal/safehttp"
 	"github.com/talyvor/lens/internal/session"
+	"github.com/talyvor/lens/internal/sessionkey"
 	"github.com/talyvor/lens/internal/shadowmint"
 	"github.com/talyvor/lens/internal/status"
 	"github.com/talyvor/lens/internal/templates"
@@ -736,6 +737,22 @@ func run() error {
 	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), jwtKey, keyStore, tenantStore).
 		WithMintKey(os.Getenv("LENS_MINT_KEY")).
 		WithOperatorReadKey(os.Getenv("LENS_OPERATOR_READ_KEY"))
+
+	// W4.6.1 step 4 — session-scoped keys, the credential a browser chat holds instead of a
+	// workspace key.
+	//
+	// ⚠ ATTACHED ONLY WHEN THE FLAG IS ON. Unset ⇒ authManager.sessionKeys stays nil, every
+	// tlv_sk_ bearer is refused by the same branch that would have admitted it, and the three
+	// routes below are never registered — a chi 404 rather than a route that exists and refuses.
+	// A deployment that does not opt in is byte-for-byte unchanged by this feature.
+	var sessionKeyStore *sessionkey.Store
+	if cfg.SessionKeysEnabled {
+		sessionKeyStore = sessionkey.NewStore(pool)
+		authManager = authManager.WithSessionKeys(sessionKeyStore)
+		logger.Info("session-scoped keys ENABLED",
+			slog.Duration("ttl_ceiling", cfg.SessionKeyTTL),
+			slog.String("note", "a browser chat holds a tlv_sk_ credential scoped to {proxy} and to its own sign-in, instead of a workspace API key"))
+	}
 
 	// requireAdmin (admin-gate) is now a package-level helper in
 	// authz_admin_handlers.go — it takes authManager explicitly so it is
@@ -2195,6 +2212,12 @@ func run() error {
 		// Extracted to newAuthTokenMintHandler (auth_token_mint_handler.go) so the
 		// admin-scoping invariant is provable over HTTP; behavior is unchanged.
 		authed.Post("/v1/auth/token", newAuthTokenMintHandler(authManager))
+
+		// W4.6.1 step 4 — session-scoped keys. Registered ONLY when configured, so an
+		// unconfigured deployment 404s these paths rather than serving a route that refuses.
+		if sessionKeyStore != nil {
+			mountSessionKeyRoutes(authed, sessionKeyStore, cfg.SessionKeyTTL)
+		}
 
 		// Admin-only: approve the LENS->LXC conversion rate. The
 		// admin can ONLY approve the algorithm's output (within

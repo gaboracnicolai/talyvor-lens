@@ -21,6 +21,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/talyvor/lens/internal/sessionkey"
 	"github.com/talyvor/lens/internal/tenant"
 )
 
@@ -106,7 +107,13 @@ const (
 	// each other: "which credential read every tenant's finances" is exactly the question an
 	// incident asks, and a shared method name cannot answer it.
 	MethodOperatorReadKey = "operator_read_key"
-	MethodLegacyHeader    = "legacy_header"
+	// MethodSessionKey is the browser-chat session credential (internal/sessionkey). Named
+	// distinctly from MethodWorkspaceKey for the reason the mint/operator methods are named
+	// distinctly from each other: "which credential spent this workspace's balance" is exactly the
+	// question an incident asks, and a shared method name cannot answer it. ⚠ IT IS ALSO THE SIGNAL
+	// THE MINT ROUTE REFUSES ON — a session key must not be able to mint another session key.
+	MethodSessionKey   = "session_key"
+	MethodLegacyHeader = "legacy_header"
 )
 
 // ─── errors ──────────────────────────────────────
@@ -139,6 +146,14 @@ type AuthContext struct {
 	Scopes      []string `json:"scopes"`
 	AuthMethod  string   `json:"auth_method"`
 	IsAdmin     bool     `json:"is_admin"`
+	// ExpiresAt is when the credential itself stops being valid. Populated for the two shapes that
+	// HAVE a lifetime — JWTs (from the exp claim) and session keys — and ZERO for the static
+	// admin/mint/operator keys, which have none.
+	//
+	// ⚠ IT EXISTS SO A SESSION KEY CAN NEVER OUTLIVE THE SESSION THAT ASKED FOR IT. The mint route
+	// clamps the new key's TTL to the caller's remaining life, and it can only do that if the
+	// caller's expiry reaches the handler. Without it the clamp would be an intention.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	// APIKeyID is the scoped API key's ID for API-key (workspace-key) auth; EMPTY for JWT/admin/other auth
 	// methods. Consumed by the F4 allocator (C.1) to key the per-agent LXC sub-budget on the scoped key —
 	// so an EMPTY APIKeyID (JWT/admin) structurally cannot enter the agent-allocation path.
@@ -239,6 +254,7 @@ type Manager struct {
 	publicKey       *ecdsa.PublicKey
 	keyStore        *KeyStore
 	tenantStore     *tenant.Store
+	sessionKeys     sessionKeyValidator
 
 	mu       sync.RWMutex
 	jwtCache map[string]*jwtCacheEntry
@@ -258,6 +274,18 @@ func (m *Manager) WithMintKey(k string) *Manager { m.mintKey = k; return m }
 // Optional: unset ⇒ the credential does not exist, every admin read stays reachable only by the
 // global key, and a deployment that never sets it is byte-for-byte unchanged by this feature.
 func (m *Manager) WithOperatorReadKey(k string) *Manager { m.operatorReadKey = k; return m }
+
+// sessionKeyValidator is the narrow slice of *sessionkey.Store this package needs. An interface
+// rather than the concrete type so auth does not force every consumer of Manager to construct a
+// session-key store, and so the nil case ("this deployment mints no session keys") is expressible.
+type sessionKeyValidator interface {
+	Validate(ctx context.Context, raw string) (*sessionkey.SessionKey, error)
+}
+
+// WithSessionKeys attaches the browser-chat session credential store (W4.6.1 step 4). Optional:
+// unset ⇒ the credential shape does not exist, every tlv_sk_ bearer is refused, and a deployment
+// that never calls this is byte-for-byte unchanged by the feature.
+func (m *Manager) WithSessionKeys(v sessionKeyValidator) *Manager { m.sessionKeys = v; return m }
 
 func NewManager(globalKey string, privateKey *ecdsa.PrivateKey, keyStore *KeyStore, tenantStore *tenant.Store) *Manager {
 	var pub *ecdsa.PublicKey
@@ -323,12 +351,45 @@ func (m *Manager) Authenticate(r *http.Request) (*AuthContext, error) {
 		if err != nil {
 			return nil, ErrInvalidAuth
 		}
-		return &AuthContext{
+		actx := &AuthContext{
 			WorkspaceID: claims.WorkspaceID,
 			UserID:      claims.UserID,
 			Scopes:      claims.Scopes,
 			AuthMethod:  MethodJWT,
 			IsAdmin:     false,
+		}
+		if claims.ExpiresAt != nil {
+			actx.ExpiresAt = claims.ExpiresAt.Time
+		}
+		return actx, nil
+	}
+
+	// Session key (W4.6.1 step 4) — the browser-chat credential.
+	//
+	// ⚠ THE SCOPE SET IS THIS LITERAL AND NOTHING ELSE. internal/sessionkey has no scopes column,
+	// so there is no row, no request body and no caller that can widen it. That is the direct
+	// lesson of docs/model2-session-credentials.md, where the neighbouring credential takes its
+	// scopes from a request body through a route with no gate — a credential minting a credential
+	// carrying scopes it does not itself hold. A session key cannot repeat that shape.
+	//
+	// ⚠ IsAdmin IS FALSE AND APIKeyID IS EMPTY, both load-bearing: IsAdmin short-circuits HasScope
+	// (it would satisfy every gate in the binary), and APIKeyID keys the F4 per-agent LXC
+	// sub-budget allocator, which a credential that dies in an hour must not enter.
+	//
+	// Ordered BEFORE the workspace-key branch only for readability — the prefixes are disjoint, and
+	// TestSessionKeyPrefixIsDisjointFromTheWorkspaceKeyPrefix is what keeps that true.
+	if m.sessionKeys != nil && strings.HasPrefix(raw, sessionkey.KeyPrefix) {
+		sk, err := m.sessionKeys.Validate(r.Context(), raw)
+		if err != nil {
+			return nil, ErrInvalidAuth
+		}
+		return &AuthContext{
+			WorkspaceID: sk.WorkspaceID,
+			UserID:      sk.UserID,
+			Scopes:      []string{ScopeProxy},
+			AuthMethod:  MethodSessionKey,
+			IsAdmin:     false,
+			ExpiresAt:   sk.ExpiresAt,
 		}, nil
 	}
 

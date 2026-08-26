@@ -120,3 +120,66 @@ short-circuited and never ran. Denying every caller in `workspaceAuthorized` lef
 green. `main.go` uses `r.Group(...)`, an inline mux whose middleware wraps the endpoint and therefore
 sees populated params; the fixture now does the same. A fixture more permissive than the product is
 how a proof of an authz gap ends up proving nothing.
+
+---
+
+# Step 4 as built — session-scoped keys
+
+Shipped in the commit that adds `internal/sessionkey`, `migrations/0122_session_keys.sql` and
+`cmd/lens/session_key_handler.go`. **Off by default**: `LENS_SESSION_KEYS_ENABLED` is false, the
+three routes are not registered, and every `tlv_sk_` bearer is refused — a deployment that does not
+opt in is byte-for-byte unchanged.
+
+## The credential
+
+| | workspace API key (what a session can mint today) | **session key** |
+|---|---|---|
+| lifetime | none unless the caller asks | **`expires_at` is `NOT NULL` in the schema** |
+| scopes | chosen by the caller, stored on the row | **no scopes column exists**; `{proxy}` is a constant in `internal/auth` |
+| blast radius | the whole workspace | the `(workspace, user)` pair |
+| survives sign-out | yes | no — `DELETE /v1/auth/session-keys` is what sign-out calls |
+| can mint another | yes | **no** — only a browser session JWT may mint |
+| revocation | `DELETE` a row | `DELETE` a row, never cached, effective on the next request |
+
+## The three bounds on its life
+
+`min(what the caller asked for, LENS_SESSION_KEY_TTL, the caller's own remaining sign-in)`.
+
+The third is the one that makes it a session key, and it is why `auth.AuthContext` gained
+`ExpiresAt`. It is applied in one place — the handler — because a clamp spread over two layers is a
+clamp nobody can state the value of. `MaxSessionKeyTTL` (12h) is deliberately shorter than
+`auth.DefaultTokenTTL` (24h): a credential derived from a session must not have a longer maximum
+than the session, or the derived credential is the wider one and the exercise inverts. A configured
+value above the ceiling is **refused at startup, not clamped** — an operator who writes `720h` and
+reads it back as `720h` must not get 12h.
+
+## What it deliberately does NOT do
+
+**No per-session spend bound.** The item asks whether a session key should carry one. It does not,
+and the column is absent rather than present-and-unread. A column nothing reads is a claim that a
+bound exists when it does not — the same shape as an inert scope. Wiring a bound means changing the
+LXC admission gate, which is the **serving** path; step 2's own note says wiring a money gate as a
+side effect of building a ledger is how a serving regression ships, and that argument applies here
+unchanged. **That is the natural step 4b, and it is unclaimed.**
+
+**It does not close the escalation measured above.** A session can still mint a workspace-wide
+proxy key through the Keys screen. Step 4 means the *chat* never needs to — it does not remove the
+option. Closing it is still the decision stated above.
+
+## Controls
+
+`w461-sessionkey-controls-k7v3.py` — **12/12 CAUGHT**. Every test was written red-first and went
+green on implementation; that is the right order and it still does not prove an assertion has teeth,
+so each behaviour gets a mutation that must turn a named test red.
+
+⚠ Three controls first read as MISSED and none of them was a blind guard: the **companion** test
+shared the mutation's blast radius, so a correct red was accompanied by a companion that could not
+possibly stay green (adding `ScopeAdmin` to the session scope set *should* make the "refuses admin"
+test fail). The rule the repair encodes: **a must-stay-green companion has to be a test the mutation
+cannot touch.** The same mistake occurred once in `w461-sessionreach-controls-k7v3.py` (C4), which is
+why it is written down here rather than only fixed.
+
+⚠ D12 is worth reading for what it accidentally proved. Deleting the line that copies the JWT's `exp`
+onto the AuthContext does not mint an unbounded key — the handler returns
+`403 forbidden: the calling session has no remaining life`. The clamp **fails closed**, which is
+what the code claimed and what the control confirmed.

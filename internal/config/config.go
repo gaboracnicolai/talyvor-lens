@@ -12,6 +12,27 @@ import (
 	"time"
 )
 
+// ── W4.6.1 step 4: session-key lifetimes ───────────────────────────────────────
+
+const (
+	// DefaultSessionKeyTTL is how long a minted session key lives when the operator sets no
+	// ceiling and the caller asks for nothing. One hour: long enough that a chat is not
+	// interrupted, short enough that a key leaked from a browser is stale before it is useful.
+	//
+	// ⚠ IT IS NOT THE ONLY BOUND, and it is the least important of the three. The binding one is
+	// the caller's own remaining session life — a session key can never outlive the sign-in that
+	// created it, whatever this says.
+	DefaultSessionKeyTTL = time.Hour
+
+	// MaxSessionKeyTTL is the hard ceiling in CODE. A configured value above it is REFUSED at
+	// load rather than clamped, so a config file cannot disagree with the running process.
+	//
+	// 12 hours is chosen to be shorter than auth.DefaultTokenTTL (24h) — a credential derived
+	// from a session must not have a longer maximum than the session itself, or the derived
+	// credential is the wider one and the whole exercise is inverted.
+	MaxSessionKeyTTL = 12 * time.Hour
+)
+
 type Config struct {
 	ListenAddr      string
 	RedisURL        string
@@ -879,6 +900,28 @@ type Config struct {
 	// See docs/model2-allowance-economics.md for what the measured hit rate
 	// requires of the pair — this value is not a recommendation.
 	SubscriptionAllowanceULXC int64
+
+	// SessionKeysEnabled gates W4.6.1 step 4 — SESSION-SCOPED KEYS, the credential a browser chat
+	// holds instead of a workspace key. Env: LENS_SESSION_KEYS_ENABLED. DEFAULT FALSE.
+	//
+	// ⚠ OFF MEANS THE ROUTES ARE NEVER REGISTERED — a chi 404, not a route that exists and refuses.
+	// This is a new AUTHZ surface (a credential that mints a credential), so a deployment that does
+	// not opt in is byte-for-byte unchanged by the feature. Same posture as the H5 flags.
+	SessionKeysEnabled bool
+
+	// SessionKeyTTL is the CEILING on how long a minted session key may live. Env:
+	// LENS_SESSION_KEY_TTL (Go duration, e.g. 45m). Default DefaultSessionKeyTTL.
+	//
+	// ⚠ IT IS A CEILING, NOT THE LIFETIME. The actual TTL is
+	// min(what the caller asked for, THIS, the caller's OWN remaining session life) — the third
+	// bound is the one that makes it a session key, and it is applied in
+	// cmd/lens/session_key_handler.go where the caller's expiry is knowable.
+	//
+	// ⚠ A VALUE ABOVE MaxSessionKeyTTL IS REFUSED AT LOAD, not clamped. Clamping would let an
+	// operator configure 30 days, read the config back as 30 days, and get 12 hours — a
+	// disagreement between what the file says and what the process does is exactly the class of
+	// defect this repo keeps finding. A MALFORMED value is refused for the same reason.
+	SessionKeyTTL time.Duration
 
 	// ROIIncludeEngineerBreakdown gates the per-engineer (author) cost
 	// section of the executive ROI report (Upgrade 24). OFF by default:
@@ -1954,6 +1997,22 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_SUBSCRIPTION_ALLOWANCE_ULXC must be a non-negative integer (µLXC), got %q", v)
 		}
 		c.SubscriptionAllowanceULXC = n
+	}
+
+	// W4.6.1 step 4 — session-scoped keys. OFF unless explicitly enabled.
+	c.SessionKeysEnabled = parseBoolEnv("LENS_SESSION_KEYS_ENABLED")
+	c.SessionKeyTTL = DefaultSessionKeyTTL
+	if v := os.Getenv("LENS_SESSION_KEY_TTL"); v != "" {
+		d, err := time.ParseDuration(v) // Go duration units (h/m/s); e.g. 45m
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("config: LENS_SESSION_KEY_TTL must be a positive Go duration (e.g. 45m), got %q", v)
+		}
+		if d > MaxSessionKeyTTL {
+			// REFUSED, not clamped — see the field comment. An operator who reads back 30 days and
+			// gets 12 hours has a config file that lies about the process.
+			return nil, fmt.Errorf("config: LENS_SESSION_KEY_TTL %v exceeds the %v ceiling; a session key is scoped to a sign-in, not to a month", d, MaxSessionKeyTTL)
+		}
+		c.SessionKeyTTL = d
 	}
 
 	c.EconomyEnabled = true
