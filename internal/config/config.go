@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/talyvor/lens/internal/envelope"
 )
 
 // ── W4.6.1 step 4: session-key lifetimes ───────────────────────────────────────
@@ -136,6 +138,20 @@ type Config struct {
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	AWSSessionToken    string
+
+	// ProviderSecretKeyring is the envelope-encryption keyring that wraps CUSTOMER provider
+	// credentials (BYOK, W6.10). Supplied via LENS_PROVIDER_SECRET_KEK as one or more base64
+	// 32-byte keys separated by commas, PRIMARY FIRST (`openssl rand -base64 32`).
+	//
+	// OPTIONAL, and the posture is copied from talyvor-track's TRACK_INTEGRATION_ENCRYPTION_KEY:
+	// unset ⇒ nil ⇒ provider-secret custody is DISABLED and there is no plaintext fallback (Lens
+	// still boots); set ⇒ every key validated to exactly 32 decoded bytes AT BOOT, so a wrong
+	// length is fail-loud at startup rather than a broken-crypto surprise at the first customer
+	// credential. It holds a *Keyring, never key material — see internal/envelope, and TestK5.
+	//
+	// ⚠ NOTHING MAY PERSIST A PROVIDER SECRET WHILE THIS IS NIL. W6.4/W6.8 build the store; this
+	// is the switch they must gate on.
+	ProviderSecretKeyring *envelope.Keyring
 
 	// OpenAI-compatible providers: Mistral, Groq, vLLM. All optional.
 	// Empty mistral/groq key → 503 on those routes. Empty VLLMBaseURL
@@ -2096,8 +2112,26 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("LENS_POVI_MINTING_ENABLED=true requires LENS_POVI_CHALLENGE_RATE > 0: provisional receipt minting credits spendable LENS and is deterred ONLY by random challenge-and-slash (P(challenge) × slash > gain); a zero rate sets P(challenge)=0, removing the only deterrent so a staked node can mint LENS against fabricated, never-challenged traces")
 	}
 
+	// Provider-secret KEK — OPTIONAL, but if provided every listed key must decode to exactly 32
+	// bytes and no key may repeat. Fail-LOUD at boot on a misconfigured ring, never a broken-crypto
+	// surprise at first use; absent ⇒ ProviderSecretKeyring stays nil ⇒ custody is disabled with no
+	// plaintext fallback. Mirrors talyvor-track's TRACK_INTEGRATION_ENCRYPTION_KEY posture, which is
+	// the half of that pointer W6.10's premise audit found worth copying.
+	if v := os.Getenv("LENS_PROVIDER_SECRET_KEK"); v != "" {
+		ring, err := envelope.ParseKeyring(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LENS_PROVIDER_SECRET_KEK (comma-separated base64 keys, primary first, each exactly %d bytes — `openssl rand -base64 %d`): %w", envelope.KEKLen, envelope.KEKLen, err)
+		}
+		c.ProviderSecretKeyring = ring
+	}
+
 	return c, nil
 }
+
+// ProviderSecretsEnabled reports whether Lens may take custody of a customer's provider credential.
+// It is false unless LENS_PROVIDER_SECRET_KEK is set and valid — W6.10's decision is that BYOK is
+// meaningless without the envelope, so this is the single gate every custody path must consult.
+func (c *Config) ProviderSecretsEnabled() bool { return c.ProviderSecretKeyring != nil }
 
 var ErrMissingEnv = errors.New("missing required environment variables")
 

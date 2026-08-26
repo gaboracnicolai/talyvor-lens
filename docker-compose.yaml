@@ -228,6 +228,15 @@ services:
       - LENS_STRIPE_WEBHOOK_SECRET=${LENS_STRIPE_WEBHOOK_SECRET:-}
       - LENS_BILLING_SUCCESS_URL=${LENS_BILLING_SUCCESS_URL:-}
       - LENS_BILLING_CANCEL_URL=${LENS_BILLING_CANCEL_URL:-}
+      # Provider-secret envelope KEK (W6.10). Comma-separated base64 32-byte keys, PRIMARY FIRST
+      # (`openssl rand -base64 32`). Empty ⇒ Lens boots with provider-secret custody DISABLED and no
+      # plaintext fallback; a wrong length is fail-loud at startup. Declared here because the trap
+      # this file keeps setting is a variable the compose stack never forwards: `.env` is read only
+      # for ${VAR} substitution INSIDE this file, so an operator who sets a KEK in .env and nowhere
+      # else gets a Lens that silently cannot hold a customer credential.
+      # ⚠ LOSING THIS KEY MAKES EVERY STORED PROVIDER SECRET UNRECOVERABLE — see
+      # docs/provider-secret-envelope.md before rotating.
+      - LENS_PROVIDER_SECRET_KEK=${LENS_PROVIDER_SECRET_KEK:-}
       # Pattern mining/earning (runbook Trap 5 — "opt-in succeeds, earning silently zero").
       # These were only ever passed by a gitignored docker-compose.override.yml, so a fresh
       # clone could never enable them. `:-` is safe for BOTH defaults: MINING is parseBoolEnv
