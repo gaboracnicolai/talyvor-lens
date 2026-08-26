@@ -46,11 +46,13 @@ type d2qResult struct {
 	// VarScores is this pair's B-vs-variant score, one per derived variant, in derivation order.
 	//
 	// ⚠ IT LIVES ON THE RESULT BECAUSE IT USED TO LIVE IN A PACKAGE-LEVEL MAP KEYED BY Pair.Name,
-	// and pair names are unique only WITHIN a corpus. poolsafety has one collision today —
-	// "notice-direction" is in both ConsumerDangerPairs and ConsumerUnrelatedPairs, the two lanes
-	// W2.7 adds — so the second corpus measured silently overwrote the first and BestAtN reported
-	// one lane's variants under the other lane's pair. Carrying the scores with the result makes
-	// that unrepresentable rather than merely fixed.
+	// and a pair name is a label, not a key. poolsafety had one collision — "notice-direction"
+	// named a landlord pair in ConsumerDangerPairs and an employment pair in
+	// ConsumerUnrelatedPairs, both of which the CONSUMER danger lane unions — so the second corpus
+	// measured silently overwrote the first and BestAtN reported one lane's variants under the
+	// other lane's pair. That pair has since been renamed and poolsafety now guards uniqueness
+	// within a lane, but carrying the scores with the result is what makes the class of defect
+	// unrepresentable rather than merely absent today.
 	VarScores []float64
 }
 

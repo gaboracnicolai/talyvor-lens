@@ -118,17 +118,10 @@ func runCanonCheck() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
 	defer cancel()
 
-	lanes := []canonLane{
-		{
-			name:     "ENGINEERING",
-			rephrase: poolsafety.EngineeringRephrasePairs(),
-			danger:   append(append([]poolsafety.RephrasePair{}, poolsafety.EngineeringDangerPairs()...), poolsafety.HeldOutDangerPairs()...),
-		},
-		{
-			name:     "CONSUMER",
-			rephrase: append(append([]poolsafety.RephrasePair{}, poolsafety.RephrasePairs()...), poolsafety.ConsumerRephrasePairs()...),
-			danger:   append(append([]poolsafety.RephrasePair{}, poolsafety.ConsumerDangerPairs()...), poolsafety.ConsumerUnrelatedPairs()...),
-		},
+	// The population is poolsafety.ByTraffic()'s, not a list written here — see cmd/hitrate.
+	lanes := make([]canonLane, 0, 2)
+	for _, tl := range poolsafety.ByTraffic() {
+		lanes = append(lanes, canonLane{name: tl.Traffic, rephrase: tl.Rephrase, danger: tl.Danger})
 	}
 
 	// Every distinct prompt across every corpus, canonicalised TWICE.
@@ -341,10 +334,7 @@ func reportLane(ln canonLane, byPrompt map[string]canonRun) {
 	// ⚠ NAMED BECAUSE W2.6 NAMES IT: "notice-direction IS THE TEST THAT MATTERS.
 	// landlord-gives-notice and tenant-gives-notice MUST produce different canonical forms. If
 	// they collapse, the approach fails and you say so."
-	for _, p := range append(append([]poolsafety.RephrasePair{}, ln.danger...), ln.rephrase...) {
-		if p.Name != "notice-direction" && p.Name != "landlord-tenant" {
-			continue
-		}
+	for _, p := range namedTestPairs(append(append([]poolsafety.RephrasePair{}, ln.danger...), ln.rephrase...)) {
 		ra, rb := byPrompt[p.A], byPrompt[p.B]
 		fmt.Printf("\n  ⚠ %s — THE NAMED TEST\n", p.Name)
 		fmt.Printf("      A: %q\n         -> %q\n", p.A, ra.first.Canonical)
@@ -359,6 +349,32 @@ func reportLane(ln canonLane, byPrompt map[string]canonRun) {
 			fmt.Printf("      VERDICT: distinct\n")
 		}
 	}
+}
+
+// namedTests are the pairs W2.6 singled out as the ones that decide the approach.
+//
+// ⚠ IT WAS A BY-NAME SELECTOR OVER A POPULATION WHERE ONE NAME MATCHED TWO PAIRS AND THE OTHER
+// MATCHED NONE. "landlord-tenant" appears exactly once in this repository — in the selector — and
+// names no pair in any corpus, so half of "THE NAMED TEST" could never run. "notice-direction"
+// named a landlord pair in ConsumerDangerPairs AND an employment pair in ConsumerUnrelatedPairs,
+// which this lane unions, so the other half ran twice and printed a verdict for a pair W2.6 never
+// named under the heading of the one it did.
+//
+// Both directions are silent: an over-match prints an extra block that reads like the real one, and
+// an under-match prints nothing at all, which is indistinguishable from a section that was not
+// reached. namedTestPairs is guarded so each name resolves to exactly one pair.
+var namedTests = []string{"notice-direction"}
+
+func namedTestPairs(pairs []poolsafety.RephrasePair) []poolsafety.RephrasePair {
+	var out []poolsafety.RephrasePair
+	for _, want := range namedTests {
+		for _, p := range pairs {
+			if p.Name == want {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 // reportCost measures the numerator and the denominator of the ratio rather than restating the

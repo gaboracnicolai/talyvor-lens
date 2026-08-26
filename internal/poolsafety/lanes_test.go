@@ -113,3 +113,95 @@ func TestUnion_CopiesRatherThanAppendingIntoItsInput(t *testing.T) {
 			"returned a view of its caller's array, not a copy", base[0].Name, "first")
 	}
 }
+
+// ⚠ A NAME IS HOW A PAIR IS IDENTIFIED IN EVERY REPORT THIS REPO PRINTS, AND ONE NAME IS USED BY
+// TWO DIFFERENT PAIRS.
+//
+// "notice-direction" is a landlord-notice pair in ConsumerDangerPairs AND an employment-notice
+// pair in ConsumerUnrelatedPairs. The CONSUMER danger lane unions those two corpora, so one lane
+// holds two different pairs under one label.
+//
+// It is not cosmetic. cmd/lens canoncheck selects W2.6's "THE NAMED TEST" by that string over
+// exactly this union, with no break — so it runs the named test twice, once on a pair W2.6 never
+// named. And cmd/lens d2qcheck kept per-variant scores in a map keyed by the name, which is how
+// one lane's measurement reached another lane's row.
+func TestLanes_PairNamesAreUniqueWithinALane(t *testing.T) {
+	for _, l := range Lanes() {
+		seen := map[string]RephrasePair{}
+		for _, p := range l.Pairs {
+			if prev, dup := seen[p.Name]; dup {
+				t.Errorf("%s: two different pairs are both named %q\n  %q → %q\n  %q → %q",
+					l.Name(), p.Name, prev.A, prev.B, p.A, p.B)
+			}
+			seen[p.Name] = p
+		}
+	}
+}
+
+// ⚠ THE CONSUMER DANGER LANE COUNTS ONE PAIR TWICE, AND EVERY CONSUMER PRECISION FIGURE THIS
+// PROJECT HAS PUBLISHED IS A FRACTION OF THE INFLATED NUMBER.
+//
+// ConsumerDangerPairs holds {"dose-adult-child", "How much paracetamol can I take?", "How much
+// paracetamol can a child take?"} and ConsumerUnrelatedPairs holds the byte-identical pair under
+// the name "dose-who". The lane unions them, so a population reported as 42 is 41 DISTINCT pairs
+// with one counted twice — and that single danger case carries double weight in W2.1's, W2.5's,
+// W2.6's and W2.7's false-serve rates.
+//
+// ⚠ IT IS PINNED, NOT DELETED. Removing a fixture moves a denominator four published tables are
+// stated over; that is a decision about the corpus, not a measurement, and W2.7's instruction is
+// to measure and report. Pinning both counts puts the discrepancy on the record, stops it growing
+// unnoticed, and stops it being quietly absorbed by whoever edits a corpus next.
+func TestLanes_RawAndDistinctPopulationsAreBothPinned(t *testing.T) {
+	want := map[string][2]int{ // lane → {raw, distinct}
+		"ENGINEERING rephrase": {30, 30},
+		"ENGINEERING danger":   {44, 44},
+		"CONSUMER rephrase":    {38, 38},
+		// ⚠ 42 ROWS, 41 DISTINCT PAIRS. dose-adult-child (ConsumerDangerPairs) and dose-who
+		// (ConsumerUnrelatedPairs) are byte-identical, and this lane unions both corpora.
+		"CONSUMER danger": {42, 41},
+	}
+	for _, l := range Lanes() {
+		distinct := map[string]bool{}
+		for _, p := range l.Pairs {
+			distinct[p.A+"\x00"+p.B] = true
+		}
+		w, ok := want[l.Name()]
+		if !ok {
+			t.Errorf("lane %q is not pinned here — a new lane's population must be stated before "+
+				"any figure is published over it", l.Name())
+			continue
+		}
+		if len(l.Pairs) != w[0] || len(distinct) != w[1] {
+			t.Errorf("%s = %d pairs / %d distinct, want %d / %d — if a corpus gained or lost a pair, "+
+				"or gained a duplicate, every published fraction over this lane needs re-measuring, "+
+				"not re-labelling", l.Name(), len(l.Pairs), len(distinct), w[0], w[1])
+		}
+	}
+}
+
+// ByTraffic is what three programs now build their sections from, so a lane that arrives empty
+// there is a whole population silently dropped from a printed report — the omission direction
+// again, one level up from Lanes().
+func TestByTraffic_EveryTrafficHasBothSidesAndNothingIsLost(t *testing.T) {
+	got := ByTraffic()
+	if len(got) != 2 {
+		t.Fatalf("ByTraffic returned %d entries, want 2", len(got))
+	}
+	total := 0
+	for _, tl := range got {
+		if len(tl.Rephrase) == 0 || len(tl.Danger) == 0 {
+			t.Errorf("%s has %d rephrase and %d danger pairs — an empty side prints a section with "+
+				"no rows, which reads as 'nothing to report' rather than 'nothing was measured'",
+				tl.Traffic, len(tl.Rephrase), len(tl.Danger))
+		}
+		total += len(tl.Rephrase) + len(tl.Danger)
+	}
+	want := 0
+	for _, l := range Lanes() {
+		want += len(l.Pairs)
+	}
+	if total != want {
+		t.Errorf("ByTraffic carries %d pairs, Lanes() defines %d — the grouping dropped %d",
+			total, want, want-total)
+	}
+}
