@@ -213,12 +213,25 @@ func TestDecodeOverrides_AliasKeyedOverrideDoesNotTouchTheCanonicalEntry(t *test
 // #449's RULE MUST SURVIVE THE MERGE: a KNOWN model repriced to nothing is still unpriced.
 //
 // This is the regression that the merge could plausibly reintroduce — if the old rates were carried
-// forward, an operator who mistyped input_per_1m would silently keep billing the old price under an
-// `exact` provenance instead of falling to the loud floor. It reds if the price fields ever start
+// forward, an operator who priced a model at nothing would silently keep billing the old price under
+// an `exact` provenance instead of falling to the loud floor. It reds if the price fields ever start
 // surviving a decode.
+//
+// ⚠ THE FIXTURE WAS RE-ANCHORED, THE RULE WAS NOT WEAKENED (override_unknown_field_test.go).
+// This test used to reach the zero-rate state through a camelCase TYPO
+// (`{"id":"gpt-4o","inputPer1M":3.75,"outputPer1M":15.00}`), which DecodeOverrides now refuses
+// outright with DisallowUnknownFields — so the typo never gets far enough to exercise #449's rule,
+// and the old fixture would have failed at the decode instead of testing anything.
+//
+// The rule itself is unchanged and is exercised here through the document that still REACHES it:
+// an explicit reprice to zero. That is now the only way to register a known model with no price, so
+// it is the right fixture — and it is a stronger one, because it tests the rule on a document the
+// operator MEANT rather than on one they fat-fingered. The typo's own behaviour (refused, naming
+// the field) is asserted in override_unknown_field_test.go; the two are complementary, and the
+// change of trigger is recorded here rather than left for someone to rediscover.
 func TestDecodeOverrides_MistypedRepriceOfAKnownModelIsStillUnpriced(t *testing.T) {
 	r := newRepriceReg()
-	overrides, err := r.DecodeOverrides([]byte(`[{"id":"gpt-4o","inputPer1M":3.75,"outputPer1M":15.00}]`))
+	overrides, err := r.DecodeOverrides([]byte(`[{"id":"gpt-4o","input_per_1m":0,"output_per_1m":0}]`))
 	if err != nil {
 		t.Fatalf("DecodeOverrides: %v", err)
 	}
@@ -226,13 +239,13 @@ func TestDecodeOverrides_MistypedRepriceOfAKnownModelIsStillUnpriced(t *testing.
 
 	rates, prov := r.ResolveRates("gpt-4o", PurposeCharge)
 	if prov != ProvenanceFallback {
-		t.Errorf("provenance = %v, want fallback — a camelCase typo registers no price and must not report one as published", prov)
+		t.Errorf("provenance = %v, want fallback — a model priced at nothing registers no price and must not report one as published", prov)
 	}
 	if rates.InputPer1M <= 0 || rates.OutputPer1M <= 0 {
 		t.Errorf("ResolveRates returned a spendable zero %+v", rates)
 	}
 	// The facts are still there — that is the point of the merge — but they do not make it priced.
 	if m, _ := r.Get("gpt-4o"); !m.Capabilities.Vision {
-		t.Error("the mistyped reprice also withdrew vision")
+		t.Error("the zero reprice also withdrew vision")
 	}
 }
