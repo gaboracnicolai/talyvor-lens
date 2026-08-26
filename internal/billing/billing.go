@@ -86,6 +86,22 @@ type Service struct {
 	allowList     map[int64]struct{}
 	wsExists      func(ctx context.Context, workspaceID string) (bool, error)
 	log           *slog.Logger
+
+	// MODEL 2 (W4.6.1 step 1). Both are OPTIONAL: a deployment with no subscription
+	// price configured serves the one-off top-up surface exactly as before, and
+	// CreateSubscriptionCheckout refuses with ErrNoSubscriptionPrice rather than
+	// calling Stripe with an empty price. See subscriptions.go.
+	subStripe subscriptionAPI
+	subPrice  string
+}
+
+// WithSubscriptions enables the subscription surface. Separate from New so every
+// existing caller and test double is unchanged — a Service without it is exactly the
+// Service that shipped before, which is what keeps this merge to one feature.
+func (s *Service) WithSubscriptions(api subscriptionAPI, priceID string) *Service {
+	s.subStripe = api
+	s.subPrice = priceID
+	return s
 }
 
 // New builds a Service. wsExists defaults to a workspaces-table lookup.
@@ -218,6 +234,11 @@ func (s *Service) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		s.handleRefund(w, r.Context(), &event)
 	case "checkout.session.async_payment_failed":
 		w.WriteHeader(http.StatusOK) // no money moved → ack, no action
+	// MODEL 2 (W4.6.1 step 1) — the recurring half. See subscriptions.go.
+	case "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted":
+		s.handleSubscription(w, r.Context(), &event)
+	case "invoice.payment_failed":
+		s.handleInvoicePaymentFailed(w, r.Context(), &event)
 	default:
 		w.WriteHeader(http.StatusOK) // unhandled type → ack, no action
 	}

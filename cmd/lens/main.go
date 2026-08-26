@@ -1553,10 +1553,17 @@ func run() error {
 	// route handler method values are valid; the routes themselves register only
 	// when cfg.BillingEnabled (billReg). Stripe keys are validated at config.Load
 	// (startup fails if billing is enabled without them) and never logged.
-	billingSvc := billing.New(pool, dualToken,
-		billing.NewLiveStripe(cfg.StripeSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL),
-		cfg.StripeWebhookSecret)
+	liveStripe := billing.NewLiveStripe(cfg.StripeSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL)
+	billingSvc := billing.New(pool, dualToken, liveStripe, cfg.StripeWebhookSecret)
+	// MODEL 2 (W4.6.1 step 1). Subscriptions are a SECOND gate on top of billing: a
+	// deployment selling one-off top-ups does not start selling a subscription because
+	// it has a Stripe key. With no price configured the routes below are not registered
+	// (chi-native 404) and the service refuses ErrNoSubscriptionPrice.
+	if cfg.BillingSubscriptionPriceID != "" {
+		billingSvc = billingSvc.WithSubscriptions(liveStripe, cfg.BillingSubscriptionPriceID)
+	}
 	bill := billReg{on: cfg.BillingEnabled}
+	subs := billReg{on: cfg.BillingEnabled && cfg.BillingSubscriptionPriceID != ""}
 	// Stage 2.4/2.5 shadow LXC spend — observational, post-serve, flag-gated
 	// (LENS_LXC_SHADOW_SPEND_ENABLED, default off). The proxy debits LXC
 	// alongside the cost_usd write; void/non-gating, cannot affect serving.
@@ -2907,6 +2914,37 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, map[string]string{"url": url})
+		})
+
+		// MODEL 2 (W4.6.1 step 1) — the subscription checkout. Same {wsID} binding as
+		// its one-off sibling above: the caller's credential owns the workspace, admin
+		// bypasses. Registered only when a Stripe Price is configured.
+		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscribe", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			url, err := billingSvc.CreateSubscriptionCheckout(req.Context(), wsID)
+			if err != nil {
+				status := http.StatusInternalServerError
+				if errors.Is(err, billing.ErrNoSubscriptionPrice) {
+					// A capability this deployment does not have — not a fault.
+					status = http.StatusNotImplemented
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]string{"url": url})
+		})
+
+		// The read: is this workspace paying, and until when. ⚠ Registered under the
+		// SAME gate as the checkout, so a deployment without subscriptions answers 404
+		// rather than a confident {"subscribed": false} about a product it does not sell.
+		subs.get(authed, "/v1/workspaces/{wsID}/billing/subscription", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			st, err := billingSvc.GetSubscription(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, st)
 		})
 
 		// Admin refund-visibility list (read-only; requireAdmin). An 'anomalous' row
