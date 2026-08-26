@@ -77,17 +77,13 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	lanes := []lane{
-		{
-			name:     "ENGINEERING",
-			rephrase: poolsafety.EngineeringRephrasePairs(),
-			danger:   append(append([]poolsafety.RephrasePair{}, poolsafety.EngineeringDangerPairs()...), poolsafety.HeldOutDangerPairs()...),
-		},
-		{
-			name:     "CONSUMER",
-			rephrase: append(append([]poolsafety.RephrasePair{}, poolsafety.RephrasePairs()...), poolsafety.ConsumerRephrasePairs()...),
-			danger:   append(append([]poolsafety.RephrasePair{}, poolsafety.ConsumerDangerPairs()...), poolsafety.ConsumerUnrelatedPairs()...),
-		},
+	// ⚠ THE POPULATION COMES FROM poolsafety.ByTraffic(), NOT FROM A LIST WRITTEN HERE. This
+	// composition used to be inline in three programs; cmd/lens d2qcheck's copy named three
+	// engineering corpora and no consumer one, so #393 published a figure beside these ones over a
+	// population that did not overlap them, and nothing could say so.
+	lanes := make([]lane, 0, 2)
+	for _, tl := range poolsafety.ByTraffic() {
+		lanes = append(lanes, lane{name: tl.Traffic, rephrase: tl.Rephrase, danger: tl.Danger})
 	}
 
 	fmt.Printf("embedding model: %s\n", model)

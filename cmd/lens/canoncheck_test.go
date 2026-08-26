@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/talyvor/lens/internal/poolsafety"
+)
 
 // wordDistance produces a NUMBER THAT GOES INTO THE REPORT — "of the 29 that did not collapse, N
 // differ by exactly one word" is the sentence that separates "tighten the instruction" from "the
@@ -46,5 +50,44 @@ func TestWordDistanceIsSymmetric(t *testing.T) {
 			t.Errorf("asymmetric on %q/%q: %d vs %d", p[0], p[1],
 				wordDistance(p[0], p[1]), wordDistance(p[1], p[0]))
 		}
+	}
+}
+
+// ⚠ W2.6 WROTE "notice-direction IS THE TEST THAT MATTERS" AND THE HARNESS SELECTED IT BY NAME
+// FROM A POPULATION WHERE THAT NAME WAS NOT UNIQUE — AND BY A SECOND NAME THAT EXISTED NOWHERE.
+//
+// A by-name selector fails silently in both directions. Matching twice prints a second verdict
+// block that is indistinguishable from the real one; matching zero times prints nothing, which is
+// indistinguishable from a section that simply was not reached. Neither is an error.
+//
+// This asserts the resolution, not the intention: every name in namedTests must resolve to exactly
+// one pair across the whole corpus the harness searches.
+func TestNamedTestPairs_EachNameResolvesToExactlyOnePair(t *testing.T) {
+	var everything []poolsafety.RephrasePair
+	for _, l := range poolsafety.Lanes() {
+		everything = append(everything, l.Pairs...)
+	}
+	if len(namedTests) == 0 {
+		t.Fatal("namedTests is empty — the loop below would assert nothing")
+	}
+	for _, want := range namedTests {
+		n := 0
+		for _, p := range everything {
+			if p.Name == want {
+				n++
+			}
+		}
+		switch {
+		case n == 0:
+			t.Errorf("namedTests entry %q matches NO pair in any corpus — the named test it "+
+				"guards has never run, and a section that prints nothing looks the same as one "+
+				"that was not reached", want)
+		case n > 1:
+			t.Errorf("namedTests entry %q matches %d different pairs — the named test runs %d "+
+				"times and %d of those verdicts are for a pair W2.6 did not name", want, n, n, n-1)
+		}
+	}
+	if got := len(namedTestPairs(everything)); got != len(namedTests) {
+		t.Errorf("namedTestPairs returned %d pairs for %d names", got, len(namedTests))
 	}
 }

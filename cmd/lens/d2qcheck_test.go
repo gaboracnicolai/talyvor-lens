@@ -111,14 +111,15 @@ func resultsFor(pairs []poolsafety.RephrasePair) []d2qResult {
 // ⚠ THE PER-VARIANT SCORES WERE KEYED BY A NAME THAT IS NOT UNIQUE.
 //
 // measureCorpus stashed each pair's variant scores in a package-level map keyed by pair.Name, and
-// runD2QCheck calls it once per corpus. Pair names are unique WITHIN a corpus and not across them:
-// poolsafety has exactly one collision today — "notice-direction" appears in both
-// ConsumerDangerPairs and ConsumerUnrelatedPairs, the two lanes W2.7 asks this harness to start
-// measuring. The second corpus overwrites the first, and BestAtN then reports one lane's variant
-// scores under the other lane's pair. The sweep row it feeds is wrong with no error anywhere.
+// runD2QCheck calls it once per corpus. A name is a label, not a key: poolsafety had exactly one
+// collision — "notice-direction" named a landlord pair in ConsumerDangerPairs and an employment
+// pair in ConsumerUnrelatedPairs, the two corpora the CONSUMER danger lane unions. The second
+// corpus overwrote the first, and BestAtN then reported one lane's variant scores under the other
+// lane's pair, with no error anywhere.
 //
-// The collision is invisible today only because the harness measures three corpora that happen not
-// to collide. Adding the lane the item asks for is what arms it.
+// That pair has been renamed and poolsafety now guards name uniqueness within a lane, so the
+// specific collision is gone. This keeps driving the real path with a deliberately reused name,
+// because the guard that matters is the one that holds when the corpus changes again.
 func TestMeasureCorpus_SameNameInTwoCorporaKeepsItsOwnVariantScores(t *testing.T) {
 	ctx := t.Context()
 	emb := fakeEmbedder{vec: map[string][]float32{

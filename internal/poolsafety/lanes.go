@@ -83,3 +83,31 @@ func union(corpora ...[]RephrasePair) []RephrasePair {
 	}
 	return out
 }
+
+// ByTraffic groups Lanes() into the rephrase/danger pair every hit-rate instrument prints as one
+// section. It exists so cmd/hitrate, cmd/lens canoncheck and cmd/lens d2qcheck stop each building
+// that grouping inline: three inline copies is how #393 came to publish a doc2query verdict over a
+// population that did not overlap the one W2.1, W2.5 and W2.6 reported.
+type TrafficLanes struct {
+	Traffic  string
+	Rephrase []RephrasePair
+	Danger   []RephrasePair
+}
+
+// ByTraffic returns one entry per traffic population, in the order cmd/hitrate has always printed.
+func ByTraffic() []TrafficLanes {
+	out := []TrafficLanes{{Traffic: TrafficEngineering}, {Traffic: TrafficConsumer}}
+	for _, l := range Lanes() {
+		for i := range out {
+			if out[i].Traffic != l.Traffic {
+				continue
+			}
+			if l.Kind == KindRephrase {
+				out[i].Rephrase = l.Pairs
+			} else {
+				out[i].Danger = l.Pairs
+			}
+		}
+	}
+	return out
+}

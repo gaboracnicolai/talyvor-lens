@@ -309,7 +309,11 @@ func ConsumerUnrelatedPairs() []RephrasePair {
 		{"vitamin-which", "Should I take vitamin D in winter?", "Should I take vitamin C in winter?"},
 		{"dose-who", "How much paracetamol can I take?", "How much paracetamol can a child take?"},
 		{"drive-side", "Which side of the road do they drive on in Japan?", "Which side of the road do they drive on in France?"},
-		{"notice-direction", "How much notice do I give when resigning?", "How much notice must my employer give me?"},
+		// ⚠ RENAMED FROM "notice-direction", WHICH ConsumerDangerPairs ALSO USES — for a DIFFERENT
+		// pair (landlord/tenant). The CONSUMER danger lane unions the two corpora, so one label
+		// covered two pairs: cmd/lens canoncheck ran W2.6's "THE NAMED TEST" twice, once on this
+		// pair, which W2.6 never named. The rename changes no population, only the label.
+		{"notice-direction-employment", "How much notice do I give when resigning?", "How much notice must my employer give me?"},
 	}
 }
 
