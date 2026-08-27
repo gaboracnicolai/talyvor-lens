@@ -2918,9 +2918,7 @@ func run() error {
 		// is read-only; the other three routes mutate the
 		// in-process registry (no persistence — restarts re-read
 		// LENS_LOCAL_ENDPOINTS).
-		authed.Get("/v1/local/endpoints", func(w http.ResponseWriter, _ *http.Request) {
-			writeJSONOK(w, http.StatusOK, localRouterMulti.List())
-		})
+		authed.Get("/v1/local/endpoints", newLocalEndpointsListHandler(localRouterMulti))
 
 		authed.Post("/v1/local/endpoints", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			var in localrouter.LocalEndpoint
