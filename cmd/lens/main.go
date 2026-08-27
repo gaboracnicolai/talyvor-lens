@@ -1878,36 +1878,13 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, insights)
 		})
 
-		// Discovery: embedding nodes available for a model.
-		pub.Get("/v1/embedding-nodes/available", func(w http.ResponseWriter, req *http.Request) {
-			model := req.URL.Query().Get("model")
-			if model == "" {
-				writeJSONErr(w, http.StatusBadRequest, "model query param required")
-				return
-			}
-			minDim, _ := strconv.Atoi(req.URL.Query().Get("min_dimensions"))
-			nodes, err := embeddingMiner.ListAvailableNodes(req.Context(), model, minDim)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, nodes)
-		})
+		// Discovery: embedding nodes available for a model. UNAUTHENTICATED —
+		// see public_node_discovery.go for what an anonymous caller may learn.
+		pub.Get("/v1/embedding-nodes/available", newPublicAvailableEmbeddingNodesHandler(embeddingMiner))
 
-		// Discovery: GPU nodes available for a model.
-		pub.Get("/v1/nodes/available", func(w http.ResponseWriter, req *http.Request) {
-			model := req.URL.Query().Get("model")
-			if model == "" {
-				writeJSONErr(w, http.StatusBadRequest, "model query param required")
-				return
-			}
-			nodes, err := computeMiner.ListAvailableNodes(req.Context(), model)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, nodes)
-		})
+		// Discovery: GPU nodes available for a model. UNAUTHENTICATED —
+		// see public_node_discovery.go for what an anonymous caller may learn.
+		pub.Get("/v1/nodes/available", newPublicAvailableNodesHandler(computeMiner))
 
 		// JWKS — public EC P-256 verification key for the ES256 JWTs
 		// Lens mints. External services fetch this once (or on cache miss)
