@@ -128,12 +128,34 @@ func (l *Learner) Record(_ context.Context, event TokenEvent) error {
 // candidates, and their hit_count inflates the estimated_monthly_savings_usd that
 // get_model_recommendations derives from it. Same column, same root cause, third surface — see
 // internal/catalog/writerless_column_guard_test.go, which is what found this one.
+//
+// ⚠ AND THE LINE BELOW IT WAS THE SAME DEFECT AGAIN, ON A DIFFERENT COLUMN. GROUP BY
+// prompt_hash grouped by a column no production writer has ever set: neither of the two INSERT
+// statements in internal/alerts names prompt_hash, so every row carries that column's NOT NULL
+// default, the empty string. Measured on a real database over the full migration chain — nine
+// spend rows covering THREE distinct prompts produced ONE group, and Analyse returned a single
+// insight with an empty pattern and HitCount 9. That count is the window's total
+// non-cache-served request count, not a repetition count, and both handleModelsRecommendations
+// and toolGetModelRecommendations multiply it into estimated_monthly_savings_usd.
+//
+// The added non-empty test on prompt_hash is the whole fix, and it is deliberately a FILTER
+// rather than a rewrite: today it makes Analyse report nothing, which is the truth — production
+// records no prompt identity to group by — and the moment a writer exists the query does exactly
+// what it was always meant to, with no further change. See
+// internal/learner/writerless_prompt_hash_test.go, whose census fails the build if that writer
+// appears, so this comment cannot go quietly stale.
+//
+// ⚠ WHAT THIS DOES NOT DO, SAID PLAINLY: it does not make pattern recommendation work. Giving
+// prompt_hash a writer means retaining a per-prompt fingerprint under the DEFAULT metadata
+// logging policy, whose stated purpose is to strip prompt identity — a privacy decision, not a
+// bug fix, and not a session's to take.
 const analyseSQL = `SELECT prompt_hash, COUNT(*) as hit_count,
        AVG(input_tokens + output_tokens) as avg_tokens,
        MAX(created_at) as last_seen
 FROM token_events
 WHERE created_at > NOW() - INTERVAL '7 days'
   AND serve_source NOT LIKE 'cache_hit%'
+  AND prompt_hash <> ''
 GROUP BY prompt_hash
 HAVING COUNT(*) >= 3
 ORDER BY hit_count DESC
