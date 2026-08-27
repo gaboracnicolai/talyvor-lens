@@ -520,8 +520,12 @@ func run() error {
 	l := learner.New(nc, pool)
 	go l.StartBackground(ctx)
 
+	// ⚠ CONSTRUCTED HERE, STARTED AFTER setupHA — it is leader-gated (W6.31). The warmer re-fires
+	// historical prompts at OpenAI and Anthropic on the OPERATOR'S KEYS and writes only to the
+	// SHARED Redis exact cache, so on N replicas it pays N times for one shared benefit. Its own
+	// dedup (w.mu + w.warming) is in-process and GetWarmCandidates is a plain LIMIT 10 with no
+	// claim, so every replica selects the same ten prompts.
 	cacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)
-	go cacheWarmer.Start(ctx, 1*time.Hour)
 
 	// Semantic-cache retention sweeper: deletes prompt_embeddings rows unused
 	// within the retention window (their updated_at is bumped on every hit, so
@@ -794,6 +798,12 @@ func run() error {
 
 	// Singleton background jobs — wrapped with leader election so exactly one
 	// instance runs each when HA is enabled; runs directly when disabled.
+	// Cache warmer (W6.31) — the ONLY background job in this binary that spends money at an
+	// external provider, and it was the only ungated one whose state is shared. ha.Leader.Run calls
+	// fn directly when HA is disabled, so a single-replica deployment is unaffected.
+	go haComps.leader.Run(ctx, "cache-warmer", 30*time.Second, func(lctx context.Context) {
+		cacheWarmer.Start(lctx, 1*time.Hour)
+	})
 	go haComps.leader.Run(ctx, "eval-scheduler", 30*time.Second, func(lctx context.Context) {
 		evalPipeline.StartScheduler(lctx, time.Minute)
 	})
