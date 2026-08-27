@@ -1,12 +1,30 @@
 package api
 
-// openapi.go — hand-written OpenAPI 3.0 spec served at
-// GET /openapi.json. Lens has too many routes to spec
-// every single one, so this file covers the canonical
-// production surface: proxy endpoints, key management,
-// workspaces, tenant config, attribution, A/B, and the
-// local-endpoint registry. Returns a valid JSON document
-// when marshalled.
+// openapi.go — hand-written OpenAPI 3.0 spec served at GET /openapi.json. Lens has too many routes
+// to spec every single one, so this file covers a subset. Returns a valid JSON document when
+// marshalled.
+//
+// COVERED — 12 paths, 15 operations: proxy endpoints, key management, workspaces, tenant config,
+// and the local-endpoint registry. Every one is registered by the binary; that is guarded, not
+// assumed (openapi_route_contract_test.go).
+//
+// ⚠ NOT COVERED, AND THIS PARAGRAPH IS WHY W6.29 EXISTS. This header used to name `attribution`
+// and `A/B` among the surfaces it covers. Measured against the served document: ZERO published
+// paths for either, against 8 registered attribution routes and 6 experiment / eval-A-B routes
+// outside /v1/admin. A client generating from this document gets no attribution API at all while
+// the header says it is there. Also not covered: 5 of the 7 registered proxy providers — only
+// openai and anthropic are published; bedrock, google, groq, mistral and vllm are not.
+//
+// ⚠ 122 NON-ADMIN /v1 ROUTES ARE OUTSIDE THIS DOCUMENT and that is a position, not a bug — see the
+// count and its reasoning in openapi_route_contract_test.go, which pins the number so it cannot
+// drift by fifty in silence.
+//
+// ⚠ AND ONE PUBLISHED SURFACE DOES NOTHING. components.schemas.WorkspaceConfig declares
+// spending_cap_usd, monthly_budget, rate_limit_rpm, rate_limit_tpm, allowed_models,
+// allowed_providers, log_level and retention_days, and PUT /v1/workspaces/{wsID}/config stores all
+// of them. W6.27 (#495) measured that NOTHING READS ANY OF IT — the allowlist the proxy enforces
+// belongs to a different table. Publishing a settings contract is a stronger promise than storing
+// one, so this note stays until that is decided.
 
 import (
 	"encoding/json"
