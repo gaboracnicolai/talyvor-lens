@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -84,11 +85,18 @@ func metricsRepoRoot(t *testing.T) string {
 // declaredMetrics returns Go identifier → exported metric name.
 func declaredMetrics(t *testing.T, root string) map[string]string {
 	t.Helper()
+	d, _ := metricCensus(t)
+	_ = root
+	return d
+}
+
+// parseDeclarations is the un-cached parse the census performs once.
+func parseDeclarations(root string) map[string]string {
 	out := map[string]string{}
 	dir := filepath.Join(root, "internal/metrics")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("read internal/metrics: %v", err)
+		return out
 	}
 	for _, e := range entries {
 		n := e.Name()
@@ -97,7 +105,7 @@ func declaredMetrics(t *testing.T, root string) map[string]string {
 		}
 		raw, rerr := os.ReadFile(filepath.Join(dir, n))
 		if rerr != nil {
-			t.Fatalf("read %s: %v", n, rerr)
+			continue
 		}
 		src := string(raw)
 		for _, loc := range metricDecl.FindAllStringSubmatchIndex(src, -1) {
@@ -154,44 +162,78 @@ func registeredMetrics(t *testing.T, root string, declared map[string]string) ma
 
 // operatedMetrics returns identifiers on which some non-test code performs an
 // operation — never a mention, and never a registration.
-func operatedMetrics(t *testing.T, root string, declared map[string]string) map[string]string {
+//
+// ⚠ COMPILED ONCE AND CACHED ONCE, AND CI IS WHY. The first draft compiled two
+// regexes per identifier PER FILE — 62 identifiers over ~1000 files is ~124,000
+// compilations — and called the sweep from three tests. On this box that was 2.9s
+// and looked fine; on CI's shared runner under -race it was 57s per call and the
+// package blew its 120s timeout, failing the build. A guard that costs a minute of
+// CI is a guard somebody deletes, so the cost is part of whether it is shippable.
+var (
+	censusOnce sync.Once
+	censusDecl map[string]string
+	censusOper map[string]string
+	censusErr  string
+)
+
+func metricCensus(t *testing.T) (declared, operated map[string]string) {
 	t.Helper()
-	out := map[string]string{}
-	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
-		if werr != nil {
-			return werr
+	censusOnce.Do(func() {
+		root, err := filepath.Abs(filepath.Join("..", ".."))
+		if err != nil {
+			censusErr = err.Error()
+			return
 		}
-		if info.IsDir() {
-			switch info.Name() {
-			case ".git", "vendor", "node_modules", "bin", "rel":
-				return filepath.SkipDir
+		censusDecl = parseDeclarations(root)
+		// ⚠ ONE ALTERNATION, NOT 62 REGEXES PER FILE. Even compiled once, running 62
+		// patterns over every file was ~24s under -race locally; a single alternation
+		// with the identifier captured is one pass per file. Cost is part of whether a
+		// guard is shippable — see the note above.
+		idents := make([]string, 0, len(censusDecl))
+		for ident := range censusDecl {
+			idents = append(idents, ident)
+		}
+		sort.Slice(idents, func(a, b int) bool { return len(idents[a]) > len(idents[b]) })
+		opRe := regexp.MustCompile(`\b(` + strings.Join(idents, "|") + `)(?:\s*\)\s*)?` + metricOp)
+		censusOper = map[string]string{}
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
+			if werr != nil || info == nil {
+				return nil
+			}
+			if info.IsDir() {
+				switch info.Name() {
+				case ".git", "vendor", "node_modules", "bin", "rel":
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			raw, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return nil
+			}
+			src := string(raw)
+			// Cheap pre-filter: a file that never says "metrics." and is not inside the
+			// metrics package cannot operate one of these identifiers. Most of the
+			// repository is skipped without running the regex at all.
+			rel, _ := filepath.Rel(root, path)
+			if !strings.Contains(src, "metrics.") && !strings.HasPrefix(rel, "internal/metrics/") {
+				return nil
+			}
+			for _, m := range opRe.FindAllStringSubmatch(src, -1) {
+				if _, done := censusOper[m[1]]; !done {
+					censusOper[m[1]] = rel
+				}
 			}
 			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		raw, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return rerr
-		}
-		rel, _ := filepath.Rel(root, path)
-		src := string(raw)
-		for ident := range declared {
-			if _, done := out[ident]; done {
-				continue
-			}
-			if regexp.MustCompile(`\b`+ident+metricOp).MatchString(src) ||
-				regexp.MustCompile(`\b`+ident+`\s*\)\s*`+metricOp).MatchString(src) {
-				out[ident] = rel
-			}
-		}
-		return nil
+		})
 	})
-	if err != nil {
-		t.Fatalf("sweep: %v", err)
+	if censusErr != "" {
+		t.Fatalf("census: %s", censusErr)
 	}
-	return out
+	return censusDecl, censusOper
 }
 
 func TestEveryRegisteredMetricCanLeaveZero(t *testing.T) {
@@ -206,7 +248,7 @@ func TestEveryRegisteredMetricCanLeaveZero(t *testing.T) {
 		t.Fatalf("found %d registered metrics, want >= 40 — the MustRegister parse has broken",
 			len(registered))
 	}
-	operated := operatedMetrics(t, root, declared)
+	_, operated := metricCensus(t)
 	if len(operated) < 40 {
 		t.Fatalf("found %d operated metrics, want >= 40 — the operation sweep has broken, and a "+
 			"broken sweep calls every metric structurally zero", len(operated))
@@ -312,7 +354,7 @@ func TestEveryAlertedMetricIsDeclared(t *testing.T) {
 func TestMetricCensusCanActuallyClassify(t *testing.T) {
 	root := metricsRepoRoot(t)
 	declared := declaredMetrics(t, root)
-	operated := operatedMetrics(t, root, declared)
+	_, operated := metricCensus(t)
 
 	if _, ok := declared["RequestsTotal"]; !ok {
 		t.Error("RequestsTotal is not seen as declared — the declaration parse is blind")

@@ -95,6 +95,16 @@ CONTROLS = [
     # does not compile, and the harness saw a build error instead of the guard's own floor
     # message. Changing what the guard LOOKS FOR reproduces "the register block cannot be found"
     # on a tree that still builds.
+    # ⚠ THE PRE-FILTER IS A MECHANICAL EXCLUSION AND EXCLUSIONS NEED CONTROLS — that is the
+    # lesson W6.24 learned twice already (the _count suffix stripper ate a real metric). This
+    # one skips any file that never says "metrics." and is outside internal/metrics.
+    ("Q8", "the sweep's pre-filter skips everything — operations outside the metrics package vanish",
+     [(GUARD, 'if !strings.Contains(src, "metrics.") && !strings.HasPrefix(rel, "internal/metrics/") {',
+       'if true {')],
+     TEETH, ALERTED,
+     "RequestsTotal is operated in internal/proxy; if the pre-filter hides it the census calls a "
+     "live metric structurally zero"),
+
     ("Q7", "the MustRegister block cannot be found — unpublished metrics get counted",
      [(GUARD, 'i := strings.Index(src, "prometheus.MustRegister(")',
        'i := strings.Index(src, "prometheus.MustRegisterZZZ(")')],
