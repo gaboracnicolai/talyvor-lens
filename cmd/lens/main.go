@@ -4792,18 +4792,17 @@ func run() error {
 			})
 		})))
 
-		authed.Get("/v1/api/keys/pool", func(w http.ResponseWriter, req *http.Request) {
-			writeJSONOK(w, http.StatusOK, keyPool.Stats())
-		})
+		// ⚠ NO GATE, while POST and DELETE on this same path are requireAdmin.
+		// Measured and recorded in W6.18; closing it is a decision, not a repair.
+		authed.Get("/v1/api/keys/pool", newKeyPoolStatsHandler(keyPool))
 
 		authed.Delete("/v1/api/keys/pool/{keyID}", requireAdmin(authManager, http.HandlerFunc(newPoolKeyDeleteHandler(keyPool))))
 
 		// Fallback chain inspection and override. The router is in-memory;
 		// updates here are not persisted — restarting the binary resets
 		// chains to the defaults.
-		authed.Get("/v1/api/fallback/chains", func(w http.ResponseWriter, req *http.Request) {
-			writeJSONOK(w, http.StatusOK, fallbackRouter.AllChains())
-		})
+		// ⚠ NO GATE, while PUT on this same path is requireAdmin. Same note as above.
+		authed.Get("/v1/api/fallback/chains", newFallbackChainsHandler(fallbackRouter))
 
 		authed.Put("/v1/api/fallback/chains/{provider}", requireAdmin(authManager, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			provider := chi.URLParam(req, "provider")
