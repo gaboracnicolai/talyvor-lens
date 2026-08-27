@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -4248,51 +4247,7 @@ func run() error {
 
 		authed.Get("/v1/sessions", newSessionsListHandler(sessionTracker))
 
-		batchGate.post(authed, "/v1/batch/submit", func(w http.ResponseWriter, req *http.Request) {
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "read body: "+err.Error())
-				return
-			}
-			wsID := req.Header.Get("X-Talyvor-Workspace")
-			if wsID == "" {
-				wsID = "default"
-			}
-			// Make sure IsEligible sees the batch trigger even when the
-			// header — not the body — set it.
-			body = ensureBatchFlag(body)
-			elig := batchRouter.IsEligible(body, wsID)
-			if !elig.Eligible {
-				writeJSONErr(w, http.StatusBadRequest, elig.Reason)
-				return
-			}
-			var parsed struct {
-				Model    string `json:"model"`
-				Messages []struct {
-					Content json.RawMessage `json:"content"`
-				} `json:"messages"`
-			}
-			_ = json.Unmarshal(body, &parsed)
-			prompt := ""
-			for _, m := range parsed.Messages {
-				var s string
-				if json.Unmarshal(m.Content, &s) == nil {
-					prompt += s
-				}
-			}
-			job, err := batchRouter.Submit(req.Context(), wsID, parsed.Model, prompt, body)
-			if err != nil {
-				writeJSONErr(w, http.StatusBadGateway, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusAccepted, map[string]any{
-				"request_id":           job.RequestID,
-				"batch_id":             job.ID,
-				"status":               string(job.Status),
-				"estimated_completion": "within 24 hours",
-				"cost_reduction":       "50%",
-			})
-		})
+		batchGate.post(authed, "/v1/batch/submit", newBatchSubmitHandler(batchRouter))
 
 		batchGate.get(authed, "/v1/batch/status/{requestID}", newBatchStatusHandler(batchRouter))
 
