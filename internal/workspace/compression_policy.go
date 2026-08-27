@@ -36,7 +36,7 @@ import (
 // TOKEN COUNT reads `prompt`, the ORIGINAL, and the three pre-serve ones run
 // before the rewrite exists at all:
 //
-//	proxy.go:855   budget gate         alerts.CostUSD(model, len(prompt)/4, 0)
+//	proxy.go:855   budget gate         budgetEstimateUSD(model, prompt)   (was alerts.CostUSD until W6.19/#487)
 //	proxy.go:867   LXC gate            p.lxcGateBlocks(..., prompt, ...)
 //	proxy.go:885   reservation hold    p.agentReserveBlocks(..., prompt, ...)   (:898 the non-reservation form)
 //	proxy.go:1239  ── the rewrite is created here ──

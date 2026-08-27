@@ -33,8 +33,12 @@ import (
 //
 // PRE-SERVE ESTIMATE is input-only (output unknown pre-call), so the gate
 // UNDER-blocks by design — exactly like the budget gate's
-// estCost = alerts.CostUSD(model, len(prompt)/4, 0). The true output-inclusive
-// cost books post-serve via the shadow debit.
+// estCost = budgetEstimateUSD(model, prompt). ⚠ THAT COMPARISON USED TO BE FALSE IN
+// ONE RESPECT AND IS NOW TRUE: the budget gate priced through alerts.CostUSD, which
+// is exactly zero for any model the catalog does not hold, while this gate has always
+// gone through the resolver. W6.19 (#487) moved it onto budgetEstimateUSD, which
+// mirrors lxcEstimate — same resolver, same catalog.PurposeCharge. The true
+// output-inclusive cost books post-serve via the shadow debit.
 //
 // FAIL-OPEN on a balance-read error: log and ALLOW (mirrors the workspace
 // spend cap — "rather under-enforce than fail-closed on a transient DB error").
