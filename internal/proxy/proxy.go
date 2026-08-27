@@ -852,7 +852,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// estimate uses input tokens only (output is unknown pre-call), so the
 	// gate under- rather than over-blocks; the true cost is booked later.
 	if p.budgetService != nil {
-		estCost := alerts.CostUSD(model, len(prompt)/4, 0)
+		estCost := budgetEstimateUSD(model, prompt)
 		if p.budgetService.CheckBudget(ctx, wsID, team, sprint, estCost) == budgets.DecisionBlock {
 			writeError(w, http.StatusPaymentRequired, "budget exceeded for workspace/team/sprint")
 			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "budget_blocked").Inc()
