@@ -480,11 +480,16 @@ type Config struct {
 	// Keel* gate the U25 cross-tenant DRIFT-ATTRIBUTION sweep — DEFAULT-ON capability flag (mint-free,
 	// descriptive, read-only; NOT force-off because it never touches money). Thresholds are PLACEHOLDERS —
 	// calibrate at N3 turn-on; synthetic data proved only the mechanism, never these values.
-	KeelEnabled        bool          // LENS_KEEL_ENABLED (default TRUE)
-	KeelDeviationSigma float64       // LENS_KEEL_DEVIATION_SIGMA (default 3.0, placeholder)
-	KeelWindowSeconds  int64         // LENS_KEEL_WINDOW_SECONDS (default 3600, placeholder)
-	KeelInterval       time.Duration // LENS_KEEL_INTERVAL (sweep tick, default 1h)
-	KeelLookback       time.Duration // LENS_KEEL_LOOKBACK (corpus read-back, default 48h)
+	KeelEnabled        bool    // LENS_KEEL_ENABLED (default TRUE)
+	KeelDeviationSigma float64 // LENS_KEEL_DEVIATION_SIGMA (default 3.0, placeholder)
+	KeelWindowSeconds  int64   // LENS_KEEL_WINDOW_SECONDS (default 3600, placeholder)
+	// ⚠ NOT ENV-CONFIGURABLE, AND THE COMMENT USED TO SAY OTHERWISE (W6.23). These two
+	// read `// LENS_KEEL_INTERVAL` and `// LENS_KEEL_LOOKBACK` exactly like the
+	// env-loaded fields around them, and NOTHING reads either name — Load assigns
+	// both from constants below. An operator setting LENS_KEEL_INTERVAL=10m got
+	// nothing, silently, from the file that is the authoritative place to look.
+	KeelInterval time.Duration // CONSTANT 1h (sweep tick) — no env var
+	KeelLookback time.Duration // CONSTANT 48h (corpus read-back) — no env var
 
 	// Keel HARDENED (K3) money-grade detection — ADDITIVE, DEFAULT-ON. Leave-one-out + median/MAD +
 	// money-grade floors + persistence + drop-direction, so findings can LATER gate money (H5). ALL
@@ -1606,6 +1611,9 @@ func Load() (*Config, error) {
 			c.KeelWindowSeconds = n
 		}
 	}
+	// Constants, not env-loaded — see the field comments. Anything that makes these
+	// configurable must add the read AND the .env.example line together, or
+	// internal/config's env census (W6.23) will say so.
 	c.KeelInterval = time.Hour
 	c.KeelLookback = 48 * time.Hour
 
