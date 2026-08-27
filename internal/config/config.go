@@ -201,8 +201,13 @@ type Config struct {
 	// surface rather than an unauthenticated one. Env: LENS_PROVISION_SECRET.
 	ProvisionSecret string
 
-	// Global rate limits (Item 8). Zero = no global cap; the
-	// per-workspace tier in MultiTierLimiter still applies.
+	// Global rate limits (Item 8). Zero = no global cap.
+	//
+	// ⚠ THIS USED TO ADD "the per-workspace tier in MultiTierLimiter still applies",
+	// and there is no per-workspace tier: main.go builds MultiTierLimiter with
+	// exactly one, named "global", then blank-assigns the limiter. Zero here does
+	// not fall back to a per-workspace cap. The cap that still applies is the legacy
+	// sliding-window limiter's, which is uniform across workspaces (W6.27).
 	GlobalRPM       int
 	GlobalTPM       int
 	BurstMultiplier float64

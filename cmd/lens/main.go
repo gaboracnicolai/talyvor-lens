@@ -634,11 +634,19 @@ func run() error {
 	spendTracker := tenant.NewSpendTracker(tenantStore)
 	rateLimiter := ratelimit.New(redisClient, ratelimit.DefaultRules())
 
-	// Token-bucket multi-tier limiter (Item 8). Global tier is
-	// configured from env; per-workspace tiers are layered on at
-	// request time by callers that build a per-request limiter
-	// from tenant.WorkspaceConfig. Coexists with the legacy
-	// sliding-window limiter above.
+	// Token-bucket multi-tier limiter (Item 8). ⚠ ONE TIER, NO CALLER.
+	//
+	// This said: "per-workspace tiers are layered on at request time by callers
+	// that build a per-request limiter from tenant.WorkspaceConfig." Nothing does.
+	// The limiter is blank-assigned four lines below — "exposed for future
+	// per-request wiring" — and the two claims contradicted each other in the same
+	// screen. tenant.WorkspaceConfig has no production reader at all (W6.27;
+	// internal/tenant/enforcement_census_test.go pins that).
+	//
+	// What actually rate-limits traffic is the legacy sliding-window limiter above,
+	// built from ratelimit.DefaultRules(): the SAME fixed 100/s · 1000/min ·
+	// 10000/hr for every workspace. rate_limit_rpm and rate_limit_tpm, which
+	// PUT /v1/workspaces/{wsID}/config accepts and stores, change nothing.
 	multiTierLimiter := ratelimit.NewMultiTierLimiter(redisClient,
 		ratelimit.LimitTier{
 			Name: "global",

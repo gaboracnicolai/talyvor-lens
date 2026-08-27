@@ -5,9 +5,19 @@
 // scoped keys with their own quota envelope.
 //
 // All the heavy lifting (DB schema, bcrypt hashing, async spend
-// cache) is collected here. The model allowlist check `CheckAllowed`
-// returns an error the proxy can surface to the client without
-// round-tripping to Postgres. (The live spending gate is
+// cache) is collected here.
+//
+// ⚠ WHAT IN HERE ACTUALLY GATES TRAFFIC: none of it. This said the model allowlist
+// check `CheckAllowed` "returns an error the proxy can surface to the client
+// without round-tripping to Postgres". CheckAllowed has no production caller. The
+// allowlist the proxy enforces is workspace.Workspace's, read from the `workspaces`
+// table — a DIFFERENT table from this package's `workspace_configs`. So a caller
+// who sets allowed_models through PUT /v1/workspaces/{wsID}/config has restricted
+// nothing. W6.27 measured it; enforcement_census_test.go keeps it measured.
+//
+// The next sentence, by contrast, has always been accurate and is why the shape of
+// this package is worth reading carefully rather than assumed. (The live spending
+// gate is
 // budgets.Service.CheckBudget on the proxy hot path; SpendTracker
 // here only tracks the cached current-month spend for the admin API.)
 
@@ -58,8 +68,14 @@ const (
 	// against "don't hammer Postgres per request".
 	MonthlyCacheTTL = 5 * time.Minute
 
-	// DefaultRetentionDays is the policy when a workspace config
-	// leaves retention_days = 0.
+	// DefaultRetentionDays is the value stored when a workspace config leaves
+	// retention_days = 0.
+	//
+	// ⚠ IT IS NOT A POLICY, WHICH IS WHAT THIS COMMENT USED TO CALL IT. Nothing
+	// deletes on it. There are two time-based sweeps in the binary and both take a
+	// single global window from env: audit.Retention (token_events only, and
+	// deliberately so — see its own comment) and the semantic-cache sweep. Neither
+	// consults a per-workspace retention_days. W6.27.
 	DefaultRetentionDays = 90
 )
 
