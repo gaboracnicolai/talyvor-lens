@@ -58,6 +58,15 @@ func OpenAPISpec() map[string]any {
 				},
 			},
 			"schemas": map[string]any{
+				// ⚠ NO RESPONSE THIS BINARY SENDS SATISFIES THIS SCHEMA — measured on real driven
+				// middleware, not read (W6.30, internal/apicontract/error_contract_test.go). The two
+				// operations that $ref it are the openai proxy's 401 and 429, and they emit
+				// {"error":…} and {"error":…,"limit_type":…,"retry_after_seconds":…} respectively:
+				// neither carries `code` or `message`, both of which are required here. The nine
+				// ErrCode* constants in middleware.go are emitted nowhere and appear only as the
+				// `example` below. ⚠ BOTH REPAIRS ARE DECISIONS — moving the wire to this schema
+				// breaks every client parsing `error`; moving this schema to the wire discards the
+				// designed contract — so W6.30 pins the gap rather than choosing.
 				"APIError": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -159,7 +168,9 @@ func openAPIPaths() map[string]any {
 			},
 		}
 	}
-	_ = errResp
+	// ⚠ `_ = errResp` STOOD HERE. It is used twice below (the openai proxy's 401 and 429), so the
+	// blank assignment read as "this helper is unused" while it was the only error contract the
+	// document has. W6.30.
 	return map[string]any{
 		"/healthz": map[string]any{
 			"get": map[string]any{
