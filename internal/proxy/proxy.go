@@ -2158,17 +2158,31 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	estimated := true
 	source := "estimated"
 	// servedCostUSD: the ONE cost basis for the streamed response — the reservation SETTLE (the customer's
-	// bill), the budget feed, and the shadow debit. Cache-aware (CostUSDDetailed) when the provider reports
-	// usage; the flat estimate otherwise (byte-identical to before). Mirrors the buffered path exactly.
+	// bill), the budget feed, and the shadow debit. Cache-aware when the provider reports usage; the flat
+	// estimate otherwise. Mirrors the buffered path exactly.
+	//
+	// ⚠ AND "EXACTLY" NOW MEANS IT (W6.13-series, W6.16). This priced through alerts.CostUSDDetailed /
+	// alerts.CostUSD, and BOTH return exactly ZERO for a model the catalog does not hold — while the
+	// buffered path prices through the RESOLVER on both of its branches, for the reason it states there:
+	// "so an unknown model still cannot come out at zero". The catalog holds 45 models; `gpt-4`,
+	// `gpt-4-turbo` and `claude-3-opus` are not among them. So the same request cost two different
+	// amounts depending on whether the client asked for a stream, and a hard_block budget could not be
+	// reached by streamed traffic it booked at zero. The fallback is not a price invented here: it is the
+	// one alerts.WarnUnpricedModel already describes — the provider's cheapest known model for a charge,
+	// "a floor, never an over-bill".
+	// The fallback, when it is taken, announces itself: CostUSDResolved calls
+	// alerts.WarnUnpricedModel, which increments UnpricedModelRequests and logs at
+	// ERROR with the model name. That is the half the plain helpers had no way to do.
 	var servedCostUSD float64
 	if u.present {
 		inT, outT = u.inputTokens, u.outputTokens
 		estimated = false
 		source = "provider_usage"
-		servedCostUSD = alerts.CostUSDDetailed(sc.model, u.uncachedInputTokens, u.cachedInputTokens, u.cacheWriteInputTokens, u.outputTokens)
+		servedCostUSD, _ = alerts.CostUSDResolved(sc.model, catalog.PurposeCharge,
+			u.uncachedInputTokens, u.cachedInputTokens, u.cacheWriteInputTokens, u.outputTokens)
 	}
 	if estimated {
-		servedCostUSD = alerts.CostUSD(sc.model, inT, outT)
+		servedCostUSD, _ = alerts.CostUSDResolved(sc.model, catalog.PurposeCharge, inT, 0, 0, outT)
 	}
 	metrics.SpendRecord(source)
 	if err := p.alertManager.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated); err != nil {
