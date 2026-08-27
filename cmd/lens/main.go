@@ -4307,19 +4307,7 @@ func run() error {
 		// Eval pipeline — test cases, suite runs, and history. RunSuite
 		// is synchronous from the caller's perspective; up to 10 cases
 		// execute concurrently inside the handler.
-		authed.Post("/v1/eval/cases", func(w http.ResponseWriter, req *http.Request) {
-			var in eval.TestCase
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			created, err := evalPipeline.AddTestCase(req.Context(), in)
-			if err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, created)
-		})
+		authed.Post("/v1/eval/cases", newEvalCaseCreateHandler(evalPipeline))
 
 		authed.Get("/v1/eval/cases", func(w http.ResponseWriter, req *http.Request) {
 			wsID, ok := applyPhase2WSID(req, req.URL.Query().Get("workspace_id"))
