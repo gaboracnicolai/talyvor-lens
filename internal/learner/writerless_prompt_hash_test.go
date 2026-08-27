@@ -138,33 +138,81 @@ func TestAnalyseDoesNotFabricateAPatternFromTheWriterlessColumn(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// CI never migrates lens_test — the gated tests build their own fixtures (see
-	// .github/workflows/ci.yaml). The shape below mirrors migrations/0034 for every column this
-	// query touches, and prompt_hash carries the SAME `NOT NULL DEFAULT ''` that makes the
-	// defect possible. TestNoProductionWriterSetsTokenEventsPromptHash is what keeps that
-	// faithful: if a writer ever appears, it fails and sends the reader back here.
+	// ⚠ THIS FIXTURE MUST NOT ASSUME IT CREATED THE TABLE, AND THAT IS NOT A STYLE POINT — IT IS
+	// THE FIRST RED THIS TEST PRODUCED, IN CI AND NOT LOCALLY. CI never migrates lens_test (the
+	// gated tests build their own fixtures — see .github/workflows/ci.yaml) and `go test -p 1` runs
+	// packages in path order, so internal/api's spendHarness reaches token_events first and creates
+	// a NARROWER table: no provider, no model, no prompt_hash. A plain CREATE TABLE IF NOT EXISTS is
+	// then a silent no-op and the seed below fails with `column "provider" does not exist`. It
+	// passed on this machine only because a previous run had left the wide table behind — a green
+	// that was an artifact of the database's history, not of the code.
+	//
+	// So: create if absent, then ADD COLUMN IF NOT EXISTS every column this test needs, then VERIFY
+	// the resulting shape before trusting it. The verification is the part that matters — without
+	// it the next harness change reintroduces the same invisible skew.
 	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS token_events (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 		workspace_id TEXT NOT NULL DEFAULT 'default',
-		provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
-		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
-		team TEXT, sprint_id TEXT, feature TEXT,
-		cost_usd FLOAT NOT NULL DEFAULT 0, prompt_text TEXT NOT NULL DEFAULT '',
-		prompt_hash TEXT NOT NULL DEFAULT '',
-		session_id TEXT NOT NULL DEFAULT '', request_id TEXT NOT NULL DEFAULT '',
-		modality TEXT NOT NULL DEFAULT 'text', cost_estimated BOOLEAN NOT NULL DEFAULT FALSE,
-		distill_method TEXT NOT NULL DEFAULT '',
-		serve_source TEXT NOT NULL DEFAULT 'upstream',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`); err != nil {
 		t.Fatalf("fixture schema: %v", err)
 	}
-	for _, ddl := range []string{
-		`ALTER TABLE token_events ADD COLUMN IF NOT EXISTS prompt_hash TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE token_events ADD COLUMN IF NOT EXISTS serve_source TEXT NOT NULL DEFAULT 'upstream'`,
-	} {
-		if _, err := pool.Exec(ctx, ddl); err != nil {
-			t.Fatalf("fixture align: %v", err)
+	// prompt_hash carries the SAME `NOT NULL DEFAULT ''` migrations/0034 gives it — the default that
+	// makes the defect possible. The rest mirror the columns analyseSQL reads and the production
+	// writer sets.
+	needed := []struct{ col, ddl string }{
+		{"workspace_id", "TEXT NOT NULL DEFAULT 'default'"},
+		{"provider", "TEXT NOT NULL DEFAULT ''"},
+		{"model", "TEXT NOT NULL DEFAULT ''"},
+		{"input_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"output_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"team", "TEXT"},
+		{"sprint_id", "TEXT"},
+		{"feature", "TEXT"},
+		{"cost_usd", "FLOAT NOT NULL DEFAULT 0"},
+		{"prompt_text", "TEXT NOT NULL DEFAULT ''"},
+		{"prompt_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"session_id", "TEXT NOT NULL DEFAULT ''"},
+		{"request_id", "TEXT NOT NULL DEFAULT ''"},
+		{"modality", "TEXT NOT NULL DEFAULT 'text'"},
+		{"cost_estimated", "BOOLEAN NOT NULL DEFAULT FALSE"},
+		{"distill_method", "TEXT NOT NULL DEFAULT ''"},
+		{"serve_source", "TEXT NOT NULL DEFAULT 'upstream'"},
+		{"created_at", "TIMESTAMPTZ NOT NULL DEFAULT NOW()"},
+	}
+	for _, c := range needed {
+		if _, err := pool.Exec(ctx,
+			"ALTER TABLE token_events ADD COLUMN IF NOT EXISTS "+c.col+" "+c.ddl); err != nil {
+			t.Fatalf("fixture align %s: %v", c.col, err)
 		}
+	}
+	for _, c := range needed {
+		var exists bool
+		if err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			 WHERE table_name = 'token_events' AND column_name = $1)`, c.col).Scan(&exists); err != nil {
+			t.Fatalf("fixture verify %s: %v", c.col, err)
+		}
+		if !exists {
+			t.Fatalf("fixture verification failed: token_events has no column %q after align — this "+
+				"test would have measured a table that is not the one production writes", c.col)
+		}
+	}
+	// prompt_hash must carry the empty-string default, or the defect under test cannot occur here
+	// and a green would mean nothing.
+	var def *string
+	if err := pool.QueryRow(ctx,
+		`SELECT column_default FROM information_schema.columns
+		 WHERE table_name = 'token_events' AND column_name = 'prompt_hash'`).Scan(&def); err != nil {
+		t.Fatalf("fixture verify prompt_hash default: %v", err)
+	}
+	if def == nil || !strings.Contains(*def, "''") {
+		shown := "NULL (no default)"
+		if def != nil {
+			shown = *def
+		}
+		t.Fatalf("fixture verification failed: token_events.prompt_hash default is %s, want the "+
+			"empty string that migrations/0034 gives it — without it this test cannot reproduce "+
+			"the defect and its green would be vacuous", shown)
 	}
 	if _, err := pool.Exec(ctx, `TRUNCATE token_events`); err != nil {
 		t.Fatalf("truncate: %v", err)
