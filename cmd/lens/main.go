@@ -4878,19 +4878,7 @@ func run() error {
 		// Prompt management — named, versioned prompts that teams edit
 		// without redeploys. Every write goes through the Manager so the
 		// in-memory cache stays consistent with the DB.
-		authed.Post("/v1/prompts", func(w http.ResponseWriter, req *http.Request) {
-			var in prompts.Prompt
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			created, err := promptManager.Create(req.Context(), in)
-			if err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, created)
-		})
+		authed.Post("/v1/prompts", newPromptCreateHandler(promptManager))
 
 		authed.Get("/v1/prompts", func(w http.ResponseWriter, req *http.Request) {
 			wsID, ok := applyPhase2WSID(req, req.URL.Query().Get("workspace_id"))
