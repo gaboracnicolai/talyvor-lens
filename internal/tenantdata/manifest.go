@@ -9,10 +9,48 @@
 // keep it honest.
 //
 // THE GUARD IS THE POINT, not the list. manifest_test.go reads the LIVE SCHEMA and fails when a
-// table with a workspace_id column is not classified here. Without it this file decays the moment
-// someone adds a migration, and a by-hand deletion silently misses a table — which is worse than
-// having no procedure, because it produces a confident claim that someone's data is gone.
+// tenant-keyed table is not classified here. Without it this file decays the moment someone adds a
+// migration, and a by-hand deletion silently misses a table — which is worse than having no
+// procedure, because it produces a confident claim that someone's data is gone.
+//
+// ⚠ W6.26 — AND THE GUARD'S POPULATION WAS THE THING THAT WAS WRONG. It asked the schema for
+// tables with a column named exactly `workspace_id`. 58 of the 99 tables answer to that. But the
+// tenant key is spelled SIX other ways in this schema — measured, not guessed:
+//
+//	workspace_id              58   owner_workspace_id      2
+//	contributor_workspace_id   8   attester_workspace_id   1
+//	requester_workspace_id     5   author_workspace_id     1
+//	                               source_workspace        1
+//
+// ⚠ Those are TABLE counts, and the first draft of this comment had 9 and 6 rather than 8 and 5
+// because it counted two VIEWS — distill_royalty_margin and pool_royalty_margin — as tables. The
+// widened guard listed them as unclassified tenant tables too, which would have been a false
+// finding of exactly the flattering kind: a view holds no rows and a DELETE against one fails.
+// TestPopulationExcludesViews is that mistake, kept.
+//
+// Twelve tables carry one of the other six and NO bare workspace_id, so the guard could not see
+// them, so nobody classified them, so a by-hand erasure misses them. A thirteenth — workspace_configs
+// — is keyed by `id` like `workspaces` is, and the guard hand-exempted `workspaces` by name rather
+// than admitting the category existed.
+//
+// ⚠ THE SHAPE OF THE MISS IS WORTH MORE THAN THE COUNT. tenant.Store owns exactly two tables and
+// says so in its own comment: `workspace_configs` and `workspace_api_keys`. One of them was
+// classified and one was not, and the only difference between them is how the column is spelled.
+// A population boundary drawn on a NAME will always cut somewhere the data does not.
+//
+// The population is now: relkind r/p (not views — see the control in manifest_test.go), not a
+// partition, and either a column matching %workspace% or membership of MappingTables below.
 package tenantdata
+
+// MappingTables are the tables whose PRIMARY KEY *is* the workspace id, so no column matching
+// %workspace% exists to discover them by. The schema cannot tell us that `id` means a workspace
+// here and a row id elsewhere, so this is declared — but it is declared, checked (every name must
+// exist and must be classified), and no longer a silent exemption inside a test.
+//
+// ⚠ `workspaces` was already exempt, by name, in the staleness check. `workspace_configs` was not,
+// and that is the whole finding: the exemption named one member of a category instead of naming
+// the category.
+var MappingTables = []string{"workspaces", "workspace_configs"}
 
 // Disposition is what happens to a table's rows when a customer leaves.
 type Disposition int
@@ -32,6 +70,21 @@ const (
 	// explicitly so the guard cannot be satisfied by silence.
 	NotTenantScoped
 )
+
+// String names the disposition. Without it the guards' failure messages print the raw iota —
+// "classified 0" — which reads as a missing value rather than as Delete. Control T5 produced
+// exactly that message and it was the message that was wrong, not the guard.
+func (d Disposition) String() string {
+	switch d {
+	case Delete:
+		return "Delete"
+	case Retain:
+		return "Retain"
+	case NotTenantScoped:
+		return "NotTenantScoped"
+	}
+	return "Disposition(unknown)"
+}
 
 // Entry is one table's classification and the reason for it.
 type Entry struct {
@@ -77,6 +130,56 @@ var Manifest = map[string]Entry{
 
 	// ─── NOT TENANT-SCOPED: carries workspace_id, holds no customer content ───────────────────
 	"mint_idempotency": {NotTenantScoped, "idempotency keys; operational replay-protection, describes nobody"},
+
+	// ─── W6.26: THE THIRTEEN THE OLD POPULATION COULD NOT SEE ────────────────────────────────
+	//
+	// ⚠ THE RULE THAT DECIDES THESE IS THE MANIFEST'S OWN, NOT A NEW ONE. Retain here is reserved
+	// for rows migration 0055's audit_block_mutation makes UNDELETABLE — that is the whole
+	// argument for the four Retain entries above. NONE of the thirteen below carries that trigger
+	// (measured against pg_trigger on the migrated schema: only lens_token_ledger, lxc_ledger,
+	// povi_receipts, request_attribution, token_events and reputation_events do). So the existing
+	// rule classifies every one of them Delete, and the precedent is concrete rather than
+	// analogical: `lens_shadow_mints`, `traffic_mint_holds` and `pattern_mine_credits` are mint
+	// tables already classified Delete above.
+	//
+	// ⚠ NICOLAI, THE ONE THING TO CONFIRM. Six of these are *_mints — a financial-adjacent record.
+	// This applies the manifest's stated rule to them rather than deciding anything new, and
+	// DeleteOrder is a BY-HAND procedure, so adding a table tells a person to delete it rather
+	// than deleting it. But if a mint record is a financial record that must survive erasure, the
+	// fix is a trigger in a migration (which would then make Retain the honest classification
+	// here), not a quiet edit to this map. Every Why below says which precedent settled it.
+	"annotation_tasks": {Delete, "W6.26; key `source_workspace`. Holds response_a/response_b — model OUTPUT " +
+		"text drawn from that workspace's traffic (internal/mining/annotation_mining.go). `annotations` " +
+		"ON DELETE CASCADEs off it, so this entry is what reaches BOTH; before it, neither was reachable."},
+	"benchmark_eval_items": {Delete, "W6.26; key `author_workspace_id`. Holds input/expected_output for a " +
+		"contributed benchmark item and names the contributing workspace (internal/benchprobe/store.go)."},
+	"confidential_compute_mints": {Delete, "W6.26; key `contributor_workspace_id`. Not audit-guarded; same " +
+		"disposition as `lens_shadow_mints` above."},
+	"distill_royalty_basis": {Delete, "W6.26; keys `owner_workspace_id`+`requester_workspace_id`. The royalty " +
+		"basis names BOTH tenants of a cross-tenant serve — erasing one leaves the other's row naming them."},
+	"distill_royalty_mints": {Delete, "W6.26; keys `contributor_workspace_id`+`requester_workspace_id`. Not " +
+		"audit-guarded; same disposition as `lens_shadow_mints`."},
+	"distill_serve_attribution": {Delete, "W6.26; keys `owner_workspace_id`+`requester_workspace_id`. A per-pair " +
+		"serve counter — it describes who served whom, which is that customer's traffic."},
+	"eval_contribution_mints": {Delete, "W6.26; key `contributor_workspace_id`. Not audit-guarded."},
+	"eval_correctness_attestations": {Delete, "W6.26; key `attester_workspace_id`. Records which workspace " +
+		"attested to which item (internal/benchprobe/store.go)."},
+	"node_latency_mints": {Delete, "W6.26; key `contributor_workspace_id`. Not audit-guarded."},
+	"pool_royalty_mints": {Delete, "W6.26; keys `contributor_workspace_id`+`requester_workspace_id`, and it also " +
+		"carries prompt_sha256/answer_sha256 — a hash of the customer's prompt is still derived from it."},
+	"routing_prediction_mints": {Delete, "W6.26; key `contributor_workspace_id`. Not audit-guarded."},
+	"royalty_detector_findings": {Delete, "W6.26; keys `contributor_workspace_id`+`requester_workspace_id` plus " +
+		"`identity_key` — an abuse-detection finding ABOUT a named workspace."},
+	// ⚠ THE ONE THAT MAKES THE PSEUDONYMISATION ARGUMENT ABOVE ACTUALLY TRUE. The Retain block
+	// says unlinkability comes from deleting the MAPPING — "the workspace row, its keys and its
+	// sessions" — after which the retained ledger rows reference an id that resolves to nobody.
+	// There are TWO mapping tables. workspace_configs is keyed by the same id and holds the same
+	// `name`, written from the admin route that calls tenant.Store.UpsertConfig. Deleting
+	// `workspaces` while leaving this behind does not achieve what that paragraph claims: the
+	// customer's NAME survives, still keyed by the id the retained rows point at.
+	"workspace_configs": {Delete, "W6.26; keyed by `id` like `workspaces`. Holds name, spending_cap, " +
+		"monthly_budget, allowed_models, retention_days. Sibling of `workspace_api_keys` — tenant.Store " +
+		"owns exactly these two and only the other one was classified."},
 
 	// ─── DELETE: everything else. The bulk of what is actually sensitive. ─────────────────────
 	"agent_lxc_subbudgets":     {Delete, ""},
