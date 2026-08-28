@@ -139,6 +139,25 @@ func jsonSamples() [][]byte {
 	}
 }
 
+// logSamples are two shapes a real log actually takes: a retry storm, and a flapping health check
+// with unrelated traffic between the runs.
+//
+// ⚠ BOTH MUST ACTUALLY REDUCE — TestConformance_SamplesActuallyReduce checks it, and it is the
+// check that caught the first JSON sample being one the reducer correctly declined. Lines here are
+// long enough that hiding copies pays for the marker; that is not a fixture convenience, it is the
+// same arithmetic worthCollapsing does, and a sample of short lines would be refused exactly as a
+// short-line log is.
+func logSamples() [][]byte {
+	const dial = "2026-08-28T01:02:03Z ERROR db: connection refused dialing 10.0.0.7:5432 (attempt 14)\n"
+	const probe = "2026-08-28T01:04:00Z WARN health: probe /readyz timed out after 2s (consecutive 31)\n"
+	return [][]byte{
+		[]byte("2026-08-28T01:02:02Z INFO db: dialing primary\n" + strings.Repeat(dial, 12) +
+			"2026-08-28T01:02:09Z INFO db: connected to 10.0.0.8:5432\n"),
+		[]byte(strings.Repeat(probe, 5) +
+			"2026-08-28T01:04:11Z INFO health: probe /readyz ok\n" + strings.Repeat(probe, 7)),
+	}
+}
+
 const goSample = `package p
 
 import "fmt"
@@ -183,6 +202,18 @@ func conformers() []conformer {
 			samples: jsonSamples(),
 			// Valid JSON with no tableable array: refused for a reason, not by erroring.
 			wrongKind: []byte(`{"a":1}`),
+		},
+		{
+			name: "LogCollapse", kind: tare.KindLog,
+			make:  func() tare.Reduction { return tare.NewLogCollapse() },
+			lossy: false,
+			// LOSSLESS, and demonstrated rather than declared: ExpandLog puts the bytes back and
+			// the comparison below is byte-for-byte (no `equal` override — logs are not JSON and
+			// nothing about a log line is "not content").
+			inverse: tare.ExpandLog,
+			samples: logSamples(),
+			// A log with no repeated run: refused for a reason, not by erroring.
+			wrongKind: []byte("alpha\nbeta\ngamma\n"),
 		},
 		{
 			name: "GoBodyTrimmer", kind: tare.KindCode,
