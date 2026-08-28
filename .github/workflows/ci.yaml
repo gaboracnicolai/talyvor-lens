@@ -14,7 +14,7 @@ jobs:
     # own, the preflight could pass against one DSN while every real-PG test
     # skipped on another, which is the failure it exists to catch.
     env:
-      LENS_TEST_DATABASE_URL: ""
+      LENS_TEST_DATABASE_URL: postgres://postgres:lens_test@localhost:5432/lens_test?sslmode=disable
     # Throwaway Postgres for two standing regression guards:
     # (1) the LENS_TEST_DATABASE_URL-gated integration tests (pool-mint-cap
     #     exactness + dbmigrate runner) — they create their own schema/fixtures
