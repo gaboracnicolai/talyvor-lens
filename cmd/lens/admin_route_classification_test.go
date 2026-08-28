@@ -87,10 +87,6 @@ var operatorMustNotReach = map[string]string{
 // adminPathRe finds every literal /v1/admin path in the router source.
 var adminPathRe = regexp.MustCompile(`"(/v1/admin[^"]*)"`)
 
-// heldMintLoopRe finds the slice literal the four revocation routes are generated from, so the
-// enumeration expands with the code instead of going stale against it.
-var heldMintLoopRe = regexp.MustCompile(`for\s+_,\s*mt\s*:=\s*range\s*\[\]string\{([^}]*)\}`)
-
 func readMainGo(t *testing.T) string {
 	t.Helper()
 	raw, err := os.ReadFile("main.go")
@@ -101,36 +97,40 @@ func readMainGo(t *testing.T) string {
 }
 
 // adminRoutesFromSource returns every /v1/admin path the router registers, with the loop expanded.
+//
+// ⚠ READ FROM THE AST SINCE #518. The regex it replaced matched a /v1/admin literal anywhere
+// in the file, so a commented-out registration still counted as a registered route and
+// TestClassificationTablesHaveNoGhosts could not see a route go. Enumeration parity was
+// measured before the switch, not assumed: the parser and the regex agree EXACTLY on the
+// real main.go — 25 paths each, 0 seen by one and not the other.
 func adminRoutesFromSource(t *testing.T) map[string]bool {
 	t.Helper()
-	src := readMainGo(t)
+	src := []byte(readMainGo(t))
 
-	// The loop's mint types, parsed from its own slice literal.
-	var mintTypes []string
-	if m := heldMintLoopRe.FindStringSubmatch(src); m != nil {
-		for _, part := range strings.Split(m[1], ",") {
-			if v := strings.Trim(strings.TrimSpace(part), `"`); v != "" {
-				mintTypes = append(mintTypes, v)
-			}
-		}
+	mintTypes, err := heldMintTypesFromAST("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
 	}
 	if len(mintTypes) == 0 {
 		t.Fatal("the held-mints loop's []string literal was not found in main.go — the expansion " +
 			"is broken, and four adjudicate routes would silently classify as non-existent")
 	}
 
+	scanned, err := scanAdminRoutes("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
 	paths := map[string]bool{}
-	for _, m := range adminPathRe.FindAllStringSubmatch(src, -1) {
-		p := m[1]
-		// The loop's fragment: `"/v1/admin/held-mints/"+mt+"/adjudicate"` yields the prefix.
+	for _, r := range scanned {
+		// The loop's fragment `"/v1/admin/held-mints/" + mt + "/adjudicate"` yields the prefix.
 		// Expand it into the concrete four rather than classifying a prefix.
-		if p == "/v1/admin/held-mints/" {
+		if r.path == "/v1/admin/held-mints/" {
 			for _, mt := range mintTypes {
-				paths[p+mt+"/adjudicate"] = true
+				paths[r.path+mt+"/adjudicate"] = true
 			}
 			continue
 		}
-		paths[p] = true
+		paths[r.path] = true
 	}
 	return paths
 }
@@ -204,41 +204,50 @@ func TestEveryClassificationCarriesAReason(t *testing.T) {
 // them. This reads each route's registration site and asserts the gate actually used there:
 // a readable route must be wrapped in requireAdminOrOperatorRead, and an unreachable one must NOT
 // be. Without this, moving a path between the tables would change a comment and nothing else.
+//
+// ⚠ IT DECIDED THE GATE BY A THREE-LINE TEXT WINDOW UNTIL #518, AND A LINE BREAK DEFEATED IT.
+// Measured by rewriting the /v1/admin/lxc/grant registration — "MINTS LXC. Moves money.", one of
+// the six the brief names by hand — in main.go, arms in
+// ~/talyvor-queue/w61-adminclass-mutation-controls-h2r7.py: widening it to
+// requireAdminOrOperatorRead on ONE line was CAUGHT; the same widening with the gate three lines
+// below the path was MISSED, and so was the same widening through
+// `gate := requireAdminOrOperatorRead`. An LXC-minting route became reachable by the operator READ
+// credential with all five guards in this file green. The gate is now the handler ARGUMENT of the
+// registration call, read from the AST and followed through aliases, so neither spacing nor a
+// local binding can hide it — and a comment naming the gate no longer counts as one.
 func TestClassificationMatchesTheGateAtEachRegistrationSite(t *testing.T) {
-	lines := strings.Split(readMainGo(t), "\n")
+	src := []byte(readMainGo(t))
+	scanned, err := scanAdminRoutes("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	// Non-vacuity: a scan that found no registrations would assert nothing about any of them.
+	if len(scanned) < 25 {
+		t.Fatalf("only %d /v1/admin registrations parsed from main.go — the scan is blind, "+
+			"and this proof is vacuous", len(scanned))
+	}
 
-	for i, line := range lines {
-		matches := adminPathRe.FindAllStringSubmatch(line, -1)
-		if len(matches) == 0 {
+	for _, r := range scanned {
+		if r.path == "/v1/admin/held-mints/" {
+			// Loop-generated adjudicate routes; all four are OUT and none may carry the gate.
+			if r.gated {
+				t.Errorf("the held-mints adjudicate loop at main.go line %d is wrapped in "+
+					"requireAdminOrOperatorRead — four PAYOUT REVOCATION routes just became "+
+					"reachable by a read credential", r.line)
+			}
 			continue
 		}
-		// The gate can sit on the registration line or the line(s) that continue the call.
-		window := strings.Join(lines[i:min(i+3, len(lines))], "\n")
-		gated := strings.Contains(window, "requireAdminOrOperatorRead(")
-
-		for _, m := range matches {
-			p := m[1]
-			if p == "/v1/admin/held-mints/" {
-				// Loop-generated adjudicate routes; all four are OUT and none may carry the gate.
-				if gated {
-					t.Errorf("the held-mints adjudicate loop at main.go:%d is wrapped in "+
-						"requireAdminOrOperatorRead — four PAYOUT REVOCATION routes just became "+
-						"reachable by a read credential", i+1)
-				}
-				continue
+		if _, ok := operatorReadable[r.path]; ok {
+			if !r.gated {
+				t.Errorf("main.go line %d registers %s, classified operatorReadable, but its gate is "+
+					"not requireAdminOrOperatorRead — the classification says reachable and the "+
+					"router says otherwise", r.line, r.path)
 			}
-			if _, ok := operatorReadable[p]; ok {
-				if !gated {
-					t.Errorf("main.go:%d registers %s, classified operatorReadable, but its gate is "+
-						"not requireAdminOrOperatorRead — the classification says reachable and the "+
-						"router says otherwise", i+1, p)
-				}
-				continue
-			}
-			if _, ok := operatorMustNotReach[p]; ok && gated {
-				t.Errorf("main.go:%d registers %s, classified operatorMustNotReach, and it IS "+
-					"wrapped in requireAdminOrOperatorRead. %s", i+1, p, operatorMustNotReach[p])
-			}
+			continue
+		}
+		if _, ok := operatorMustNotReach[r.path]; ok && r.gated {
+			t.Errorf("main.go line %d registers %s, classified operatorMustNotReach, and it IS "+
+				"wrapped in requireAdminOrOperatorRead. %s", r.line, r.path, operatorMustNotReach[r.path])
 		}
 	}
 }
