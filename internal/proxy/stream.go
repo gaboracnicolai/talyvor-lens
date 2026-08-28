@@ -428,6 +428,15 @@ func (s *StreamHandler) serve(
 		// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
 		s.proxy.storeCaches(storeCtx, provider, model, cachePrompt, prompt, sc.wsID, cached)
 	}
+	// W4.9 SHADOW POOL LOG — the streaming lane carries the SAME paid provider call as the buffered
+	// one, so leaving it out would make the measured pooled hit rate a statement about half the
+	// traffic while reading as a statement about all of it. Gated on the same shouldCache as the
+	// cache write above (an uncacheable response could never have been pooled) and on the logging
+	// policy, exactly as the buffered seam is. Void, post-serve, default-off.
+	if shouldCache && s.proxy.loggingPolicyFor(sc.wsID) != workspace.LoggingNone {
+		s.proxy.shadowPoolObservation(storeCtx, sc.wsID, provider, model, prompt,
+			s.proxy.poolGate.DecidePoolableOnWrite(storeCtx, sc.wsID))
+	}
 	eventPrompt := prompt
 	if piiDetected && s.proxy.piiDetector != nil {
 		eventPrompt = s.proxy.piiDetector.Detect(prompt).Redacted

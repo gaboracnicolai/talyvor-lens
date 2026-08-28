@@ -167,6 +167,12 @@ var Manifest = map[string]Entry{
 	"node_latency_mints": {Delete, "W6.26; key `contributor_workspace_id`. Not audit-guarded."},
 	"pool_royalty_mints": {Delete, "W6.26; keys `contributor_workspace_id`+`requester_workspace_id`, and it also " +
 		"carries prompt_sha256/answer_sha256 — a hash of the customer's prompt is still derived from it."},
+	"pooled_shadow_observations": {Delete, "W4.9; key `workspace_id`. The cross-tenant pooling SHADOW LOG " +
+		"(migration 0125). It stores no prompt TEXT, only SHA-256 fingerprints — but `pool_royalty_mints` " +
+		"directly above settles that: a hash of the customer's prompt is still DERIVED FROM IT, and the row " +
+		"also records that this workspace made a request at this time. Not audit-guarded (no trigger), " +
+		"purely observational, and nothing downstream aggregates it into money — so there is no retention " +
+		"claim pulling the other way. Delete."},
 	"routing_prediction_mints": {Delete, "W6.26; key `contributor_workspace_id`. Not audit-guarded."},
 	"royalty_detector_findings": {Delete, "W6.26; keys `contributor_workspace_id`+`requester_workspace_id` plus " +
 		"`identity_key` — an abuse-detection finding ABOUT a named workspace."},

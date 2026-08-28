@@ -191,6 +191,12 @@ type Proxy struct {
 	patternSink           patternCaptureSink
 	patternCaptureEnabled func() bool
 
+	// Cross-tenant pooling SHADOW LOG (W4.9) — optional, nil-safe post-serve
+	// observation of what would have pooled. Shares the obsLimiter budget.
+	// Persist-only sink; no cache client, no ledger. See shadow_pool.go.
+	poolShadowSink    poolShadowSink
+	poolShadowEnabled func() bool
+
 	// WorkTier descriptive classifier (optional, nil-safe post-serve). Shares the
 	// obsLimiter budget with pattern capture. See worktier_capture.go.
 	workTierSink    workTierSink
@@ -1601,6 +1607,23 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// workspace get cache hits but other workspaces don't. The raw
 			// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
 			p.storeCaches(ctx, cfg.ProviderName(), model, cachePrompt, prompt, wsID, upstreamBody)
+		}
+		// W4.9 SHADOW POOL LOG — void, post-serve, default-off. Records that a fresh cacheable
+		// response was produced, so the cross-tenant pooled hit rate is computable from repeats
+		// while pooling stays OFF. Gated on the SAME shouldCache as the cache write above: a
+		// response the product would not cache could never have been pooled either, so including
+		// it would deflate the rate by construction.
+		//
+		// ⚠ IT HONOURS LoggingNone, AND THAT NARROWS THE POPULATION IN A DIRECTION WORTH STATING.
+		// storeCaches deliberately does NOT consult the policy — that is the open decision
+		// docs/retention-none-and-the-semantic-cache.md records and logging_none_cache_test.go
+		// pins — so a LoggingNone workspace's response IS cached, and would be pooled, while this
+		// observation is skipped. The measured rate is therefore a FLOOR: it under-counts by
+		// whatever share of traffic sits on LoggingNone. Reporting a floor is correct here;
+		// writing a metadata row for a tenant that asked for no rows would not be.
+		if shouldCache && loggingPolicy != workspace.LoggingNone {
+			p.shadowPoolObservation(ctx, wsID, cfg.ProviderName(), model, prompt,
+				p.poolGate.DecidePoolableOnWrite(ctx, wsID))
 		}
 		eventPrompt := prompt
 		if piiDetected {

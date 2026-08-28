@@ -914,3 +914,44 @@ func TestLoad_PatternEarningEnabledDefaultsOnAndParses(t *testing.T) {
 		t.Error("LENS_PATTERN_EARNING_ENABLED=false must disable the flag")
 	}
 }
+
+// TestLoad_PoolShadowLogEnabledDefaultsOffAndParses — W4.9's shadow log is a serve-path write, so
+// it is inert until deliberately enabled.
+//
+// ⚠ AND IT ASSERTS THE ECONOMY MASTER SWITCH DOES **NOT** FORCE IT OFF, which is the half a reader
+// would assume the other way. The flag measures whether cross-tenant pooling would be worth turning
+// on; force-off'ing it with EconomyEnabled would mean the evidence needed to make that decision can
+// only be gathered after the decision has been made. Same posture as ShadowMintsEnabled.
+func TestLoad_PoolShadowLogEnabledDefaultsOffAndParses(t *testing.T) {
+	setRequiredEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PoolShadowLogEnabled {
+		t.Error("PoolShadowLogEnabled must DEFAULT FALSE — it writes on the serve path")
+	}
+	t.Setenv("LENS_POOL_SHADOW_LOG_ENABLED", "true")
+	c2, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c2.PoolShadowLogEnabled {
+		t.Error("LENS_POOL_SHADOW_LOG_ENABLED=true must enable the flag")
+	}
+	// The economy off-switch must leave it alone. The CONTROL is on the same Load: a flag that IS
+	// force-off'd has to come back false, or this assertion is only proving the switch does nothing.
+	t.Setenv("LENS_ECONOMY_ENABLED", "false")
+	c3, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c3.PoolShadowLogEnabled {
+		t.Error("EconomyEnabled=false force-off'd the shadow log — the evidence for a decision must " +
+			"be gatherable before the decision")
+	}
+	if c3.PatternCaptureEnabled {
+		t.Error("CONTROL FAILED: PatternCaptureEnabled survived EconomyEnabled=false, so the " +
+			"assertion above is not evidence that the master switch spares the shadow log")
+	}
+}
