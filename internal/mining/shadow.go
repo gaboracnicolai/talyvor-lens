@@ -21,15 +21,25 @@
 //
 // Not a flag. Four independent obstacles, three of them compile-time or schema-level:
 //
-//  1. THE SINK CANNOT REACH THE LEDGER. ShadowSink.RecordShadow takes NO pgx.Tx — so it cannot
-//     join the mint transaction — and is handed no LedgerStore, so it has nothing to credit
-//     with. Widening that interface is the only way in, and TestShadowSink_CannotReachTheLedger
-//     reads the source to fail if anyone does.
+//  1. THE SINK CANNOT JOIN THE MINT TRANSACTION. ShadowSink.RecordShadow takes NO pgx.Tx and is
+//     handed no LedgerStore, so it cannot write inside the tx that is about to roll back, and
+//     TestShadowSink_CannotReachTheLedger reads the source to fail if the interface is widened.
+//     ⚠ THIS ITEM CLAIMED "widening that interface is the only way in" AND THAT WAS FALSE. The
+//     concrete sink is shadowmint.Recorder, constructed as shadowmint.New(pool) in
+//     cmd/lens/main.go: it holds a *pgxpool.Pool for the same database, which is strictly more
+//     than a pgx.Tx. This obstacle bans the narrow door; the wide one was already open, and a
+//     schema-valid ledger INSERT added to RecordShadow passed the whole suite (106 packages, real
+//     Postgres, -race). What closes it is a guard in the WRITER's package — see obstacle 2.
 //  2. A DIFFERENT TABLE. Shadow rows go to lens_shadow_mints. Every balance, ledger sum and
 //     supply figure in this repository queries lens_token_ledger, so none of them can see a
 //     shadow row. That converts an N-reader obligation ("remember to exclude shadow rows") into
-//     a ONE-WRITER obligation ("never write one into the ledger"), which
-//     TestShadowMint_NeverTouchesTheTokenLedger pins by reading this file's code.
+//     a ONE-WRITER obligation ("never write one into the ledger").
+//     ⚠ AND THE OBLIGATION WAS PINNED ON THE NON-WRITER. TestShadowMint_NeverTouchesTheTokenLedger
+//     reads THIS file — which runs no SQL at all — so it could never have failed for the reason it
+//     names. The writer is internal/shadowmint, and it now carries the matching guard,
+//     TestShadowRecorderNamesOnlyItsOwnTable, which reads its SQL string literals (not its text:
+//     recorder.go legitimately discusses the ledger in prose). Both are kept: this one stops the
+//     interception logic growing a ledger write, that one stops the recorder doing it.
 //  3. NO CREDIT PATH READS IT. There is no settle, finalize, or promote step from
 //     lens_shadow_mints into the ledger. Making a shadow row real requires WRITING NEW CODE that
 //     inserts into the ledger from this table — a reviewable change, not a config flip.
