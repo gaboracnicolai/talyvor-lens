@@ -204,33 +204,46 @@ func isEconomyPath(path string) bool {
 
 // TestEconomyKillSwitch_WorkersGuarded — the two economy background workers must
 // start inside an `if cfg.EconomyEnabled` block.
+//
+// ⚠ THIS ASKED BOTH HALVES OF THE QUESTION OF LINE TEXT UNTIL #516, AND BOTH HALVES
+// COULD BE ANSWERED BY A COMMENT. It found the worker by a LINE containing the
+// selector and the quoted name, then looked UP AT MOST FOUR LINES for the literal
+// text `if cfg.EconomyEnabled {`. So an economy worker moved OUT of the gate passed
+// with the gate left behind as a comment, or quoted inside a log string, or merely
+// CLOSED above it (`if cfg.EconomyEnabled { … }` then an ungated registration two
+// lines later) — and a worker in the gate's ELSE branch, which runs precisely when
+// the economy is OFF, was reported gated. Meanwhile a legitimately gated worker
+// nested more than four lines below its own `if` was reported UNGATED. The gate is
+// now the set of `if` conditions that really enclose the call, read from main.go's
+// AST. Arms and verdicts: ~/talyvor-queue/w61-econworker-mutation-controls-h2r7.py.
 func TestEconomyKillSwitch_WorkersGuarded(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	lines := strings.Split(string(src), "\n")
-	for _, worker := range []string{`"pool-royalty-finalize"`, `"povi-challenge"`} {
-		idx := -1
-		for i, ln := range lines {
-			if strings.Contains(ln, "haComps.leader.Run") && strings.Contains(ln, worker) {
-				idx = i
-				break
+	jobs, err := scanLeaderJobs("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(jobs) < 20 {
+		t.Fatalf("scanLeaderJobs found only %d leader.Run registrations in main.go — "+
+			"the scanner is blind, not the file empty (35 measured at #516)", len(jobs))
+	}
+	for _, worker := range []string{"pool-royalty-finalize", "povi-challenge"} {
+		found := false
+		for _, j := range jobs {
+			if j.name != worker {
+				continue
+			}
+			found = true
+			if !j.gatedOn("cfg.EconomyEnabled") {
+				t.Errorf("economy worker %q is not enclosed by `if cfg.EconomyEnabled` "+
+					"(enclosing conditions: %v) — the master kill switch would not stop it",
+					worker, j.conds)
 			}
 		}
-		if idx < 0 {
-			t.Errorf("worker %s not found", worker)
-			continue
-		}
-		guarded := false
-		for j := idx; j >= 0 && j > idx-4; j-- {
-			if strings.Contains(lines[j], "if cfg.EconomyEnabled {") {
-				guarded = true
-				break
-			}
-		}
-		if !guarded {
-			t.Errorf("worker %s is not gated on cfg.EconomyEnabled", worker)
+		if !found {
+			t.Errorf("economy worker %q has no haComps.leader.Run registration in main.go at all", worker)
 		}
 	}
 }
