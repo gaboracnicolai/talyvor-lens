@@ -87,6 +87,7 @@ import (
 	"github.com/talyvor/lens/internal/outputverify"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/poolroyalty"
+	"github.com/talyvor/lens/internal/poolshadow"
 	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/provenance"
@@ -1642,6 +1643,12 @@ func run() error {
 	// separate later stage).
 	p.SetPatternCapture(patternMiner, func() bool { return cfg.PatternCaptureEnabled })
 	p.SetObservationalLimiter(obsLimiter)
+	// W4.9 cross-tenant pooling SHADOW LOG — post-serve, void, fingerprint-only.
+	// Default off. It is handed a *poolshadow.Recorder, which holds a pool and
+	// nothing else: no cache client (so it cannot read or write the pooled
+	// keyspace) and no ledger handle (so it cannot mint). Read back offline with
+	// poolshadow.Recorder.Rate; see migrations/0125.
+	p.SetPoolShadowLog(poolshadow.New(pool), func() bool { return cfg.PoolShadowLogEnabled })
 	// WorkTier descriptive classifier (default-off capability flag). Post-serve,
 	// NON-CONTENT, mint-free; shares the obsLimiter budget. The ANALYTICS consumer
 	// (GET /v1/admin/worktier/distribution, registered below) reads this same store via

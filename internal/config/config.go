@@ -328,6 +328,20 @@ type Config struct {
 	// PatternMiningEnabled (which gates the opt-in HTTP route, unchanged).
 	PatternCaptureEnabled bool
 
+	// PoolShadowLogEnabled gates the W4.9 cross-tenant pooling SHADOW LOG: a
+	// post-serve, void, fingerprint-only observation of what WOULD have pooled,
+	// so the pooled hit rate is measurable on real traffic while pooling itself
+	// stays off. Persist-only; no cache client and no ledger handle, so it can
+	// neither serve a pooled answer nor mint. DEFAULT FALSE.
+	// Env: LENS_POOL_SHADOW_LOG_ENABLED.
+	//
+	// ⚠ NOT force-off'd with EconomyEnabled, and that is deliberate rather than an
+	// omission — same posture as ShadowMintsEnabled. This flag measures whether a
+	// feature would be worth turning on; force-off'ing it with the master switch
+	// would mean the evidence needed to decide can only be gathered once the
+	// decision has already been made.
+	PoolShadowLogEnabled bool
+
 	// PatternEarningEnabled gates the Phase-3 routing-pattern EARNING wire-up
 	// (S4) — the FIRST pattern-earning stage that touches the serve path. When
 	// ON, an opted-in, authenticated workspace's served request routes into
@@ -1178,6 +1192,7 @@ func Load() (*Config, error) {
 		LXCGatingEnabled:          parseBoolEnv("LENS_LXC_GATING_ENABLED"),
 		AdminLXCGrantEnabled:      parseBoolEnv("LENS_ADMIN_LXC_GRANT_ENABLED"),
 		PatternCaptureEnabled:     parseBoolEnv("LENS_PATTERN_CAPTURE_ENABLED"),
+		PoolShadowLogEnabled:      parseBoolEnv("LENS_POOL_SHADOW_LOG_ENABLED"),
 		PatternEarningEnabled:     parseBoolEnv("LENS_PATTERN_EARNING_ENABLED"),
 
 		ROIIncludeEngineerBreakdown: parseBoolEnv("LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN"),
