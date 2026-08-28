@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -228,7 +230,65 @@ func conformers() []conformer {
 
 // ── the census that makes the registry unbypassable ─────────────────────────────────────────────
 
-var reduceMethod = regexp.MustCompile(`(?m)^func \(\w+ \*?(\w+)\) Reduce\(`)
+// reducerReceiversIn returns the receiver type name of every method named Reduce declared in src.
+//
+// ⚠ IT PARSES, IT DOES NOT MATCH. The previous version was a regex over the source text and it was
+// wrong in both directions — see TestReducerCensusReadsDeclarationsNotSpellings for the measured
+// arms. A parser is what tells a DECLARATION apart from the same characters inside a comment or a
+// string, and it is what sees a receiver whose name the method does not bother to give.
+//
+// ⚠ IT KEYS ON THE METHOD NAME ONLY, NOT ON THE SIGNATURE, AND THAT IS THE CONSERVATIVE DIRECTION.
+// A method named Reduce whose signature does not satisfy tare.Reduction is reported and must then
+// be registered or renamed — noisy. Matching the signature instead would let a reducer that is one
+// type away from the interface pass unseen, which is the failure that matters.
+//
+// ⚠ A PARSE ERROR IS RETURNED, NEVER SWALLOWED. A scanner that returns nothing agrees with any
+// registry.
+func reducerReceiversIn(filename string, src []byte) ([]string, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), filename, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name == nil || fd.Name.Name != "Reduce" {
+			continue
+		}
+		if n := receiverTypeName(fd); n != "" {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// receiverTypeName is the bare type name a method is declared on, or "" for a plain function.
+//
+// ⚠ THE UNWRAPPING IS THE POINT. `*T`, `T[P]` and `*T[K, V]` are all ordinary ways to spell a
+// receiver and each defeated the regex this replaced; the receiver may also have NO name at all,
+// which is idiomatic Go for a method that does not use it and is invisible to any pattern that
+// expects an identifier before the type.
+func receiverTypeName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) != 1 {
+		return ""
+	}
+	expr := fd.Recv.List[0].Type
+	for {
+		switch t := expr.(type) {
+		case *ast.StarExpr: // *T
+			expr = t.X
+		case *ast.IndexExpr: // T[P]
+			expr = t.X
+		case *ast.IndexListExpr: // T[K, V]
+			expr = t.X
+		case *ast.Ident:
+			return t.Name
+		default:
+			return ""
+		}
+	}
+}
 
 // ⚠ WITHOUT THIS, EVERY TEST BELOW IS OPT-IN. A new reducer that simply is not added to
 // conformers() would be held to nothing at all, and the suite would report a clean run — the exact
@@ -251,8 +311,12 @@ func TestEveryReductionInThePackageIsRegistered(t *testing.T) {
 			t.Fatalf("read %s: %v", n, rerr)
 		}
 		scanned++
-		for _, m := range reduceMethod.FindAllStringSubmatch(string(src), -1) {
-			found[m[1]] = true
+		recvs, perr := reducerReceiversIn(n, src)
+		if perr != nil {
+			t.Fatalf("parse %s: %v — a file this census cannot read is a file it cannot police", n, perr)
+		}
+		for _, r := range recvs {
+			found[r] = true
 		}
 	}
 	if scanned == 0 {
@@ -261,7 +325,7 @@ func TestEveryReductionInThePackageIsRegistered(t *testing.T) {
 	}
 	if len(found) < 2 {
 		t.Fatalf("found %d Reduce method(s) in %d file(s); this package has at least three — the "+
-			"regex is not matching and the census is inert", len(found), scanned)
+			"scan is not finding them and the census is inert", len(found), scanned)
 	}
 
 	prefixTests, err := os.ReadFile("prefix_test.go")
@@ -582,5 +646,91 @@ func TestRoundTripComparisonIsByteExactByDefaultAndAdmitsNonJSON(t *testing.T) {
 	if compare(jc, []byte(`{"a":1}`), []byte(`not json at all`)) {
 		t.Error("jsonSemanticEqual reported equality against something it could not parse; a " +
 			"comparator that cannot read its inputs must refuse, not pass")
+	}
+}
+
+// ── the census reads DECLARATIONS, not spellings ─────────────────────────────────────────────────
+
+// ⚠ THE CENSUS ABOVE IS THE ONLY THING THAT MAKES EVERY OTHER PROPERTY IN THIS FILE NON-OPT-IN, SO
+// ITS OWN BLINDNESS IS THE WHOLE SUITE'S BLINDNESS. Measured 2026-08-28 (tab-q6d3) by dropping one
+// new production file per arm into this package, each declaring a type the COMPILER certifies
+// implements tare.Reduction (`var _ Reduction = ...`) and registered nowhere. Every arm below
+// compiles and is gofmt-clean.
+//
+// The scan used to be a regex, `^func \(\w+ \*?(\w+)\) Reduce\(`, and it was wrong in BOTH
+// directions:
+//
+//	BLIND — a real, unregistered reducer the census could not see, held to NO property at all:
+//	  func (*T) Reduce(...)      unnamed pointer receiver  -> MISSED
+//	  func (T) Reduce(...)       unnamed value receiver    -> MISSED
+//	  func (t *T[P]) Reduce(...) generic receiver          -> MISSED
+//	PHANTOM — a reducer that does not exist, which the census demanded be registered, so it FAILED
+//	ON CORRECT CODE (the direction that gets guards deleted):
+//	  the same line inside a /* block comment */          -> reported type "GhostComment"
+//	  the same line inside a `raw string`                 -> reported type "GhostString"
+//
+// A named-receiver reducer WAS caught, which is why the regex looked like it worked: all four
+// Reduce methods in this package happen to name their receiver, and an unnamed one is ordinary Go
+// for a receiver a method does not use.
+//
+// A census by regex is a census of SPELLINGS. This drives the real scanner over synthetic sources
+// so it cannot narrow back to one — every row below reds against the regex it replaced.
+//
+// ⚠ ONE THING IS STILL INVISIBLE TO THE CENSUS, AND IT IS NAMED HERE RATHER THAN LEFT TO BE
+// REDISCOVERED — this file's own PrefixStable exclusion is the reason: an exclusion that goes
+// unwritten is a promise nobody can check. `type W struct{ *JSONReducer }` satisfies Reduction by
+// PROMOTION and declares no Reduce of its own, so it has no entry here and no row below. That is
+// correct as long as it stays pure delegation: such a type has no behaviour that is not already
+// held to the registry through the reducer it embeds, and the moment it declares its own Reduce to
+// change any of that behaviour, the scan sees it. Measured, not assumed — the arm was run.
+func TestReducerCensusReadsDeclarationsNotSpellings(t *testing.T) {
+	const sig = "(_ context.Context, content []byte, kind Kind) ([]byte, int, int, error) { return content, 0, 0, nil }"
+
+	cases := []struct {
+		name string
+		src  string
+		want []string
+	}{
+		{"named pointer receiver", "package tare\nfunc (r *Alpha) Reduce" + sig + "\n", []string{"Alpha"}},
+		{"named value receiver", "package tare\nfunc (r Bravo) Reduce" + sig + "\n", []string{"Bravo"}},
+		{"UNNAMED pointer receiver", "package tare\nfunc (*Charlie) Reduce" + sig + "\n", []string{"Charlie"}},
+		{"UNNAMED value receiver", "package tare\nfunc (Delta) Reduce" + sig + "\n", []string{"Delta"}},
+		{"generic receiver, one parameter", "package tare\nfunc (r *Echo[T]) Reduce" + sig + "\n", []string{"Echo"}},
+		{"generic receiver, two parameters", "package tare\nfunc (r *Foxtrot[K, V]) Reduce" + sig + "\n", []string{"Foxtrot"}},
+		{"two reducers in one file are both reported",
+			"package tare\n\nfunc (r *Golf) Reduce" + sig + "\n\nfunc (r *Hotel) Reduce" + sig + "\n",
+			[]string{"Golf", "Hotel"}},
+
+		// ⚠ THE INVERTED ARMS. A census that reds on correct code gets relaxed until it reds on
+		// nothing, so these matter as much as the blind ones.
+		{"a block comment is documentation, not a reducer",
+			"package tare\n\n/*\nfunc (g *GhostComment) Reduce" + sig + "\n*/\n", nil},
+		{"a raw string is data, not a reducer",
+			"package tare\n\nconst example = `\nfunc (g *GhostString) Reduce" + sig + "\n`\n", nil},
+		{"a plain function named Reduce is not a method and cannot implement the interface",
+			"package tare\nfunc Reduce" + sig + "\n", nil},
+		{"a method with another name is not a reducer",
+			"package tare\nfunc (r *India) Expand" + sig + "\n", nil},
+	}
+
+	for _, tc := range cases {
+		got, err := reducerReceiversIn("probe.go", []byte(tc.src))
+		if err != nil {
+			t.Errorf("%s: scanner returned an error: %v", tc.name, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s:\n  want %v\n  got  %v", tc.name, tc.want, got)
+		}
+	}
+}
+
+// ⚠ AND THE SCANNER MUST FAIL LOUDLY ON A FILE IT CANNOT READ. A scanner that returns nothing
+// agrees with any registry — the same floor TestEveryReductionInThePackageIsRegistered's
+// `scanned == 0` check exists for, one level down.
+func TestReducerCensusRefusesSourceItCannotParse(t *testing.T) {
+	if _, err := reducerReceiversIn("broken.go", []byte("package tare\nfunc (r *A) Reduce( {{{\n")); err == nil {
+		t.Error("the scanner read unparseable source and reported no reducers; a silent zero from a " +
+			"broken scan is indistinguishable from a correctly empty package")
 	}
 }
