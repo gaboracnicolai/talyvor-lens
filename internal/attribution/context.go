@@ -94,6 +94,17 @@ func ExtractFromRequest(r *http.Request) AttributionContext {
 	// Strip the optional "code-" prefix Talyvor Code adds —
 	// keeps the dashboard chips readable.
 	feature = strings.TrimPrefix(feature, "code-")
+	// X-Talyvor-Repository is the PUBLIC spelling: it is what both shipped SDKs emit (measured by
+	// running them, not by reading their constants) and what both SDK READMEs document. This
+	// function read only X-Talyvor-Repo, which no shipped Talyvor client anywhere in the estate
+	// emits — so repo_name could only ever hold '', and it is a WHERE predicate in three places
+	// (branchSpendForWorkspaceSQL, topBranchesForWorkspaceSQL, summaryByRepoSQL). X-Talyvor-Repo
+	// stays accepted as a fallback: nothing is known to send it, so honouring both regresses
+	// nothing and dropping it would be a removal nobody measured the need for.
+	repo := r.Header.Get("X-Talyvor-Repository")
+	if repo == "" {
+		repo = r.Header.Get("X-Talyvor-Repo")
+	}
 	return AttributionContext{
 		WorkspaceID: truncate(r.Header.Get("X-Talyvor-Workspace"), maxIDLen),
 		Feature:     truncate(feature, maxNameLen),
@@ -103,7 +114,7 @@ func ExtractFromRequest(r *http.Request) AttributionContext {
 			PRNumber:  truncate(r.Header.Get("X-Talyvor-PR"), maxPRNumLen),
 			CommitSHA: truncate(r.Header.Get("X-Talyvor-Commit"), maxSHALen),
 			Author:    truncate(r.Header.Get("X-Talyvor-Author"), maxNameLen),
-			RepoName:  truncate(r.Header.Get("X-Talyvor-Repo"), maxNameLen),
+			RepoName:  truncate(repo, maxNameLen),
 		},
 		UserID:    truncate(r.Header.Get("X-Talyvor-User"), maxIDLen),
 		SessionID: truncate(r.Header.Get("X-Talyvor-Session"), maxIDLen),
