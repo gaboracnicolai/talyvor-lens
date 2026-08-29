@@ -145,4 +145,14 @@ class LensClient:
             "branch": self._headers.get(HEADER_BRANCH, ""),
         }
         defaults.update(overrides)
-        return LensClient(**defaults)
+        clone = LensClient(**defaults)
+        # ⚠ AND CARRY ANY HEADER THE CONSTRUCTOR DOES NOT REBUILD. The comment above says this
+        # rebuild exists so a derived client "picks up any future header additions made in
+        # __init__" — but __init__ has no ``pr_number`` parameter, so ``set_branch(b, pr)``
+        # followed by ``set_session(...)`` DROPPED X-Talyvor-PR. That is the documented usage
+        # (branch once per CI run, session per turn), the loss was silent, and the row the proxy
+        # stored then had an empty pr_number while summaryByPRSQL predicated on it. Filling only
+        # the GAPS means a real override still wins — the rebuilt value is already in place.
+        for name, value in self._headers.items():
+            clone._headers.setdefault(name, value)
+        return clone

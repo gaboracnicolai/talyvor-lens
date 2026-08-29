@@ -162,3 +162,55 @@ describe("injectLensHeaders", () => {
     expect(headers["X-Talyvor-Workspace"]).toBe("default");
   });
 });
+
+describe("attribution survives chaining", () => {
+  /**
+   * ⚠ THIS IS THE DOCUMENTED USAGE, NOT AN EDGE CASE. `withBranch`'s doc comment says the PR
+   * number is "commonly set on CI runs" and `withSession` is the per-turn call — set the branch
+   * once, derive a session per turn. In that order every turn after the first lost
+   * X-Talyvor-PR, silently, because `derive` rebuilds through the constructor and
+   * `LensClientOptions` has no `prNumber`. The reverse order kept it, so the defect depended on
+   * which of two documented calls came second.
+   *
+   * The consequence is not a crash: the request succeeds, the proxy stores an attribution row
+   * with an empty pr_number, and summaryByPRSQL shows the CI run's spend against no PR at all.
+   * The Python SDK had the identical defect in the identical place.
+   */
+  it("withBranch(...).withSession(...) keeps the PR number", () => {
+    const ci = new LensClient({ lensUrl: "http://lens:8080", apiKey: "tlv_x" }).withBranch(
+      "feat/x",
+      "42",
+    );
+    expect(ci.getHeaders()["X-Talyvor-PR"]).toBe("42");
+
+    const perTurn = ci.withSession("turn-1", "planner");
+    expect(perTurn.getHeaders()["X-Talyvor-PR"]).toBe("42");
+    // the session override still took effect, so the fix is not "return the same client"
+    expect(perTurn.getHeaders()["X-Talyvor-Session"]).toBe("turn-1");
+    expect(perTurn.getHeaders()["X-Talyvor-Agent"]).toBe("planner");
+    // branch survives too — it always did, and a fix that broke it would be a regression
+    expect(perTurn.getHeaders()["X-Talyvor-Branch"]).toBe("feat/x");
+  });
+
+  /**
+   * ⚠ THIS CASE EXISTS BECAUSE A CONTROL FOUND ITS ABSENCE. The test above starts from a client
+   * with no session, so the parent has no X-Talyvor-Session key at all — which means a fix that
+   * copied the parent's headers OVER the rebuilt ones instead of into the gaps would have passed
+   * it. The mutation harness injected exactly that fix and the suite stayed green. The parent
+   * here HAS a session and an agent, so the override is observable and the wrong fix reds.
+   */
+  it("an override beats the header the parent carried", () => {
+    const base = new LensClient({
+      lensUrl: "http://lens:8080",
+      apiKey: "tlv_x",
+      sessionId: "turn-0",
+      agentName: "scout",
+    }).withBranch("feat/x", "42");
+    expect(base.getHeaders()["X-Talyvor-Session"]).toBe("turn-0");
+
+    const next = base.withSession("turn-1", "planner");
+    expect(next.getHeaders()["X-Talyvor-Session"]).toBe("turn-1");
+    expect(next.getHeaders()["X-Talyvor-Agent"]).toBe("planner");
+    expect(next.getHeaders()["X-Talyvor-PR"]).toBe("42");
+  });
+});
