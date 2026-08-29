@@ -1,8 +1,8 @@
 package main
 
 import (
+	"fmt"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/talyvor/lens/internal/config"
@@ -37,55 +37,73 @@ func TestU6_TrustfulComputeMintDefaultsFalse(t *testing.T) {
 // TestU6_MintVerifierWiredUnconditional — the Sybil floor must be wired
 // UNCONDITIONALLY: a safety restriction must NOT be liftable by the economy
 // master kill (the precise analogue of the LXC-fiat unconditional-wiring
-// invariant, TestEconomyKillSwitch_LXCWiringUnconditional). The SetMintVerifier
-// call must be a top-level run() statement (exactly one leading tab), never
-// nested inside an `if cfg.EconomyEnabled` block.
+// invariant, TestEconomyKillSwitch_LXCWiringUnconditional).
+//
+// ⚠ IT ASKED THAT OF A LEADING TAB UNTIL #520, WHICH IS A QUESTION ABOUT TEXT LAYOUT AND NOT
+// ABOUT EXECUTION. Measured (~/talyvor-queue/w61-unconditional-wiring-controls-h2r7.py):
+// deleting the call was CAUGHT and moving it inside `if cfg.EconomyEnabled` was CAUGHT — but
+// moving it into a helper called only `if cfg.EconomyEnabled` was MISSED, and so was a helper
+// that is NEVER CALLED, and so was deleting the wiring entirely and leaving the call text in a
+// RAW STRING whose content line begins with one tab. A function body is indented with one tab
+// like run()'s statements, so the proxy cannot tell the boot path from any other function. The
+// question is now answered by reachability from run() over main.go's AST.
 func TestU6_MintVerifierWiredUnconditional(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	present, unconditional := false, false
-	for _, ln := range strings.Split(string(src), "\n") {
-		if strings.Contains(ln, "SetMintVerifier(") {
-			present = true
-			if strings.HasPrefix(ln, "\ttokenLedger.SetMintVerifier(") { // exactly one leading tab
-				unconditional = true
+	w, err := scanWiring("main.go", src, map[string]bool{"SetMintVerifier": true})
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	assertBootReachable(t, w, "tokenLedger", "SetMintVerifier",
+		"the Sybil floor would never enforce",
+		"a safety restriction must survive the economy master kill")
+}
+
+// assertBootReachable is the shared assertion behind the three unconditional-wiring guards:
+// the hook must be CALLED, and that call must run whenever run() runs.
+func assertBootReachable(t *testing.T, w *wiringScan, receiver, method, missingWhy, liftableWhy string) {
+	t.Helper()
+	// Vacuity floor: a scan that resolved no reachability would report every hook as
+	// conditional, and one that found no call sites would report every hook as missing.
+	if len(w.reached) < 2 {
+		t.Fatalf("scanWiring reached only %d functions from %s() — the scan is blind", len(w.reached), bootEntryPoint)
+	}
+	switch {
+	case !w.present(receiver, method):
+		t.Fatalf("%s.%s is not called in main.go — %s", receiver, method, missingWhy)
+	case !w.unconditional(receiver, method):
+		var where []string
+		for _, s := range w.sites {
+			if s.receiver == receiver && s.method == method {
+				where = append(where, fmt.Sprintf("line %d in %s() (guarded=%v, reached-from-%s=%v)",
+					s.line, s.fn, s.guarded, bootEntryPoint, w.reached[s.fn]))
 			}
 		}
-	}
-	if !present {
-		t.Fatal("SetMintVerifier not wired in main.go — the Sybil floor would never enforce")
-	}
-	if !unconditional {
-		t.Fatal("SetMintVerifier must be an unconditional top-level run() wiring (one leading tab) — a safety restriction must survive the economy master kill")
+		t.Fatalf("%s.%s is called but not on the unconditional boot path: %v — %s",
+			receiver, method, where, liftableWhy)
 	}
 }
 
 // TestU6PR2_WashHardeningWiredUnconditional — the PR2 rate cap and owner-linkage
-// guard are SAFETY restrictions wired unconditionally (one leading tab, never
-// inside an `if cfg.EconomyEnabled` block) — the economy kill must not lift them,
-// mirroring the verifier + the LXC-fiat invariant.
+// guard are SAFETY restrictions wired unconditionally — the economy kill must not lift them,
+// mirroring the verifier + the LXC-fiat invariant. Same defect and same fix as #520 above.
 func TestU6PR2_WashHardeningWiredUnconditional(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	for _, hook := range []string{"tokenLedger.SetMintRateCap(", "royaltyMinter.SetOwnerLinkageCheck("} {
-		present, unconditional := false, false
-		for _, ln := range strings.Split(string(src), "\n") {
-			if strings.Contains(ln, hook) {
-				present = true
-				if strings.HasPrefix(ln, "\t"+hook) { // exactly one leading tab
-					unconditional = true
-				}
-			}
-		}
-		if !present {
-			t.Errorf("%s not wired in main.go — the wash-hardening would never enforce", hook)
-		}
-		if !unconditional {
-			t.Errorf("%s must be unconditional (one leading tab) — a safety restriction must survive the economy kill", hook)
-		}
+	w, err := scanWiring("main.go", src, map[string]bool{"SetMintRateCap": true, "SetOwnerLinkageCheck": true})
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	for _, hook := range []struct{ receiver, method string }{
+		{"tokenLedger", "SetMintRateCap"},
+		{"royaltyMinter", "SetOwnerLinkageCheck"},
+	} {
+		assertBootReachable(t, w, hook.receiver, hook.method,
+			"the wash-hardening would never enforce",
+			"a safety restriction must survive the economy kill")
 	}
 }

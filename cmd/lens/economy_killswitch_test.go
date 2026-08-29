@@ -320,32 +320,28 @@ func TestEconomyKillSwitch_WorkersGuarded(t *testing.T) {
 // wired UNCONDITIONALLY — like the fiat routes — NOT inside an `if cfg.EconomyEnabled`
 // block; else the master kill would silently disable paid-credit gating, the exact
 // bug U18a exists to prevent. This is the precise INVERSE of WorkersGuarded: those
-// two workers MUST be econ-guarded; these two hooks must NOT be. "Unconditional" ⇒
-// a top-level run() statement ⇒ exactly one leading tab; nesting in any block
-// indents to >=2 tabs. Fails if a hook is deleted (never installed) OR moved under
-// a guard.
+// two workers MUST be econ-guarded; these two hooks must NOT be.
+//
+// ⚠ "UNCONDITIONAL" MEANT "EXACTLY ONE LEADING TAB" UNTIL #520, which is a claim about text
+// layout, not about execution: a function body is indented with one tab too. Moving a hook
+// into a helper called only `if cfg.EconomyEnabled`, into a helper never called at all, or
+// deleting it and leaving the call text inside a raw string whose content line starts with a
+// tab, all passed the tab rule — the first of those is the master kill silently disabling
+// paid-credit gating, which is precisely U18a. Reachability from run() answers it now.
+// Arms: ~/talyvor-queue/w61-unconditional-wiring-controls-h2r7.py.
 func TestEconomyKillSwitch_LXCWiringUnconditional(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	lines := strings.Split(string(src), "\n")
-	for _, hook := range []string{"p.SetLXCGate(", "p.SetLXCSpendSink("} {
-		present, unconditional := false, false
-		for _, ln := range lines {
-			if strings.Contains(ln, hook) {
-				present = true
-				if strings.HasPrefix(ln, "\t"+hook) { // exactly one leading tab
-					unconditional = true
-				}
-			}
-		}
-		switch {
-		case !present:
-			t.Errorf("LXC hook %q not installed in main.go — fiat gating/shadow would never fire", hook)
-		case !unconditional:
-			t.Errorf("LXC hook %q is indented inside a block (>=2 tabs) — it must be an unconditional top-level run() wiring (fiat survives the master kill)", hook)
-		}
+	w, err := scanWiring("main.go", src, map[string]bool{"SetLXCGate": true, "SetLXCSpendSink": true})
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	for _, method := range []string{"SetLXCGate", "SetLXCSpendSink"} {
+		assertBootReachable(t, w, "p", method,
+			"fiat gating/shadow would never fire",
+			"fiat survives the master kill, so this wiring must not be liftable by it")
 	}
 }
 
