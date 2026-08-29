@@ -100,14 +100,33 @@ func TestBootWarnsWhenProvisioningIsUnconfigured(t *testing.T) {
 	if lo < 0 {
 		lo = 0
 	}
-	window := s[lo : mount+400]
+	hi := mount + 400
 
-	if !strings.Contains(window, "logger.Warn") {
+	// ⚠ THE WINDOW IS UNCHANGED AND DELIBERATE — 1200 bytes back, 400 forward, "near enough that
+	// someone changing one sees the other". What changed in #525 is WHAT COUNTS INSIDE IT.
+	// strings.Contains counted a COMMENT: deleting the warning and leaving its text in a comment
+	// beside the mount left this green, and the guard's own message says the cost — provisioning
+	// fails closed and silently, so a paired BFF 404s every login while Lens looks healthy. A real
+	// CALL and a real STRING LITERAL are now required; the offsets come from the AST, so the byte
+	// window keeps exactly the meaning it had.
+	warnAt, err := callOffsets("main.go", src, "logger.Warn")
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	nameAt, err := stringLiteralOffsets("main.go", src, "LENS_PROVISION_SECRET")
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(warnAt) == 0 {
+		t.Fatal("main.go contains no logger.Warn call at all — the scan is blind, not the file silent")
+	}
+
+	if !anyWithin(warnAt, lo, hi) {
 		t.Error("run() does not log a WARN beside mountProvisionRoute. Provisioning fails CLOSED " +
 			"when LENS_PROVISION_SECRET is unset, which is correct — but it is then completely " +
 			"silent: a paired BFF 404s every login while Lens looks healthy. Boot must say so.")
 	}
-	if !strings.Contains(window, "LENS_PROVISION_SECRET") {
+	if !anyWithin(nameAt, lo, hi) {
 		t.Error("the warning beside mountProvisionRoute must NAME LENS_PROVISION_SECRET — a " +
 			"warning that does not name the variable to set is a warning nobody can act on")
 	}

@@ -4,7 +4,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"regexp"
 	"testing"
 
 	"github.com/talyvor/lens/internal/catalog"
@@ -70,20 +69,50 @@ func TestApplyCatalogOverrides_InvalidDocumentChangesNothing(t *testing.T) {
 // And main() must actually hand the variable to it. The behaviour tests above run the function; this
 // is the one claim they cannot make — that boot reaches it. Same shape as
 // internal/poolroyalty/sweeper_finaltype_guard_test.go, which pins sweeper wiring out of this file.
-var catalogOverrideWiring = regexp.MustCompile(`applyCatalogOverrides\(os\.Getenv\("LENS_MODEL_CATALOG_OVERRIDES"\)`)
-
+//
+// ⚠ IT WAS A REGEX OVER RAW SOURCE UNTIL #525, so commenting the boot wiring OUT left this green:
+// the operator's model-price override document would stop being applied at boot and the guard
+// would still say it was wired. (What that costs is #476's finding one file over — a mistyped rate
+// key in an override document registered a model at $0.00 output.) The wiring is now a real CALL,
+// reachable from run(), with the env var as its first argument.
 func TestMain_WiresCatalogOverridesThroughTheMergingDecoder(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	if !catalogOverrideWiring.Match(src) {
-		t.Error("cmd/lens/main.go no longer passes LENS_MODEL_CATALOG_OVERRIDES to applyCatalogOverrides — " +
-			"if it decodes the document itself again, a price-only override goes back to blanking every " +
-			"fact it did not restate and the tests in internal/catalog cannot see it")
+	w, err := scanWiring("main.go", src, map[string]bool{"applyCatalogOverrides": true})
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
 	}
-	if regexp.MustCompile(`json\.Unmarshal\(\[\]byte\(raw\), &overrides\)`).Match(src) {
-		t.Error("cmd/lens/main.go decodes the override document with a bare json.Unmarshal again — " +
-			"that is the decode that made \"unsaid\" and \"false\" the same byte")
+	if len(w.reached) < 2 {
+		t.Fatalf("scanWiring reached only %d functions from %s() — the scan is blind", len(w.reached), bootEntryPoint)
+	}
+	wired := false
+	for _, s := range w.sites {
+		if s.method != "applyCatalogOverrides" || !w.reached[s.fn] {
+			continue
+		}
+		if len(s.args) > 0 && s.args[0] == `os.Getenv("LENS_MODEL_CATALOG_OVERRIDES")` {
+			wired = true
+		}
+	}
+	if !wired {
+		t.Errorf("cmd/lens/main.go no longer passes LENS_MODEL_CATALOG_OVERRIDES to applyCatalogOverrides "+
+			"on a path reachable from %s() (call sites found: %v) — if it decodes the document itself "+
+			"again, a price-only override goes back to blanking every fact it did not restate and the "+
+			"tests in internal/catalog cannot see it", bootEntryPoint, w.sites)
+	}
+
+	// The inverse: the bare decode that made "unsaid" and "false" the same byte must not come back.
+	// Asked as a real CALL with those arguments, so a comment recording the old mistake is not it.
+	bad, err := scanWiring("main.go", src, map[string]bool{"Unmarshal": true})
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	for _, s := range bad.sites {
+		if s.receiver == "json" && len(s.args) == 2 && s.args[0] == "[]byte(raw)" && s.args[1] == "&overrides" {
+			t.Errorf("cmd/lens/main.go line %d decodes the override document with a bare json.Unmarshal "+
+				"again — that is the decode that made \"unsaid\" and \"false\" the same byte", s.line)
+		}
 	}
 }
