@@ -147,14 +147,51 @@ func TestFallbackChains_WhatATenantCanReadToday(t *testing.T) {
 
 // ── the wiring ──
 
+// ⚠ BOTH OF THESE WERE strings.Contains OVER THE RAW SOURCE UNTIL #526, so a COMMENT carrying
+// the old registration text answered them. Measured: DELETE /v1/api/keys/pool/{keyID} stripped of
+// requireAdmin, with the admin-gated form left in a comment, kept
+// TestOperatorReadWriteAsymmetryIsStillWhatW618Recorded GREEN — a route that REMOVES A PROVIDER
+// API KEY FROM THE POOL, reachable by any authenticated tenant, while the record says the
+// asymmetry holds. Registrations, their handlers and their gates are now read from the AST.
+// Arms: ~/talyvor-queue/w61-operatorkeys-controls-h2r7.py.
+
+// operatorRouteRegs parses main.go once for both guards below.
+func operatorRouteRegs(t *testing.T) []routeReg {
+	t.Helper()
+	regs, _, _, err := scanRouteRegistrations("main.go", []byte(readMainGo(t)))
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(regs) < 100 {
+		t.Fatalf("only %d route registrations parsed from main.go — the scan is blind", len(regs))
+	}
+	return regs
+}
+
+// findRoute returns the registration for verb+path.
+func findRoute(regs []routeReg, verb, path string) (routeReg, bool) {
+	for _, r := range regs {
+		if r.verb == verb && r.path == path {
+			return r, true
+		}
+	}
+	return routeReg{}, false
+}
+
 func TestOperatorReadsGoThroughTheirNamedHandlers(t *testing.T) {
-	src := readMainGo(t)
-	for _, want := range []string{
-		`authed.Get("/v1/api/keys/pool", newKeyPoolStatsHandler(keyPool))`,
-		`authed.Get("/v1/api/fallback/chains", newFallbackChainsHandler(fallbackRouter))`,
+	regs := operatorRouteRegs(t)
+	for _, want := range []struct{ verb, path, handler string }{
+		{"Get", "/v1/api/keys/pool", "newKeyPoolStatsHandler"},
+		{"Get", "/v1/api/fallback/chains", "newFallbackChainsHandler"},
 	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("main.go does not register through the named handler: %s", want)
+		r, ok := findRoute(regs, want.verb, want.path)
+		if !ok {
+			t.Errorf("main.go does not register %s %s at all", want.verb, want.path)
+			continue
+		}
+		if !r.wrapsCall(want.handler) {
+			t.Errorf("main.go does not register %s %s through the named handler %s — handler is %s",
+				want.verb, want.path, want.handler, r.handler)
 		}
 	}
 }
@@ -163,28 +200,32 @@ func TestOperatorReadsGoThroughTheirNamedHandlers(t *testing.T) {
 // are not. If somebody gates a read, this fires and tells them to close W6.18's
 // decision rather than leave the record saying something untrue.
 func TestOperatorReadWriteAsymmetryIsStillWhatW618Recorded(t *testing.T) {
-	src := readMainGo(t)
-	for _, c := range []struct{ what, line string }{
-		{"POST /v1/api/keys/pool is admin-gated",
-			`authed.Post("/v1/api/keys/pool", requireAdmin(`},
-		{"DELETE /v1/api/keys/pool/{keyID} is admin-gated",
-			`authed.Delete("/v1/api/keys/pool/{keyID}", requireAdmin(`},
-		{"PUT /v1/api/fallback/chains/{provider} is admin-gated",
-			`authed.Put("/v1/api/fallback/chains/{provider}", requireAdmin(`},
+	regs := operatorRouteRegs(t)
+	for _, c := range []struct{ what, verb, path string }{
+		{"POST /v1/api/keys/pool is admin-gated", "Post", "/v1/api/keys/pool"},
+		{"DELETE /v1/api/keys/pool/{keyID} is admin-gated", "Delete", "/v1/api/keys/pool/{keyID}"},
+		{"PUT /v1/api/fallback/chains/{provider} is admin-gated", "Put", "/v1/api/fallback/chains/{provider}"},
 	} {
-		if !strings.Contains(src, c.line) {
-			t.Errorf("%s — no longer true. W6.18's finding is the ASYMMETRY between these writes "+
-				"and their ungated reads; if the writes changed, the record is stale.", c.what)
+		r, ok := findRoute(regs, c.verb, c.path)
+		if !ok {
+			t.Errorf("%s — the route is not registered at all; re-anchor this census", c.what)
+			continue
+		}
+		if !r.wrapsCall("requireAdmin") {
+			t.Errorf("%s — no longer true (main.go line %d, handler %s). W6.18's finding is the "+
+				"ASYMMETRY between these writes and their ungated reads; if the writes changed, "+
+				"the record is stale.", c.what, r.line, r.handler)
 		}
 	}
-	for _, c := range []struct{ what, line string }{
-		{"GET /v1/api/keys/pool", `authed.Get("/v1/api/keys/pool", newKeyPoolStatsHandler(keyPool))`},
-		{"GET /v1/api/fallback/chains", `authed.Get("/v1/api/fallback/chains", newFallbackChainsHandler(fallbackRouter))`},
+	for _, c := range []struct{ what, verb, path, handler string }{
+		{"GET /v1/api/keys/pool", "Get", "/v1/api/keys/pool", "newKeyPoolStatsHandler"},
+		{"GET /v1/api/fallback/chains", "Get", "/v1/api/fallback/chains", "newFallbackChainsHandler"},
 	} {
-		if !strings.Contains(src, c.line) {
-			t.Errorf("%s is no longer registered as W6.18 recorded it. If it was GATED, that is "+
-				"the decision W6.18 asked for — close it in the queue and rewrite this test with "+
-				"the answer.", c.what)
+		r, ok := findRoute(regs, c.verb, c.path)
+		if !ok || !r.wrapsCall(c.handler) || r.wrapsCall("requireAdmin") {
+			t.Errorf("%s is no longer registered as W6.18 recorded it (found=%v, handler=%s). If it "+
+				"was GATED, that is the decision W6.18 asked for — close it in the queue and "+
+				"rewrite this test with the answer.", c.what, ok, r.handler)
 		}
 	}
 }
