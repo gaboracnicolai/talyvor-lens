@@ -5,7 +5,16 @@ import hashlib, os, signal, subprocess, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAIN = os.path.join(ROOT, "cmd/lens/main.go")
 TEST = os.path.join(ROOT, "cmd/lens/background_job_classification_test.go")
-FILES = [MAIN, TEST]
+# ⚠ Y4 AND Y5 MUTATE THE SCANNERS, WHICH MOVED OUT OF background_job_classification_test.go IN
+# #526/#528. Both arms used to neuter a `regexp.MustCompile` declared in TEST; the census stopped
+# being a line-and-substring rule and became a go/parser walk, the two regex vars were deleted, and
+# the arms sat ANCHOR-FAILED ("appears 0 times") reporting 4/6 for an unknown period. A MOVED anchor
+# is the worse half of that failure: the control was not near-missing, it was measuring nothing.
+# ⚠ AND BOTH FILES BELONG IN FILES, NOT ONLY IN THE CONTROL ROWS: the sha256 restore proof at the
+# bottom iterates FILES. An arm that mutates a file the proof does not cover is unproven to restore.
+SCAN = os.path.join(ROOT, "cmd/lens/go_statement_scan_test.go")
+LEADER = os.path.join(ROOT, "cmd/lens/leader_job_scan_test.go")
+FILES = [MAIN, TEST, SCAN, LEADER]
 
 
 def restore_on_signal(snapshot):
@@ -72,14 +81,24 @@ CONTROLS = [
      '"cpSyncer.Run": "",',
      CLS, WRM, "a bare classification is a label, not a decision"),
 
-    ("Y4 the goroutine scan neutered", TEST,
-     'var anyGoroutine = regexp.MustCompile(`^\\s*go `)',
-     'var anyGoroutine = regexp.MustCompile(`^\\s*NEVERMATCH `)',
+    # ⚠ RE-POINTED FROM THE DELETED `anyGoroutine` REGEX TO THE WALK THAT REPLACED IT. The
+    # property is unchanged and it is the one scanGoStatements' own docstring names: "a scan that
+    # enumerates no goroutines reports every goroutine as classified". Dropping the collection
+    # leaves the walk running and returning nothing, which is what a refactor that goes wrong here
+    # actually looks like. It must red on the FLOOR (`found 0 leader-gated jobs, expected 30+`) and
+    # WRM must stay green, because scanLeaderJobs is a different function.
+    ("Y4 the goroutine scan neutered", SCAN,
+     "\t\tout = append(out, site)",
+     "\t\t_ = site",
      CLS, WRM, "a broken scan hits the floor rather than reporting every job classified"),
 
-    ("Y5 the leader-gate pattern stops matching", TEST,
-     'var leaderGated = regexp.MustCompile(`^\\s*go haComps\\.leader\\.Run\\(ctx, "([a-z0-9-]+)"`)',
-     'var leaderGated = regexp.MustCompile(`^\\s*go haComps\\.NOPE\\.Run\\(ctx, "([a-z0-9-]+)"`)',
+    # ⚠ RE-POINTED FROM THE DELETED `leaderGated` REGEX TO THE CONST THAT REPLACED IT. The
+    # selector is matched against the RENDERED AST EXPRESSION of the call rather than against a
+    # line, but it is still a name, and a name that stops matching is still how this fails. It
+    # governs BOTH scanners, so no green-must-stay-green test is asserted — same as the original.
+    ("Y5 the leader-gate selector stops matching", LEADER,
+     'const leaderRunSelector = "haComps.leader.Run"',
+     'const leaderRunSelector = "haComps.NOPE.Run"',
      CLS, None, "the census cannot pass by seeing zero singletons"),
 
     ("Y6 both a gated AND an ungated warmer", MAIN,
