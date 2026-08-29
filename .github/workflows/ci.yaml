@@ -66,6 +66,24 @@ jobs:
       # to silence with the guard green.
       - name: control scripts must restore on SIGTERM, not only in a finally
         run: python3 scripts/check-restore-signal-handlers.py --ci
+      # ⚠ THE OTHER END A CONTROL SCRIPT ROTS FROM. The step above proves these scripts RESTORE.
+      # Nothing proved they still ANCHOR. Measured (W6.45): w631's Y4/Y5 arms sat
+      # `ANCHOR-FAILED: anchor appears 0 times` for an unknown period after #526/#528 replaced a
+      # regex census with a go/parser walk and deleted the vars they mutated — the campaign printed
+      # `4/6` the whole time, and `4/6` reads like a SCORE, not like an instrument reporting it
+      # could not run. The sibling repos hit the mirror direction: docs `2 times`, track `3 times`.
+      #
+      # ⚠⚠ IT READS 6 OF 35 SCRIPTS AND SAYS SO ON EVERY RUN, GREEN ONES INCLUDED. Only the
+      # w626–w631 convention carries a resolvable path column in its control table; the other 29
+      # keep the target in a module constant used elsewhere, and 203 of 251 candidate rows are
+      # unreadable for that reason. A green here is a claim about those six, not about the repo.
+      # talyvor-docs shipped a real-PG guard covering 36 of 78 tests while a pass implied all 78,
+      # and removed it — see scripts/check-realpg-dsn.sh. Partial is fine; partial-reading-as-total
+      # is the defect. Floors are per dimension, because a union floor is satisfied by either half.
+      #
+      # Pure string counting: no mutation, no `go test`, no database.
+      - name: control anchors must still resolve (the census, with its own denominator)
+        run: python3 scripts/check-control-anchors.py --ci
       - name: go vet
         run: go vet ./...
       # Real-migration regression guard: the ONLY place migrations/*.sql are
