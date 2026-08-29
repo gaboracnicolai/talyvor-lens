@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -8,7 +9,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talyvor/lens/internal/config"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -37,19 +37,26 @@ import (
 // spend row, or it does not happen". A test that accepts a 4xx would pass on a route that returned
 // an error AFTER calling Anthropic.
 
-var batchRouteRe = regexp.MustCompile(`\b(?:authed|pub|r)\.(?:Get|Post|Delete)\("(/v1/batch/[^"]*)"`)
-
 // TestBatchLane_NoBareRouteRegistration: every /v1/batch route must go through the gate. A bare
 // authed.Post is exactly how this shipped unbilled, so the shape itself is what is banned.
+//
+// ⚠ IT WAS A REGEX KNOWING THREE VERBS ON ONE LINE UNTIL #522. Measured: a bare route written
+// with authed.Put, with r.Handle (the UNAUTHENTICATED root router), or split across lines was
+// MISSED — and this lane's own header says a re-opened bare route is a CROSS-TENANT READ of every
+// workspace's batch prompts, not merely an unbilled one. Registrations now come from the AST.
 func TestBatchLane_NoBareRouteRegistration(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	if m := batchRouteRe.FindAllStringSubmatch(string(src), -1); len(m) > 0 {
+	w, err := scanBatchWiring("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(w.bare) > 0 {
 		var got []string
-		for _, s := range m {
-			got = append(got, s[1])
+		for _, r := range w.bare {
+			got = append(got, fmt.Sprintf("%s.%s(%q) at line %d", r.receiver, r.verb, r.path, r.line))
 		}
 		t.Fatalf("batch routes registered WITHOUT the gate: %s\n"+
 			"register through batchGate.{get,post} so the lane cannot be reached while it bills nothing",
@@ -60,18 +67,27 @@ func TestBatchLane_NoBareRouteRegistration(t *testing.T) {
 // TestBatchLane_RegisteredThroughTheGate: the positive half — the routes still exist, through the
 // gate. Without this the previous test passes by deleting the feature, which is a different change
 // from switching it off.
+//
+// ⚠ AND A COMMENT COULD SUPPLY THE FEATURE UNTIL #522: it was a strings.Contains for the exact
+// registration text, so deleting the gated registration and leaving that text in a commented line
+// passed — precisely the "passes by deleting the feature" case the doc above says it prevents.
 func TestBatchLane_RegisteredThroughTheGate(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	for _, want := range []string{
-		`batchGate.post(authed, "/v1/batch/submit"`,
-		`batchGate.get(authed, "/v1/batch/status/{requestID}"`,
-		`batchGate.get(authed, "/v1/batch/jobs"`,
+	w, err := scanBatchWiring("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	for _, want := range []struct{ verb, path string }{
+		{"post", "/v1/batch/submit"},
+		{"get", "/v1/batch/status/{requestID}"},
+		{"get", "/v1/batch/jobs"},
 	} {
-		if !strings.Contains(string(src), want) {
-			t.Errorf("missing gated registration: %s", want)
+		if _, ok := w.gatedRoute(want.verb, want.path); !ok {
+			t.Errorf("missing gated registration: batchGate.%s(authed, %q, …) — found %v",
+				want.verb, want.path, w.gated)
 		}
 	}
 }
