@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -217,10 +216,30 @@ func TestAdminLXCGrantRoute_FlagGated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	if !regexp.MustCompile(`if cfg\.AdminLXCGrantEnabled\s*\{`).Match(src) {
-		t.Fatal("POST /v1/admin/lxc/grant must be registered inside `if cfg.AdminLXCGrantEnabled {` — default-off, route absent when the flag is off")
+	regs, _, _, err := scanRouteRegistrations("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
 	}
-	if !regexp.MustCompile(`"/v1/admin/lxc/grant",\s*requireAdmin\(authManager,\s*newAdminLXCGrantHandler\(`).Match(src) {
-		t.Fatal("POST /v1/admin/lxc/grant must be wrapped in requireAdmin(authManager, newAdminLXCGrantHandler(...))")
+	if len(regs) < 100 {
+		t.Fatalf("only %d route registrations parsed from main.go — the scan is blind", len(regs))
+	}
+	found := false
+	for _, r := range regs {
+		if r.path != "/v1/admin/lxc/grant" || r.verb != "Post" {
+			continue
+		}
+		found = true
+		if !r.gatedOn("cfg.AdminLXCGrantEnabled") {
+			t.Fatalf("POST /v1/admin/lxc/grant is registered at main.go line %d with enclosing "+
+				"conditions %v — it must be INSIDE `if cfg.AdminLXCGrantEnabled {` so the route is "+
+				"absent when the flag is off. This route MINTS LXC.", r.line, r.conds)
+		}
+		if !r.wrapsCall("requireAdmin") || !r.wrapsCall("newAdminLXCGrantHandler") {
+			t.Fatalf("POST /v1/admin/lxc/grant is registered with handler %s — it must be wrapped in "+
+				"requireAdmin(authManager, newAdminLXCGrantHandler(...))", r.handler)
+		}
+	}
+	if !found {
+		t.Fatal("POST /v1/admin/lxc/grant is not registered in main.go at all — this guard has gone blind; re-anchor it")
 	}
 }

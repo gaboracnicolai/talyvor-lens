@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -168,5 +169,89 @@ func TestScanRouteRegistrations_ParseErrorsAreReturned(t *testing.T) {
 	}
 	if regs != nil || routers != nil || unknown != nil {
 		t.Errorf("all results must be nil on a parse error, got %v %v %v", regs, routers, unknown)
+	}
+}
+
+// TestScanRouteRegistrations_RecordsTheHandlerAndItsEnclosingConditions — the two fields the
+// route-GATE guards are built from (#524). `wrapsCall` answers "is this route wrapped in
+// requireAdmin" and `gatedOn` answers "is it inside `if cfg.X`". Both were raw-source regexes
+// before: a comment showing the gated form satisfied the first, and the second only checked that
+// the `if` existed SOMEWHERE in the file — so moving the route out of its flag block left it
+// green while a default-off LXC MINT route became unconditional.
+func TestScanRouteRegistrations_RecordsTheHandlerAndItsEnclosingConditions(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantWraps bool
+		wantGated bool
+		wantConds int
+		legacyOK  bool // what the raw-source regexes answered: "looks correctly wired"
+	}{
+		{
+			name:      "inside the flag block, wrapped in requireAdmin",
+			body:      "\tif cfg.AdminLXCGrantEnabled {\n\t\tauthed.Post(\"/p\", requireAdmin(am, h))\n\t}\n",
+			wantWraps: true, wantGated: true, wantConds: 1, legacyOK: true,
+		},
+		{
+			name:      "wrapped, but OUTSIDE the flag block — the flag exists elsewhere",
+			body:      "\tif cfg.AdminLXCGrantEnabled {\n\t\t_ = cfg\n\t}\n\tauthed.Post(\"/p\", requireAdmin(am, h))\n",
+			wantWraps: true, wantConds: 0, legacyOK: true,
+		},
+		{
+			name:      "inside the flag block, NOT wrapped",
+			body:      "\tif cfg.AdminLXCGrantEnabled {\n\t\tauthed.Post(\"/p\", h)\n\t}\n",
+			wantGated: true, wantConds: 1,
+		},
+		{
+			name:      "not wrapped, with the wrapped form left in a COMMENT",
+			body:      "\tif cfg.AdminLXCGrantEnabled {\n\t\t// authed.Post(\"/p\", requireAdmin(am, h))\n\t\tauthed.Post(\"/p\", h)\n\t}\n",
+			wantGated: true, wantConds: 1, legacyOK: true,
+		},
+		{
+			name:      "registered in the flag's ELSE branch — it runs when the flag is OFF",
+			body:      "\tif cfg.AdminLXCGrantEnabled {\n\t\t_ = cfg\n\t} else {\n\t\tauthed.Post(\"/p\", requireAdmin(am, h))\n\t}\n",
+			wantWraps: true, wantConds: 1, legacyOK: true,
+		},
+		{
+			name:      "wrapped through a deeper chain: requireAdmin around a middleware around the handler",
+			body:      "\tauthed.Post(\"/p\", withLogging(requireAdmin(am, h)))\n",
+			wantWraps: true, wantConds: 0,
+		},
+		{
+			// ⚠ THE GATE MUST BE APPLIED, NOT MERELY NAMED. Without this row that distinction is
+			// asserted by nothing: a control that accepted a bare MENTION of requireAdmin instead
+			// of a CALL to it changed no verdict, so the rule could have been relaxed away with
+			// everything green. The same call #515 made about its middleware chain.
+			name:      "requireAdmin is PASSED AROUND but never applied to this route",
+			body:      "\tauthed.Post(\"/p\", pickHandler(requireAdmin, h))\n",
+			wantWraps: false, wantConds: 0,
+		},
+	} {
+		regs, _, _, err := scanRouteRegistrations("synthetic.go", []byte(wrapMain(tc.body)))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(regs) != 1 {
+			t.Fatalf("%s: regs=%d want 1 (%v)", tc.name, len(regs), regs)
+		}
+		r := regs[0]
+		if r.wrapsCall("requireAdmin") != tc.wantWraps {
+			t.Errorf("%s: wrapsCall=%v want %v (handler %s)", tc.name, r.wrapsCall("requireAdmin"), tc.wantWraps, r.handler)
+		}
+		if r.gatedOn("cfg.AdminLXCGrantEnabled") != tc.wantGated {
+			t.Errorf("%s: gatedOn=%v want %v (conds %v)", tc.name, r.gatedOn("cfg.AdminLXCGrantEnabled"), tc.wantGated, r.conds)
+		}
+		if len(r.conds) != tc.wantConds {
+			t.Errorf("%s: conds=%v want %d of them", tc.name, r.conds, tc.wantConds)
+		}
+		// The legacy answer is recorded so the rows where the regexes were wrong stay visible.
+		legacy := regexp.MustCompile(`"/p",\s*requireAdmin\(`).MatchString(wrapMain(tc.body)) &&
+			(!tc.wantGated || strings.Contains(wrapMain(tc.body), "if cfg.AdminLXCGrantEnabled {"))
+		if legacy != tc.legacyOK {
+			t.Fatalf("%s: the recorded legacy answer is stale (got %v want %v)", tc.name, legacy, tc.legacyOK)
+		}
+		if tc.legacyOK && (!tc.wantWraps || !tc.wantGated) {
+			t.Logf("%s: the raw-source regexes called this correctly wired; it is not", tc.name)
+		}
 	}
 }

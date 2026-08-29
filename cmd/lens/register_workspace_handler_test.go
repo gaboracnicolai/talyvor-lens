@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -216,8 +215,28 @@ func TestWorkspaceRegisterRoute_WiredWithRequireAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	re := regexp.MustCompile(`authed\.Post\("/v1/workspaces",\s*requireAdmin\(`)
-	if !re.Match(src) {
-		t.Fatal("POST /v1/workspaces must be wrapped in requireAdmin(authManager, …) — the cross-tenant IDOR gate is missing")
+	regs, _, _, err := scanRouteRegistrations("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	// Vacuity floor: a scan that found no registrations would find no ungated one either.
+	if len(regs) < 100 {
+		t.Fatalf("only %d route registrations parsed from main.go — the scan is blind", len(regs))
+	}
+	found := false
+	for _, r := range regs {
+		if r.path != "/v1/workspaces" || r.verb != "Post" {
+			continue
+		}
+		found = true
+		if !r.wrapsCall("requireAdmin") {
+			t.Fatalf("POST /v1/workspaces is registered at main.go line %d with handler %s — it must "+
+				"be wrapped in requireAdmin(authManager, …); the cross-tenant IDOR gate is missing "+
+				"(see TestWorkspaceRegister_Ungated_CrossTenantOverwriteLands for what lands without it)",
+				r.line, r.handler)
+		}
+	}
+	if !found {
+		t.Fatal("POST /v1/workspaces is not registered in main.go at all — this guard has gone blind; re-anchor it")
 	}
 }
