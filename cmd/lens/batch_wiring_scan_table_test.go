@@ -182,3 +182,58 @@ func TestScanBatchWiring_ParseErrorsAreReturned(t *testing.T) {
 		t.Errorf("result must be nil on a parse error, got %v", w)
 	}
 }
+
+// TestFuncParamCount_ReadsTheDeclarationNotItsSpelling — the W6.38 half. "Is the batch job list
+// scoped by workspace" must be a question about ListJobs's DECLARATION. The text rule this
+// replaces matched `func (r *BatchRouter) ListJobs() []*BatchJob` exactly, so a reformatted but
+// still-unscoped signature read as SCOPED (the unsafe direction) and a comment carrying the old
+// signature read a scoped list as unscoped.
+func TestFuncParamCount_ReadsTheDeclarationNotItsSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		src    string
+		params int
+		found  bool
+	}{
+		{"unscoped", "package batch\nfunc (r *BatchRouter) ListJobs() []*BatchJob { return nil }\n", 0, true},
+		{"scoped", "package batch\nfunc (r *BatchRouter) ListJobs(workspaceID string) []*BatchJob { return nil }\n", 1, true},
+		{
+			name:   "unscoped but reformatted across lines — the text rule called this SCOPED",
+			src:    "package batch\nfunc (r *BatchRouter) ListJobs() (\n\tout []*BatchJob,\n) {\n\treturn nil\n}\n",
+			params: 0, found: true,
+		},
+		{
+			name:   "scoped, with the OLD unscoped signature left behind in a comment",
+			src:    "package batch\n// was: func (r *BatchRouter) ListJobs() []*BatchJob\nfunc (r *BatchRouter) ListJobs(workspaceID string) []*BatchJob { return nil }\n",
+			params: 1, found: true,
+		},
+		{
+			name:   "an unnamed parameter is still a parameter",
+			src:    "package batch\nfunc (r *BatchRouter) ListJobs(string) []*BatchJob { return nil }\n",
+			params: 1, found: true,
+		},
+		{
+			name:   "a value receiver answers the same type",
+			src:    "package batch\nfunc (r BatchRouter) ListJobs(ws string) []*BatchJob { return nil }\n",
+			params: 1, found: true,
+		},
+		{
+			name:  "the method is on a DIFFERENT type",
+			src:   "package batch\nfunc (r *OtherRouter) ListJobs(ws string) []*BatchJob { return nil }\n",
+			found: false,
+		},
+		{"absent", "package batch\nfunc (r *BatchRouter) Other() {}\n", 0, false},
+	} {
+		got, found, err := funcParamCount(tc.src, "BatchRouter", "ListJobs")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if found != tc.found || got != tc.params {
+			t.Errorf("%s: params=%d found=%v want params=%d found=%v", tc.name, got, found, tc.params, tc.found)
+		}
+	}
+	if _, _, err := funcParamCount("package batch\nfunc ( this is not go\n", "BatchRouter", "ListJobs"); err == nil {
+		t.Error("unparseable router source returned no error — a scan that cannot read the " +
+			"declaration would report the list UNSCOPED or SCOPED at random")
+	}
+}
