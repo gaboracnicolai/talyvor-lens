@@ -202,26 +202,40 @@ func TestLocalEndpointsList_StillCarriesURL_ByDecisionNotOversight(t *testing.T)
 // ── the wiring ──
 
 func TestLocalEndpointsListRouteGoesThroughTheProjection(t *testing.T) {
-	src := readMainGo(t)
-	const want = `authed.Get("/v1/local/endpoints", newLocalEndpointsListHandler(localRouterMulti))`
-	if !strings.Contains(src, want) {
-		t.Errorf("main.go does not register GET /v1/local/endpoints through " +
-			"newLocalEndpointsListHandler; the projection is unreached and every other test in " +
-			"this file drives a handler the binary does not serve")
+	src := []byte(readMainGo(t))
+	// ⚠ THE REGISTRATION HALF WAS AN EXACT-TEXT Contains UNTIL #527, so serving the route from an
+	// inline handler with the scoped registration left in a COMMENT passed. And the bypass half
+	// listed TWO literal shapes, so `raw := localRouterMulti.List()` then `writeJSONOK(w, …, raw)`
+	// walked past both.
+	regs, _, _, err := scanRouteRegistrations("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(regs) < 100 {
+		t.Fatalf("only %d route registrations parsed from main.go — the scan is blind", len(regs))
+	}
+	r, ok := findRoute(regs, "Get", "/v1/local/endpoints")
+	switch {
+	case !ok:
+		t.Error("main.go does not register GET /v1/local/endpoints at all.")
+	case !r.wrapsCall("newLocalEndpointsListHandler"):
+		t.Errorf("main.go registers GET /v1/local/endpoints with handler %s, not "+
+			"newLocalEndpointsListHandler (main.go line %d); the projection is unreached and every "+
+			"other test in this file drives a handler the binary does not serve", r.handler, r.line)
 	}
 	// ⚠ NOT "main.go never calls List()". It legitimately does, once, inside the
 	// `local_models` health check, which COUNTS endpoints and serves none — and the
 	// first draft of this assertion flagged exactly that. What must not exist is a
-	// call whose result is written to a RESPONSE.
-	for _, shape := range []string{
-		"writeJSONOK(w, http.StatusOK, localRouterMulti.List())",
-		"writeJSONOK(w, http.StatusOK, l.List())",
-	} {
-		if strings.Contains(src, shape) {
-			t.Errorf("main.go writes the raw endpoint list to a response (%s) — that is the "+
-				"struct shape, carrying workspace_id, last_check_at and active_count, none of "+
-				"which components.schemas.LocalEndpoint declares", shape)
-		}
+	// call whose result is written to a RESPONSE, which is a question about where the
+	// VALUE goes; a variable in between is still the same value.
+	leaks, err := rawValueReachesResponse("main.go", src, "localRouterMulti", "List", "writeJSONOK")
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(leaks) > 0 {
+		t.Errorf("main.go writes the raw endpoint list to a response at line(s) %v — that is the "+
+			"struct shape, carrying workspace_id, last_check_at and active_count, none of "+
+			"which components.schemas.LocalEndpoint declares", leaks)
 	}
 }
 
