@@ -254,18 +254,37 @@ func TestPromptCreate_RowLandsInTheCallersWorkspace_RealPG(t *testing.T) {
 // dependency graph, so the registration is read from the source — the same
 // constraint admin_route_classification_test.go documents.)
 func TestPromptCreateRouteGoesThroughTheScopedHandler(t *testing.T) {
-	src := readMainGo(t)
-
-	const want = `authed.Post("/v1/prompts", newPromptCreateHandler(promptManager))`
-	if !strings.Contains(src, want) {
-		t.Errorf("main.go does not register POST /v1/prompts through newPromptCreateHandler.\n" +
-			"    Without it the workspace scoping in prompt_create_handler.go is unreached and " +
-			"every other test in this file is driving a handler the binary does not serve.")
+	src := []byte(readMainGo(t))
+	// ⚠ BOTH HALVES WERE RAW TEXT UNTIL #527. The registration was an exact-text Contains, so
+	// serving /v1/prompts from an UNSCOPED inline handler while leaving the scoped registration in
+	// a COMMENT passed — the workspace scoping in prompt_create_handler.go unreached, exactly the
+	// case this assertion exists for. And the bypass rule counted the receiver's SPELLING, so
+	// `pm := promptManager` then `pm.Create(…)` walked past it.
+	regs, _, _, err := scanRouteRegistrations("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(regs) < 100 {
+		t.Fatalf("only %d route registrations parsed from main.go — the scan is blind", len(regs))
+	}
+	r, ok := findRoute(regs, "Post", "/v1/prompts")
+	switch {
+	case !ok:
+		t.Error("main.go does not register POST /v1/prompts at all.")
+	case !r.wrapsCall("newPromptCreateHandler"):
+		t.Errorf("main.go registers POST /v1/prompts with handler %s, not newPromptCreateHandler "+
+			"(main.go line %d).\n"+
+			"    Without it the workspace scoping in prompt_create_handler.go is unreached and "+
+			"every other test in this file is driving a handler the binary does not serve.", r.handler, r.line)
 	}
 	// And nothing else may call Create from main.go — an inline second create path
-	// would bypass the scoping exactly the way the original did.
-	if n := strings.Count(src, "promptManager.Create("); n != 0 {
-		t.Errorf("main.go calls promptManager.Create directly %d time(s); the create path must go "+
-			"through newPromptCreateHandler so effectiveWorkspaceID applies", n)
+	// would bypass the scoping exactly the way the original did. Aliases are followed.
+	loose, err := callsOnAliasesOf("main.go", src, "promptManager", "Create")
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(loose) > 0 {
+		t.Errorf("main.go calls promptManager.Create directly at line(s) %v; the create path must go "+
+			"through newPromptCreateHandler so the workspace scoping applies", loose)
 	}
 }

@@ -170,16 +170,33 @@ func TestEvalCaseCreate_RowLandsInTheCallersWorkspace_RealPG(t *testing.T) {
 // Every test above drives newEvalCaseCreateHandler directly, so all of them stay
 // green if main.go stops using it.
 func TestEvalCaseCreateRouteGoesThroughTheScopedHandler(t *testing.T) {
-	src := readMainGo(t)
-	const want = `authed.Post("/v1/eval/cases", newEvalCaseCreateHandler(evalPipeline))`
-	if !strings.Contains(src, want) {
-		t.Errorf("main.go does not register POST /v1/eval/cases through newEvalCaseCreateHandler; " +
-			"the scoping is unreached and every other test in this file drives a handler the " +
-			"binary does not serve")
+	src := []byte(readMainGo(t))
+	// ⚠ SAME DEFECT AND SAME FIX AS #527's sibling in prompt_create_handler_test.go: the
+	// registration was an exact-text Contains, so an UNSCOPED inline handler with the scoped
+	// registration left in a COMMENT passed, and the bypass rule matched the receiver's spelling.
+	regs, _, _, err := scanRouteRegistrations("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
 	}
-	if n := strings.Count(src, "evalPipeline.AddTestCase("); n != 0 {
-		t.Errorf("main.go calls evalPipeline.AddTestCase directly %d time(s); the create path must "+
-			"go through newEvalCaseCreateHandler so effectiveWorkspaceID applies", n)
+	if len(regs) < 100 {
+		t.Fatalf("only %d route registrations parsed from main.go — the scan is blind", len(regs))
+	}
+	r, ok := findRoute(regs, "Post", "/v1/eval/cases")
+	switch {
+	case !ok:
+		t.Error("main.go does not register POST /v1/eval/cases at all.")
+	case !r.wrapsCall("newEvalCaseCreateHandler"):
+		t.Errorf("main.go registers POST /v1/eval/cases with handler %s, not newEvalCaseCreateHandler "+
+			"(main.go line %d); the scoping is unreached and every other test in this file drives a "+
+			"handler the binary does not serve", r.handler, r.line)
+	}
+	loose, err := callsOnAliasesOf("main.go", src, "evalPipeline", "AddTestCase")
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(loose) > 0 {
+		t.Errorf("main.go calls evalPipeline.AddTestCase directly at line(s) %v; the create path must "+
+			"go through newEvalCaseCreateHandler so effectiveWorkspaceID applies", loose)
 	}
 }
 
