@@ -1,7 +1,7 @@
 package main
 
 import (
-	"regexp"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -28,12 +28,6 @@ import (
 //	IDEMPOTENT           an age predicate or a row lock makes the Nth run affect nothing.
 //	PER-REQUEST          started inside an HTTP handler; it belongs to no fleet-wide bucket.
 //	SINGLETON            shared state, non-idempotent, or it costs money. Must be leader-gated.
-
-// leaderGated matches the wrapper that makes a job a fleet-wide singleton.
-var leaderGated = regexp.MustCompile(`^\s*go haComps\.leader\.Run\(ctx, "([a-z0-9-]+)"`)
-
-// anyGoroutine matches every `go` statement in the file.
-var anyGoroutine = regexp.MustCompile(`^\s*go `)
 
 // perReplica is every goroutine deliberately NOT leader-gated, with the measured property that
 // makes running it on every replica correct. ⚠ A REASON HERE IS A CLAIM ABOUT CODE, not a label:
@@ -65,51 +59,65 @@ var perReplica = map[string]string{
 	"audit export POST":            "PER-REQUEST. Started inside an HTTP handler.",
 }
 
-// perReplicaMatch maps a classification key to the substring identifying its `go` line.
+// perReplicaMatch maps a classification key to the CALL that identifies its goroutine: either the
+// callee itself, or — for a closure — a call inside its body.
+//
+// ⚠ IT MAPPED TO A SUBSTRING OF THE `go` LINE UNTIL #528, AND THREE OF THE TEN WERE CLOSURES
+// IDENTIFIED BY THE TEXT AFTER `go func(`. One was a COMMENT. And the "stranded reservation
+// sweep" needle reduced, after the matcher split it on "\n" and kept index 0, to `go func() {` —
+// which every anonymous goroutine in this file begins with, so any new one silently inherited
+// that entry's money-path reason. A call is not a spelling; these are calls.
 var perReplicaMatch = map[string]string{
-	"batchRouter.StartPoller":      "go batchRouter.StartPoller(",
-	"sessionTracker.StartCleanup":  "go sessionTracker.StartCleanup(",
-	"statusPage.StartCacher":       "go statusPage.StartCacher(",
-	"l.StartBackground":            "go l.StartBackground(",
-	"semanticCache.StartSweeper":   "go semanticCache.StartSweeper(",
-	"cpSyncer.Run":                 "go cpSyncer.Run(",
-	"detector staleness":           "go func() { // publish detector staleness",
-	"stranded reservation sweep":   "go func() {\n\t\t\tt := time.NewTicker(2 * time.Minute)",
-	"localRouterMulti.CheckHealth": "go localRouterMulti.CheckHealth(",
-	"audit export POST":            "go func(filter audit.ExportFilter, url string) {",
+	"batchRouter.StartPoller":      "batchRouter.StartPoller",
+	"sessionTracker.StartCleanup":  "sessionTracker.StartCleanup",
+	"statusPage.StartCacher":       "statusPage.StartCacher",
+	"l.StartBackground":            "l.StartBackground",
+	"semanticCache.StartSweeper":   "semanticCache.StartSweeper",
+	"cpSyncer.Run":                 "cpSyncer.Run",
+	"localRouterMulti.CheckHealth": "localRouterMulti.CheckHealth",
+	// The three closures, each identified by the one call that is its whole point.
+	"detector staleness":         "patternDetectorHealth.PublishAge",
+	"stranded reservation sweep": "dualToken.ReleaseStrandedReservations",
+	"audit export POST":          "auditExporter.ExportWebhook",
 }
 
 // ⚠ THE GUARD. A goroutine that is neither leader-gated nor classified is one nobody has decided
 // about, and the wrong answer is invisible until the fleet grows past one replica.
 func TestEveryBackgroundGoroutineIsClassified(t *testing.T) {
-	src := readMainGo(t)
-	lines := strings.Split(src, "\n")
+	sites, err := scanGoStatements("main.go", []byte(readMainGo(t)))
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
 
 	var gated, unclassified []string
-	for i, line := range lines {
-		if !anyGoroutine.MatchString(line) {
+	for _, g := range sites {
+		if g.jobName != "" {
+			gated = append(gated, g.jobName)
 			continue
 		}
-		if m := leaderGated.FindStringSubmatch(line); m != nil {
-			gated = append(gated, m[1])
-			continue
-		}
-		var matched bool
+		var hits []string
 		for key, needle := range perReplicaMatch {
-			probe := line
-			if strings.Contains(needle, "\n") {
-				probe = strings.Join(lines[i:min(i+2, len(lines))], "\n")
-			}
-			if strings.Contains(probe, strings.SplitN(needle, "\n", 2)[0]) {
+			if g.matches(needle) {
 				if perReplica[key] == "" {
 					t.Errorf("%s is classified per-replica with no reason", key)
 				}
-				matched = true
-				break
+				hits = append(hits, key)
 			}
 		}
-		if !matched {
-			unclassified = append(unclassified, strings.TrimSpace(line))
+		switch len(hits) {
+		case 0:
+			what := g.callee
+			if what == "" {
+				what = "func literal calling " + strings.Join(g.calls, ", ")
+			}
+			unclassified = append(unclassified, fmt.Sprintf("main.go:%d %s", g.line, what))
+		case 1:
+			// classified
+		default:
+			sort.Strings(hits)
+			t.Errorf("the goroutine at main.go:%d matches %d classifications (%s) — a goroutine "+
+				"that answers to two reasons has been decided about by neither",
+				g.line, len(hits), strings.Join(hits, ", "))
 		}
 	}
 
