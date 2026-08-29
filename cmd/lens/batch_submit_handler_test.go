@@ -148,12 +148,18 @@ func TestBatchSubmit_IneligibleBodyIsStillRefused(t *testing.T) {
 // ── the wiring ──
 
 func TestBatchSubmitRouteGoesThroughTheScopedHandler(t *testing.T) {
-	src := readMainGo(t)
-	const want = `batchGate.post(authed, "/v1/batch/submit", newBatchSubmitHandler(batchRouter))`
-	if !strings.Contains(src, want) {
-		t.Errorf("main.go does not register POST /v1/batch/submit through newBatchSubmitHandler")
+	src := []byte(readMainGo(t))
+	w, err := scanBatchWiring("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
 	}
-	if strings.Contains(src, `wsID := req.Header.Get("X-Talyvor-Workspace")`) {
+	g, ok := w.gatedRoute("post", "/v1/batch/submit")
+	if !ok {
+		t.Errorf("main.go does not register POST /v1/batch/submit through the gate at all (found %v)", w.gated)
+	} else if !strings.HasPrefix(g.handler, "newBatchSubmitHandler(") {
+		t.Errorf("main.go registers POST /v1/batch/submit with handler %s, not newBatchSubmitHandler", g.handler)
+	}
+	if strings.Contains(string(src), `wsID := req.Header.Get("X-Talyvor-Workspace")`) {
 		t.Error(`main.go still derives a workspace from the X-Talyvor-Workspace header inline. ` +
 			`A header is a request, not an identity.`)
 	}
@@ -171,11 +177,26 @@ func TestBatchSubmitRouteGoesThroughTheScopedHandler(t *testing.T) {
 //
 // What IS a session's to do is make the two facts inseparable: the lane may stay
 // closed with an unscoped list, and it may open with a scoped one, and it may not
-// open with an unscoped one. This fails the moment somebody changes main.go's
-// literal `false` without having given ListJobs a workspace argument first.
+// open with an unscoped one.
+//
+// ⚠ IT DECIDED "IS THE LANE CLOSED" BY THE PRESENCE OF A LINE OF TEXT UNTIL #522, AND IT WAS
+// WRONG IN BOTH DIRECTIONS. Measured (~/talyvor-queue/w61-batchlaneopen-controls-h2r7.py):
+// setting settleWired to `true` was CAUGHT, but doing so while leaving the old
+// `newBatchReg(cfg.BatchEnabled, false)` text behind in a COMMENT — or quoted in a string —
+// made this guard RETURN EARLY and enforce nothing, so the lane opens over an unscoped
+// ListJobs and every tenant's Prompt is readable with the suite green. In the other direction
+// it FALSELY ACCUSED correct code: the same closed call written across lines reported that the
+// lane could now be registered. The boolean is now read from the newBatchReg CALL's argument.
 func TestBatchLane_CannotOpenWhileTheJobListIsUnscoped(t *testing.T) {
-	src := readMainGo(t)
-	const closed = `batchGate := newBatchReg(cfg.BatchEnabled, false)`
+	src := []byte(readMainGo(t))
+	w, err := scanBatchWiring("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if w.settleWired == "" {
+		t.Fatalf("no %s(...) call found in main.go — this guard couples two facts and one of "+
+			"them has vanished, so it proves nothing", batchRegFunc)
+	}
 
 	raw, err := os.ReadFile("../../internal/batch/router.go")
 	if err != nil {
@@ -190,7 +211,7 @@ func TestBatchLane_CannotOpenWhileTheJobListIsUnscoped(t *testing.T) {
 			"one of them has vanished, so it proves nothing")
 	}
 
-	if strings.Contains(src, closed) {
+	if w.settleWired == "false" {
 		// Lane closed. Nothing to enforce, but say what is being carried.
 		if !listScoped {
 			t.Log("batch lane is CLOSED (settleWired literal false) and ListJobs is unscoped — " +
