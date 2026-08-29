@@ -47,6 +47,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -365,24 +366,30 @@ func TestMintRouteRegistrationCarriesNoScopeGate(t *testing.T) {
 // `operator_read` by their own by-name checks — none of those three go through RequireScope, which
 // is why this test counts call sites rather than asserting each scope is unenforced.)
 func TestRequireScopeHasExactlyOneCallSite(t *testing.T) {
-	src, err := os.ReadFile("main.go")
+	sites, files, err := scanScopeGates(".")
 	if err != nil {
-		t.Fatalf("read main.go: %v", err)
+		t.Fatalf("scan cmd/lens: %v", err)
 	}
-	var sites []string
-	for _, line := range strings.Split(string(src), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-		if strings.Contains(trimmed, "auth.RequireScope(") {
-			sites = append(sites, trimmed)
-		}
+	// ⚠ THE COVERAGE FLOOR IS THE POINT OF #521. This census read main.go alone — 1 of the 57
+	// non-test files in this package — while making a claim about the binary, so a gate added in
+	// any of the other 56 would not move the count. A scan that read almost nothing would report
+	// "exactly one" for free.
+	if len(files) < 50 {
+		t.Fatalf("the scan read only %d non-test .go files in cmd/lens — it is reading almost "+
+			"nothing and this census passed for free (57 measured at #521)", len(files))
 	}
-	if len(sites) != 1 || !strings.Contains(sites[0], "auth.ScopeProxy") {
-		t.Fatalf("auth.RequireScope call sites in main.go = %d, want exactly 1 carrying "+
+	if len(sites) != 1 || sites[0].scope != "auth.ScopeProxy" {
+		var found []string
+		for _, s := range sites {
+			via := ""
+			if s.alias != "" {
+				via = " via alias " + s.alias
+			}
+			found = append(found, fmt.Sprintf("%s:%d %s(%s)%s", s.file, s.line, requireScopeFunc, s.scope, via))
+		}
+		t.Fatalf("auth.RequireScope call sites in cmd/lens = %d, want exactly 1 carrying "+
 			"auth.ScopeProxy.\nFound: %q\nIf a scope gate was ADDED, that is a real narrowing — "+
 			"update this test and say which credential it refuses. If one was REMOVED, a scope "+
-			"boundary just disappeared silently.", len(sites), sites)
+			"boundary just disappeared silently.", len(sites), found)
 	}
 }
