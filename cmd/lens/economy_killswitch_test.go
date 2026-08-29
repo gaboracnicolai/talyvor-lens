@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -146,22 +145,54 @@ var economyManifest = []string{
 	// TestEconomyKillSwitch_BrowserPageCarriesNoEconomy).
 }
 
-// bareReg matches a BARE (non-econ) chi registration: router.Verb("/path".
-var bareReg = regexp.MustCompile(`\b(?:authed|pub|r)\.(?:Get|Post|Delete)\("([^"]+)"`)
+// ⚠ THE REGEX THAT USED TO LIVE HERE — `\b(?:authed|pub|r)\.(?:Get|Post|Delete)\("([^"]+)"` —
+// WAS REPLACED IN #519. It saw three verbs on three routers and only when the path literal sat
+// on the same line as the call, while main.go registers 167 routes using SIX verbs: 85 Get,
+// 52 Post, 10 Put, 9 Handle, 9 Delete, 2 Patch. Twenty-one real registration sites were invisible
+// to it by construction. See TestEconomyKillSwitch_ManifestCoverage for the measured arms.
 
-// TestEconomyKillSwitch_ManifestCoverage — the forgotten-gate tripwire. Every
-// economy-manifest route in main.go must be registered through econ.{...}; a bare
-// router.Verb("/v1/economy-path" fails the build. (distill/preview and
-// dashboard/nodes are NOT economy and must stay bare.)
+// unknownRouterMethods — methods called on something this scan identified as a router which are
+// neither a registration nor a known non-registering Router method. Pinned rather than asserted
+// empty, for the same reason internal/pointeraudit pins its unresolvable citations: the
+// population that cannot be checked is the one a number must still mention.
+//
+// `Context` is here because receivers are matched BY NAME and handlers throughout main.go name
+// their *http.Request `r`, which is also the root router's name. That is a real limit of a
+// name-based scan, written down rather than silently allowlisted.
+var unknownRouterMethods = map[string]string{
+	"Context": "*http.Request.Context inside handlers — `r` is both the root router and the conventional request name",
+}
+
+// TestEconomyKillSwitch_ManifestCoverage — the forgotten-gate tripwire. Every economy-manifest
+// route in main.go must be registered through econ.{...}; a bare router.Verb("/v1/economy-path"
+// fails the build. (distill/preview and dashboard/nodes are NOT economy and must stay bare.)
+//
+// ⚠ IT WAS A REGEX OVER RAW TEXT UNTIL #519 AND FOUR SHAPES WALKED PAST IT. Measured by adding
+// one bare economy route to main.go per arm (~/talyvor-queue/w61-manifestcov-mutation-controls-h2r7.py):
+// `authed.Get("/v1/economy/probe", h)` on one line was CAUGHT — and the SAME registration split
+// across lines, or written with `authed.Put`, `authed.Patch`, or `r.Handle`, was MISSED. A bare
+// economy route is one the master kill switch cannot withhold: it serves with the economy off,
+// and the r.Handle arm puts it on the UNAUTHENTICATED root router. Registrations now come from
+// main.go's AST.
 func TestEconomyKillSwitch_ManifestCoverage(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	for _, m := range bareReg.FindAllStringSubmatch(string(src), -1) {
-		path := m[1]
-		if isEconomyPath(path) {
-			t.Errorf("economy route %q is registered BARE (not via econ.) — add the guard", path)
+	regs, _, _, err := scanRouteRegistrations("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	// Vacuity floor: a scan that found no registrations finds no bare economy routes either.
+	// 167 measured at #519; the floor is deliberately loose.
+	if len(regs) < 100 {
+		t.Fatalf("only %d route registrations parsed from main.go — the scan is blind, and this "+
+			"tripwire reports nothing because it sees nothing", len(regs))
+	}
+	for _, rg := range regs {
+		if isEconomyPath(rg.path) {
+			t.Errorf("economy route %q is registered BARE at main.go line %d (%s.%s, not via econ.) "+
+				"— the master kill switch cannot withhold it; add the guard", rg.path, rg.line, rg.receiver, rg.verb)
 		}
 	}
 	// Negative controls: these economy-adjacent routes are deliberately NOT economy.
@@ -182,6 +213,41 @@ func TestEconomyKillSwitch_ManifestCoverage(t *testing.T) {
 	}
 	if !isEconomyPath("/v1/workspaces/{wsID}/lxc/convert") {
 		t.Error("/lxc/convert must stay economy (it burns LENS)")
+	}
+}
+
+// TestRouterVerbCoverage_NoRegistrationShapeIsUnseen — the guard on the guard. routerVerbs is a
+// LIST, and the defect #519 fixed was precisely a list that had gone stale against the code: the
+// regex knew three verbs while main.go used six. This fails when main.go calls a method on a
+// router that the scanner neither treats as a registration nor knows to be a non-registering
+// one, so a new registration shape cannot be silently uncovered.
+func TestRouterVerbCoverage_NoRegistrationShapeIsUnseen(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	regs, routers, unknown, err := scanRouteRegistrations("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(regs) < 100 || len(routers) == 0 {
+		t.Fatalf("the scan found %d registrations on %d routers — it is reading almost nothing "+
+			"and this coverage check passed for free", len(regs), len(routers))
+	}
+	for m, on := range unknown {
+		if _, pinned := unknownRouterMethods[m]; !pinned {
+			t.Errorf("main.go calls %s on a router (%v) and this scan neither registers it nor "+
+				"knows it to be a non-registering Router method. If it BINDS A PATH, every "+
+				"economy route registered that way is invisible to the manifest tripwire — add it "+
+				"to routerVerbs with its path-argument index. If it does not, add it to "+
+				"routerNonRegistering.", m, on)
+		}
+	}
+	for m := range unknownRouterMethods {
+		if _, seen := unknown[m]; !seen {
+			t.Errorf("unknownRouterMethods pins %q, which main.go no longer calls on a router — "+
+				"a pinned exception that guards nothing reads as though it does", m)
+		}
 	}
 }
 
