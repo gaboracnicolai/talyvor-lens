@@ -4277,9 +4277,15 @@ func run() error {
 		batchGate.get(authed, "/v1/batch/status/{requestID}", newBatchStatusHandler(batchRouter))
 
 		batchGate.get(authed, "/v1/batch/jobs", func(w http.ResponseWriter, req *http.Request) {
-			// workspace_id filtering happens client-side for now — the
-			// in-memory list doesn't index by workspace.
-			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs())
+			// W6.38: scoped to the CALLER's workspace, the same way GET /v1/sessions is
+			// (newSessionsListHandler). BatchJob carries Prompt and Response, so an
+			// unscoped list is a cross-tenant read of customer prompt text.
+			wsID, ok := applyPhase2WSID(req, req.URL.Query().Get("workspace_id"))
+			if !ok {
+				phase2Forbidden(w)
+				return
+			}
+			writeJSONOK(w, http.StatusOK, batchRouter.ListJobs(wsID))
 		})
 
 		// Eval pipeline — test cases, suite runs, and history. RunSuite

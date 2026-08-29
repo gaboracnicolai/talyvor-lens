@@ -202,14 +202,20 @@ func TestBatchLane_CannotOpenWhileTheJobListIsUnscoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read internal/batch/router.go: %v", err)
 	}
-	routerSrc := string(raw)
-	listScoped := !strings.Contains(routerSrc, "func (r *BatchRouter) ListJobs() []*BatchJob")
-
-	// Non-vacuity: the two things this couples must both be findable.
-	if !strings.Contains(routerSrc, "ListJobs(") {
+	// ⚠ READ FROM THE DECLARATION, NOT FROM ITS SPELLING. This matched the exact text
+	// `func (r *BatchRouter) ListJobs() []*BatchJob`, so any reformatting of a still-unscoped
+	// signature would have reported the list as SCOPED — the unsafe direction — and a comment
+	// carrying the old signature would report a scoped list as unscoped. The question is whether
+	// the method takes a workspace, which is a property of the declaration.
+	params, found, err := funcParamCount(string(raw), "BatchRouter", "ListJobs")
+	if err != nil {
+		t.Fatalf("parse internal/batch/router.go: %v", err)
+	}
+	if !found {
 		t.Fatal("internal/batch/router.go has no ListJobs — this guard is coupling two facts and " +
 			"one of them has vanished, so it proves nothing")
 	}
+	listScoped := params > 0
 
 	if w.settleWired == "false" {
 		// Lane closed. Nothing to enforce, but say what is being carried.

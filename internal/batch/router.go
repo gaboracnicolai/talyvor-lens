@@ -402,12 +402,28 @@ func (r *BatchRouter) GetJobByRequestID(requestID string) *BatchJob {
 	return nil
 }
 
-// ListJobs returns a snapshot of all in-memory batch jobs.
-func (r *BatchRouter) ListJobs() []*BatchJob {
+// ListJobs returns a snapshot of the in-memory batch jobs OWNED BY workspaceID.
+//
+// ⚠ IT RETURNED EVERY JOB UNTIL W6.38, AND BatchJob CARRIES Prompt AND Response — so the one
+// caller, GET /v1/batch/jobs, handed every authenticated tenant every other tenant's prompt
+// text. The lane was switched off, which is why that was latent rather than live.
+//
+// ⚠ THE FILTER IS A FILTER AND NOT AN INDEX ON PURPOSE. The deferral this replaces said the fix
+// "means indexing the pending map by workspace inside internal/batch — a change to a data
+// structure". WorkspaceID is set on every job at Submit and always was, so a linear scan over
+// the pending map is exactly as CORRECT as an index; an index would be a PERFORMANCE choice
+// over a map of in-flight jobs, and choosing one is not this fix's to make.
+//
+// An empty or unknown workspaceID returns no jobs. It is never read as "everything": that
+// reading is the defect.
+func (r *BatchRouter) ListJobs(workspaceID string) []*BatchJob {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]*BatchJob, 0, len(r.pending))
 	for _, j := range r.pending {
+		if j.WorkspaceID != workspaceID {
+			continue
+		}
 		out = append(out, j)
 	}
 	return out

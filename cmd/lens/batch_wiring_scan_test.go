@@ -124,3 +124,52 @@ func (w *batchWiring) gatedRoute(verb, path string) (gatedBatchRoute, bool) {
 	}
 	return gatedBatchRoute{}, false
 }
+
+// funcParamCount reports how many parameters the method named on the given receiver TYPE
+// declares, read from src's AST. It exists so "is the batch job list scoped by workspace" is a
+// question about a DECLARATION rather than about the spelling of one.
+func funcParamCount(src, recvType, method string) (params int, found bool, err error) {
+	f, perr := parser.ParseFile(token.NewFileSet(), "router.go", src, 0)
+	if perr != nil {
+		return 0, false, perr
+	}
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name == nil || fd.Name.Name != method || fd.Recv == nil || len(fd.Recv.List) == 0 {
+			continue
+		}
+		if unwrapRecvType(fd.Recv.List[0].Type) != recvType {
+			continue
+		}
+		if fd.Type.Params != nil {
+			for _, p := range fd.Type.Params.List {
+				n := len(p.Names)
+				if n == 0 {
+					n = 1 // an unnamed parameter is still a parameter
+				}
+				params += n
+			}
+		}
+		return params, true, nil
+	}
+	return 0, false, nil
+}
+
+// unwrapRecvType renders a receiver's TYPE NAME through pointers and type parameters, so
+// `*BatchRouter`, `BatchRouter` and `*BatchRouter[T]` all answer BatchRouter.
+func unwrapRecvType(e ast.Expr) string {
+	for {
+		switch x := e.(type) {
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.IndexListExpr:
+			e = x.X
+		case *ast.Ident:
+			return x.Name
+		default:
+			return ""
+		}
+	}
+}
