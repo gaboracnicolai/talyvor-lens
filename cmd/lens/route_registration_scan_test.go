@@ -63,6 +63,42 @@ type routeReg struct {
 	verb     string
 	path     string
 	line     int
+	// handler is the rendered argument that follows the path — what actually serves the route,
+	// gate wrapper and all.
+	handler string
+	// conds are the `if` conditions that govern the registration, outermost first, rendered from
+	// the AST. An else-branch renders `!(cond)`.
+	conds []string
+	// handlerExpr is the unrendered form of handler, kept so wrapsCall can ask a structural
+	// question about it rather than a textual one.
+	handlerExpr ast.Expr
+}
+
+// wrapsCall reports whether the route's handler expression applies fn — `requireAdmin(...)`
+// wrapping the real handler, at any depth. It is a question about a CALL, so a comment or a
+// string naming fn cannot answer it.
+func (r routeReg) wrapsCall(fn string) bool {
+	if r.handlerExpr == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(r.handlerExpr, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok && types.ExprString(c.Fun) == fn {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// gatedOn reports whether cond is among the `if` conditions enclosing the registration.
+func (r routeReg) gatedOn(cond string) bool {
+	for _, c := range r.conds {
+		if c == cond {
+			return true
+		}
+	}
+	return false
 }
 
 // scanRouteRegistrations returns every path main.go binds on a router, the router expressions
@@ -77,7 +113,13 @@ func scanRouteRegistrations(filename string, src []byte) (regs []routeReg, route
 	}
 
 	isRouter := map[string]bool{}
+	var stack []ast.Node
 	ast.Inspect(f, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -100,7 +142,13 @@ func scanRouteRegistrations(filename string, src []byte) (regs []routeReg, route
 		}
 		recv := types.ExprString(sel.X)
 		isRouter[routerBase(recv)] = true
-		regs = append(regs, routeReg{receiver: recv, verb: sel.Sel.Name, path: p, line: fset.Position(lit.Pos()).Line})
+		reg := routeReg{receiver: recv, verb: sel.Sel.Name, path: p, line: fset.Position(lit.Pos()).Line,
+			conds: enclosingIfConds(stack)}
+		if idx+1 < len(call.Args) {
+			reg.handlerExpr = call.Args[idx+1]
+			reg.handler = types.ExprString(call.Args[idx+1])
+		}
+		regs = append(regs, reg)
 		return true
 	})
 
@@ -140,4 +188,23 @@ func routerBase(expr string) string {
 		return expr[:i]
 	}
 	return expr
+}
+
+// enclosingIfConds renders the condition of every `if` whose BODY (or else-branch) contains the
+// node. A call in the `if`'s own CONDITION is not governed by it and contributes nothing.
+func enclosingIfConds(stack []ast.Node) []string {
+	var conds []string
+	for i := 0; i+1 < len(stack); i++ {
+		ifs, ok := stack[i].(*ast.IfStmt)
+		if !ok {
+			continue
+		}
+		switch child := stack[i+1]; {
+		case ast.Node(ifs.Body) == child:
+			conds = append(conds, types.ExprString(ifs.Cond))
+		case ifs.Else != nil && ifs.Else == child:
+			conds = append(conds, "!("+types.ExprString(ifs.Cond)+")")
+		}
+	}
+	return conds
 }
