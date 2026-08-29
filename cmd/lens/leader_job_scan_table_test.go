@@ -266,3 +266,56 @@ func TestScanLeaderJobs_ParseErrorsAreReturned(t *testing.T) {
 		t.Errorf("jobs must be nil on a parse error, got %v", jobs)
 	}
 }
+
+// TestCallsOutsideLeaderJob_ReadsContainmentNotText — the #526 half. The cache-warmer guard had a
+// positive rule ("the leader job is registered") and a negative one ("the exact text
+// `go cacheWarmer.Start(ctx` is absent"), and a CLOSURE walked past both: the job line left in a
+// comment satisfied the first and `go func() { cacheWarmer.Start(ctx, …) }()` did not match the
+// second. Containment answers what both were reaching for.
+func TestCallsOutsideLeaderJob_ReadsContainmentNotText(t *testing.T) {
+	const gated = "\tgo haComps.leader.Run(ctx, \"cache-warmer\", d, func(lctx context.Context) {\n" +
+		"\t\tcacheWarmer.Start(lctx, h)\n\t})\n"
+	for _, tc := range []struct {
+		name  string
+		body  string
+		loose int
+	}{
+		{"inside the named leader job", gated, 0},
+		{"a bare `go cacheWarmer.Start(ctx, …)`", "\tgo cacheWarmer.Start(ctx, h)\n", 1},
+		{"inside a CLOSURE, not the leader job", "\tgo func() { cacheWarmer.Start(ctx, h) }()\n", 1},
+		{"gated, PLUS a second ungated start", gated + "\tgo func() { cacheWarmer.Start(ctx, h) }()\n", 1},
+		{
+			name:  "inside a leader job with a DIFFERENT name",
+			body:  "\tgo haComps.leader.Run(ctx, \"other-job\", d, func(lctx context.Context) {\n\t\tcacheWarmer.Start(lctx, h)\n\t})\n",
+			loose: 1,
+		},
+		{"only a COMMENT calls it", "\t// go cacheWarmer.Start(ctx, h)\n\t_ = cacheWarmer\n", 0},
+		{
+			// ⚠ INSIDE SOMETHING THAT TAKES THE JOB NAME IS NOT INSIDE THE JOB. Without this row
+			// the leader.Run check is asserted by nothing: a control that accepted ANY enclosing
+			// call changed no verdict, because every other row's wrapper has no string argument.
+			// A retry/telemetry wrapper taking a job name is an ordinary thing to write, and it
+			// does not elect a leader.
+			name:  "inside a wrapper that merely takes the job NAME",
+			body:  "\tgo retryWrapper(ctx, \"cache-warmer\", func() { cacheWarmer.Start(ctx, h) })\n",
+			loose: 1,
+		},
+		{"a DIFFERENT receiver's Start", "\tgo otherWarmer.Start(ctx, h)\n", 0},
+		{"nested two levels inside the named job",
+			"\tgo haComps.leader.Run(ctx, \"cache-warmer\", d, func(lctx context.Context) {\n" +
+				"\t\tif ok {\n\t\t\tcacheWarmer.Start(lctx, h)\n\t\t}\n\t})\n", 0},
+	} {
+		got, err := callsOutsideLeaderJob("synthetic.go", []byte(wrapMain(tc.body)), "cacheWarmer", "Start", "cache-warmer")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(got) != tc.loose {
+			t.Errorf("%s: calls outside the job = %d %v, want %d", tc.name, len(got), got, tc.loose)
+		}
+	}
+	if _, err := callsOutsideLeaderJob("broken.go", []byte("package main\nfunc run() { this is not go\n"),
+		"cacheWarmer", "Start", "cache-warmer"); err == nil {
+		t.Error("a parse error was swallowed — an unreadable file would report NO ungated calls, " +
+			"which is the wrong direction to be wrong in")
+	}
+}

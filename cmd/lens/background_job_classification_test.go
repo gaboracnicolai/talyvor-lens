@@ -148,10 +148,28 @@ func TestEveryBackgroundGoroutineIsClassified(t *testing.T) {
 // directly when HA is disabled, so gating it changes nothing for a single replica — which is
 // exactly why it was safe to do rather than only report.
 func TestTheCacheWarmerIsLeaderGated(t *testing.T) {
-	src := readMainGo(t)
-	const want = `go haComps.leader.Run(ctx, "cache-warmer"`
-	if !strings.Contains(src, want) {
-		t.Errorf("the cache warmer is not leader-gated.\n\n" +
+	src := []byte(readMainGo(t))
+	// ⚠ BOTH HALVES WERE strings.Contains OVER THE RAW SOURCE UNTIL #526, and a closure walked
+	// past both: `go func() { cacheWarmer.Start(ctx, …) }()` with the leader.Run line left in a
+	// COMMENT satisfied the positive half and dodged the negative one, which looked for the exact
+	// text `go cacheWarmer.Start(ctx`. The question is now (a) does the named leader job exist as
+	// a real call, and (b) is EVERY cacheWarmer.Start call lexically inside it.
+	// Arms: ~/talyvor-queue/w61-operatorkeys-controls-h2r7.py.
+	jobs, err := scanLeaderJobs("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(jobs) < 20 {
+		t.Fatalf("scanLeaderJobs found only %d leader.Run registrations — the scan is blind", len(jobs))
+	}
+	gated := false
+	for _, j := range jobs {
+		if j.name == "cache-warmer" {
+			gated = true
+		}
+	}
+	if !gated {
+		t.Error("the cache warmer is not leader-gated.\n\n" +
 			"    It re-fires historical prompts at OpenAI and Anthropic on the operator's keys, " +
 			"hourly, and writes only to the SHARED Redis exact cache. Its dedup (w.mu + w.warming) " +
 			"is in-process, and GetWarmCandidates takes a plain LIMIT 10 with no claim — so N " +
@@ -159,9 +177,13 @@ func TestTheCacheWarmerIsLeaderGated(t *testing.T) {
 			"    Every other money-touching singleton in this file is wrapped in leader.Run, " +
 			"including audit-retention, which only deletes rows.")
 	}
-	if strings.Contains(src, "go cacheWarmer.Start(ctx") {
-		t.Error("the ungated `go cacheWarmer.Start(ctx, …)` call is back alongside the gated one — " +
-			"the warmer would run on every replica AND on the leader")
+	loose, err := callsOutsideLeaderJob("main.go", src, "cacheWarmer", "Start", "cache-warmer")
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(loose) > 0 {
+		t.Errorf("cacheWarmer.Start is called at main.go line(s) %v OUTSIDE the \"cache-warmer\" "+
+			"leader job — the warmer would run on every replica AND on the leader", loose)
 	}
 }
 

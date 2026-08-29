@@ -114,3 +114,51 @@ func enclosingConds(stack []ast.Node) []string {
 	}
 	return conds
 }
+
+// callsOutsideLeaderJob returns the lines of every call to receiver.method in src that is NOT
+// lexically inside a `haComps.leader.Run(ctx, "<jobName>", …)` call.
+//
+// ⚠ WHY LEXICALLY INSIDE AND NOT "IS THE JOB PRESENT". A guard asking only whether the job is
+// registered cannot see a SECOND, ungated invocation of the same work — and a guard asking only
+// whether an ungated line is absent is defeated by writing it a different way. Both halves of the
+// cache-warmer guard were text rules of exactly those two shapes, and a closure walked past both.
+func callsOutsideLeaderJob(filename string, src []byte, receiver, method, jobName string) ([]int, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filename, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []int
+	var stack []ast.Node
+	ast.Inspect(f, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != method || types.ExprString(sel.X) != receiver {
+			return true
+		}
+		for _, anc := range stack[:len(stack)-1] {
+			outer, ok := anc.(*ast.CallExpr)
+			if !ok || types.ExprString(outer.Fun) != leaderRunSelector || len(outer.Args) < 2 {
+				continue
+			}
+			lit, ok := outer.Args[1].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				continue
+			}
+			if v, uerr := strconv.Unquote(lit.Value); uerr == nil && v == jobName {
+				return true // inside the named leader job — this call is gated
+			}
+		}
+		out = append(out, fset.Position(call.Pos()).Line)
+		return true
+	})
+	return out, nil
+}
