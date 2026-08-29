@@ -45,6 +45,27 @@ jobs:
         with:
           go-version: "1.25"
           cache: false
+      # A `finally` DOES NOT RUN ON SIGTERM, and 16 of this repo's control scripts mutate a
+      # tracked file and restore it in one. NONE installed a handler before this step, and
+      # talyvor-lens was the LAST repo in the estate with no guard for it at all.
+      #
+      # ⚠ ORG-LEVEL CLASS GUARD, NOT A LENS GUARD. The hazard was measured in talyvor-suite
+      # (W1.7, 78c69c8): a 2-minute command timeout killed a control mid-mutation and left
+      # deploy/decision-expiry.sh reading `if true; then` WHERE A GATE HAD BEEN, with a green suite
+      # and a `git status` showing only files the session had edited on purpose. Reproduced on
+      # demand in suite 5de27e3, talyvor-docs ffe9063 (go.mod), talyvor-track 5f01947 (go.mod) and
+      # here.
+      #
+      # ⚠⚠ DETECTION IS `ast`, NEVER GREP, AND THIS REPO IS THE PROOF THAT A GREP IS WRONG IN BOTH
+      # DIRECTIONS. `grep -l finally:` counts 15 here and the real population is 16 — a restore
+      # reached through a `with`/__exit__ has no `finally:` token near it at all. Everywhere else
+      # the grep OVER-counts by about a third (suite 58 vs 41, docs 60 vs 43, track 90 vs 61).
+      #
+      # The guard resolves four restore idioms and carries a floor PER DETECTOR: a single floor
+      # over the union is satisfied by either detector alone, which would let the wide half revert
+      # to silence with the guard green.
+      - name: control scripts must restore on SIGTERM, not only in a finally
+        run: python3 scripts/check-restore-signal-handlers.py --ci
       - name: go vet
         run: go vet ./...
       # Real-migration regression guard: the ONLY place migrations/*.sql are
