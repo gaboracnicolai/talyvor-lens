@@ -97,7 +97,7 @@ export class LensClient {
    * use the semantic ``with*`` methods.
    */
   private derive(overrides: Partial<LensClientOptions>): LensClient {
-    return new LensClient({
+    const clone = new LensClient({
       lensUrl: this.lensUrl,
       apiKey: this.apiKey,
       workspaceId: this.headers["X-Talyvor-Workspace"],
@@ -108,5 +108,17 @@ export class LensClient {
       branch: this.headers[HEADER_BRANCH],
       ...overrides,
     });
+    // ⚠ AND CARRY ANY HEADER THE CONSTRUCTOR DOES NOT REBUILD. LensClientOptions has no
+    // `prNumber`, so `withBranch(b, pr)` followed by `withSession(...)` DROPPED X-Talyvor-PR —
+    // the documented usage (branch once per CI run, session per turn), silently, leaving the
+    // proxy to store an attribution row with an empty pr_number that summaryByPRSQL predicates
+    // on. Filling only the GAPS means a real override still wins. The Python SDK had the
+    // identical defect in the identical place.
+    for (const [name, value] of Object.entries(this.headers)) {
+      if (clone.headers[name] === undefined) {
+        clone.headers[name] = value;
+      }
+    }
+    return clone;
   }
 }

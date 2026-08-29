@@ -115,3 +115,55 @@ def test_openai_property_lazy_no_import_if_unused() -> None:
     client = LensClient(lens_url="http://lens:8080", api_key="tlv_x")
     assert client._openai_client is None
     assert client._anthropic_client is None
+
+
+def test_set_branch_then_set_session_keeps_the_pr_number() -> None:
+    """PR attribution must survive a later ``set_session``.
+
+    ⚠ THIS IS THE DOCUMENTED USAGE, NOT AN EDGE CASE. ``set_branch``'s own docstring says the PR
+    number flows through "so cost shows up on the right PR's CI run", and ``set_session``'s says it
+    is "useful inside an agent framework where each turn carries its own session ID" — i.e. set the
+    branch once per CI run, derive a session per turn. In that order every turn after the first
+    lost X-Talyvor-PR, silently, because ``_derive`` rebuilds through ``__init__`` and the
+    constructor has no ``pr_number`` parameter. The reverse order kept it, so the defect depended
+    on which of two documented calls came second.
+
+    The consequence is not a crash: the request succeeds, the proxy stores an attribution row with
+    an empty pr_number, and `summaryByPRSQL` shows the CI run's spend against no PR at all.
+    """
+    ci = LensClient(lens_url="http://lens:8080", api_key="tlv_x").set_branch("feat/x", "42")
+    assert ci.get_headers()["X-Talyvor-PR"] == "42"
+
+    per_turn = ci.set_session("turn-1", agent_name="planner")
+    assert per_turn.get_headers().get("X-Talyvor-PR") == "42", (
+        "set_session dropped the PR number set by set_branch"
+    )
+    # and the session override still took effect, so the fix is not "return the same client"
+    assert per_turn.get_headers()["X-Talyvor-Session"] == "turn-1"
+    assert per_turn.get_headers()["X-Talyvor-Agent"] == "planner"
+    # branch survives too — it always did, and a fix that broke it would be a regression
+    assert per_turn.get_headers()["X-Talyvor-Branch"] == "feat/x"
+
+
+def test_derive_override_beats_the_inherited_header() -> None:
+    """A carried-over header must never beat the value the caller just set.
+
+    ⚠ THIS CASE EXISTS BECAUSE A CONTROL FOUND ITS ABSENCE. The chaining test above starts from a
+    client with NO session, so the parent has no X-Talyvor-Session key at all — which means a fix
+    that copied the parent's headers OVER the rebuilt ones instead of into the gaps would have
+    passed it. The mutation harness injected exactly that fix and the suite stayed green. The
+    parent here HAS a session and an agent, so the override is observable and the wrong fix reds.
+    """
+    base = LensClient(
+        lens_url="http://lens:8080",
+        api_key="tlv_x",
+        session_id="turn-0",
+        agent_name="scout",
+    ).set_branch("feat/x", "42")
+    assert base.get_headers()["X-Talyvor-Session"] == "turn-0"
+
+    nxt = base.set_session("turn-1", agent_name="planner")
+    assert nxt.get_headers()["X-Talyvor-Session"] == "turn-1"
+    assert nxt.get_headers()["X-Talyvor-Agent"] == "planner"
+    # and the PR the parent carried is still there
+    assert nxt.get_headers()["X-Talyvor-PR"] == "42"

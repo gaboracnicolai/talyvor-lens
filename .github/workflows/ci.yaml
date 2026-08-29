@@ -128,6 +128,42 @@ jobs:
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
           "$(go env GOPATH)/bin/golangci-lint" run ./...
 
+  # THE TWO SHIPPED SDKs, WHICH RAN IN NOTHING UNTIL THIS JOB.
+  #
+  # ⚠ THE ABSENCE WAS ITSELF A FINDING, AND IT WAS WRITTEN DOWN BEFORE IT WAS FIXED.
+  # internal/attribution/sdk_header_sync_guard_test.go opens with it: *"The SDKs are in no CI
+  # workflow, no Makefile target and no Go test, and the drift that resulted was
+  # X-Talyvor-Repository: emitted by both SDKs, documented in both READMEs, and stored by
+  # nothing."* That guard reads the SDKs' header CONSTANTS from Go. It cannot execute them, so it
+  # cannot see a defect in what the clients DO — and there was one: `set_branch(b, pr)` followed
+  # by `set_session(...)` dropped X-Talyvor-PR in BOTH SDKs, in the same place, for the same
+  # reason. Both suites already existed, both were green, and neither had ever run outside a
+  # developer's shell.
+  #
+  # Both are pinned to the versions their own manifests declare and neither needs a network
+  # service. `pip install -e .[dev]` brings pytest; the TypeScript devDependencies bring jest.
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: python SDK
+        run: |
+          cd sdk/python
+          python -m pip install --quiet -e ".[dev]"
+          python -m pytest tests -q
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "20"
+      - name: typescript SDK
+        run: |
+          cd sdk/typescript
+          npm ci
+          npx tsc --noEmit
+          npm test
+
   # Supply-chain gate: govulncheck against the Go vulnerability DB. This is the
   # standing guard for the unmaintained-but-sandboxed github.com/ledongthuc/pdf
   # dependency (see internal/distill/pdf.go): a future CVE in it — or any dep, or
