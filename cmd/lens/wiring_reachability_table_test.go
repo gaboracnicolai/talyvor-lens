@@ -183,3 +183,149 @@ func TestScanWiring_ParseErrorsAreReturned(t *testing.T) {
 		t.Errorf("scan must be nil on a parse error, got %v", w)
 	}
 }
+
+// TestScanWiring_RecordsPlainFunctionCallsWithTheirConditions — the #525 additions. The three
+// remaining line-text scanners over main.go all asked about a PLAIN FUNCTION call
+// (mountSessionKeyRoutes, applyCatalogOverrides, logger.Warn) and about WHICH `if` encloses it,
+// and all three answered from raw text.
+func TestScanWiring_RecordsPlainFunctionCallsWithTheirConditions(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantSites int
+		wantCond  bool
+		wantArg0  string
+	}{
+		{
+			name: "inside the guard", body: "\tif sessionKeyStore != nil {\n\t\tmountSessionKeyRoutes(authed, sessionKeyStore, ttl)\n\t}\n",
+			wantSites: 1, wantCond: true, wantArg0: "authed",
+		},
+		{
+			name: "mounted UNCONDITIONALLY", body: "\tmountSessionKeyRoutes(authed, sessionKeyStore, ttl)\n",
+			wantSites: 1, wantArg0: "authed",
+		},
+		{
+			name:      "mounted under a DIFFERENT condition",
+			body:      "\tif cfg.SessionKeysEnabled {\n\t\tmountSessionKeyRoutes(authed, sessionKeyStore, ttl)\n\t}\n",
+			wantSites: 1, wantArg0: "authed",
+		},
+		{
+			name: "the call exists only as a COMMENT", body: "\t// if sessionKeyStore != nil {\n\t// \tmountSessionKeyRoutes(authed, sessionKeyStore, ttl)\n\t_ = authed\n",
+		},
+		{
+			name:      "guarded, but nested far below the guard — no proximity rule to fool",
+			body:      "\tif sessionKeyStore != nil {\n\t\t_ = authed\n\t\t_ = ttl\n\t\t_ = cfg\n\t\t_ = logger\n\t\t_ = wsManager\n\t\tmountSessionKeyRoutes(authed, sessionKeyStore, ttl)\n\t}\n",
+			wantSites: 1, wantCond: true, wantArg0: "authed",
+		},
+	} {
+		w, err := scanWiring("synthetic.go", []byte(wrapMain(tc.body)), map[string]bool{"mountSessionKeyRoutes": true})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(w.sites) != tc.wantSites {
+			t.Errorf("%s: sites=%d want %d (%v)", tc.name, len(w.sites), tc.wantSites, w.sites)
+			continue
+		}
+		if tc.wantSites == 0 {
+			continue
+		}
+		s := w.sites[0]
+		if s.condsInclude("sessionKeyStore != nil") != tc.wantCond {
+			t.Errorf("%s: condsInclude=%v want %v (conds %v)", tc.name, s.condsInclude("sessionKeyStore != nil"), tc.wantCond, s.conds)
+		}
+		if s.receiver != "" {
+			t.Errorf("%s: a plain function call must carry no receiver, got %q", tc.name, s.receiver)
+		}
+		if len(s.args) == 0 || s.args[0] != tc.wantArg0 {
+			t.Errorf("%s: args=%v want first %q", tc.name, s.args, tc.wantArg0)
+		}
+	}
+}
+
+// TestAssignConds_ReadsWhereTheAssignmentSits — "the store is only constructed when the config
+// says so" is a question about WHERE the assignment is, and the guard that asked it was satisfied
+// by the flag's `if` appearing anywhere in the file.
+func TestAssignConds_ReadsWhereTheAssignmentSits(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		body  string
+		found bool
+		gated bool
+	}{
+		{"inside the flag block", "\tif cfg.SessionKeysEnabled {\n\t\tsessionKeyStore = newStore()\n\t}\n", true, true},
+		{"outside it, flag used elsewhere", "\tif cfg.SessionKeysEnabled {\n\t\t_ = cfg\n\t}\n\tsessionKeyStore = newStore()\n", true, false},
+		{"in the flag's ELSE branch — constructed when the flag is OFF",
+			"\tif cfg.SessionKeysEnabled {\n\t\t_ = cfg\n\t} else {\n\t\tsessionKeyStore = newStore()\n\t}\n", true, false},
+		{"never assigned", "\t_ = cfg\n", false, false},
+	} {
+		condSets, found, err := assignConds("synthetic.go", []byte(wrapMain(tc.body)), "sessionKeyStore")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if found != tc.found {
+			t.Errorf("%s: found=%v want %v", tc.name, found, tc.found)
+			continue
+		}
+		if !found {
+			continue
+		}
+		gated := false
+		for _, cs := range condSets {
+			for _, c := range cs {
+				if c == "cfg.SessionKeysEnabled" {
+					gated = true
+				}
+			}
+		}
+		if gated != tc.gated {
+			t.Errorf("%s: gated=%v want %v (conds %v)", tc.name, gated, tc.gated, condSets)
+		}
+	}
+}
+
+// TestCallAndLiteralOffsets_DoNotCountComments — the provisioning warn-adjacency rule keeps its
+// deliberate byte window; what changed is that a COMMENT inside that window is no longer a call
+// and no longer a string literal.
+func TestCallAndLiteralOffsets_DoNotCountComments(t *testing.T) {
+	real := wrapMain("\tlogger.Warn(\"set LENS_PROVISION_SECRET on both sides\")\n")
+	commented := wrapMain("\t// logger.Warn(\"set LENS_PROVISION_SECRET on both sides\")\n\t_ = logger\n")
+	for _, tc := range []struct {
+		name  string
+		src   string
+		calls int
+		lits  int
+	}{
+		{"a real warn", real, 1, 1},
+		{"only a commented-out warn", commented, 0, 0},
+		// ⚠ A METHOD VALUE IS NOT A CALL. Without this row that distinction is asserted by
+		// nothing: a control that matched the SelectorExpr `logger.Warn` instead of a CallExpr
+		// changed no verdict, because in every other row the selector only ever appears inside
+		// the call. Passing logger.Warn to something is not logging a warning.
+		{"logger.Warn passed as a VALUE, never called",
+			wrapMain("\tdeferWarn(logger.Warn, \"LENS_PROVISION_SECRET\")\n"), 0, 1},
+	} {
+		calls, err := callOffsets("synthetic.go", []byte(tc.src), "logger.Warn")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		lits, err := stringLiteralOffsets("synthetic.go", []byte(tc.src), "LENS_PROVISION_SECRET")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(calls) != tc.calls || len(lits) != tc.lits {
+			t.Errorf("%s: calls=%d lits=%d want %d/%d", tc.name, len(calls), len(lits), tc.calls, tc.lits)
+		}
+		if tc.calls == 1 && !anyWithin(calls, 0, len(tc.src)) {
+			t.Errorf("%s: the call offset is outside the source it came from", tc.name)
+		}
+		if tc.calls == 1 && anyWithin(calls, 0, 1) {
+			t.Errorf("%s: anyWithin accepts an offset outside the range", tc.name)
+		}
+	}
+	if _, err := callOffsets("broken.go", []byte("package main\nfunc run() { this is not go\n"), "logger.Warn"); err == nil {
+		t.Error("callOffsets swallowed a parse error — an unreadable file would report NO warning")
+	}
+	if _, err := stringLiteralOffsets("broken.go", []byte("package main\nfunc run() { this is not go\n"), "X"); err == nil {
+		t.Error("stringLiteralOffsets swallowed a parse error")
+	}
+}

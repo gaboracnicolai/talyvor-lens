@@ -341,27 +341,74 @@ func TestSessionKeyRoutesAreRegisteredOnlyWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	text := string(src)
-
-	// The mount call must sit inside a guard on the constructed store.
-	idx := strings.Index(text, "mountSessionKeyRoutes(authed,")
-	if idx < 0 {
+	// ⚠ THIS ASKED BOTH HALVES OF TEXT UNTIL #525. The mount's guard was decided by a 400-CHARACTER
+	// window, so mounting unconditionally and leaving `if sessionKeyStore != nil {` in a COMMENT
+	// just above passed — and the guard's own message says what that costs: flag-off would REGISTER
+	// routes that mint a proxy-capable credential. Mounting under a DIFFERENT condition with the
+	// real one commented nearby passed too. In the other direction it FALSELY ACCUSED a correctly
+	// guarded mount whose guard sat more than 400 characters above. And the store-construction half
+	// only checked that `if cfg.SessionKeysEnabled {` appeared ANYWHERE in main.go. Both are now
+	// read from the AST. Arms: ~/talyvor-queue/w61-sessionkey-controls-h2r7.py.
+	w, err := scanWiring("main.go", src, map[string]bool{"mountSessionKeyRoutes": true})
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if len(w.reached) < 2 {
+		t.Fatalf("scanWiring reached only %d functions from %s() — the scan is blind", len(w.reached), bootEntryPoint)
+	}
+	var mounts []wiringSite
+	for _, s := range w.sites {
+		if s.method == "mountSessionKeyRoutes" {
+			mounts = append(mounts, s)
+		}
+	}
+	if len(mounts) == 0 {
 		t.Fatal("main.go never calls mountSessionKeyRoutes — the feature is dead code, and every " +
 			"test in this file is then testing a router nothing serves")
 	}
-	// Look back a short way for the conditional that guards it.
-	window := text[max(0, idx-400):idx]
-	if !strings.Contains(window, "if sessionKeyStore != nil {") {
-		t.Fatalf("mountSessionKeyRoutes is not guarded by `if sessionKeyStore != nil` — flag-off "+
-			"would REGISTER routes that mint a proxy-capable credential.\nPreceding source:\n%s", window)
+	for _, m := range mounts {
+		if !m.condsInclude("sessionKeyStore != nil") {
+			t.Fatalf("mountSessionKeyRoutes at main.go line %d is not inside `if sessionKeyStore != nil` "+
+				"(enclosing conditions: %v) — flag-off would REGISTER routes that mint a "+
+				"proxy-capable credential", m.line, m.conds)
+		}
 	}
-	// And the store itself must only be constructed when the config says so.
-	if !strings.Contains(text, "if cfg.SessionKeysEnabled {") {
-		t.Fatal("main.go constructs the session-key store unconditionally — the config flag is decoration")
+
+	// And the store itself must only be CONSTRUCTED when the config says so — asked of the
+	// assignment's own enclosing conditions, not of the flag appearing somewhere in the file.
+	condSets, found, err := assignConds("main.go", src, "sessionKeyStore")
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
 	}
-	// The control: an unconditional neighbour on the same router.
-	if !strings.Contains(text, `authed.Post("/v1/auth/token", newAuthTokenMintHandler(authManager))`) {
-		t.Fatal("the unconditional control route /v1/auth/token is gone — re-anchor this census, " +
+	if !found {
+		t.Fatal("main.go never assigns sessionKeyStore — re-anchor this census")
+	}
+	for _, cs := range condSets {
+		gated := false
+		for _, c := range cs {
+			if c == "cfg.SessionKeysEnabled" {
+				gated = true
+			}
+		}
+		if !gated {
+			t.Fatalf("sessionKeyStore is assigned outside `if cfg.SessionKeysEnabled` (enclosing "+
+				"conditions: %v) — the config flag is decoration", cs)
+		}
+	}
+
+	// The control: an unconditional neighbour on the same router, asserted as a real registration.
+	regs, _, _, err := scanRouteRegistrations("main.go", src)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	control := false
+	for _, r := range regs {
+		if r.verb == "Post" && r.path == "/v1/auth/token" && len(r.conds) == 0 {
+			control = true
+		}
+	}
+	if !control {
+		t.Fatal("the unconditional control route POST /v1/auth/token is gone — re-anchor this census, " +
 			"because without it the assertions above could pass against a main.go that registers nothing")
 	}
 }
