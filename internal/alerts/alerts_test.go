@@ -65,7 +65,7 @@ func TestRecordSpend_CostForGPT4o(t *testing.T) {
 	// distill_method. This row is an image request → modality "image", estimated
 	// true; not distilled → distill_method "".
 	pool.ExpectExec(`INSERT INTO token_events`).
-		WithArgs("ws-test", "openai", "gpt-4o", 100000, 50000, "core", "sprint-1", "search", wantCost, "p", "", "", "image", true, "").
+		WithArgs("ws-test", "openai", "gpt-4o", 100000, 50000, "core", "sprint-1", "search", wantCost, "p", "", "", "image", true, "", "", 0, 0, 0.0, "").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := mgr.RecordSpend(context.Background(), "ws-test", "core", "sprint-1", "search", "gpt-4o", 100000, 50000, "p", "", "", "image", true); err != nil {
@@ -88,7 +88,7 @@ func TestRecordSpend_CostForClaudeHaiku(t *testing.T) {
 	const wantCost = 6.00
 
 	pool.ExpectExec(`INSERT INTO token_events`).
-		WithArgs("ws-test", "anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "", "search", wantCost, "p", "", "", "text", false, "").
+		WithArgs("ws-test", "anthropic", "claude-haiku-4-5", 1000000, 1000000, "core", "", "search", wantCost, "p", "", "", "text", false, "", "", 0, 0, 0.0, "").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := mgr.RecordSpend(context.Background(), "ws-test", "core", "", "search", "claude-haiku-4-5", 1000000, 1000000, "p", "", "", "text", false); err != nil {
@@ -119,6 +119,7 @@ func TestRecordSpendWithDistill_TagsMethod(t *testing.T) {
 					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 					pgxmock.AnyArg(), pgxmock.AnyArg(), tc.modality, tc.estimated, tc.method,
+					"", 0, 0, 0.0, "", // tare_*: not a Tare-reduced request
 				).
 				WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
@@ -148,7 +149,8 @@ func TestRecordSpend_PersistsWorkspaceID(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 		if err := mgr.RecordSpend(context.Background(), ws, "core", "", "search", "gpt-4o", 10, 10, "", "", "", "text", false); err != nil {
@@ -176,6 +178,7 @@ func TestRecordSpend_FiresWarningAlertOverThreshold(t *testing.T) {
 
 	pool.ExpectExec(`INSERT INTO token_events`).
 		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -218,6 +221,7 @@ func TestRecordSpend_OpensCircuitOverThreshold(t *testing.T) {
 
 	pool.ExpectExec(`INSERT INTO token_events`).
 		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),

@@ -9,7 +9,7 @@ import (
 )
 
 // restartTestPool builds a real-PG pool and a fresh `workspaces` table mirroring
-// the production schema (migrations 0005/0039/0041/0104/0117). Skips when
+// the production schema (migrations 0005/0039/0041/0104/0117/0126). Skips when
 // LENS_TEST_DATABASE_URL is unset.
 //
 // ⚠ THIS FIXTURE IS A CLAIM ABOUT THE MIGRATIONS, and it is the reason 0117 had to
@@ -44,6 +44,7 @@ func restartTestPool(t *testing.T) *pgxpool.Pool {
 			logging_policy TEXT NOT NULL DEFAULT 'metadata',
 			distill_policy TEXT NOT NULL DEFAULT 'disabled',
 			compression_policy TEXT NOT NULL DEFAULT 'disabled',
+			tare_policy TEXT NOT NULL DEFAULT 'disabled',
 			cache_poolable BOOLEAN NOT NULL DEFAULT false,
 			distill_poolable BOOLEAN NOT NULL DEFAULT false,
 			cost_optimize_routing BOOLEAN NOT NULL DEFAULT false,

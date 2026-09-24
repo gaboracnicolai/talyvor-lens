@@ -4134,6 +4134,37 @@ func run() error {
 			})
 		})
 
+		// B6.5 — per-workspace TARE policy (migration 0126): disabled | opt_in | always. DISABLED by
+		// default; opt_in reduces only requests that also carry X-Talyvor-Tare: true. Applies on the
+		// next request, streaming and buffered alike. See internal/workspace/tare_policy.go.
+		authed.Put("/v1/workspaces/{wsID}/tare", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				TarePolicy workspace.TarePolicy `json:"tare_policy"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if err := wsManager.SetTarePolicy(req.Context(), wsID, in.TarePolicy); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			ws, _ := wsManager.GetWorkspace(wsID)
+			writeJSONOK(w, http.StatusOK, map[string]any{"ok": true, "tare_policy": ws.TarePolicy})
+		})
+
+		// B6.4 — what Tare saved in this workspace, per work item (X-Talyvor-Issue), read from the
+		// tare_* columns of token_events. work_item_id is CALLER-DECLARED — a label, not an audit.
+		authed.Get("/v1/workspaces/{wsID}/tare/savings", func(w http.ResponseWriter, req *http.Request) {
+			savings, err := alertManager.TareSavings(req.Context(), chi.URLParam(req, "wsID"))
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]any{"by_work_item": savings})
+		})
+
 		// COMPRESSION EVIDENCE — what the rewriter actually removed from THIS
 		// workspace's wire, and how much of it reached THIS workspace's bill.
 		//

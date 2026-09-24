@@ -66,6 +66,9 @@ func (nopAlertSink) RecordSpend(context.Context, string, string, string, string,
 func (nopAlertSink) RecordSpendWithDistill(context.Context, string, string, string, string, string, int, int, string, string, string, string, bool, string) error {
 	return nil
 }
+func (nopAlertSink) RecordSpendWithTare(context.Context, string, string, string, string, string, int, int, string, string, string, string, bool, string, alerts.TareMeter) error {
+	return nil
+}
 func (nopAlertSink) RecordCacheServe(context.Context, string, string, string, string, string, int, int, string, string, string, string) error {
 	return nil
 }

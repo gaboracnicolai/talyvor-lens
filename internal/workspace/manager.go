@@ -97,11 +97,13 @@ type Workspace struct {
 	// CompressionPolicy gates the prompt REWRITER (internal/compressor). Unset ⇒
 	// disabled: see compression_policy.go for why the default differs from
 	// DistillPolicy's.
-	CompressionPolicy   CompressionPolicy `json:"compression_policy"`
-	CachePoolable       bool              `json:"cache_poolable"`
-	CostOptimizeRouting bool              `json:"cost_optimize_routing"`
-	DistillPoolable     bool              `json:"distill_poolable"`
-	CreatedAt           time.Time         `json:"created_at"`
+	CompressionPolicy CompressionPolicy `json:"compression_policy"`
+	// TarePolicy gates the Tare reduction layer (internal/tare). Unset ⇒ disabled.
+	TarePolicy          TarePolicy `json:"tare_policy"`
+	CachePoolable       bool       `json:"cache_poolable"`
+	CostOptimizeRouting bool       `json:"cost_optimize_routing"`
+	DistillPoolable     bool       `json:"distill_poolable"`
+	CreatedAt           time.Time  `json:"created_at"`
 }
 
 type WorkspacePolicy struct {
@@ -127,8 +129,8 @@ const insertWorkspaceSQL = `INSERT INTO workspaces (
   id, name, cache_prefix, spend_limit_usd,
   allowed_models, allowed_providers, max_tokens_per_request,
   max_output_tokens, max_input_tokens, active, logging_policy, distill_policy,
-  cache_poolable, distill_poolable, cost_optimize_routing, compression_policy
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+  cache_poolable, distill_poolable, cost_optimize_routing, compression_policy, tare_policy
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 ON CONFLICT (id) DO UPDATE SET
   name                   = EXCLUDED.name,
   cache_prefix           = EXCLUDED.cache_prefix,
@@ -148,6 +150,9 @@ ON CONFLICT (id) DO UPDATE SET
   -- never grant one. That asymmetry is why it is safe here and why the three
   -- CONSENT columns below are not.
   compression_policy     = EXCLUDED.compression_policy,
+  -- tare_policy follows compression_policy for the same reason: its default is DISABLED, so a
+  -- blind re-POST can only turn it off.
+  tare_policy            = EXCLUDED.tare_policy,
   -- The three CONSENT columns — cache_poolable, distill_poolable, cost_optimize_routing
   -- — are DELIBERATELY absent from this list. Registration CREATES consent; it never
   -- CHANGES it. Leaving them here moved them in BOTH directions on a blind re-POST:
@@ -227,6 +232,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 	ws.LoggingPolicy = normalizeLoggingPolicy(ws.LoggingPolicy)
 	ws.DistillPolicy = normalizeDistillPolicy(ws.DistillPolicy)
 	ws.CompressionPolicy = normalizeCompressionPolicy(ws.CompressionPolicy)
+	ws.TarePolicy = normalizeTarePolicy(ws.TarePolicy)
 
 	// Cross-tenant cache pooling (cache_poolable) defaults ON for a NEW workspace,
 	// but its consent is NEVER changed retroactively. The flag is SYMMETRIC — one
@@ -274,7 +280,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 			stored.AllowedModels, stored.AllowedProviders, stored.MaxTokensPerRequest,
 			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active, string(stored.LoggingPolicy),
 			string(stored.DistillPolicy), stored.CachePoolable, stored.DistillPoolable, stored.CostOptimizeRouting,
-			string(stored.CompressionPolicy),
+			string(stored.CompressionPolicy), string(stored.TarePolicy),
 		).Scan(&dbPoolable, &dbDistillPoolable, &dbCostOptimizeRouting); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
 		}
@@ -498,7 +504,7 @@ func (m *Manager) ScopedCacheKey(wsID, baseKey string) string {
 
 const loadAllSQL = `SELECT id, name, cache_prefix, spend_limit_usd,
   allowed_models, allowed_providers, max_tokens_per_request,
-  max_output_tokens, max_input_tokens, active, logging_policy, distill_policy, cache_poolable, distill_poolable, cost_optimize_routing, compression_policy, created_at
+  max_output_tokens, max_input_tokens, active, logging_policy, distill_policy, cache_poolable, distill_poolable, cost_optimize_routing, compression_policy, tare_policy, created_at
 FROM workspaces
 WHERE active = true`
 
@@ -526,17 +532,18 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 	next := make(map[string]*Workspace)
 	for rows.Next() {
 		var ws Workspace
-		var policy, dpolicy, cpolicy string
+		var policy, dpolicy, cpolicy, tpolicy string
 		if err := rows.Scan(
 			&ws.ID, &ws.Name, &ws.CachePrefix, &ws.SpendLimitUSD,
 			&ws.AllowedModels, &ws.AllowedProviders, &ws.MaxTokensPerRequest,
-			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &dpolicy, &ws.CachePoolable, &ws.DistillPoolable, &ws.CostOptimizeRouting, &cpolicy, &ws.CreatedAt,
+			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &dpolicy, &ws.CachePoolable, &ws.DistillPoolable, &ws.CostOptimizeRouting, &cpolicy, &tpolicy, &ws.CreatedAt,
 		); err != nil {
 			return fmt.Errorf("workspace: scan: %w", err) // old map intact — no swap
 		}
 		ws.LoggingPolicy = normalizeLoggingPolicy(LoggingPolicy(policy))
 		ws.DistillPolicy = normalizeDistillPolicy(DistillPolicy(dpolicy))
 		ws.CompressionPolicy = normalizeCompressionPolicy(CompressionPolicy(cpolicy))
+		ws.TarePolicy = normalizeTarePolicy(TarePolicy(tpolicy))
 		stored := ws
 		next[ws.ID] = &stored
 	}

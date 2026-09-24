@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
@@ -46,6 +47,8 @@ type recordedSpend struct {
 	// cache layer label for RecordCacheServe writes — the sink-level mirror of
 	// token_events.serve_source (the store maps "" → 'upstream' via the column DEFAULT).
 	serveSource string
+	// tare is the Tare metering record (B6.4) on a RecordSpendWithTare write; zero otherwise.
+	tare alerts.TareMeter
 }
 
 func (r *recordingAlertSink) IsCircuitOpen(string, string) bool { return false }
@@ -58,6 +61,16 @@ func (r *recordingAlertSink) RecordSpend(ctx context.Context, workspaceID, team,
 
 func (r *recordingAlertSink) RecordSpendWithDistill(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error {
 	return r.record(model, inputTokens, outputTokens, prompt, modality, estimated, distillMethod)
+}
+
+func (r *recordingAlertSink) RecordSpendWithTare(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string, tare alerts.TareMeter) error {
+	if err := r.record(model, inputTokens, outputTokens, prompt, modality, estimated, distillMethod); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.spends[len(r.spends)-1].tare = tare
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *recordingAlertSink) RecordCacheServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality, serveSource string) error {

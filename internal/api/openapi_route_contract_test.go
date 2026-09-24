@@ -268,7 +268,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 // "Lens has too many routes to spec every single one" and that is a reasonable position for an
 // admin-heavy API. What is NOT reasonable is the number changing by fifty without anyone noticing
 // which way, so the count is pinned with a tolerance and its message says what each direction means.
-const undocumentedNonAdminV1Routes = 122
+//
+// 122 → 124 (B6.4/B6.5): PUT /v1/workspaces/{wsID}/tare and GET /v1/workspaces/{wsID}/tare/savings,
+// added undocumented beside their compression-policy sibling, which is undocumented too.
+const undocumentedNonAdminV1Routes = 124
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)
