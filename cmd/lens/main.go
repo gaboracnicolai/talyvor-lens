@@ -3116,6 +3116,35 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, st)
 		})
 
+		// B1.5 — cancel and resume. Cancel is AT PERIOD END: the workspace keeps what
+		// it paid for and flips to unsubscribed when Stripe's .deleted arrives. Neither
+		// route writes the subscriptions row — the webhook that follows does.
+		for _, r := range []struct {
+			path   string
+			cancel bool
+		}{
+			{"/v1/workspaces/{wsID}/billing/subscription/cancel", true},
+			{"/v1/workspaces/{wsID}/billing/subscription/resume", false},
+		} {
+			cancel := r.cancel
+			subs.post(authed, r.path, func(w http.ResponseWriter, req *http.Request) {
+				wsID := chi.URLParam(req, "wsID")
+				st, err := billingSvc.SetCancelAtPeriodEnd(req.Context(), wsID, cancel)
+				if err != nil {
+					status := http.StatusInternalServerError
+					switch {
+					case errors.Is(err, billing.ErrNoSubscriptionPrice):
+						status = http.StatusNotImplemented
+					case errors.Is(err, billing.ErrNoLiveSubscription):
+						status = http.StatusConflict
+					}
+					writeJSONErr(w, status, err.Error())
+					return
+				}
+				writeJSONOK(w, http.StatusOK, st)
+			})
+		}
+
 		// Admin refund-visibility list (read-only; requireAdmin). An 'anomalous' row
 		// means the customer was CHARGED and NOT credited — v1 resolution is a manual
 		// refund in the Stripe dashboard.

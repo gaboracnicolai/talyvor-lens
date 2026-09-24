@@ -8,6 +8,7 @@ import (
 	"github.com/stripe/stripe-go/v81/checkout/session"
 	"github.com/stripe/stripe-go/v81/customer"
 	"github.com/stripe/stripe-go/v81/paymentintent"
+	"github.com/stripe/stripe-go/v81/subscription"
 )
 
 // LiveStripe is the production stripeAPI implementation. It is NOT exercised by
@@ -119,4 +120,13 @@ func (l *LiveStripe) CreateSubscriptionCheckoutSession(ctx context.Context, p Su
 		return "", "", err
 	}
 	return sess.URL, sess.ID, nil
+}
+
+// SetCancelAtPeriodEnd flips the subscription's cancel_at_period_end flag. B1.5.
+// Stripe answers with the updated subscription and then sends the matching
+// customer.subscription.updated to the webhook, which is what records it.
+func (l *LiveStripe) SetCancelAtPeriodEnd(ctx context.Context, subscriptionID string, cancel bool) (*stripe.Subscription, error) {
+	params := &stripe.SubscriptionParams{CancelAtPeriodEnd: stripe.Bool(cancel)}
+	params.Context = ctx
+	return subscription.Update(subscriptionID, params)
 }
