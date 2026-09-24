@@ -174,6 +174,8 @@ type Proxy struct {
 	// Inert unless lxcGatingEnabled() AND lxcShadowEnabled() (see lxc_gate.go).
 	lxcGate          lxcBalanceReader
 	lxcGatingEnabled func() bool
+	// B1.6 subscription allowance — drawn before prepaid LXC; nil = no allowance wired.
+	allowance subscriptionAllowance
 
 	// F4-capstone step C.1 — the agent allocator (see agent_allocator.go). agentSpender debits the pre-serve
 	// LXC estimate against the per-scoped-key sub-budget; agentAllocEnabled gates it; agentDebitSalt
@@ -899,6 +901,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if p.lxcGateBlocks(ctx, wsID, model, prompt, loggingPolicy) {
 		writeError(w, http.StatusPaymentRequired, "insufficient LXC balance for estimated request cost")
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "lxc_blocked").Inc()
+		return
+	}
+	// B1.6 — a subscriber whose plan allowance is used up continues on prepaid credit, and
+	// is refused when there is none. Inert for non-subscribers and agent keys (allowance.go).
+	if p.allowanceGateBlocks(ctx, wsID, model, prompt) {
+		writeError(w, http.StatusPaymentRequired, "this period's plan allowance is used up and prepaid credit does not cover the request — top up to continue")
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "allowance_blocked").Inc()
 		return
 	}
 
@@ -1759,11 +1768,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// charge, not the (possibly larger) delivered servedCostUSD. It funds the distill royalty below.
 			// 0 when reservations are off (no settle) ⇒ the distill handoff writes a row the sweeper skips.
 			settledChargeUSD := 0.0
+			// B1.6: a subscriber's non-agent request draws the plan allowance on EITHER arm below —
+			// the session-key chat has no reservation, so the settle alone would charge it nothing.
+			subscriber := p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
 			if p.reservationActive() {
 				// Keep BOTH: #355's served-model arg (stamps the settle/charge row) AND our captured return
 				// (the clamped USD actually paid, which funds the distill royalty via recordDistillServes below).
 				settledChargeUSD = p.settleReservationBasis(ctx, servedCostUSD, upstreamModel, servedPriceBasis)
-			} else {
+			} else if !subscriber {
 				p.shadowSpendLXC(ctx, wsID, servedCostUSD)
 			}
 			// Routing-pattern capture (Phase-3) — post-serve, VOID, structurally
@@ -2252,9 +2264,11 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	// Reservation SETTLE (the customer's bill) or the shadow debit, mutually exclusive by the flag. Fires
 	// on storeCtx = WithoutCancel(r.Context()) (stream.go), which now carries the reservation handle, so the
 	// streamed settle happens in-band instead of stranding the hold for the sweeper to refund.
+	// B1.6: the same allowance draw as the buffered seam (see there).
+	subscriber := p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
 	if p.reservationActive() {
 		p.settleReservation(ctx, servedCostUSD, sc.model)
-	} else {
+	} else if !subscriber {
 		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
 	}
 }

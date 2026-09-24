@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/economy"
 )
 
 // MODEL 2, STEP 2 — THE ALLOWANCE LEDGER. W4.6.1.
@@ -26,12 +28,11 @@ import (
 // look like an undecided price, not like a default someone will mistake for a
 // decision. F is the Stripe Price from step 1; this file never sees it.
 //
-// ⚠ WHAT THIS FILE DOES NOT DO: it does not gate serving. `Consume` reports how much
-// of a cost the allowance covered; deciding what to do with the remainder is the
-// caller's. The existing LXC admission gate reads a prepaid balance and is behind its
-// own default-off flag; making it read allowance-then-prepaid is a change to the
-// SERVING path and belongs in its own merge with its own controls. Wiring a money
-// gate as a side effect of building a ledger is how a serving regression ships.
+// ⚠ WHAT THIS FILE DOES NOT DO: it does not gate serving. `Draw` reports how much of a
+// cost the allowance covered; deciding what to do with the remainder is the caller's.
+// The serving path's caller is internal/proxy/allowance.go (B1.6): non-agent requests
+// draw here first, pay the remainder from prepaid, and are refused when neither covers
+// the estimate.
 
 // ErrNoAllowanceConfigured is returned by Grant when D is zero — the default. It is a
 // CONFIGURATION state, not a failure: a deployment that has not priced the allowance
@@ -47,6 +48,7 @@ type Allowance struct {
 	GrantedULXC    int64     `json:"granted_ulxc"`
 	ConsumedULXC   int64     `json:"consumed_ulxc"`
 	RemainingULXC  int64     `json:"remaining_ulxc"`
+	FeeUSDCents    int64     `json:"fee_usd_cents"`
 }
 
 // WithAllowance sets D, in µLXC, for grants made by this Service. Zero (the default)
@@ -66,15 +68,21 @@ func (s *Service) WithAllowance(grantULXC int64) *Service {
 // cannot happen. ON CONFLICT DO NOTHING makes the second grant a no-op, and the
 // caller learns nothing new happened from `created`.
 func (s *Service) Grant(ctx context.Context, workspaceID, subscriptionID string, periodStart, periodEnd time.Time) (created bool, err error) {
+	return s.grantPeriod(ctx, workspaceID, subscriptionID, periodStart, periodEnd, 0)
+}
+
+// grantPeriod is Grant with the fee F the period was billed at (B1.6), read by the
+// webhook off the subscription's price. 0 = unknown.
+func (s *Service) grantPeriod(ctx context.Context, workspaceID, subscriptionID string, periodStart, periodEnd time.Time, feeUSDCents int64) (created bool, err error) {
 	if s.allowanceULXC <= 0 {
 		return false, ErrNoAllowanceConfigured
 	}
 	ct, err := s.pool.Exec(ctx, `
 		INSERT INTO subscription_allowance
-			(workspace_id, stripe_subscription_id, period_start, period_end, granted_ulxc)
-		VALUES ($1, $2, $3, $4, $5)
+			(workspace_id, stripe_subscription_id, period_start, period_end, granted_ulxc, fee_usd_cents)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (stripe_subscription_id, period_start) DO NOTHING`,
-		workspaceID, subscriptionID, periodStart, periodEnd, s.allowanceULXC)
+		workspaceID, subscriptionID, periodStart, periodEnd, s.allowanceULXC, feeUSDCents)
 	if err != nil {
 		return false, fmt.Errorf("billing: grant allowance: %w", err)
 	}
@@ -85,11 +93,11 @@ func (s *Service) Grant(ctx context.Context, workspaceID, subscriptionID string,
 func (s *Service) CurrentAllowance(ctx context.Context, workspaceID string, at time.Time) (*Allowance, error) {
 	var a Allowance
 	err := s.pool.QueryRow(ctx, `
-		SELECT workspace_id, stripe_subscription_id, period_start, period_end, granted_ulxc, consumed_ulxc
+		SELECT workspace_id, stripe_subscription_id, period_start, period_end, granted_ulxc, consumed_ulxc, fee_usd_cents
 		FROM subscription_allowance
 		WHERE workspace_id = $1 AND period_start <= $2 AND period_end > $2
 		ORDER BY period_start DESC LIMIT 1`, workspaceID, at).
-		Scan(&a.WorkspaceID, &a.SubscriptionID, &a.PeriodStart, &a.PeriodEnd, &a.GrantedULXC, &a.ConsumedULXC)
+		Scan(&a.WorkspaceID, &a.SubscriptionID, &a.PeriodStart, &a.PeriodEnd, &a.GrantedULXC, &a.ConsumedULXC, &a.FeeUSDCents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -122,8 +130,16 @@ func (s *Service) CurrentAllowance(ctx context.Context, workspaceID string, at t
 // two settles fit inside, and the DB CHECK would then reject the loser outright —
 // turning a benign race into a failed settle.
 func (s *Service) Consume(ctx context.Context, workspaceID string, costULXC int64, at time.Time) (covered int64, err error) {
+	covered, _, err = s.Draw(ctx, workspaceID, costULXC, at)
+	return covered, err
+}
+
+// Draw is Consume that also reports whether the workspace HAS an allowance covering
+// `at` — so a caller can tell "no subscription" (inPeriod=false) from "allowance used
+// up" (inPeriod=true, covered < cost), which the serving path treats differently.
+func (s *Service) Draw(ctx context.Context, workspaceID string, costULXC int64, at time.Time) (covered int64, inPeriod bool, err error) {
 	if costULXC <= 0 {
-		return 0, nil
+		return 0, false, nil
 	}
 	err = s.pool.QueryRow(ctx, `
 		WITH target AS (
@@ -143,10 +159,84 @@ func (s *Service) Consume(ctx context.Context, workspaceID string, costULXC int6
 	if errors.Is(err, pgx.ErrNoRows) {
 		// No allowance for this workspace right now: nothing is covered, and the
 		// caller charges the whole cost as it did before subscriptions existed.
-		return 0, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("billing: consume allowance: %w", err)
+		return 0, false, fmt.Errorf("billing: consume allowance: %w", err)
 	}
-	return covered, nil
+	return covered, true, nil
+}
+
+// RemainingULXC is what is left of the allowance covering `at`, and whether there is
+// one at all (inPeriod=false: not a subscriber right now).
+func (s *Service) RemainingULXC(ctx context.Context, workspaceID string, at time.Time) (remaining int64, inPeriod bool, err error) {
+	a, err := s.CurrentAllowance(ctx, workspaceID, at)
+	if err != nil || a == nil {
+		return 0, false, err
+	}
+	return a.RemainingULXC, true, nil
+}
+
+// AllowanceSummary is B1.6's read: the period's allowance, what has been used, and
+// what the workspace's answers earned back against the fee.
+type AllowanceSummary struct {
+	Allowance *Allowance `json:"allowance"`
+	// EarnedULENS is what the workspace's pooled and distilled answers minted to it
+	// this period, revoked mints excluded; EarnedHeldULENS is the part of that still
+	// inside its holdback and so still revocable.
+	EarnedULENS     int64 `json:"earned_ulens"`
+	EarnedHeldULENS int64 `json:"earned_held_ulens"`
+	EarnedUSDCents  int64 `json:"earned_usd_cents"`
+	// EarnedBackUSDCents is EarnedUSDCents CAPPED AT THE FEE. See earnedBack.
+	EarnedBackUSDCents int64 `json:"earned_back_usd_cents"`
+}
+
+// earnedBack is the ceiling: a subscriber's earnings, counted against their plan, can
+// never exceed the fee they paid for it. An unknown fee (0) earns back nothing.
+func earnedBack(earnedUSDCents, feeUSDCents int64) int64 {
+	if feeUSDCents <= 0 || earnedUSDCents <= 0 {
+		return 0
+	}
+	return min(earnedUSDCents, feeUSDCents)
+}
+
+// ulensToUSDCents converts µLENS to whole US cents at the published peg
+// (economy.LENSPerUSD LENS per dollar), rounding DOWN: an earnings figure shown to a
+// customer never rounds in their favour past what was minted.
+func ulensToUSDCents(ulens int64) int64 {
+	return ulens * 100 / (int64(economy.LENSPerUSD) * 1_000_000)
+}
+
+// Summary returns the allowance covering `at` and what the workspace earned during
+// that period. With no allowance there is no period to count earnings in, so the
+// summary is empty rather than an all-time figure mislabelled as "this plan".
+func (s *Service) Summary(ctx context.Context, workspaceID string, at time.Time) (*AllowanceSummary, error) {
+	a, err := s.CurrentAllowance(ctx, workspaceID, at)
+	if err != nil {
+		return nil, err
+	}
+	out := &AllowanceSummary{Allowance: a}
+	if a == nil {
+		return out, nil
+	}
+	// A royalty is minted to the CONTRIBUTOR when another workspace is served its
+	// answer — from the pool (pool_royalty_mints) or as a distilled answer
+	// (distill_royalty_mints). Both carry held | final | revoked; revoked is a mint
+	// taken back and is not earnings.
+	err = s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(minted_amount), 0)::bigint,
+		       COALESCE(SUM(minted_amount) FILTER (WHERE status = 'held'), 0)::bigint
+		FROM (
+			SELECT minted_amount, status FROM pool_royalty_mints
+			WHERE contributor_workspace_id = $1 AND created_at >= $2 AND created_at < $3 AND status <> 'revoked'
+			UNION ALL
+			SELECT minted_amount, status FROM distill_royalty_mints
+			WHERE contributor_workspace_id = $1 AND created_at >= $2 AND created_at < $3 AND status <> 'revoked'
+		) m`, workspaceID, a.PeriodStart, a.PeriodEnd).Scan(&out.EarnedULENS, &out.EarnedHeldULENS)
+	if err != nil {
+		return nil, fmt.Errorf("billing: read earnings: %w", err)
+	}
+	out.EarnedUSDCents = ulensToUSDCents(out.EarnedULENS)
+	out.EarnedBackUSDCents = earnedBack(out.EarnedUSDCents, a.FeeUSDCents)
+	return out, nil
 }
