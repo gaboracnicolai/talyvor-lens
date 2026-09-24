@@ -107,3 +107,20 @@ transform's behaviour on real code, not a forecast of production saving.
 ## Wired to nothing
 
 No call site on the serve path, as the item requires.
+
+## TypeScript (B6.2)
+
+`internal/tare/tscode.go` — `TSBodyTrimmer`, the same contract as the Go trimmer: imports, signatures
+and types byte-identical, every function body replaced by an announced `/* tare: N lines elided */`,
+input AND output parsed by esbuild's TypeScript parser (pure Go; tree-sitter is CGO and this repo
+builds with `CGO_ENABLED=0`). esbuild exposes no AST, so a conservative token scanner finds the
+bodies and skips every type position — a `=> {` inside a function type is a type, not a body.
+`.tsx` is refused (JSX does not parse under the TS loader).
+
+Measured by `TestTS_RealSDKFiles_KeepImportsSignaturesTypes` on the SDK this repo ships:
+
+| file | bytes in | bytes out | reduction |
+|---|---|---|---|
+| `sdk/typescript/src/client.ts` | 3,993 | 1,943 | 51.34% |
+| `sdk/typescript/src/middleware.ts` | 1,959 | 1,625 | 17.05% |
+| `sdk/typescript/src/types.ts` | 1,069 | — | refused: no function bodies |

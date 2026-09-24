@@ -6,6 +6,7 @@ toolchain go1.26.6 // the version this repo SHIPS: setup-go pins below it are up
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/evanw/esbuild v0.28.2
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
