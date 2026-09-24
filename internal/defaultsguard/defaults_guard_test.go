@@ -116,6 +116,7 @@ var shipped = map[string]recorded{
 	"tenant.DefaultRetentionDays":                 {tenant.DefaultRetentionDays, 90, "data retention"},
 	"workspace.DefaultCompressionPolicy":          {workspace.DefaultCompressionPolicy, workspace.CompressionDisabled, "compression default"},
 	"workspace.DefaultDistillPolicy":              {workspace.DefaultDistillPolicy, workspace.DistillAlways, "distill default"},
+	"workspace.DefaultTarePolicy":                 {workspace.DefaultTarePolicy, workspace.TareDisabled, "tare default"},
 	// Prose, not a scalar — pinned by CONTENT HASH so a silent reword of a prompt
 	// sent to a PAID vision model is loud, without inlining 191 characters here.
 	"distill.DefaultVisionPrompt": {sha12(distill.DefaultVisionPrompt), "532be6cd7c36", "vision prompt, sha256[:12]"},
