@@ -96,8 +96,9 @@ func seedWS(t *testing.T, pool *pgxpool.Pool, wsID string) {
 type fakeStripe struct {
 	customers      int
 	sessions       int
-	fingerprint    string // returned by CardFingerprint
-	fingerprintErr error  // when set, CardFingerprint errors (the capture must swallow it)
+	last           CheckoutParams // the most recent CreateCheckoutSession input
+	fingerprint    string         // returned by CardFingerprint
+	fingerprintErr error          // when set, CardFingerprint errors (the capture must swallow it)
 }
 
 func (f *fakeStripe) CreateCustomer(_ context.Context, workspaceID string) (string, error) {
@@ -107,6 +108,7 @@ func (f *fakeStripe) CreateCustomer(_ context.Context, workspaceID string) (stri
 
 func (f *fakeStripe) CreateCheckoutSession(_ context.Context, p CheckoutParams) (string, string, error) {
 	f.sessions++
+	f.last = p
 	return "https://checkout.stripe.test/pay/" + p.WorkspaceID, "cs_test_" + p.WorkspaceID, nil
 }
 
@@ -286,7 +288,7 @@ func TestWebhook_CurrencyNotUSD_Anomalous(t *testing.T) {
 func TestWebhook_NonpositiveAndDisallowed_Anomalous(t *testing.T) {
 	svc, pool, _ := newBillingService(t)
 	seedWS(t, pool, "ws_amt")
-	for name, cents := range map[string]int64{"zero": 0, "negative": -500, "disallowed": 2000} {
+	for name, cents := range map[string]int64{"zero": 0, "negative": -500, "below_min": 999, "above_max": 1_000_001} {
 		t.Run(name, func(t *testing.T) {
 			sess := "cs_amt_" + name
 			lxc := lxcForCents(cents)
@@ -466,11 +468,52 @@ func TestWebhook_ConcurrentSameEvent_OneCredit(t *testing.T) {
 
 // ─── Checkout ──────────────────────────────────────────────────────────
 
-func TestCheckout_DisallowedAmount_Rejected(t *testing.T) {
+func TestCheckout_OutOfBoundsAmount_Rejected(t *testing.T) {
 	svc, pool, _ := newBillingService(t)
 	seedWS(t, pool, "ws_chk")
-	if _, err := svc.CreateCheckout(context.Background(), "ws_chk", 2000); !errors.Is(err, ErrAmountNotAllowed) {
-		t.Fatalf("disallowed amount: err=%v, want ErrAmountNotAllowed", err)
+	for _, cents := range []int64{0, 999, 1_000_001} {
+		if _, err := svc.CreateCheckout(context.Background(), "ws_chk", cents); !errors.Is(err, ErrAmountNotAllowed) {
+			t.Errorf("%d cents: err=%v, want ErrAmountNotAllowed", cents, err)
+		}
+	}
+}
+
+// B5.1: any whole-cent amount in bounds, checkout through to the LEDGER ROW.
+// $12.34 is one of the amounts the old float peg under-credited (123,399,999 µLXC);
+// $2,500 is the top-up the item names.
+func TestCheckout_AnyAmount_CreditsExactLedgerRow(t *testing.T) {
+	_, pool, dt := newBillingService(t)
+	fake := &fakeStripe{}
+	svc := New(pool, dt, fake, testWebhookSecret)
+	for _, tc := range []struct {
+		ws    string
+		cents int64
+		ulxc  int64
+	}{
+		{"ws_any_2500", 250_000, 25_000 * 1_000_000}, // $2,500 → 25,000 credits
+		{"ws_any_1234", 1_234, 123_400_000},          // $12.34 → 123.4 credits
+	} {
+		seedWS(t, pool, tc.ws)
+		if _, err := svc.CreateCheckout(context.Background(), tc.ws, tc.cents); err != nil {
+			t.Fatalf("%s: checkout: %v", tc.ws, err)
+		}
+		if fake.last.USDCents != tc.cents || fake.last.LXCAmount != tc.ulxc {
+			t.Fatalf("%s: Stripe asked for %d¢ / %d µLXC, want %d¢ / %d µLXC",
+				tc.ws, fake.last.USDCents, fake.last.LXCAmount, tc.cents, tc.ulxc)
+		}
+		sess := "cs_" + tc.ws
+		body, sig := signed(testWebhookSecret, "evt_"+tc.ws, "checkout.session.completed",
+			sessionObj(sess, tc.ws, tc.cents, "usd", "paid", "pi_"+tc.ws, fake.last.LXCAmount))
+		if got := post(svc, body, sig); got != http.StatusOK {
+			t.Fatalf("%s: webhook %d", tc.ws, got)
+		}
+		assertStatus(t, pool, sess, "completed")
+		if c, sum := sessionRows(t, pool, sess); c != 1 || sum != tc.ulxc {
+			t.Errorf("%s: purchase rows=%d lxc=%d, want 1 row of %d µLXC", tc.ws, c, sum, tc.ulxc)
+		}
+		if b := balance(t, pool, tc.ws); b != tc.ulxc {
+			t.Errorf("%s: balance=%d µLXC, want %d", tc.ws, b, tc.ulxc)
+		}
 	}
 }
 

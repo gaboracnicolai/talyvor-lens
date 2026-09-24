@@ -37,17 +37,38 @@ import (
 // DoS guard). The full body is still needed to verify the signature.
 const maxWebhookBody = 1 << 20 // 1 MiB
 
-// allowedTopUps — the server-side top-up sizes in USD cents ($10 / $50 / $100).
+// A top-up may be ANY whole number of USD cents in [minTopUpCents, maxTopUpCents]. B5.1.
 //
-// ADDITIVE-ONLY while any checkout session may still be in flight: async payment
-// methods (e.g. bank debits) can settle DAYS after session creation, and the
-// webhook re-checks this list, so REMOVING a value would mark a legitimately-PAID
-// purchase anomalous (charged, not credited). Only ever append sizes; never
-// remove one until you are certain no session created with it can still settle.
-var allowedTopUps = []int64{1000, 5000, 10000}
+// MINIMUM $10. Stripe takes 2.9% + 30¢ of every card payment, and a credit is sold
+// at face value (1 credit = $0.10), so the fee comes out of our side: 59¢ (5.9%) at
+// $10, 44.5¢ (8.9%) at $5, 33¢ (33%) at $1. $10 keeps it under 6%, and it is where
+// the smallest fixed size already sat, so the floor does not move.
+//
+// MAXIMUM $10,000. A card payment stays disputable for months, and credits spent
+// before a chargeback cannot be taken back, so this is the most one stolen or
+// disputed card can cost. A team spending more tops up more than once. (Stripe's
+// own ceiling for a single USD payment is $999,999.99.)
+//
+// ⚠ THE BOUNDS MAY ONLY WIDEN while a checkout session may still be in flight:
+// async payment methods can settle DAYS after session creation, and the webhook
+// re-checks these bounds, so narrowing them would mark a legitimately-PAID purchase
+// anomalous (charged, not credited). The old fixed sizes $10/$50/$100 all sit
+// inside the range, so sessions created before B5.1 still credit.
+const (
+	minTopUpCents int64 = 1_000
+	maxTopUpCents int64 = 1_000_000
+)
 
-// ErrAmountNotAllowed is returned by CreateCheckout for an off-allow-list amount.
-var ErrAmountNotAllowed = errors.New("billing: usd_cents is not an allowed top-up size")
+// topUpPresets are the sizes the checkout UI offers as one-click buttons. Any
+// amount in bounds is accepted; these are a suggestion, not a rule.
+var topUpPresets = []int64{1000, 5000, 10000}
+
+// ErrAmountNotAllowed is returned by CreateCheckout for an out-of-bounds amount.
+var ErrAmountNotAllowed = fmt.Errorf("billing: usd_cents must be a whole number of cents from %d to %d", minTopUpCents, maxTopUpCents)
+
+func topUpInBounds(usdCents int64) bool {
+	return usdCents >= minTopUpCents && usdCents <= maxTopUpCents
+}
 
 // lxcCrediter is the LXC-credit surface billing needs — satisfied by
 // *economy.DualTokenStore. Billing passes its OWN tx so the idempotency claim and
@@ -83,7 +104,6 @@ type Service struct {
 	credits       lxcCrediter
 	stripe        stripeAPI
 	webhookSecret string
-	allowList     map[int64]struct{}
 	wsExists      func(ctx context.Context, workspaceID string) (bool, error)
 	log           *slog.Logger
 
@@ -111,16 +131,11 @@ func (s *Service) WithSubscriptions(api subscriptionAPI, priceID string) *Servic
 
 // New builds a Service. wsExists defaults to a workspaces-table lookup.
 func New(pool *pgxpool.Pool, credits lxcCrediter, sapi stripeAPI, webhookSecret string) *Service {
-	al := make(map[int64]struct{}, len(allowedTopUps))
-	for _, c := range allowedTopUps {
-		al[c] = struct{}{}
-	}
 	return &Service{
 		pool:          pool,
 		credits:       credits,
 		stripe:        sapi,
 		webhookSecret: webhookSecret,
-		allowList:     al,
 		wsExists:      defaultWorkspaceExists(pool),
 		log:           slog.Default(),
 	}
@@ -142,20 +157,27 @@ func defaultWorkspaceExists(pool *pgxpool.Pool) func(context.Context, string) (b
 
 // lxcForCents recomputes LXC from USD cents at the fixed peg — the SINGLE price
 // truth, in µLXC (SEC-2). No LXC amount is hardcoded anywhere else in billing.
-// A fiat purchase mints LXC to the payer, so it rounds DOWN (floor) — never
-// over-credit. At the $0.10 peg the division is exact for integer cents anyway.
+//
+// ⚠ INTEGER ARITHMETIC, NOT FLOAT. The float form this replaced,
+// floor(cents/100/0.10*1e6), under-credited by 1 µLXC on 386,523 of the first
+// million cent amounts (1¢ → 99,999 instead of 100,000). It was exact only for
+// the three fixed sizes, which is why nothing noticed until any amount was allowed.
 func lxcForCents(usdCents int64) int64 {
-	return int64(math.Floor((float64(usdCents) / 100.0) / economy.LXCUSDValue * 1e6))
+	return usdCents * ulxcPerCent
 }
 
-// AllowedTopUpCents returns the configured allow-list (for the checkout UI / docs).
-func AllowedTopUpCents() []int64 { return append([]int64(nil), allowedTopUps...) }
+// ulxcPerCent is how many µLXC one US cent buys at the peg: $0.01 / $0.10 × 1e6.
+// Rounded once, here, from the peg constant — 100,000 at $0.10.
+var ulxcPerCent = int64(math.Round(0.01 / economy.LXCUSDValue * 1e6))
+
+// TopUpPresetCents returns the one-click sizes the checkout UI offers.
+func TopUpPresetCents() []int64 { return append([]int64(nil), topUpPresets...) }
 
 // CreateCheckout validates the amount, recomputes LXC at the peg, ensures the
 // Stripe customer mapping, and creates a Checkout Session. Returns the session
-// URL. A disallowed amount yields ErrAmountNotAllowed (the caller maps it to 400).
+// URL. An out-of-bounds amount yields ErrAmountNotAllowed (the caller maps it to 400).
 func (s *Service) CreateCheckout(ctx context.Context, workspaceID string, usdCents int64) (string, error) {
-	if _, ok := s.allowList[usdCents]; !ok {
+	if !topUpInBounds(usdCents) {
 		return "", ErrAmountNotAllowed
 	}
 	lxc := lxcForCents(usdCents)
@@ -610,7 +632,7 @@ func (s *Service) classify(ctx context.Context, currency string, usdCents int64,
 	if usdCents <= 0 {
 		return "nonpositive_amount", nil
 	}
-	if _, ok := s.allowList[usdCents]; !ok {
+	if !topUpInBounds(usdCents) {
 		return "amount_not_allowlisted", nil
 	}
 	if wsID == "" {
