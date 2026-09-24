@@ -225,6 +225,12 @@ func conformers() []conformer {
 			samples:   [][]byte{[]byte(goSample)},
 			wrongKind: []byte("this is not Go source at all"),
 		},
+		{
+			name: "TSBodyTrimmer", kind: tare.KindCode, lossy: true, marker: tare.ElisionMarker,
+			make:      func() tare.Reduction { return tare.NewTSBodyTrimmer() },
+			samples:   [][]byte{[]byte(tsSample)},
+			wrongKind: []byte("this is not TypeScript source at all"),
+		},
 	}
 }
 
