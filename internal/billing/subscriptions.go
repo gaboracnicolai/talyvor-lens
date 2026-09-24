@@ -388,7 +388,7 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 	if applied && (status == "active" || status == "trialing") {
 		if end := periodEnd(&sub); end != nil {
 			start := periodStart(&sub)
-			if _, err := s.Grant(ctx, wsID, sub.ID, start, *end); err != nil && !errors.Is(err, ErrNoAllowanceConfigured) {
+			if _, err := s.grantPeriod(ctx, wsID, sub.ID, start, *end, feeOf(&sub)); err != nil && !errors.Is(err, ErrNoAllowanceConfigured) {
 				// The state is committed and correct; the allowance is repairable.
 				// Log rather than 5xx, so Stripe is not asked to redeliver a fact we
 				// already have.
@@ -486,6 +486,24 @@ func priceOf(sub *stripe.Subscription) string {
 		return ""
 	}
 	return it.Price.ID
+}
+
+// feeOf is what one period of this subscription is billed at, in US cents: the
+// price's unit amount × quantity. 0 when the price is absent or not USD — an unknown
+// fee, which caps "earned back" at nothing rather than at a guess.
+func feeOf(sub *stripe.Subscription) int64 {
+	if sub.Items == nil || len(sub.Items.Data) == 0 {
+		return 0
+	}
+	it := sub.Items.Data[0]
+	if it == nil || it.Price == nil || it.Price.Currency != stripe.CurrencyUSD || it.Price.UnitAmount <= 0 {
+		return 0
+	}
+	qty := it.Quantity
+	if qty < 1 {
+		qty = 1
+	}
+	return it.Price.UnitAmount * qty
 }
 
 // ⚠ MEASURED AGAINST THE SDK, NOT ASSUMED. My first draft read the period off the

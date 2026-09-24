@@ -1599,6 +1599,12 @@ func run() error {
 	if cfg.BillingSubscriptionPriceID != "" {
 		billingSvc = billingSvc.WithSubscriptions(liveStripe, cfg.BillingSubscriptionPriceID)
 	}
+	// B1.6 — D, the allowance each paid period grants. Zero (the default) grants
+	// nothing, and then there is nothing for a served request to draw down either.
+	billingSvc = billingSvc.WithAllowance(cfg.SubscriptionAllowanceULXC)
+	if cfg.SubscriptionAllowanceULXC > 0 {
+		p.SetSubscriptionAllowance(billingSvc)
+	}
 	bill := billReg{on: cfg.BillingEnabled}
 	subs := billReg{on: cfg.BillingEnabled && cfg.BillingSubscriptionPriceID != ""}
 	// Stage 2.4/2.5 shadow LXC spend — observational, post-serve, flag-gated
@@ -3114,6 +3120,19 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, st)
+		})
+
+		// B1.6 — the subscriber's plan this period: the allowance, what has been used
+		// of it, and what the workspace's answers earned back (capped at the fee).
+		// {"allowance": null} when no period is granted.
+		subs.get(authed, "/v1/workspaces/{wsID}/billing/allowance", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			sum, err := billingSvc.Summary(req.Context(), wsID, time.Now())
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, sum)
 		})
 
 		// B1.5 — cancel and resume. Cancel is AT PERIOD END: the workspace keeps what

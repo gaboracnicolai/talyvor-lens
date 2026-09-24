@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"time"
 
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/catalog"
@@ -167,6 +168,13 @@ func (p *Proxy) lxcGateBlocks(ctx context.Context, workspaceID, model, prompt st
 			slog.String("err", err.Error()),
 		)
 		return false
+	}
+	// B1.6: allowance left counts before prepaid, so a subscriber is not refused
+	// for having no top-up. A read error counts no allowance (prepaid alone decides).
+	if p.allowance != nil && agentKeyIDFromContext(ctx) == "" {
+		if rem, _, err := p.allowance.RemainingULXC(ctx, workspaceID, time.Now()); err == nil {
+			balance += rem
+		}
 	}
 	return balance < estLXC
 }

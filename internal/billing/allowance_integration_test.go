@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -306,5 +307,91 @@ func TestAllowance_StaleEventGrantsNothing(t *testing.T) {
 	if a != nil {
 		t.Errorf("a stale event granted an allowance: %+v — the out-of-order bug, wearing a "+
 			"different hat and an expensive one", a)
+	}
+}
+
+// B1.6 — the webhook records F, the amount the granted period was billed at, off the
+// subscription's own price: "Your plan is $20" is read from Stripe, not from config.
+func TestAllowance_GrantRecordsThePeriodFee(t *testing.T) {
+	svc, pool := newAllowanceService(t)
+	svc = svc.WithSubscriptions(&fakeSubStripe{}, "price_test_model2")
+	seedWS(t, pool, "ws-al-fee")
+	now := time.Now()
+
+	obj := subObj("sub_al_fee", "ws-al-fee", "cus_fee", "price_test_model2", "active", now.Add(30*24*time.Hour), false)
+	obj["current_period_start"] = now.Add(-time.Hour).Unix()
+	obj["items"] = map[string]any{"data": []any{map[string]any{
+		"quantity": 1,
+		"price":    map[string]any{"id": "price_test_model2", "currency": "usd", "unit_amount": 2000},
+	}}}
+	body, sig := signedAt(testWebhookSecret, "evt_al_fee", "customer.subscription.created", now, obj)
+	if c := postEvent(svc, body, sig); c != http.StatusOK {
+		t.Fatalf("webhook = %d", c)
+	}
+	a, err := svc.CurrentAllowance(context.Background(), "ws-al-fee", now)
+	if err != nil || a == nil {
+		t.Fatalf("CurrentAllowance = %+v, %v", a, err)
+	}
+	if a.FeeUSDCents != 2000 {
+		t.Errorf("fee_usd_cents = %d, want 2000 (the price's unit_amount)", a.FeeUSDCents)
+	}
+}
+
+// B1.6 — THE CEILING. What a subscriber's answers earned counts back against their
+// plan only up to the fee: earnings of $25 against a $20 plan earn back $20, not $25.
+// Revoked mints are not earnings; held ones are, and are reported as still held.
+func TestAllowance_Summary_EarnedBackNeverExceedsTheFee(t *testing.T) {
+	svc, pool := newAllowanceService(t)
+	ctx := context.Background()
+	ws := fmt.Sprintf("ws-al-earn-%d", time.Now().UnixNano())
+	seedWS(t, pool, ws)
+	now := time.Now()
+	start, end := period(now)
+	if _, err := svc.grantPeriod(ctx, ws, "sub_"+ws, start, end, 2000); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.Consume(ctx, ws, 250_000, now); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	// µLENS at $0.10/LENS: 150 LENS = $15, 100 LENS = $10, 500 LENS revoked, and a
+	// mint from before the period — none of the last two count.
+	mint := func(table, status string, ulens int64, at time.Time) {
+		t.Helper()
+		var err error
+		if table == "pool_royalty_mints" {
+			_, err = pool.Exec(ctx, `INSERT INTO pool_royalty_mints
+				(request_id, requester_workspace_id, contributor_workspace_id, layer, minted_amount, status, created_at)
+				VALUES ($1, 'ws-other', $2, 'exact', $3, $4, $5)`,
+				fmt.Sprintf("%s-%s-%d", ws, status, ulens), ws, ulens, status, at)
+		} else {
+			_, err = pool.Exec(ctx, `INSERT INTO distill_royalty_mints
+				(request_id, contributor_workspace_id, requester_workspace_id, content_hash, avoided_cogs_usd, minted_amount, status, created_at)
+				VALUES ($1, $2, 'ws-other', 'h', 0, $3, $4, $5)`,
+				fmt.Sprintf("%s-d-%s-%d", ws, status, ulens), ws, ulens, status, at)
+		}
+		if err != nil {
+			t.Fatalf("seed %s: %v", table, err)
+		}
+	}
+	mint("pool_royalty_mints", "final", 150_000_000, now)
+	mint("distill_royalty_mints", "held", 100_000_000, now)
+	mint("pool_royalty_mints", "revoked", 500_000_000, now)
+	mint("pool_royalty_mints", "final", 900_000_000, start.Add(-time.Hour))
+
+	sum, err := svc.Summary(ctx, ws, now)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if sum.Allowance == nil || sum.Allowance.ConsumedULXC != 250_000 || sum.Allowance.RemainingULXC != testGrant-250_000 {
+		t.Fatalf("allowance = %+v, want 250000 used of %d", sum.Allowance, testGrant)
+	}
+	if sum.EarnedULENS != 250_000_000 || sum.EarnedHeldULENS != 100_000_000 {
+		t.Errorf("earned = %d (held %d) µLENS, want 250000000 (held 100000000)", sum.EarnedULENS, sum.EarnedHeldULENS)
+	}
+	if sum.EarnedUSDCents != 2500 {
+		t.Errorf("earned_usd_cents = %d, want 2500", sum.EarnedUSDCents)
+	}
+	if sum.EarnedBackUSDCents != 2000 {
+		t.Errorf("earned_back_usd_cents = %d, want 2000 — earnings counted against the plan must stop at the $20 fee", sum.EarnedBackUSDCents)
 	}
 }

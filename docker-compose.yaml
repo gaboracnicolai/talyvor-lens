@@ -230,6 +230,8 @@ services:
       - LENS_BILLING_CANCEL_URL=${LENS_BILLING_CANCEL_URL:-}
       # Model 2 subscriptions. Empty ⇒ /billing/subscribe and its siblings are not registered.
       - LENS_BILLING_SUBSCRIPTION_PRICE_ID=${LENS_BILLING_SUBSCRIPTION_PRICE_ID:-}
+      # D, the allowance each paid period grants, in µLXC. Empty/0 ⇒ subscribers get no allowance.
+      - LENS_SUBSCRIPTION_ALLOWANCE_ULXC=${LENS_SUBSCRIPTION_ALLOWANCE_ULXC:-}
       # Provider-secret envelope KEK (W6.10). Comma-separated base64 32-byte keys, PRIMARY FIRST
       # (`openssl rand -base64 32`). Empty ⇒ Lens boots with provider-secret custody DISABLED and no
       # plaintext fallback; a wrong length is fail-loud at startup. Declared here because the trap
