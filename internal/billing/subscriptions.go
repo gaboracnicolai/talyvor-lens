@@ -54,6 +54,7 @@ type SubscriptionParams struct {
 // without learning a method it has no opinion about.
 type subscriptionAPI interface {
 	CreateSubscriptionCheckoutSession(ctx context.Context, p SubscriptionParams) (url string, sessionID string, err error)
+	SetCancelAtPeriodEnd(ctx context.Context, subscriptionID string, cancel bool) (*stripe.Subscription, error)
 }
 
 // terminalStatuses never move again. A row in one of these is history.
@@ -148,6 +149,50 @@ func (s *Service) GetSubscription(ctx context.Context, workspaceID string) (*Sub
 	st.CurrentPeriodEnd = periodEnd
 	st.Subscribed = status == "trialing" || status == "active" || status == "past_due"
 	return &st, nil
+}
+
+// ErrNoLiveSubscription is returned when a cancel or resume is asked of a workspace
+// that has nothing live to cancel or resume.
+var ErrNoLiveSubscription = errors.New("billing: workspace has no live subscription")
+
+// SetCancelAtPeriodEnd cancels (cancel=true) or resumes (cancel=false) the
+// workspace's live subscription. B1.5.
+//
+// ⚠ CANCEL MEANS "AT THE END OF THE PAID PERIOD", NOT NOW. The workspace paid for
+// the month; it keeps what it paid for, stays Subscribed until current_period_end,
+// and Stripe sends customer.subscription.deleted when the period runs out. Resume is
+// the same call with false, and it exists because without it a customer who changes
+// their mind is stuck: CreateSubscriptionCheckout refuses a second live subscription.
+//
+// ⚠ THIS WRITES NOTHING TO THE subscriptions TABLE. The webhook is the only author
+// of that row — the customer.subscription.updated this call provokes is what moves
+// it, through the same idempotency and out-of-order guards as every other event. The
+// returned status is STRIPE'S answer to the update, so the caller sees the change
+// immediately without this becoming a second writer of one state machine.
+func (s *Service) SetCancelAtPeriodEnd(ctx context.Context, workspaceID string, cancel bool) (*SubscriptionStatus, error) {
+	if s.subPrice == "" || s.subStripe == nil {
+		return nil, ErrNoSubscriptionPrice
+	}
+	subID, err := s.liveSubscriptionID(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if subID == "" {
+		return nil, ErrNoLiveSubscription
+	}
+	sub, err := s.subStripe.SetCancelAtPeriodEnd(ctx, subID, cancel)
+	if err != nil {
+		return nil, fmt.Errorf("billing: update subscription %s: %w", subID, err)
+	}
+	status := string(sub.Status)
+	return &SubscriptionStatus{
+		Subscribed:        status == "trialing" || status == "active" || status == "past_due",
+		Status:            status,
+		CurrentPeriodEnd:  periodEnd(sub),
+		CancelAtPeriodEnd: sub.CancelAtPeriodEnd,
+		SubscriptionID:    sub.ID,
+		Livemode:          sub.Livemode,
+	}, nil
 }
 
 // ─── the webhook half ────────────────────────────────────────────────────────────

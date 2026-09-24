@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"bytes"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	stripe "github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/webhook"
 )
 
@@ -122,7 +124,21 @@ func countEvents(t *testing.T, pool *pgxpool.Pool, subID string) int {
 	return n
 }
 
-type fakeSubStripe struct{ sessions int }
+type fakeSubStripe struct {
+	sessions int
+	updates  []fakeSubUpdate
+}
+
+type fakeSubUpdate struct {
+	subID  string
+	cancel bool
+}
+
+func (f *fakeSubStripe) SetCancelAtPeriodEnd(_ context.Context, subID string, cancel bool) (*stripe.Subscription, error) {
+	f.updates = append(f.updates, fakeSubUpdate{subID, cancel})
+	return &stripe.Subscription{ID: subID, Status: stripe.SubscriptionStatusActive, CancelAtPeriodEnd: cancel,
+		CurrentPeriodEnd: time.Now().Add(30 * 24 * time.Hour).Unix()}, nil
+}
 
 func (f *fakeSubStripe) CreateSubscriptionCheckoutSession(_ context.Context, p SubscriptionParams) (string, string, error) {
 	f.sessions++
@@ -411,5 +427,89 @@ func TestSubscriptionCheckout_HappyPath_CallsStripeOnce(t *testing.T) {
 	}
 	if fss.sessions != 1 {
 		t.Errorf("stripe sessions = %d, want 1", fss.sessions)
+	}
+}
+
+// ── B1.5: cancel, and the flip back ──────────────────────────────────────────────
+
+// The whole lifecycle a customer sees: subscribed → cancel (still subscribed, the
+// period is paid for) → Stripe's .deleted at period end → not subscribed, and
+// nothing left to cancel. Every step after the Stripe call is read from the ROW the
+// webhook wrote, because SetCancelAtPeriodEnd itself writes none.
+func TestSubscription_CancelAtPeriodEnd_ThenDeleted_FlipsBack(t *testing.T) {
+	svc, pool, fss := newSubService(t)
+	seedWS(t, pool, "ws-sub-cancel")
+	ctx := context.Background()
+	end := time.Now().Add(30 * 24 * time.Hour).Truncate(time.Second)
+	t0 := time.Now().Add(-time.Minute)
+
+	body, sig := signedAt(testWebhookSecret, "evt_cancel_1", "customer.subscription.created",
+		t0, subObj("sub_cancel", "ws-sub-cancel", "cus_c", "price_test_model2", "active", end, false))
+	if c := postEvent(svc, body, sig); c != http.StatusOK {
+		t.Fatalf("created = %d", c)
+	}
+
+	st, err := svc.SetCancelAtPeriodEnd(ctx, "ws-sub-cancel", true)
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if len(fss.updates) != 1 || fss.updates[0] != (fakeSubUpdate{"sub_cancel", true}) {
+		t.Fatalf("Stripe updates = %+v, want one cancel of sub_cancel", fss.updates)
+	}
+	if !st.CancelAtPeriodEnd || !st.Subscribed {
+		t.Errorf("cancel answer = %+v, want cancel_at_period_end and still subscribed", st)
+	}
+
+	body, sig = signedAt(testWebhookSecret, "evt_cancel_2", "customer.subscription.updated",
+		t0.Add(10*time.Second), subObj("sub_cancel", "ws-sub-cancel", "cus_c", "price_test_model2", "active", end, true))
+	if c := postEvent(svc, body, sig); c != http.StatusOK {
+		t.Fatalf("updated = %d", c)
+	}
+	if row, _ := readSub(t, pool, "sub_cancel"); !row.cancelAtEnd || row.status != "active" {
+		t.Errorf("row after cancel = %+v, want active with cancel_at_period_end", row)
+	}
+	if got, _ := svc.GetSubscription(ctx, "ws-sub-cancel"); !got.Subscribed {
+		t.Errorf("GetSubscription after cancel = %+v, want still subscribed until period end", got)
+	}
+
+	body, sig = signedAt(testWebhookSecret, "evt_cancel_3", "customer.subscription.deleted",
+		t0.Add(20*time.Second), subObj("sub_cancel", "ws-sub-cancel", "cus_c", "price_test_model2", "canceled", end, true))
+	if c := postEvent(svc, body, sig); c != http.StatusOK {
+		t.Fatalf("deleted = %d", c)
+	}
+	if row, _ := readSub(t, pool, "sub_cancel"); row.status != "canceled" {
+		t.Errorf("row status after period end = %q, want canceled", row.status)
+	}
+	if got, _ := svc.GetSubscription(ctx, "ws-sub-cancel"); got.Subscribed {
+		t.Errorf("GetSubscription after .deleted = %+v, want not subscribed", got)
+	}
+
+	if _, err := svc.SetCancelAtPeriodEnd(ctx, "ws-sub-cancel", true); !errors.Is(err, ErrNoLiveSubscription) {
+		t.Errorf("second cancel err = %v, want ErrNoLiveSubscription", err)
+	}
+	if len(fss.updates) != 1 {
+		t.Errorf("Stripe called %d times, want 1 — a cancel with nothing live must not reach Stripe", len(fss.updates))
+	}
+}
+
+func TestSubscription_Resume_ClearsCancelAtPeriodEnd(t *testing.T) {
+	svc, pool, fss := newSubService(t)
+	seedWS(t, pool, "ws-sub-resume")
+	end := time.Now().Add(30 * 24 * time.Hour)
+	body, sig := signedAt(testWebhookSecret, "evt_resume_1", "customer.subscription.created",
+		time.Now(), subObj("sub_resume", "ws-sub-resume", "cus_r", "price_test_model2", "active", end, true))
+	if c := postEvent(svc, body, sig); c != http.StatusOK {
+		t.Fatalf("created = %d", c)
+	}
+
+	st, err := svc.SetCancelAtPeriodEnd(context.Background(), "ws-sub-resume", false)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if len(fss.updates) != 1 || fss.updates[0] != (fakeSubUpdate{"sub_resume", false}) {
+		t.Fatalf("Stripe updates = %+v, want one resume of sub_resume", fss.updates)
+	}
+	if st.CancelAtPeriodEnd {
+		t.Errorf("resume answer = %+v, want cancel_at_period_end cleared", st)
 	}
 }
