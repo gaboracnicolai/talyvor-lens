@@ -84,6 +84,9 @@ type alertSink interface {
 	// attribution ("convert" / "vision_ocr"). Used only by the DISTILL request
 	// path; non-distilled traffic keeps using RecordSpend.
 	RecordSpendWithDistill(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string) error
+	// RecordSpendWithTare is RecordSpendWithDistill plus the Tare metering record (token_events
+	// tare_* columns, B6.4). Used only when Tare reduced the request.
+	RecordSpendWithTare(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string, tare alerts.TareMeter) error
 	// RecordCacheServe writes the token_events row for a CACHE-SERVED response
 	// (serve_source = the cache-hit layer, cost_usd = 0 — Talyvor's provider
 	// cost; the requester's pre-serve LXC debit is a different ledger). Used
@@ -801,6 +804,29 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 	}
 
+	// TARE (B6.4/B6.5) — the context-reduction layer, OFF unless the workspace policy AND (always, or
+	// this request's X-Talyvor-Tare: true) turn it on. Runs after distill and BEFORE the streaming
+	// branch below, so the streaming and buffered paths send the same reduced body. Only the newest
+	// message can change (tare.PrefixStable); prompt and the workspace-scoped cachePrompt are
+	// re-derived from the reduced body exactly as distill does, so a reduced request is cached
+	// under its own key and never answers an unreduced one. tareMeter rides the spend write on both
+	// paths; its zero value means Tare changed nothing.
+	var tareMeter alerts.TareMeter
+	if p.shouldTare(r, wsID) {
+		if nb, kind, tin, tout, ok := tareReduce(ctx, body); ok {
+			if _, np, perr := extractPrompt(nb); perr == nil {
+				body, prompt = nb, np
+				cachePrompt = prompt
+				if p.workspaceManager != nil {
+					cachePrompt = wsID + ":" + prompt
+				}
+				tareMeter = alerts.TareMeter{Kind: string(kind), TokensIn: tin, TokensOut: tout,
+					WorkItemID: attribution.ExtractFromRequest(r).IssueID}
+				w.Header().Set("X-Talyvor-Tare", "applied")
+			}
+		}
+	}
+
 	// Session pickup — header-driven, optional. Empty sessionID means
 	// the caller isn't tracking sessions; the entire feature is skipped.
 	sessionID := r.Header.Get("X-Talyvor-Session")
@@ -1227,6 +1253,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			wsID: wsID, team: team, sprint: sprint, feature: feature,
 			model: model, requestID: requestID, sessionID: sessionID,
 			modality: modSet.Label(), logging: loggingPolicy, estInputTokens: estIn,
+			tare: tareMeter,
 		}
 		var serr error
 		if cfg.ProviderName() == "openai" {
@@ -1707,7 +1734,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// (the saving is IMPLICIT in this row's lower count), "" otherwise.
 			metrics.SpendRecord(spendSource)
 			var recErr error
-			if distillMethod != "" {
+			if tareMeter.Kind != "" {
+				recErr = p.alertManager.RecordSpendWithTare(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated, distillMethod, tareMeter)
+			} else if distillMethod != "" {
 				recErr = p.alertManager.RecordSpendWithDistill(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated, distillMethod)
 			} else {
 				recErr = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated)
@@ -2208,8 +2237,14 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 		servedCostUSD, _ = alerts.CostUSDResolved(sc.model, catalog.PurposeCharge, inT, 0, 0, outT)
 	}
 	metrics.SpendRecord(source)
-	if err := p.alertManager.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated); err != nil {
-		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", err.Error()))
+	var recErr error
+	if sc.tare.Kind != "" {
+		recErr = p.alertManager.RecordSpendWithTare(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated, "", sc.tare)
+	} else {
+		recErr = p.alertManager.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated)
+	}
+	if recErr != nil {
+		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", recErr.Error()))
 	}
 	if p.budgetService != nil {
 		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, servedCostUSD)

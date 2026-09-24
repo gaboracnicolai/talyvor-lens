@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/metrics"
@@ -44,7 +45,8 @@ type streamSpend struct {
 	requestID, sessionID        string
 	modality                    string
 	logging                     workspace.LoggingPolicy
-	estInputTokens              int // fallback input estimate when no usage is emitted
+	estInputTokens              int              // fallback input estimate when no usage is emitted
+	tare                        alerts.TareMeter // B6.4: the Tare record for this request; zero = not reduced
 }
 
 const (
