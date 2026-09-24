@@ -178,7 +178,7 @@ func lexTS(src []byte) ([]tsTok, bool) {
 		case c == '=' && i+1 < n && src[i+1] == '>':
 			i += 2
 			tok.text = "=>"
-		case c == '?' && i+1 < n && (src[i+1] == '?' || (src[i+1] == '.' && !(i+2 < n && src[i+2] >= '0' && src[i+2] <= '9'))):
+		case c == '?' && i+1 < n && (src[i+1] == '?' || (src[i+1] == '.' && (i+2 >= n || src[i+2] < '0' || src[i+2] > '9'))):
 			i += 2
 			tok.text = string(src[tok.lo:i])
 		default:
@@ -422,7 +422,7 @@ func (s *tsScan) step(i int) int {
 		return i + 1
 	case "?":
 		// `a?: T` is an optional marker, and so is `m?()` in a class body; anything else is a ternary.
-		if n := s.text(i + 1); n != ":" && !(n == "(" && s.top().kind == 'c') {
+		if n := s.text(i + 1); n != ":" && (n != "(" || s.top().kind != 'c') {
 			s.top().ternary++
 		}
 		return i + 1
@@ -612,7 +612,7 @@ func (s *tsScan) skipType(i int) int {
 		}
 		// A complete type so far. A line break ends it unless the next token plainly continues it.
 		if tk.nl && x != "|" && x != "&" && x != "." && x != "extends" && x != "is" &&
-			!(x == "?" && extends > 0) && !(x == ":" && cond > 0) {
+			(x != "?" || extends == 0) && (x != ":" || cond == 0) {
 			return i
 		}
 		switch {
