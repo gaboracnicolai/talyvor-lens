@@ -76,6 +76,15 @@ func seedModels() []Model {
 		// invent a 0.5x discount that does not exist and under-bill every cache read.
 		{ID: "gpt-5.5-pro", Provider: "openai", DisplayName: "GPT-5.5 Pro", InputPer1M: 30.00, OutputPer1M: 180.00, CachedInputPer1M: 30.00, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 		{ID: "gpt-5.4-pro", Provider: "openai", DisplayName: "GPT-5.4 Pro", InputPer1M: 30.00, OutputPer1M: 180.00, CachedInputPer1M: 30.00, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+
+		// ─── OpenAI GPT-6 (B15.4) ────────────────────────────────────────────────────────────────
+		// Every rate transcribed from each model's page under https://developers.openai.com/api/docs/models/
+		// (gpt-6-astra, gpt-6-sol, gpt-6-luna; fetched 2026-09-26), Standard tier, with the page's own
+		// cached-input column — 0.1x again, so set explicitly. 1.05M context, 128K max output, same pages.
+		// These are reasoning models: the proxy rewrites max_tokens/temperature for them (reasoning_params.go).
+		{ID: "gpt-6-astra", Provider: "openai", DisplayName: "GPT-6 Astra", InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
+		{ID: "gpt-6-sol", Provider: "openai", DisplayName: "GPT-6 Sol", InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
+		{ID: "gpt-6-luna", Provider: "openai", DisplayName: "GPT-6 Luna", InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
 		// ⚠ NOT TOUCHED: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano. They are ABSENT from
 		// the current pricing page, which does not mean they are unavailable — it may mean the page lists
 		// only current models. Their rates here are therefore UNVERIFIED against a published source as of
@@ -138,6 +147,13 @@ func seedModels() []Model {
 		// id that already exists (see model_detection.go's stated limits).
 		{ID: "claude-sonnet-5", Provider: "anthropic", DisplayName: "Claude Sonnet 5", InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 8192, Aliases: []string{"claude-sonnet-5[1m]"}},
 		{ID: "claude-fable-5", Provider: "anthropic", DisplayName: "Claude Fable 5", InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, CacheWritePer1M: 12.50, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 8192},
+		// B15.4 — Opus 5.5 and Fable 5.1, transcribed from https://platform.claude.com/docs/en/about-claude/pricing
+		// (fetched 2026-09-26). ⚠ THEIR CACHE READS ARE NOT 0.1x: the page's footnotes price Opus 5.5 hits
+		// at 0.05x ($0.20) and Fable 5.1 hits at 0.025x ($0.25), so both are set explicitly — the derived
+		// 0.1x would over-bill every cache read. IDs, 1M context and 128K max output are from
+		// https://platform.claude.com/docs/en/about-claude/models/overview (same date).
+		{ID: "claude-opus-5-5", Provider: "anthropic", DisplayName: "Claude Opus 5.5", InputPer1M: 4.00, OutputPer1M: 20.00, CachedInputPer1M: 0.20, CacheWritePer1M: 5.00, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 128000},
+		{ID: "claude-fable-5-1", Provider: "anthropic", DisplayName: "Claude Fable 5.1", InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 0.25, CacheWritePer1M: 12.50, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 128000},
 		// claude-mythos-5 IS DELIBERATELY NOT SEEDED. Its rate IS published ($10/$50, same as Fable 5),
 		// so this is not a missing-price case — it is a missing-EXISTENCE case. The page marks it
 		// "limited availability" and it is absent from the pinned /v1/models capture that
@@ -157,6 +173,18 @@ func seedModels() []Model {
 		// prompt-size-dependent rate, so long-context requests to this model UNDER-bill 2x. Same
 		// class as Anthropic's fast mode: a price that varies by request shape, not by model id.
 		{ID: "gemini-2.5-pro", Provider: "google", DisplayName: "Gemini 2.5 Pro", InputPer1M: 1.25, OutputPer1M: 10.00, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
+		// B15.4 — Google limits the 2.5 models to accounts that already used them, so these are what a
+		// NEW customer can call. Rates and exact API ids from https://ai.google.dev/gemini-api/docs/pricing
+		// (fetched 2026-09-26), Standard paid tier. ContextTokens/MaxOutput mirror the siblings above and
+		// are informational only.
+		// ⚠ gemini-3.1-pro-preview: $2.00/$12.00 is the <=200k-token tier; above 200k Google charges
+		//   $4.00/$18.00. The same unmodelled prompt-size tier as gemini-2.5-pro — long prompts UNDER-bill.
+		// ⚠ gemini-3.8-flash IS PRICED "THROUGH DECEMBER 31, 2026". From 2027-01-01 the page lists
+		//   $1.50/$7.50 — ON THAT DATE THIS LINE MUST CHANGE. Entering the later rate now would over-bill;
+		//   this one under-bills after the date until someone edits it (the Sonnet 5 precedent above).
+		{ID: "gemini-3.1-pro-preview", Provider: "google", DisplayName: "Gemini 3.1 Pro", InputPer1M: 2.00, OutputPer1M: 12.00, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
+		{ID: "gemini-3.8-flash", Provider: "google", DisplayName: "Gemini 3.8 Flash", InputPer1M: 0.75, OutputPer1M: 3.75, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
+		{ID: "gemini-3.5-flash-lite", Provider: "google", DisplayName: "Gemini 3.5 Flash-Lite", InputPer1M: 0.30, OutputPer1M: 2.50, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
 		// ⚠ CORRECTED 2026-07-26 — UNDER-BILLING BADLY. Held 0.075/0.30 (an older Flash generation's
 		// rate); published is 0.30 in / 2.50 out — 4x under on input and 8.3x under on OUTPUT.
 		// Source: https://ai.google.dev/gemini-api/docs/pricing (fetched 2026-07-26), paid tier.

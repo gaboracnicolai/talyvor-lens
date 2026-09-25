@@ -343,6 +343,8 @@ func (s *StreamHandler) serve(
 	// Ask the provider to surface usage in the stream (OpenAI-family:
 	// stream_options.include_usage; identity for Anthropic). Best-effort.
 	body = ops.prepareBody(body)
+	// GPT-6 rejects max_tokens and temperature — the same rewrite forward applies (reasoning_params.go).
+	body = adaptReasoningParams(model, body)
 
 	// Retry the initial upstream call on transient failures. Once we
 	// commit to streaming (after WriteHeader below) there's no second
