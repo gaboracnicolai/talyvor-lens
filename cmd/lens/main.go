@@ -1606,6 +1606,10 @@ func run() error {
 		billingSvc = billingSvc.WithPlans(liveStripe, cfg.BillingSubscriptionPlans)
 	}
 	sellsSubscriptions := cfg.BillingSubscriptionPriceID != "" || len(cfg.BillingSubscriptionPlans) > 0
+	// B13.2 — a subscriber's final royalty earnings come off their next renewal invoice (capped at the fee).
+	if sellsSubscriptions {
+		billingSvc = billingSvc.WithBillCredits(tokenLedger, liveStripe)
+	}
 	// B1.6 — D, the allowance each paid period grants. Zero (the default) grants
 	// nothing, and then there is nothing for a served request to draw down either.
 	billingSvc = billingSvc.WithAllowance(cfg.SubscriptionAllowanceULXC)

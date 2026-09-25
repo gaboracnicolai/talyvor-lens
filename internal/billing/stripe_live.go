@@ -7,6 +7,7 @@ import (
 	stripe "github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/checkout/session"
 	"github.com/stripe/stripe-go/v81/customer"
+	"github.com/stripe/stripe-go/v81/invoiceitem"
 	"github.com/stripe/stripe-go/v81/paymentintent"
 	"github.com/stripe/stripe-go/v81/subscription"
 )
@@ -129,4 +130,20 @@ func (l *LiveStripe) SetCancelAtPeriodEnd(ctx context.Context, subscriptionID st
 	params := &stripe.SubscriptionParams{CancelAtPeriodEnd: stripe.Bool(cancel)}
 	params.Context = ctx
 	return subscription.Update(subscriptionID, params)
+}
+
+// CreditInvoice adds a NEGATIVE line of amountCents to a draft invoice (B13.2), idempotent on
+// idempotencyKey so a retried webhook cannot add a second one.
+func (l *LiveStripe) CreditInvoice(ctx context.Context, customerID, invoiceID string, amountCents int64, description, idempotencyKey string) error {
+	params := &stripe.InvoiceItemParams{
+		Customer:    stripe.String(customerID),
+		Invoice:     stripe.String(invoiceID),
+		Amount:      stripe.Int64(-amountCents),
+		Currency:    stripe.String(string(stripe.CurrencyUSD)),
+		Description: stripe.String(description),
+	}
+	params.Context = ctx
+	params.SetIdempotencyKey(idempotencyKey)
+	_, err := invoiceitem.New(params)
+	return err
 }

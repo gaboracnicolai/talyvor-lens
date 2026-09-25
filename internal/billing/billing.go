@@ -114,6 +114,9 @@ type Service struct {
 	subStripe subscriptionAPI
 	subPrice  string
 	subPlans  map[string]string // B13.1: plan name → Stripe Price id
+	// B13.2 — earnings off the next bill (bill_credit.go). Both nil ⇒ invoice.created is ignored.
+	billLens     lensDebiter
+	billInvoices invoiceCrediter
 
 	// D, in µLXC — the Model 2 allowance per billing period (W4.6.1 step 2).
 	// ZERO is the default and means "no allowance configured": no grant row is ever
@@ -274,6 +277,8 @@ func (s *Service) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		s.handleSubscription(w, r.Context(), &event)
 	case "invoice.payment_failed":
 		s.handleInvoicePaymentFailed(w, r.Context(), &event)
+	case "invoice.created": // B13.2 — a renewal's draft: the moment earnings can come off it
+		s.handleInvoiceCreated(w, r.Context(), &event)
 	default:
 		w.WriteHeader(http.StatusOK) // unhandled type → ack, no action
 	}
