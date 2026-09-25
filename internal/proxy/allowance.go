@@ -81,20 +81,34 @@ func (p *Proxy) chargeSubscriberUsage(ctx context.Context, workspaceID string, c
 	if costULXC <= 0 {
 		return false
 	}
+	inPeriod, _ := p.subscriberCharge(ctx, workspaceID, costULXC)
+	return inPeriod
+}
+
+// subscriberCharge draws costULXC from the allowance and debits the uncovered remainder from
+// prepaid. inPeriod=false means the workspace has no allowance this period and nothing was booked;
+// charged is what was booked (allowance drawn + prepaid debited).
+func (p *Proxy) subscriberCharge(ctx context.Context, workspaceID string, costULXC int64) (inPeriod bool, charged int64) {
+	if p.allowance == nil {
+		return false, 0
+	}
 	covered, inPeriod, err := p.allowance.Draw(ctx, workspaceID, costULXC, time.Now())
 	if err != nil {
 		slog.Warn("billing: allowance draw failed (booked as a non-subscriber; serve unaffected)",
 			slog.String("workspace", workspaceID), slog.Int64("cost_ulxc", costULXC), slog.String("err", err.Error()))
-		return false
+		return false, 0
 	}
 	if !inPeriod {
-		return false
+		return false, 0
 	}
+	charged = covered
 	if rest := costULXC - covered; rest > 0 && p.lxcSink != nil {
 		if err := p.lxcSink.SpendLXC(ctx, workspaceID, rest, "subscription: usage beyond the plan allowance"); err != nil {
 			slog.Warn("billing: prepaid debit past the allowance failed (serve unaffected)",
 				slog.String("workspace", workspaceID), slog.Int64("ulxc", rest), slog.String("err", err.Error()))
+		} else {
+			charged += rest
 		}
 	}
-	return true
+	return true, charged
 }

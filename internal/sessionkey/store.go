@@ -176,6 +176,22 @@ func (s *Store) Validate(ctx context.Context, raw string) (*SessionKey, error) {
 	return &k, nil
 }
 
+// Spent returns what the session has been charged so far, in µLXC (B9.8's per-session bound).
+func (s *Store) Spent(ctx context.Context, id string) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT spent_ulxc FROM session_keys WHERE id = $1`, id).Scan(&n)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrInvalid
+	}
+	return n, err
+}
+
+// AddSpent adds a charge to the session's running total.
+func (s *Store) AddSpent(ctx context.Context, id string, ulxc int64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE session_keys SET spent_ulxc = spent_ulxc + $2 WHERE id = $1`, id, ulxc)
+	return err
+}
+
 const revokeAllSQL = `DELETE FROM session_keys WHERE workspace_id = $1 AND user_id = $2`
 
 // RevokeAll is what sign-out calls. It returns how many keys it removed so the caller can log a

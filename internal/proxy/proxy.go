@@ -190,6 +190,9 @@ type Proxy struct {
 	// allowance when a request omits max_tokens. Both nil-safe (reservationActive() checks).
 	reservationEnabled func() bool
 	reservationMaxOut  func() int
+	// B9.8 — the per-session running total and its ceiling for browser-chat requests (chat_billing.go).
+	sessionSpend      sessionSpend
+	sessionSpendBound int64
 
 	// Routing-pattern capture (Phase-3) — optional, nil-safe post-serve
 	// producer for the routing Advisor. See pattern_capture.go.
@@ -908,6 +911,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if p.allowanceGateBlocks(ctx, wsID, model, prompt) {
 		writeError(w, http.StatusPaymentRequired, "this period's plan allowance is used up and prepaid credit does not cover the request — top up to continue")
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "allowance_blocked").Inc()
+		return
+	}
+	// B9.8 — a browser-chat request is charged, so it is admitted only when allowance + prepaid covers
+	// its conservative cost and its session is under its bound. Inert for every other credential.
+	if msg, blocked := p.chatAdmission(ctx, wsID, model, prompt, boundedMaxOut(extractMaxTokens(body), p.reservationMaxOut)); blocked {
+		writeError(w, http.StatusPaymentRequired, msg)
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "chat_blocked").Inc()
 		return
 	}
 
@@ -1770,7 +1780,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			settledChargeUSD := 0.0
 			// B1.6: a subscriber's non-agent request draws the plan allowance on EITHER arm below —
 			// the session-key chat has no reservation, so the settle alone would charge it nothing.
-			subscriber := p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
+			// B9.8: a chat request is charged by chargeChatUsage (allowance, then prepaid) and nothing else.
+			subscriber := p.chargeChatUsage(ctx, wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
 			if p.reservationActive() {
 				// Keep BOTH: #355's served-model arg (stamps the settle/charge row) AND our captured return
 				// (the clamped USD actually paid, which funds the distill royalty via recordDistillServes below).
@@ -2250,7 +2261,7 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	// on storeCtx = WithoutCancel(r.Context()) (stream.go), which now carries the reservation handle, so the
 	// streamed settle happens in-band instead of stranding the hold for the sweeper to refund.
 	// B1.6: the same allowance draw as the buffered seam (see there).
-	subscriber := p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
+	subscriber := p.chargeChatUsage(ctx, sc.wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
 	if p.reservationActive() {
 		p.settleReservation(ctx, servedCostUSD, sc.model)
 	} else if !subscriber {
