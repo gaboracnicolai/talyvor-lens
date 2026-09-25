@@ -14,6 +14,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
@@ -162,7 +163,7 @@ func TestOTel_CacheHitAddsSpanEvent(t *testing.T) {
 
 	// No upstream — the cache hit should short-circuit before any LLM call.
 	p, _ := newProxyWithMockUpstream(t, "", nil)
-	if err := p.exact.Set(context.Background(), "openai", "gpt-4", "hi", []byte(`{"choices":[]}`)); err != nil {
+	if err := p.exact.Set(context.Background(), "openai", "gpt-4", cache.FingerprintedKey("hi", plainFP), []byte(`{"choices":[]}`)); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
 

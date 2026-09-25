@@ -55,7 +55,7 @@ func TestNodeServeVisibility_RealPG_WritesNodeRow_CountsAsMiss(t *testing.T) {
 	rec := httptest.NewRecorder()
 	served := p.tryNodeRouting(rec, context.Background(),
 		"vllm", "node-model", "a prompt of a certain length here", "a prompt of a certain length here",
-		"ws-log", "", "", "feat", "sess", reqID, false, "", localrouter.RoutingStrategy(""))
+		"", "ws-log", "", "", "feat", "sess", reqID, false, "", localrouter.RoutingStrategy(""))
 	if !served {
 		t.Fatalf("tryNodeRouting returned false — node serve did not happen (status=%d body=%s)", rec.Code, rec.Body.String())
 	}
@@ -113,7 +113,7 @@ func TestNodeServe_PoVIInteraction_MeasurementAndTokenEventDisjoint(t *testing.T
 	const reqID = "node-req-interaction-1"
 	rec := httptest.NewRecorder()
 	if !p.tryNodeRouting(rec, context.Background(),
-		"vllm", "node-model", "prompt", "prompt", "ws-log", "", "", "feat", "sess", reqID,
+		"vllm", "node-model", "prompt", "prompt", "", "ws-log", "", "", "feat", "sess", reqID,
 		false, "", localrouter.RoutingStrategy("")) {
 		t.Fatalf("node serve did not happen: status=%d body=%s", rec.Code, rec.Body.String())
 	}

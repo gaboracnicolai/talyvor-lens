@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
@@ -99,7 +100,7 @@ func TestStream_OpenAIFullResponseCachedAfterDone(t *testing.T) {
 
 	p.HandleOpenAI(w, req)
 
-	stored, err := exact.Get(context.Background(), "openai", "gpt-4", "hi")
+	stored, err := exact.Get(context.Background(), "openai", "gpt-4", cache.FingerprintedKey("hi", cache.RequestFingerprint([]byte(body))))
 	if err != nil {
 		t.Fatalf("exact.Get: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestStream_AnthropicContentBlockDeltaAccumulated(t *testing.T) {
 		t.Errorf("Content-Type = %q, want text/event-stream", got)
 	}
 
-	stored, err := exact.Get(context.Background(), "anthropic", "claude-3-opus-20240229", "hi")
+	stored, err := exact.Get(context.Background(), "anthropic", "claude-3-opus-20240229", cache.FingerprintedKey("hi", cache.RequestFingerprint([]byte(body))))
 	if err != nil {
 		t.Fatalf("exact.Get: %v", err)
 	}

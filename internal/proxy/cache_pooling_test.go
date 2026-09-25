@@ -107,7 +107,7 @@ func TestPooling_AllOn_CrossTenantHit(t *testing.T) {
 	}
 	// Provenance: the pooled entry (under the reserved pooled key) is owner-tagged
 	// with wsA.
-	if _, owner, _ := exact.GetWithOwner(context.Background(), "openai", "gpt-4o", pooledPromptKey("what is 2+2")); owner != "wsA" {
+	if _, owner, _ := exact.GetWithOwner(context.Background(), "openai", "gpt-4o", cache.FingerprintedKey(pooledPromptKey("what is 2+2"), plainFP)); owner != "wsA" {
 		t.Errorf("pooled entry must record the contributor; owner=%q want wsA", owner)
 	}
 }

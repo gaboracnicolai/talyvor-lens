@@ -1077,6 +1077,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 	}
 
+	// B15.1 — everything in this request that shapes the answer besides the prompt text (system,
+	// tools, temperature, max_tokens, ...), read from the body exactly as it goes upstream: after
+	// distill, Tare and the budget rewrite. Every cache read below and every cache write (buffered,
+	// streamed, local and node routing) carries it, so an entry is served only to a request asked
+	// under the same settings — in this workspace and, through the pool, in any other.
+	reqFP := cache.RequestFingerprint(body)
+
 	if !piiDetected {
 		var cached []byte
 		var layer string
@@ -1093,12 +1100,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		span.AddEvent("cache.check.exact")
 		if !endpoint.cacheable() {
 			span.AddEvent("cache.skip.non_chat")
-		} else if c := p.tryExact(ctx, cfg.ProviderName(), model, cachePrompt); c != nil {
+		} else if c := p.tryExact(ctx, cfg.ProviderName(), model, cache.FingerprintedKey(cachePrompt, reqFP)); c != nil {
 			cached, layer = c, "cache_hit_exact"
 			span.AddEvent("cache.hit.exact")
 		} else {
 			span.AddEvent("cache.check.semantic")
-			if c := p.trySemantic(ctx, cfg.ProviderName(), model, cachePrompt, wsID); c != nil {
+			if c := p.trySemantic(ctx, cfg.ProviderName(), model, cachePrompt, reqFP, wsID); c != nil {
 				cached, layer = c, "cache_hit_semantic"
 				span.AddEvent("cache.hit.semantic")
 			} else if p.poolGate.Participant(wsID) {
@@ -1110,19 +1117,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// needs global + requester + contributor all true. Inert by
 				// default: Participant is false when the gate is nil/off, so this
 				// whole branch (and its extra cache read) never runs.
-				if c, owner := p.tryExactPooled(ctx, cfg.ProviderName(), model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+				if c, owner := p.tryExactPooled(ctx, cfg.ProviderName(), model, prompt, reqFP); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled"
 					pooledHit = &poolroyalty.ServedHit{
 						RequestID:            requestID,
 						RequesterWorkspace:   wsID,
 						ContributorWorkspace: owner,
 						Layer:                "exact",
-						EntryID:              p.exact.Key(cfg.ProviderName(), model, pooledPromptKey(prompt)),
+						EntryID:              p.exact.Key(cfg.ProviderName(), model, cache.FingerprintedKey(pooledPromptKey(prompt), reqFP)),
 						Provider:             cfg.ProviderName(),
 						Model:                model,
 					}
 					span.AddEvent("cache.hit.pooled")
-				} else if c, owner, entryID, sim := p.trySemanticPooled(ctx, cfg.ProviderName(), model, prompt); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
+				} else if c, owner, entryID, sim := p.trySemanticPooled(ctx, cfg.ProviderName(), model, prompt, reqFP); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled_semantic"
 					pooledHit = &poolroyalty.ServedHit{
 						RequestID:            requestID,
@@ -1226,7 +1233,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// routing must never break the main request. Multimodal requests
 	// skip local entirely (the local text models can't serve images) and
 	// fall through to the capability-aware cloud path below.
-	if !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.ProviderName(), model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt, p.agentStrategy(agentKeyID)) {
+	if !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.ProviderName(), model, prompt, cachePrompt, reqFP, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt, p.agentStrategy(agentKeyID)) {
 		return
 	}
 
@@ -1272,7 +1279,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			wsID: wsID, team: team, sprint: sprint, feature: feature,
 			model: model, requestID: requestID, sessionID: sessionID,
 			modality: modSet.Label(), logging: loggingPolicy, estInputTokens: estIn,
-			tare: tareMeter, distillMethod: distillMethod, visionOCR: visionOCR,
+			tare: tareMeter, distillMethod: distillMethod, visionOCR: visionOCR, reqFP: reqFP,
 		}
 		var serr error
 		if cfg.ProviderName() == "openai" {
@@ -1652,7 +1659,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// originally requested model so repeat callers in the same
 			// workspace get cache hits but other workspaces don't. The raw
 			// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
-			p.storeCaches(ctx, cfg.ProviderName(), model, cachePrompt, prompt, wsID, upstreamBody)
+			p.storeCaches(ctx, cfg.ProviderName(), model, cachePrompt, prompt, reqFP, wsID, upstreamBody)
 		}
 		// W4.9 SHADOW POOL LOG — void, post-serve, default-off. Records that a fresh cacheable
 		// response was produced, so the cross-tenant pooled hit rate is computable from repeats
@@ -1955,7 +1962,7 @@ type nodeInferResp struct {
 func (p *Proxy) tryNodeRouting(
 	w http.ResponseWriter,
 	ctx context.Context,
-	provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID string,
+	provider, model, prompt, cachePrompt, reqFP, wsID, team, sprint, feature, sessionID, requestID string,
 	piiDetected bool,
 	redactedPrompt string,
 	strategy localrouter.RoutingStrategy, // F4 C.1: threaded from tryLocalRouting (price-aware for agents)
@@ -2028,7 +2035,7 @@ func (p *Proxy) tryNodeRouting(
 	_, _ = w.Write(out) // JSON API response (application/json), mirrors tryLocalRouting
 
 	if !piiDetected {
-		p.storeCaches(ctx, provider, model, cachePrompt, prompt, wsID, out)
+		p.storeCaches(ctx, provider, model, cachePrompt, prompt, reqFP, wsID, out)
 	}
 	eventPrompt := prompt
 	if piiDetected {
@@ -2074,7 +2081,7 @@ func nodeOpenAIEnvelope(model string, nr nodeInferResp) map[string]any {
 func (p *Proxy) tryLocalRouting(
 	w http.ResponseWriter,
 	ctx context.Context,
-	provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID string,
+	provider, model, prompt, cachePrompt, reqFP, wsID, team, sprint, feature, sessionID, requestID string,
 	piiDetected bool,
 	redactedPrompt string,
 	strategy localrouter.RoutingStrategy, // F4 C.1: StrategyPriceAware for agents, else the default
@@ -2084,7 +2091,7 @@ func (p *Proxy) tryLocalRouting(
 	// returns false and we fall through to the EXISTING legacy localRouter / cloud path below.
 	// Byte-identical to today when the flag is off (the branch is never entered).
 	if p.nodeAutoRouteEnabled && p.nodeRouter != nil {
-		if p.tryNodeRouting(w, ctx, provider, model, prompt, cachePrompt, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt, strategy) {
+		if p.tryNodeRouting(w, ctx, provider, model, prompt, cachePrompt, reqFP, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt, strategy) {
 			return true
 		}
 	}
@@ -2118,7 +2125,7 @@ func (p *Proxy) tryLocalRouting(
 	_, _ = w.Write(formatted)
 
 	if !piiDetected {
-		p.storeCaches(ctx, provider, model, cachePrompt, prompt, wsID, formatted)
+		p.storeCaches(ctx, provider, model, cachePrompt, prompt, reqFP, wsID, formatted)
 	}
 	eventPrompt := prompt
 	if piiDetected {
@@ -2308,11 +2315,11 @@ func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []
 	return cached
 }
 
-func (p *Proxy) trySemantic(ctx context.Context, provider, model, prompt, workspaceID string) []byte {
+func (p *Proxy) trySemantic(ctx context.Context, provider, model, prompt, reqFP, workspaceID string) []byte {
 	if p.semantic == nil {
 		return nil
 	}
-	cached, err := p.semantic.Get(ctx, provider, model, prompt, workspaceID)
+	cached, err := p.semantic.Get(ctx, provider, model, prompt, reqFP, workspaceID)
 	if err != nil || cached == nil {
 		return nil
 	}
@@ -2325,11 +2332,11 @@ func (p *Proxy) trySemantic(ctx context.Context, provider, model, prompt, worksp
 // pooled rows are written — and returns the body plus the contributing
 // workspace plus the matched row's id and similarity (Stage-2.1 royalty
 // attribution data). A miss is (nil, "", "", 0).
-func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model, rawPrompt string) ([]byte, string, string, float64) {
+func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model, rawPrompt, reqFP string) ([]byte, string, string, float64) {
 	if p.semantic == nil {
 		return nil, "", "", 0
 	}
-	body, owner, entryID, sim, err := p.semantic.GetPooled(ctx, provider, model, rawPrompt)
+	body, owner, entryID, sim, err := p.semantic.GetPooled(ctx, provider, model, rawPrompt, reqFP)
 	if err != nil || body == nil {
 		return nil, "", "", 0
 	}
@@ -2544,11 +2551,11 @@ func pooledPromptKey(prompt string) string { return cache.PooledPromptKey(prompt
 // It is the cross-tenant read surface: a separate keyspace from the
 // workspace-private keys tryExact uses, so it can never leak a private entry. A
 // miss is (nil, "").
-func (p *Proxy) tryExactPooled(ctx context.Context, provider, model, rawPrompt string) ([]byte, string) {
+func (p *Proxy) tryExactPooled(ctx context.Context, provider, model, rawPrompt, reqFP string) ([]byte, string) {
 	if p.exact == nil {
 		return nil, ""
 	}
-	body, owner, err := p.exact.GetWithOwner(ctx, provider, model, pooledPromptKey(rawPrompt))
+	body, owner, err := p.exact.GetWithOwner(ctx, provider, model, cache.FingerprintedKey(pooledPromptKey(rawPrompt), reqFP))
 	if err != nil || body == nil {
 		return nil, ""
 	}
@@ -2562,21 +2569,23 @@ func (p *Proxy) tryExactPooled(ctx context.Context, provider, model, rawPrompt s
 // key, tagged with the contributor — the only cross-tenant-readable surface.
 // Inert by default: a nil/off gate writes no pooled copy. Callers gate this on
 // !piiDetected, so a PII-flagged entry is never stored, hence never pooled.
-func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, rawPrompt, wsID string, response []byte) {
+// reqFP (B15.1) is the request's fingerprint: every entry written here answers only a request with
+// the same one.
+func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, rawPrompt, reqFP, wsID string, response []byte) {
 	if p.exact != nil {
 		// Private (workspace-scoped) entry — today's behavior, now owner-stamped.
-		_ = p.exact.SetWithOwner(ctx, provider, model, cachePrompt, wsID, response)
+		_ = p.exact.SetWithOwner(ctx, provider, model, cache.FingerprintedKey(cachePrompt, reqFP), wsID, response)
 		// Pooled (cross-tenant) copy under the reserved, namespace-disjoint pooled
 		// key — opt-in, inert by default.
 		if p.poolGate.DecidePoolableOnWrite(ctx, wsID) {
-			_ = p.exact.SetWithOwner(ctx, provider, model, pooledPromptKey(rawPrompt), wsID, response)
+			_ = p.exact.SetWithOwner(ctx, provider, model, cache.FingerprintedKey(pooledPromptKey(rawPrompt), reqFP), wsID, response)
 		}
 	}
 	if p.semantic != nil && p.embedder != nil {
 		// Private (workspace-scoped) semantic entry — embeds the wsID-prefixed
 		// prompt and stores is_poolable=false (default), exactly as before.
 		if vec, err := p.embedder.Embed(ctx, cachePrompt); err == nil {
-			_ = p.semantic.Set(ctx, provider, model, cachePrompt, response, vec, wsID)
+			_ = p.semantic.Set(ctx, provider, model, cachePrompt, reqFP, response, vec, wsID)
 		}
 		// Pooled (cross-tenant) semantic copy — opt-in, inert by default. Keyed on
 		// the NUL-sentinel pooled prompt (disjoint hash) but embedding the RAW
@@ -2599,7 +2608,7 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 		// would drop real cross-tenant exact hits.
 		if p.poolGate.DecidePoolableOnWrite(ctx, wsID) && discriminator.Canon(rawPrompt).Verifiable() {
 			if vec, err := p.embedder.Embed(ctx, rawPrompt); err == nil {
-				_ = p.semantic.SetPooled(ctx, provider, model, pooledPromptKey(rawPrompt), wsID, response, vec)
+				_ = p.semantic.SetPooled(ctx, provider, model, pooledPromptKey(rawPrompt), reqFP, wsID, response, vec)
 			}
 		}
 	}

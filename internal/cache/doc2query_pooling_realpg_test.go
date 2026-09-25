@@ -40,13 +40,13 @@ func TestSetPooledWithVariants_VariantInheritsOriginalDiscriminators(t *testing.
 		{Question: "How do I validate a field?", Embedding: vec},
 		{Question: "What replaced the validator decorator in Pydantic v2?", Embedding: vec},
 	}
-	if err := c.SetPooledWithVariants(ctx, "anthropic", "claude-sonnet-5", original, "ws-contributor", answer, vec, variants); err != nil {
+	if err := c.SetPooledWithVariants(ctx, "anthropic", "claude-sonnet-5", original, testFP, "ws-contributor", answer, vec, variants); err != nil {
 		t.Fatalf("SetPooledWithVariants: %v", err)
 	}
 
 	// Someone asks the version-LESS question. The variant's own text would match it, but the
 	// variant inherits "v2", so the entity gate must still refuse.
-	resp, _, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", "How do I validate a field?")
+	resp, _, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", "How do I validate a field?", testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestSetPooledWithVariants_VariantInheritsOriginalDiscriminators(t *testing.
 
 	// Control: the SAME question WITH the version must still be served, or the assertion above
 	// passes for a system that simply stored nothing.
-	resp2, _, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", "How do I validate a field in Pydantic v2?")
+	resp2, _, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", "How do I validate a field in Pydantic v2?", testFP)
 	if err != nil {
 		t.Fatalf("GetPooled(control): %v", err)
 	}
@@ -81,12 +81,12 @@ func TestSetPooledWithVariants_ServesTheOriginalAnswerUnmodified(t *testing.T) {
 	vec, _ := constEmbedder{}.Embed(ctx, "x")
 	original := "How do I write a validator in Pydantic v2?"
 
-	if err := c.SetPooledWithVariants(ctx, "anthropic", "claude-sonnet-5", original, "ws-contributor", answer, vec,
+	if err := c.SetPooledWithVariants(ctx, "anthropic", "claude-sonnet-5", original, testFP, "ws-contributor", answer, vec,
 		[]doc2query.Variant{{Question: "In Pydantic v2 how is a field validated?", Embedding: vec}}); err != nil {
 		t.Fatalf("SetPooledWithVariants: %v", err)
 	}
 
-	resp, contributor, entryID, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", "In Pydantic v2 how is a field validated?")
+	resp, contributor, entryID, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", "In Pydantic v2 how is a field validated?", testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestSetPooledWithVariants_VariantRowsStoreTheInheritedDiscriminators(t *tes
 	vec, _ := constEmbedder{}.Embed(ctx, original)
 	want := string(discriminator.Canon(original))
 
-	if err := c.SetPooledWithVariants(ctx, "anthropic", "claude-sonnet-5", original, "ws-c", []byte("edit the CSS file"), vec,
+	if err := c.SetPooledWithVariants(ctx, "anthropic", "claude-sonnet-5", original, testFP, "ws-c", []byte("edit the CSS file"), vec,
 		[]doc2query.Variant{
 			{Question: "How do I set up Tailwind?", Embedding: vec},
 			{Question: "Where does Tailwind config live now?", Embedding: vec},

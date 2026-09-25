@@ -35,12 +35,12 @@ func TestGetPooled_RefusesWhenNeitherPromptNamesAnEntity(t *testing.T) {
 	c := NewSemanticCache(pool, constEmbedder{}, 0.92, 24*time.Hour)
 
 	vec, _ := constEmbedder{}.Embed(ctx, landlordNotice)
-	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", landlordNotice, "ws-contributor",
+	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", landlordNotice, testFP, "ws-contributor",
 		[]byte("the landlord must give two months"), vec); err != nil {
 		t.Fatalf("SetPooled: %v", err)
 	}
 
-	resp, contributor, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", tenantNotice)
+	resp, contributor, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", tenantNotice, testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestGetPooled_RefusesLegacyRowStoredWithEmptyStringDiscriminators(t *testin
 		t.Fatalf("seed legacy row: %v", err)
 	}
 
-	resp, _, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", tenantNotice)
+	resp, _, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", tenantNotice, testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestSetPooled_EmptyExtractionStoresNULLNotEmptyString(t *testing.T) {
 	c := NewSemanticCache(pool, constEmbedder{}, 0.92, 24*time.Hour)
 
 	vec, _ := constEmbedder{}.Embed(ctx, landlordNotice)
-	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", landlordNotice, "ws-contributor",
+	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", landlordNotice, testFP, "ws-contributor",
 		[]byte("the landlord must give two months"), vec); err != nil {
 		t.Fatalf("SetPooled: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestSetPooledWithVariants_EmptyExtractionStoresNULLOnEveryVariantRow(t *tes
 		{Question: "How long before a tenancy ends must notice be given?", Embedding: vec},
 	}
 	if err := c.SetPooledWithVariants(ctx, "anthropic", "claude-sonnet-5", landlordNotice,
-		"ws-contributor", []byte("two months"), vec, variants); err != nil {
+		testFP, "ws-contributor", []byte("two months"), vec, variants); err != nil {
 		t.Fatalf("SetPooledWithVariants: %v", err)
 	}
 
@@ -185,12 +185,12 @@ func TestGetPooled_EntityBearingPairStillServesAfterTheFix(t *testing.T) {
 	asked := "In Pydantic v2, how do I write a validator?"
 
 	vec, _ := constEmbedder{}.Embed(ctx, stored)
-	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, "ws-contributor",
+	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, testFP, "ws-contributor",
 		[]byte("use @field_validator"), vec); err != nil {
 		t.Fatalf("SetPooled: %v", err)
 	}
 
-	resp, _, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked)
+	resp, _, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked, testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}

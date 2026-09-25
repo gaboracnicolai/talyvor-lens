@@ -117,11 +117,11 @@ func TestGetPooled_RefusesAcrossVersionBoundary(t *testing.T) {
 	asked := "How do I write a validator in Pydantic v2?"
 
 	vec, _ := constEmbedder{}.Embed(ctx, stored)
-	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, "ws-contributor", []byte("use @validator"), vec); err != nil {
+	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, testFP, "ws-contributor", []byte("use @validator"), vec); err != nil {
 		t.Fatalf("SetPooled: %v", err)
 	}
 
-	resp, contributor, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked)
+	resp, contributor, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked, testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
@@ -145,11 +145,11 @@ func TestGetPooled_StillServesWhenEntitiesMatch(t *testing.T) {
 	asked := "In Pydantic v2, what is the way to write a validator?"
 
 	vec, _ := constEmbedder{}.Embed(ctx, stored)
-	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, "ws-contributor", []byte("use @field_validator"), vec); err != nil {
+	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, testFP, "ws-contributor", []byte("use @field_validator"), vec); err != nil {
 		t.Fatalf("SetPooled: %v", err)
 	}
 
-	resp, contributor, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked)
+	resp, contributor, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked, testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestGetPooled_LegacyRowWithoutDiscriminatorsIsNotServed(t *testing.T) {
 		t.Fatalf("seed legacy row: %v", err)
 	}
 
-	resp, _, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", "anything at all")
+	resp, _, _, _, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", "anything at all", testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
@@ -219,11 +219,11 @@ func TestGetPooled_RefusesGluedUnitMismatch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vec, _ := constEmbedder{}.Embed(ctx, tc.stored)
-			if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", tc.stored, "ws-contributor",
+			if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", tc.stored, testFP, "ws-contributor",
 				[]byte("stored answer"), vec); err != nil {
 				t.Fatalf("SetPooled: %v", err)
 			}
-			resp, contributor, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", tc.asked)
+			resp, contributor, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", tc.asked, testFP)
 			if err != nil {
 				t.Fatalf("GetPooled: %v", err)
 			}
@@ -253,11 +253,11 @@ func TestGetPooled_GluedAndSpacedUnitsAreTheSameQuestion(t *testing.T) {
 	asked := "How do I set the JVM heap to 512 mb?"
 
 	vec, _ := constEmbedder{}.Embed(ctx, stored)
-	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, "ws-contributor",
+	if err := c.SetPooled(ctx, "anthropic", "claude-sonnet-5", stored, testFP, "ws-contributor",
 		[]byte("-Xmx512m"), vec); err != nil {
 		t.Fatalf("SetPooled: %v", err)
 	}
-	resp, _, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked)
+	resp, _, _, sim, err := c.GetPooled(ctx, "anthropic", "claude-sonnet-5", asked, testFP)
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
