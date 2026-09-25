@@ -222,7 +222,10 @@ var Manifest = map[string]Entry{
 	// Stripe holds the authoritative billing record, this is Lens's local grant-and-
 	// consumption projection of it, so erasure removes the customer's data here without
 	// destroying anything an audit would reach for.
-	"subscription_allowance":        {Delete, ""},
+	"subscription_allowance": {Delete, ""},
+	// B13.2 — which renewal invoice a workspace's earnings were credited against. Lens's projection of a
+	// line on a Stripe invoice (the authoritative record); the LENS it consumed is in lens_token_ledger.
+	"subscription_bill_credits":     {Delete, ""},
 	"subscription_events":           {Delete, ""},
 	"subscriptions":                 {Delete, ""},
 	"lxc_reservations":              {Delete, ""},
