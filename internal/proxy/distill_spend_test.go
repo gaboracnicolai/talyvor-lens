@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/talyvor/lens/internal/compressor"
@@ -139,5 +141,55 @@ func TestSpend_VisionOCRRecordsSeparateRow(t *testing.T) {
 	}
 	if vrow.modality != "document" {
 		t.Errorf("vision_ocr row modality should be 'document' (the OCR input); got %q", vrow.modality)
+	}
+}
+
+// B7.3 — the SAME distilled request, sent buffered and then streamed, writes the SAME token_events
+// rows: a 'convert' main row and the OCR sub-call's own 'vision_ocr' row, with equal models and
+// token counts. The streamed seam wrote an untagged main row and no vision_ocr row at all, so a
+// scanned document sent with stream:true lost the OCR call's cost as well as the tag.
+func TestSpend_StreamedDistilledRequestWritesTheBufferedRows(t *testing.T) {
+	const usageIn, usageOut = 1000, 40
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if bytes.Contains(raw, []byte(`"stream":true`)) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "event: message_start\n"+
+				"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1000,\"output_tokens\":1}}}\n\n"+
+				"event: content_block_delta\n"+
+				"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"ok\"}}\n\n"+
+				"event: message_delta\n"+
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":40}}\n\n"+
+				"event: message_stop\n"+
+				"data: {\"type\":\"message_stop\"}\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"# OCR recovered"}],"usage":{"input_tokens":1000,"output_tokens":40}}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	rows := func(stream bool) []recordedSpend {
+		p, sink := newDistillSpendProxy(t, &fakeDistillConv{res: distill.Result{NeedsVision: true}}, "", workspace.DistillAlways)
+		p.anthropicURL = upstream.URL
+		if w := dispatchAnthropicDoc(t, p, anthropicDocBody(t, stream)); w.Code != http.StatusOK {
+			t.Fatalf("stream=%v: status = %d; body=%s", stream, w.Code, w.Body.String())
+		}
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		out := append([]recordedSpend(nil), sink.spends...)
+		sort.Slice(out, func(i, j int) bool { return out[i].distillMethod < out[j].distillMethod })
+		return out
+	}
+	buffered, streamed := rows(false), rows(true)
+
+	if len(buffered) != 2 || buffered[0].distillMethod != "convert" || buffered[1].distillMethod != "vision_ocr" {
+		t.Fatalf("buffered rows = %+v, want one 'convert' and one 'vision_ocr'", buffered)
+	}
+	if buffered[0].inputTokens != usageIn || buffered[0].outputTokens != usageOut {
+		t.Fatalf("buffered convert row billed %d/%d, want the provider's %d/%d", buffered[0].inputTokens, buffered[0].outputTokens, usageIn, usageOut)
+	}
+	if !reflect.DeepEqual(streamed, buffered) {
+		t.Errorf("the streamed request wrote different token_events rows than the buffered one:\n  buffered %+v\n  streamed %+v", buffered, streamed)
 	}
 }

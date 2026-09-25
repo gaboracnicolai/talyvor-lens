@@ -1262,7 +1262,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			wsID: wsID, team: team, sprint: sprint, feature: feature,
 			model: model, requestID: requestID, sessionID: sessionID,
 			modality: modSet.Label(), logging: loggingPolicy, estInputTokens: estIn,
-			tare: tareMeter,
+			tare: tareMeter, distillMethod: distillMethod, visionOCR: visionOCR,
 		}
 		var serr error
 		if cfg.ProviderName() == "openai" {
@@ -1858,27 +1858,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// priced on the vision model, flagged estimated — a COST, never a
 			// saving, NEVER blended into the 'convert' row above. The durable
 			// monthly spend cap (SUM(cost_usd) over token_events) then includes it.
-			if visionOCR.recorded() {
-				// The OCR row is a cost_estimated row (document/image token
-				// accounting is approximate), so keep the SpendRecord source label
-				// within its bounded domain (provider_usage|estimated).
-				metrics.SpendRecord("estimated")
-				// A successful OCR must name its model so the cost prices (an empty
-				// model → cost_usd=0, unbudgeted). Production always sets it; warn
-				// loudly if a dispatcher ever doesn't, rather than silently $0.
-				if visionOCR.model == "" {
-					slog.Warn("distill: vision-OCR cost recorded WITHOUT a model — it cannot be priced (cost_usd=0)",
-						slog.String("workspace_id", wsID),
-						slog.Int("ocr_input_tokens", visionOCR.inputTokens),
-						slog.Int("ocr_output_tokens", visionOCR.outputTokens),
-					)
-				}
-				if err := p.alertManager.RecordSpendWithDistill(ctx, wsID, team, sprint, feature, visionOCR.model, visionOCR.inputTokens, visionOCR.outputTokens, "", sessionID, requestID, "document", true, "vision_ocr"); err != nil {
-					slog.Warn("alerts: vision-OCR RecordSpend failed",
-						slog.String("err", err.Error()),
-					)
-				}
-			}
+			p.recordVisionOCRSpend(ctx, wsID, team, sprint, feature, sessionID, requestID, visionOCR)
 		}
 		// Feed the in-memory budget totals from the SAME billed cost. This is
 		// a memory update (+ threshold checks), not a second hot-path DB
@@ -2250,14 +2230,19 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	}
 	metrics.SpendRecord(source)
 	var recErr error
+	// B7.3 — the same three writers, in the same order, as the buffered seam: a distilled streamed
+	// request tags its row 'convert', and its OCR sub-call gets its own 'vision_ocr' row.
 	if sc.tare.Kind != "" {
-		recErr = p.alertManager.RecordSpendWithTare(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated, "", sc.tare)
+		recErr = p.alertManager.RecordSpendWithTare(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated, sc.distillMethod, sc.tare)
+	} else if sc.distillMethod != "" {
+		recErr = p.alertManager.RecordSpendWithDistill(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated, sc.distillMethod)
 	} else {
 		recErr = p.alertManager.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated)
 	}
 	if recErr != nil {
 		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", recErr.Error()))
 	}
+	p.recordVisionOCRSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.sessionID, sc.requestID, sc.visionOCR)
 	if p.budgetService != nil {
 		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, servedCostUSD)
 	}
@@ -2270,6 +2255,34 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 		p.settleReservation(ctx, servedCostUSD, sc.model)
 	} else if !subscriber {
 		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
+	}
+}
+
+// recordVisionOCRSpend books a distilled request's vision-OCR sub-call as its OWN 'vision_ocr'
+// token_events row. ONE writer for the buffered and streamed seams (B7.3): the streamed seam had
+// none, so a scanned document sent with stream:true never recorded what its OCR call cost.
+func (p *Proxy) recordVisionOCRSpend(ctx context.Context, wsID, team, sprint, feature, sessionID, requestID string, visionOCR visionSpend) {
+	if !visionOCR.recorded() {
+		return
+	}
+	// The OCR row is a cost_estimated row (document/image token
+	// accounting is approximate), so keep the SpendRecord source label
+	// within its bounded domain (provider_usage|estimated).
+	metrics.SpendRecord("estimated")
+	// A successful OCR must name its model so the cost prices (an empty
+	// model → cost_usd=0, unbudgeted). Production always sets it; warn
+	// loudly if a dispatcher ever doesn't, rather than silently $0.
+	if visionOCR.model == "" {
+		slog.Warn("distill: vision-OCR cost recorded WITHOUT a model — it cannot be priced (cost_usd=0)",
+			slog.String("workspace_id", wsID),
+			slog.Int("ocr_input_tokens", visionOCR.inputTokens),
+			slog.Int("ocr_output_tokens", visionOCR.outputTokens),
+		)
+	}
+	if err := p.alertManager.RecordSpendWithDistill(ctx, wsID, team, sprint, feature, visionOCR.model, visionOCR.inputTokens, visionOCR.outputTokens, "", sessionID, requestID, "document", true, "vision_ocr"); err != nil {
+		slog.Warn("alerts: vision-OCR RecordSpend failed",
+			slog.String("err", err.Error()),
+		)
 	}
 }
 

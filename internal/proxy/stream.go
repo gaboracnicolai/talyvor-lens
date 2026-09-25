@@ -47,6 +47,8 @@ type streamSpend struct {
 	logging                     workspace.LoggingPolicy
 	estInputTokens              int              // fallback input estimate when no usage is emitted
 	tare                        alerts.TareMeter // B6.4: the Tare record for this request; zero = not reduced
+	distillMethod               string           // B7.3: "convert" when this request was distilled, as on the buffered row
+	visionOCR                   visionSpend      // B7.3: the OCR sub-call's cost, owed its own vision_ocr row
 }
 
 const (
