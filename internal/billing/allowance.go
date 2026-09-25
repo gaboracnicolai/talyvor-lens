@@ -73,8 +73,17 @@ func (s *Service) Grant(ctx context.Context, workspaceID, subscriptionID string,
 
 // grantPeriod is Grant with the fee F the period was billed at (B1.6), read by the
 // webhook off the subscription's price. 0 = unknown.
+//
+// B13.1: when the fee is known, D is the plan's COMPUTED included usage (included_usage.go); the
+// configured LENS_SUBSCRIPTION_ALLOWANCE_ULXC is only the fallback for a period whose fee is unknown.
 func (s *Service) grantPeriod(ctx context.Context, workspaceID, subscriptionID string, periodStart, periodEnd time.Time, feeUSDCents int64) (created bool, err error) {
-	if s.allowanceULXC <= 0 {
+	d := s.allowanceULXC
+	if feeUSDCents > 0 {
+		if d, err = s.includedUsage(ctx, feeUSDCents, periodStart); err != nil {
+			return false, err
+		}
+	}
+	if d <= 0 {
 		return false, ErrNoAllowanceConfigured
 	}
 	ct, err := s.pool.Exec(ctx, `
@@ -82,7 +91,7 @@ func (s *Service) grantPeriod(ctx context.Context, workspaceID, subscriptionID s
 			(workspace_id, stripe_subscription_id, period_start, period_end, granted_ulxc, fee_usd_cents)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (stripe_subscription_id, period_start) DO NOTHING`,
-		workspaceID, subscriptionID, periodStart, periodEnd, s.allowanceULXC, feeUSDCents)
+		workspaceID, subscriptionID, periodStart, periodEnd, d, feeUSDCents)
 	if err != nil {
 		return false, fmt.Errorf("billing: grant allowance: %w", err)
 	}

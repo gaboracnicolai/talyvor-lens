@@ -113,6 +113,7 @@ type Service struct {
 	// calling Stripe with an empty price. See subscriptions.go.
 	subStripe subscriptionAPI
 	subPrice  string
+	subPlans  map[string]string // B13.1: plan name → Stripe Price id
 
 	// D, in µLXC — the Model 2 allowance per billing period (W4.6.1 step 2).
 	// ZERO is the default and means "no allowance configured": no grant row is ever
@@ -126,6 +127,13 @@ type Service struct {
 func (s *Service) WithSubscriptions(api subscriptionAPI, priceID string) *Service {
 	s.subStripe = api
 	s.subPrice = priceID
+	return s
+}
+
+// WithPlans offers named plans (B13.1: plus, pro, max → their Stripe Price ids) at checkout.
+func (s *Service) WithPlans(api subscriptionAPI, plans map[string]string) *Service {
+	s.subStripe = api
+	s.subPlans = plans
 	return s
 }
 

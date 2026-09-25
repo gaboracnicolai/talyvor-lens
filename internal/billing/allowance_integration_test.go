@@ -382,8 +382,10 @@ func TestAllowance_Summary_EarnedBackNeverExceedsTheFee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summary: %v", err)
 	}
-	if sum.Allowance == nil || sum.Allowance.ConsumedULXC != 250_000 || sum.Allowance.RemainingULXC != testGrant-250_000 {
-		t.Fatalf("allowance = %+v, want 250000 used of %d", sum.Allowance, testGrant)
+	// B13.1: a $20 period grants the plan's computed included usage, not the configured figure.
+	d := IncludedUsageULXC(2000, 0)
+	if sum.Allowance == nil || sum.Allowance.ConsumedULXC != 250_000 || sum.Allowance.RemainingULXC != d-250_000 {
+		t.Fatalf("allowance = %+v, want 250000 used of %d", sum.Allowance, d)
 	}
 	if sum.EarnedULENS != 250_000_000 || sum.EarnedHeldULENS != 100_000_000 {
 		t.Errorf("earned = %d (held %d) µLENS, want 250000000 (held 100000000)", sum.EarnedULENS, sum.EarnedHeldULENS)

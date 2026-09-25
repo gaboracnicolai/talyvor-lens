@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/envelope"
+	"strings"
 )
 
 // ── W4.6.1 step 4: session-key lifetimes ───────────────────────────────────────
@@ -924,6 +925,12 @@ type Config struct {
 	// out of the codebase entirely rather than being written down in two places.
 	BillingSubscriptionPriceID string
 
+	// BillingSubscriptionPlans are the named plans offered at checkout (B13.1), plan → Stripe Price id.
+	// Env: LENS_BILLING_SUBSCRIPTION_PLANS="plus=price_…,pro=price_…,max=price_…", default EMPTY. Like
+	// the single price above, the amounts live in Stripe; each plan's included usage is computed from
+	// its price (internal/billing/included_usage.go), not configured.
+	BillingSubscriptionPlans map[string]string
+
 	// SubscriptionAllowanceULXC is D — the Model 2 allowance granted per billing
 	// period, in µLXC (W4.6.1 step 2). Env: LENS_SUBSCRIPTION_ALLOWANCE_ULXC,
 	// default 0.
@@ -1236,6 +1243,7 @@ func Load() (*Config, error) {
 		TrackWebhookURL:            os.Getenv("LENS_TRACK_WEBHOOK_URL"),
 		TrackWebhookSecret:         os.Getenv("LENS_TRACK_WEBHOOK_SECRET"),
 		BillingSubscriptionPriceID: getEnv("LENS_BILLING_SUBSCRIPTION_PRICE_ID", ""),
+		BillingSubscriptionPlans:   parsePlans(os.Getenv("LENS_BILLING_SUBSCRIPTION_PLANS")),
 		BillingSuccessURL:          getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
 		BillingCancelURL:           getEnv("LENS_BILLING_CANCEL_URL", "https://app.talyvor.com/billing/cancel"),
 
@@ -2219,6 +2227,18 @@ func getEnv(key, fallback string) string {
 // parseBoolEnv recognises the common "true" forms (1, true, yes,
 // on) case-insensitively. Anything else (including empty) is
 // false so the feature stays opt-in by default.
+// parsePlans reads "name=price_id,name=price_id". Blank entries and entries without both halves are skipped.
+func parsePlans(v string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(v, ",") {
+		name, price, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && strings.TrimSpace(name) != "" && strings.TrimSpace(price) != "" {
+			out[strings.TrimSpace(name)] = strings.TrimSpace(price)
+		}
+	}
+	return out
+}
+
 func parseBoolEnv(key string) bool {
 	v := os.Getenv(key)
 	if v == "" {

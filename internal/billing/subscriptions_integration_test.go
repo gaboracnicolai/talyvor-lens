@@ -125,8 +125,9 @@ func countEvents(t *testing.T, pool *pgxpool.Pool, subID string) int {
 }
 
 type fakeSubStripe struct {
-	sessions int
-	updates  []fakeSubUpdate
+	sessions  int
+	lastPrice string
+	updates   []fakeSubUpdate
 }
 
 type fakeSubUpdate struct {
@@ -142,6 +143,7 @@ func (f *fakeSubStripe) SetCancelAtPeriodEnd(_ context.Context, subID string, ca
 
 func (f *fakeSubStripe) CreateSubscriptionCheckoutSession(_ context.Context, p SubscriptionParams) (string, string, error) {
 	f.sessions++
+	f.lastPrice = p.PriceID
 	return "https://checkout.stripe.test/sub/" + p.WorkspaceID, "cs_sub_" + p.WorkspaceID, nil
 }
 
@@ -427,6 +429,26 @@ func TestSubscriptionCheckout_HappyPath_CallsStripeOnce(t *testing.T) {
 	}
 	if fss.sessions != 1 {
 		t.Errorf("stripe sessions = %d, want 1", fss.sessions)
+	}
+}
+
+// B13.1 — a named plan checks out at that plan's price; an unknown plan is refused before Stripe.
+func TestSubscriptionCheckout_NamedPlan_SendsItsPrice_UnknownPlanRefusedBeforeStripe(t *testing.T) {
+	svc, pool, fss := newSubService(t)
+	svc = svc.WithPlans(fss, map[string]string{"plus": "price_plus", "pro": "price_pro", "max": "price_max"})
+	seedWS(t, pool, "ws-sub-plan")
+	if _, err := svc.CreatePlanCheckout(context.Background(), "ws-sub-plan", "pro"); err != nil {
+		t.Fatalf("CreatePlanCheckout(pro): %v", err)
+	}
+	if fss.lastPrice != "price_pro" {
+		t.Errorf("Stripe was sent price %q, want price_pro", fss.lastPrice)
+	}
+	before := fss.sessions
+	if _, err := svc.CreatePlanCheckout(context.Background(), "ws-sub-plan", "gold"); !errors.Is(err, ErrUnknownPlan) {
+		t.Errorf("unknown plan: err = %v, want ErrUnknownPlan", err)
+	}
+	if fss.sessions != before {
+		t.Errorf("Stripe was called for an unknown plan")
 	}
 }
 
