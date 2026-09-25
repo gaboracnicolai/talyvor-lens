@@ -401,6 +401,21 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleSubscriptionCheckout acks a checkout.session.* event for a SUBSCRIPTION-mode
+// session. It writes nothing: the session buys no LXC, so there is no lxc_purchases
+// expectation to record, and the subscription itself arrives on
+// customer.subscription.created, which handleSubscription records and grants from.
+func (s *Service) handleSubscriptionCheckout(w http.ResponseWriter, event *stripe.Event, sess *stripe.CheckoutSession) {
+	subID := ""
+	if sess.Subscription != nil {
+		subID = sess.Subscription.ID
+	}
+	s.log.Info("billing webhook: subscription checkout — no LXC purchase; customer.subscription.* carries it",
+		"event", event.ID, "type", string(event.Type), "session", sess.ID,
+		"subscription", subID, "workspace", sess.Metadata["workspace_id"])
+	w.WriteHeader(http.StatusOK)
+}
+
 // periodStart reads the subscription's current period start, falling back to the
 // period end minus nothing — an absent start would make the grant's identity
 // ambiguous, so it is taken from the payload and only from there.
