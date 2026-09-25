@@ -172,7 +172,7 @@ func TestStoreCaches_UnverifiablePromptBuysNoPooledEmbedding(t *testing.T) {
 		t.Fatalf("fixture is not the case under test: %q has a verifiable canon", raw)
 	}
 
-	p.storeCaches(context.Background(), "openai", "gpt-4o", "wsA:"+raw, raw, "wsA", []byte(okResp))
+	p.storeCaches(context.Background(), "openai", "gpt-4o", "wsA:"+raw, raw, "", "wsA", []byte(okResp))
 
 	if n := emb.callsFor(raw); n != 0 {
 		t.Errorf("pooled embedding calls on an unverifiable prompt = %d, want 0 "+
@@ -195,7 +195,7 @@ func TestStoreCaches_VerifiablePromptStillPoolsAndStillPaysExactlyOnce(t *testin
 		t.Fatalf("fixture is not the case under test: %q has an empty canon", raw)
 	}
 
-	p.storeCaches(context.Background(), "openai", "gpt-4o", "wsA:"+raw, raw, "wsA", []byte(okResp))
+	p.storeCaches(context.Background(), "openai", "gpt-4o", "wsA:"+raw, raw, "", "wsA", []byte(okResp))
 
 	if n := emb.callsFor(raw); n != 1 {
 		t.Errorf("pooled embedding calls on a verifiable prompt = %d, want exactly 1 "+
@@ -217,7 +217,7 @@ func TestStoreCaches_PrivateSemanticWriteSurvivesAnUnverifiablePrompt(t *testing
 	const raw = "How long should I boil an egg?"
 	cachePrompt := "wsA:" + raw
 
-	p.storeCaches(context.Background(), "openai", "gpt-4o", cachePrompt, raw, "wsA", []byte(okResp))
+	p.storeCaches(context.Background(), "openai", "gpt-4o", cachePrompt, raw, "", "wsA", []byte(okResp))
 
 	if n := emb.callsFor(cachePrompt); n != 1 {
 		t.Errorf("private embedding calls = %d, want 1 — the private cache must still store "+

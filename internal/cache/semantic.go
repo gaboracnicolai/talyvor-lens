@@ -124,6 +124,7 @@ WHERE provider = $2 AND model = $3
   AND is_poolable = false
   AND workspace_id = $5
   AND embedding_model = $6
+  AND request_fp = $7
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -143,6 +144,9 @@ WHERE provider = $2 AND model = $3
   -- also what fails legacy rows closed: their discriminators are NULL, and NULL = $6 is NULL,
   -- never TRUE, so a row whose prompt text no longer exists is never served.
   AND discriminators = $6
+  -- B15.1: similarity judges the prompt; the fingerprint is everything else that shapes the answer
+  -- (system, tools, temperature, max_tokens, ...). Equal or no serve; a pre-B15.1 row is NULL here.
+  AND request_fp = $7
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -160,21 +164,22 @@ WHERE id = $1`
 const semanticDeleteStaleSQL = `DELETE FROM prompt_embeddings WHERE updated_at < $1`
 
 const semanticUpsertSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, workspace_id, embedding_model)
-VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''))
+  (provider, model, prompt_hash, embedding, response, workspace_id, embedding_model, request_fp)
+VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
   workspace_id = EXCLUDED.workspace_id,
   embedding_model = EXCLUDED.embedding_model,
+  request_fp = EXCLUDED.request_fp,
   updated_at = NOW()`
 
 // semanticUpsertPooledSQL writes a shared-pool row: contributor stamped,
 // is_poolable=true (a literal). Its prompt_hash is keyed on a NUL-sentinel-
 // prefixed prompt (the caller's job), provably disjoint from any private hash.
 const semanticUpsertPooledSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators)
-VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''))
+  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, request_fp)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
@@ -186,6 +191,7 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
   -- Same reasoning for the entities: the row now answers the NEW prompt, so it must be
   -- findable by that prompt's entities and not the previous one's.
   discriminators = EXCLUDED.discriminators,
+  request_fp = EXCLUDED.request_fp,
   updated_at = NOW()`
 
 // freshnessCutoff is the lower bound a row's updated_at must exceed to remain
@@ -202,7 +208,9 @@ func (c *SemanticCache) freshnessCutoff() time.Time {
 	return time.Now().UTC().Add(-c.retention)
 }
 
-func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, workspaceID string) ([]byte, error) {
+// Get serves the caller's own row most similar to prompt, only if it was stored under the same
+// request fingerprint fp (RequestFingerprint).
+func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, fp, workspaceID string) ([]byte, error) {
 	vec, err := c.embedder.Embed(ctx, prompt)
 	if err != nil {
 		return nil, err
@@ -215,7 +223,7 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, worksp
 	)
 	// workspace_id is the HARD tenant filter (#142): a private lookup can only
 	// match the caller's own rows; the embedding ranks within that boundary.
-	err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel).
+	err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp).
 		Scan(&id, &response, &similarity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -236,8 +244,8 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, worksp
 	return []byte(response), nil
 }
 
-func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt string, response []byte, embedding []float32, workspaceID string) error {
-	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + prompt))
+func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt, fp string, response []byte, embedding []float32, workspaceID string) error {
+	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + FingerprintedKey(prompt, fp)))
 	hash := hex.EncodeToString(sum[:])
 
 	// prompt_hash is unchanged (still sha256 of the wsID-prefixed prompt — the
@@ -246,7 +254,7 @@ func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt string,
 	_, err := c.pool.Exec(
 		ctx,
 		semanticUpsertSQL,
-		provider, model, hash, vectorLiteral(embedding), string(response), workspaceID, c.embeddingModel,
+		provider, model, hash, vectorLiteral(embedding), string(response), workspaceID, c.embeddingModel, fp,
 	)
 	return err
 }
@@ -256,15 +264,15 @@ func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt string,
 // the NUL-sentinel pooled marker, so the row's prompt_hash is provably disjoint
 // from any workspace-private hash (which carries a "wsID:" prefix). Used only on
 // the opt-in path — Stage 2.0b's cross-tenant write surface.
-func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, contributorWsID string, response []byte, embedding []float32) error {
-	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + prompt))
+func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, fp, contributorWsID string, response []byte, embedding []float32) error {
+	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + FingerprintedKey(prompt, fp)))
 	hash := hex.EncodeToString(sum[:])
 
 	_, err := c.pool.Exec(
 		ctx,
 		semanticUpsertPooledSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
-		string(discriminator.Canon(prompt)),
+		string(discriminator.Canon(prompt)), fp,
 	)
 	return err
 }
@@ -284,14 +292,14 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 // Inheriting confines doc2query to widening recall INSIDE an entity class, which is the only place
 // it is safe: it can find you a different phrasing of a Pydantic v2 question, and can never find
 // you a Pydantic v1 one.
-func (c *SemanticCache) SetPooledWithVariants(ctx context.Context, provider, model, prompt, contributorWsID string, response []byte, embedding []float32, variants []doc2query.Variant) error {
-	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + prompt))
+func (c *SemanticCache) SetPooledWithVariants(ctx context.Context, provider, model, prompt, fp, contributorWsID string, response []byte, embedding []float32, variants []doc2query.Variant) error {
+	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + FingerprintedKey(prompt, fp)))
 	hash := hex.EncodeToString(sum[:])
 
 	var originalID string
 	if err := c.pool.QueryRow(ctx, semanticUpsertPooledReturningSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
-		string(discriminator.Canon(prompt)),
+		string(discriminator.Canon(prompt)), fp,
 	).Scan(&originalID); err != nil {
 		return err
 	}
@@ -300,10 +308,11 @@ func (c *SemanticCache) SetPooledWithVariants(ctx context.Context, provider, mod
 	// on which a variant's own text can reach the discriminators column.
 	inherited := string(discriminator.Canon(prompt))
 	for _, v := range variants {
-		vsum := sha256.Sum256([]byte(provider + ":" + model + ":variant:" + v.Question))
+		// A variant answers only under the original's fingerprint, exactly as it inherits its entities.
+		vsum := sha256.Sum256([]byte(provider + ":" + model + ":variant:" + FingerprintedKey(v.Question, fp)))
 		if _, err := c.pool.Exec(ctx, semanticUpsertVariantSQL,
 			provider, model, hex.EncodeToString(vsum[:]), vectorLiteral(v.Embedding), string(response),
-			contributorWsID, c.embeddingModel, inherited, originalID,
+			contributorWsID, c.embeddingModel, inherited, originalID, fp,
 		); err != nil {
 			return err
 		}
@@ -315,8 +324,8 @@ const semanticUpsertPooledReturningSQL = semanticUpsertPooledSQL + `
 RETURNING id`
 
 const semanticUpsertVariantSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, variant_of)
-VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9)
+  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, variant_of, request_fp)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9, $10)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
@@ -324,6 +333,7 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
   embedding_model = EXCLUDED.embedding_model,
   discriminators = EXCLUDED.discriminators,
   variant_of = EXCLUDED.variant_of,
+  request_fp = EXCLUDED.request_fp,
   updated_at = NOW()`
 
 // GetPooled is the cross-tenant similarity lookup: it searches ONLY is_poolable
@@ -335,7 +345,7 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
 // blocks it. The entry id + similarity are Stage-2.1 attribution data for the
 // royalty claim row — NOT an idempotency key (a retried request can re-match a
 // different row: ORDER BY similarity LIMIT 1 over a moving 24h window).
-func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt string) ([]byte, string, string, float64, error) {
+func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt, fp string) ([]byte, string, string, float64, error) {
 	// ⚠ AN UNVERIFIABLE PROMPT CANNOT BE SERVED FROM THE POOL, AND THIS IS CHECKED BEFORE THE
 	// QUERY RATHER THAN INSIDE IT. Canon returns "" for a prompt naming no version, code,
 	// identifier, proper noun or listed technology — most consumer traffic — and `discriminators
@@ -363,7 +373,7 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt s
 		similarity  float64
 	)
 	err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
-		string(canon)).
+		string(canon), fp).
 		Scan(&id, &response, &contributor, &similarity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", "", 0, nil

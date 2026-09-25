@@ -39,13 +39,18 @@ func NewSeeder(exact *cache.ExactCache, semantic *cache.SemanticCache, dc *cache
 	return &Seeder{exact: exact, semantic: semantic, distill: dc, embedder: embedder}
 }
 
+// BareQuestionFP is the request fingerprint (B15.1) a seed is stored under: one user message and
+// no settings — no system prompt, tools, temperature or max_tokens. A seeded answer was written for
+// the bare question, so that is the only request it may answer.
+var BareQuestionFP = cache.RequestFingerprint([]byte(`{"messages":[{"role":"user","content":""}]}`))
+
 // SeedExact writes a POOLED exact-cache entry owned by the seed workspace — keyed via
 // cache.PooledPromptKey so it lands in the cross-tenant keyspace the serve path reads.
 func (s *Seeder) SeedExact(ctx context.Context, provider, model, prompt string, response []byte) error {
 	if s == nil || s.exact == nil {
 		return fmt.Errorf("seedcache: exact cache not configured")
 	}
-	return s.exact.SetWithOwner(ctx, provider, model, cache.PooledPromptKey(prompt), Owner, response)
+	return s.exact.SetWithOwner(ctx, provider, model, cache.FingerprintedKey(cache.PooledPromptKey(prompt), BareQuestionFP), Owner, response)
 }
 
 // SeedSemantic embeds the RAW prompt (the same Embedder the cache uses) and writes a POOLED
@@ -62,7 +67,7 @@ func (s *Seeder) SeedSemantic(ctx context.Context, provider, model, prompt strin
 	if err != nil {
 		return fmt.Errorf("seedcache: embed: %w", err)
 	}
-	return s.semantic.SetPooled(ctx, provider, model, cache.PooledPromptKey(prompt), Owner, response, vec)
+	return s.semantic.SetPooled(ctx, provider, model, cache.PooledPromptKey(prompt), BareQuestionFP, Owner, response, vec)
 }
 
 // SeedDistill writes a POOLED distill-OCR entry owned by the seed workspace: it content-hashes the

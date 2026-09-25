@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/workspace"
@@ -140,7 +141,7 @@ func TestPoolRoyalty_ServedPooledHit_FiresMintKeyedOnRequestID(t *testing.T) {
 	if h.Layer != "exact" {
 		t.Errorf("Layer = %q, want exact", h.Layer)
 	}
-	if want := exact.Key("openai", "gpt-4o", pooledPromptKey("what is 2+2")); h.EntryID != want {
+	if want := exact.Key("openai", "gpt-4o", cache.FingerprintedKey(pooledPromptKey("what is 2+2"), plainFP)); h.EntryID != want {
 		t.Errorf("EntryID = %q, want the pooled cache key %q", h.EntryID, want)
 	}
 	if h.Provider != "openai" || h.Model != "gpt-4o" {
@@ -174,7 +175,7 @@ func TestPoolRoyalty_FoundButNotServed_DoesNotMint(t *testing.T) {
 
 	// Seed a pooled entry whose payload cannot be replayed as SSE.
 	if err := exact.SetWithOwner(context.Background(), "openai", "gpt-4o",
-		pooledPromptKey("stream me"), "wsA", []byte("not-a-json-payload")); err != nil {
+		cache.FingerprintedKey(pooledPromptKey("stream me"), plainFP), "wsA", []byte("not-a-json-payload")); err != nil {
 		t.Fatal(err)
 	}
 

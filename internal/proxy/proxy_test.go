@@ -55,7 +55,7 @@ func TestProxy_OpenAIExactCacheHit_LLMNeverCalled(t *testing.T) {
 	p.openAIURL = upstream.URL
 
 	cached := []byte(`{"cached":"response"}`)
-	if err := exact.Set(context.Background(), "openai", "gpt-4", "hello", cached); err != nil {
+	if err := exact.Set(context.Background(), "openai", "gpt-4", cache.FingerprintedKey("hello", plainFP), cached); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestProxy_OpenAICacheMiss_ForwardsAndStores(t *testing.T) {
 		t.Fatalf("LLM called %d times, expected 1", llmHits)
 	}
 
-	stored, err := exact.Get(context.Background(), "openai", "gpt-4", "hello")
+	stored, err := exact.Get(context.Background(), "openai", "gpt-4", cache.FingerprintedKey("hello", plainFP))
 	if err != nil {
 		t.Fatalf("exact.Get after miss: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestProxy_AnthropicExactCacheHit_LLMNeverCalled(t *testing.T) {
 	p.anthropicURL = upstream.URL
 
 	cached := []byte(`{"cached":"anthropic"}`)
-	if err := exact.Set(context.Background(), "anthropic", "claude-3-opus-20240229", "hello", cached); err != nil {
+	if err := exact.Set(context.Background(), "anthropic", "claude-3-opus-20240229", cache.FingerprintedKey("hello", plainFP), cached); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
 
@@ -182,7 +182,7 @@ func TestProxy_AnthropicCacheMiss_ForwardsAndStores(t *testing.T) {
 		t.Errorf("anthropic-version = %q, want %q", sawVersion, "2023-06-01")
 	}
 
-	stored, err := exact.Get(context.Background(), "anthropic", "claude-3-opus-20240229", "hello")
+	stored, err := exact.Get(context.Background(), "anthropic", "claude-3-opus-20240229", cache.FingerprintedKey("hello", plainFP))
 	if err != nil {
 		t.Fatalf("exact.Get after miss: %v", err)
 	}

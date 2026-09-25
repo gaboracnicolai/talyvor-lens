@@ -94,7 +94,7 @@ func TestLearner_NodePath_HonoursLoggingPolicy(t *testing.T) {
 			rec := httptest.NewRecorder()
 			served := p.tryNodeRouting(rec, context.Background(),
 				"vllm", "node-model", "a prompt of a certain length here", "a prompt of a certain length here",
-				"ws-log", "", "", "feat", "sess", "node-req-learner", false, "", localrouter.RoutingStrategy(""))
+				"", "ws-log", "", "", "feat", "sess", "node-req-learner", false, "", localrouter.RoutingStrategy(""))
 			if !served {
 				t.Fatalf("tryNodeRouting returned false (status=%d body=%s)", rec.Code, rec.Body.String())
 			}
@@ -129,7 +129,7 @@ func TestLearner_LocalPath_HonoursLoggingPolicy(t *testing.T) {
 			rec := httptest.NewRecorder()
 			served := p.tryLocalRouting(rec, context.Background(),
 				"openai", "gpt-4", "hi", "hi",
-				"default", "", "", "feat", "sess", "local-req-learner", false, "", localrouter.RoutingStrategy(""))
+				"", "default", "", "", "feat", "sess", "local-req-learner", false, "", localrouter.RoutingStrategy(""))
 			if !served {
 				t.Fatalf("tryLocalRouting returned false (status=%d body=%s)", rec.Code, rec.Body.String())
 			}

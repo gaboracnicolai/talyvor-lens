@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
@@ -131,7 +132,7 @@ func TestServe_StreamTrueCacheHit_UsesSSEReplay(t *testing.T) {
 		"openai-key", "anthropic-key", "",
 	)
 	cached := []byte(`{"choices":[{"message":{"role":"assistant","content":"cached hello"}}]}`)
-	if err := exact.Set(context.Background(), "openai", "gpt-4", "hi", cached); err != nil {
+	if err := exact.Set(context.Background(), "openai", "gpt-4", cache.FingerprintedKey("hi", plainFP), cached); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
 

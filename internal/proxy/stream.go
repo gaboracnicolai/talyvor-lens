@@ -49,6 +49,7 @@ type streamSpend struct {
 	tare                        alerts.TareMeter // B6.4: the Tare record for this request; zero = not reduced
 	distillMethod               string           // B7.3: "convert" when this request was distilled, as on the buffered row
 	visionOCR                   visionSpend      // B7.3: the OCR sub-call's cost, owed its own vision_ocr row
+	reqFP                       string           // B15.1: the request fingerprint the cache write is keyed under
 }
 
 const (
@@ -430,7 +431,7 @@ func (s *StreamHandler) serve(
 		// Use the workspace-scoped prompt for the cache key so streamed
 		// responses respect tenant isolation just like buffered ones. The raw
 		// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
-		s.proxy.storeCaches(storeCtx, provider, model, cachePrompt, prompt, sc.wsID, cached)
+		s.proxy.storeCaches(storeCtx, provider, model, cachePrompt, prompt, sc.reqFP, sc.wsID, cached)
 	}
 	// W4.9 SHADOW POOL LOG — the streaming lane carries the SAME paid provider call as the buffered
 	// one, so leaving it out would make the measured pooled hit rate a statement about half the
