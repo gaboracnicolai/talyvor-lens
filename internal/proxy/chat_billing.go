@@ -130,3 +130,57 @@ func (p *Proxy) chargeChatUsage(ctx context.Context, workspaceID string, costUSD
 func formatLXC(ulxc int64) string {
 	return fmt.Sprintf("%d", ulxc/1_000_000)
 }
+
+// lxcMetaSpender is the prepaid debit that records the pool metadata and reports its cash-backed part.
+// *economy.DualTokenStore satisfies it.
+type lxcMetaSpender interface {
+	SpendLXCMeta(ctx context.Context, workspaceID string, lxcAmount int64, description string, metadata map[string]interface{}) (int64, error)
+}
+
+// chargeChatPooled charges a browser-chat POOLED serve exactly like an agent's (B9.3): the discounted
+// price (list × (1 − r)) from the plan allowance first, then prepaid LXC, with the pool figures on the
+// prepaid row. It returns the royalty basis in USD — the allowance-covered part (paid for by the plan
+// fee) plus the CASH-BACKED part of the prepaid debit, as the agent settle does — and whether this
+// was a chat request at all. The funding invariant is unchanged: nothing charged, nothing minted.
+func (p *Proxy) chargeChatPooled(ctx context.Context, price pooledPrice) (float64, bool) {
+	sessionID, ok := chatSession(ctx)
+	if !ok || p == nil {
+		return 0, false
+	}
+	workspaceID := auth.GetAuthContext(ctx).WorkspaceID
+	amount := price.ChargedULXC
+	if amount <= 0 || workspaceID == "" {
+		return 0, true
+	}
+	var covered int64
+	if p.allowance != nil {
+		c, inPeriod, err := p.allowance.Draw(ctx, workspaceID, amount, time.Now())
+		if err != nil {
+			slog.Warn("billing: allowance draw for a chat pooled serve failed (charged to prepaid)", slog.String("err", err.Error()))
+		} else if inPeriod {
+			covered = c
+		}
+	}
+	funded, charged := covered, covered
+	if rest := amount - covered; rest > 0 {
+		ms, ok := p.lxcSink.(lxcMetaSpender)
+		if !ok {
+			slog.Error("billing: chat pooled serve UNBILLED — no LXC sink wired", slog.String("workspace", workspaceID))
+		} else if cash, err := ms.SpendLXCMeta(ctx, workspaceID, rest, "chat: pooled answer", map[string]interface{}{
+			"served_model": price.modelForRow, "price_basis": price.PriceBasis,
+			"pool_list_ulxc": price.ListULXC, "pool_saved_ulxc": price.SavedULXC, "pool_discount_rate": price.Rate,
+		}); err != nil {
+			slog.Error("billing: chat pooled serve UNBILLED — prepaid debit failed",
+				slog.String("workspace", workspaceID), slog.Int64("ulxc", rest), slog.String("err", err.Error()))
+		} else {
+			funded += cash
+			charged += rest
+		}
+	}
+	if charged > 0 && p.sessionSpend != nil && sessionID != "" {
+		if err := p.sessionSpend.AddSpent(ctx, sessionID, charged); err != nil {
+			slog.Warn("billing: chat session spend not recorded", slog.String("err", err.Error()))
+		}
+	}
+	return float64(funded) * economy.LXCUSDValue / 1e6, true
+}

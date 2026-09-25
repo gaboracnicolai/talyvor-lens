@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/earnverify"
+	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/poolroyalty"
 )
@@ -107,14 +109,18 @@ func TestPoolB91_IdenticalPromptFromSecondWorkspace_ServedDiscountedAndRoyaltyPa
 		list, charged, saved, minted)
 }
 
-// The browser chat authenticates with a session key, not an agent key. Measured: the same pooled
-// serve reaches chat, but chat has no reservation to settle against, so the asker is charged
-// nothing and — because a royalty is funded only by a charge — the contributor is paid nothing.
-func TestPoolB91_ChatSessionKey_ServedFromPoolButNothingChargedOrMinted(t *testing.T) {
+// B9.3 — the same question from a second workspace through the BROWSER CHAT (a session key, no agent
+// reservation) is charged exactly like an agent-key pooled serve: list × (1 − 0.30), from prepaid here
+// (no plan), on a row carrying the pool figures — and that charge funds the contributor's held royalty
+// at the 0.5 share. (B9.1 measured this serve at 0 charged and 0 minted.)
+func TestPoolB93_ChatPooledServe_ChargedDiscountedAndRoyaltyPaid(t *testing.T) {
 	p, pool, calls := anthropicPoolProxy(t)
 	armProductionMinter(t, p, pool)
+	store := economy.NewDualTokenStore(nil, pool, nil)
+	p.SetLXCSpendSink(store, func() bool { return false })
+	p.SetLXCGate(store, func() bool { return false })
 
-	anthropicRequest(t, p, "wsPoolA")
+	anthropicRequest(t, p, "wsPoolA") // an agent key pays list price upstream; A owns the pooled entry
 
 	body := `{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"` + anthropicPooledPrompt + `"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/anthropic/v1/messages", strings.NewReader(body))
@@ -131,16 +137,41 @@ func TestPoolB91_ChatSessionKey_ServedFromPoolButNothingChargedOrMinted(t *testi
 		t.Fatalf("upstream called %d times, want 1 — chat was not served from the pool", got)
 	}
 
-	var charges, claims int
-	ctx := context.Background()
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM lxc_ledger WHERE workspace_id = 'wsPoolB' AND amount < 0`).Scan(&charges); err != nil {
+	// The asker's discounted charge row.
+	var charged int64
+	var desc string
+	var raw []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT -amount, description, COALESCE(metadata,'{}'::jsonb) FROM lxc_ledger WHERE workspace_id = 'wsPoolB' AND amount < 0`).
+		Scan(&charged, &desc, &raw); err != nil {
+		t.Fatalf("want exactly one charge row for the chat asker: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pool_royalty_mints`).Scan(&claims); err != nil {
+	list, _ := meta["pool_list_ulxc"].(float64)
+	saved, _ := meta["pool_saved_ulxc"].(float64)
+	if desc != "chat: pooled answer" || meta["pool_discount_rate"] != 0.3 || float64(charged)+saved != list || saved <= 0 {
+		t.Errorf("chat charge row = %d µLXC %q %v; want list × 0.70 with charged + saved = list at rate 0.3", charged, desc, meta)
+	}
+
+	// The contributor's held royalty row: half of what the chat asker paid.
+	var requester, contributor string
+	var minted int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT requester_workspace_id, contributor_workspace_id, minted_amount FROM pool_royalty_mints`).
+		Scan(&requester, &contributor, &minted); err != nil {
+		t.Fatalf("pool_royalty_mints: want exactly one claim: %v", err)
+	}
+	var held int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COALESCE(sum(amount),0) FROM lens_token_ledger WHERE workspace_id = 'wsPoolA' AND type = $1`, mining.TypePoolRoyaltyHeld).Scan(&held); err != nil {
 		t.Fatal(err)
 	}
-	if charges != 0 || claims != 0 {
-		t.Errorf("chat pooled serve: %d charge rows, %d royalty claims; measured 0 and 0 on 2026-09-25 — "+
-			"if this changed, update docs/pool-b91-measured.md", charges, claims)
+	if requester != "wsPoolB" || contributor != "wsPoolA" || minted != charged/2 || held != minted {
+		t.Errorf("royalty: requester %s, contributor %s, minted %d, held %d; want wsPoolB, wsPoolA, %d, %d",
+			requester, contributor, minted, held, charged/2, charged/2)
 	}
+	t.Logf("B9.3 chat pooled serve: list %.0f µLXC, chat asker charged %d, contributor held %d µLENS", list, charged, minted)
 }
