@@ -280,6 +280,15 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 		return
 	}
 
+	// B7.1 — ROUTE BY SESSION MODE FIRST. A subscription checkout carries no
+	// lxc_amount, so on the top-up path below it classified as amount_mismatch and
+	// every new subscriber landed on the admin list as "charged and NOT credited".
+	// Only `payment` (and a mode-less legacy payload) is a top-up.
+	if sess.Mode == stripe.CheckoutSessionModeSubscription {
+		s.handleSubscriptionCheckout(w, event, &sess)
+		return
+	}
+
 	// Delayed payment methods fire checkout.session.completed with
 	// payment_status != "paid" FIRST, then a SEPARATE
 	// async_payment_succeeded (different event id) when money settles. Credit ONLY
