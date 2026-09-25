@@ -54,6 +54,9 @@ type callerRecord struct {
 }
 
 var remainingCallers = map[string]callerRecord{
+	"cmd/pairverify/main.go": {2, "TWO, both in a measurement harness (B9.2): the price of one pair " +
+		"check and of one real answer. Nothing is booked, gated or paid; a zero from either is printed " +
+		"as 'the catalog prices <model> at $0 — the ratio below is meaningless' and no break-even is reported."},
 	"cmd/lens/main.go": {2, "TWO: the routing advisor's blended price (line ~1528) and the routing " +
 		"BRAIN's hard-floor cost basis (~1640). ⚠ THE BRAIN ONE DECIDES ROUTING, and the three " +
 		"consequences are driven in internal/routingbrain/unpriced_cost_floor_test.go: an unpriced " +

@@ -65,16 +65,12 @@ func run() error {
 	if key == "" {
 		return fmt.Errorf("no LENS_ANTHROPIC_API_KEY — nothing can be measured")
 	}
-	model := os.Getenv("LENS_PAIRVERIFY_MODEL")
-	if model == "" {
-		model = pairverify.DefaultModel
-	}
+	v := pairverify.NewAnthropicVerifier(key, os.Getenv("LENS_PAIRVERIFY_MODEL"))
+	model := v.Model
 	threshold := config.DefaultSemanticThreshold
 	if v, err := strconv.ParseFloat(os.Getenv("LENS_SEMANTIC_THRESHOLD"), 64); err == nil {
 		threshold = v
 	}
-	v := pairverify.NewAnthropicVerifier(key, model)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 
@@ -94,7 +90,6 @@ func run() error {
 	}
 	fmt.Println()
 
-	var all []result
 	dangerServed := 0
 	unmeasured := 0
 	for _, ln := range poolsafety.ByTraffic() {
@@ -109,8 +104,6 @@ func run() error {
 		ds, un := report(ln.Traffic, reph, dang, emb != nil)
 		dangerServed += ds
 		unmeasured += un
-		all = append(all, reph...)
-		all = append(all, dang...)
 	}
 
 	economics(ctx, key, model)

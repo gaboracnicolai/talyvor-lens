@@ -41,8 +41,8 @@ func TestAnthropicVerifier_SendsThePairAndReturnsUsage(t *testing.T) {
 	if got.Same || got.InTokens != 120 || got.OutTokens != 1 {
 		t.Errorf("verdict = %+v, want Same=false with 120 in / 1 out", got)
 	}
-	if sent["temperature"] != float64(0) || sent["model"] != DefaultModel {
-		t.Errorf("request temperature/model = %v/%v, want 0/%s", sent["temperature"], sent["model"], DefaultModel)
+	if sent["temperature"] != float64(0) || sent["model"] != defaultModel {
+		t.Errorf("request temperature/model = %v/%v, want 0/%s", sent["temperature"], sent["model"], defaultModel)
 	}
 	msg := sent["messages"].([]any)[0].(map[string]any)["content"].(string)
 	if !strings.Contains(msg, "How do I enable SSO?") || !strings.Contains(msg, "How do I disable SSO?") {

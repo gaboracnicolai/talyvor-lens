@@ -63,12 +63,12 @@ type AnthropicVerifier struct {
 	HTTP   *http.Client
 }
 
-// DefaultModel is the cheap model the measurement ran on.
-const DefaultModel = "claude-haiku-4-5"
+// defaultModel is the cheap model the measurement ran on.
+const defaultModel = "claude-haiku-4-5"
 
 func NewAnthropicVerifier(apiKey, model string) *AnthropicVerifier {
 	if model == "" {
-		model = DefaultModel
+		model = defaultModel
 	}
 	return &AnthropicVerifier{APIKey: apiKey, Model: model, URL: "https://api.anthropic.com/v1/messages",
 		HTTP: &http.Client{Timeout: 30 * time.Second}}
