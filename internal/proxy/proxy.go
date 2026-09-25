@@ -2671,6 +2671,7 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 		}
 		upstreamURL = eu
 	}
+	body = adaptReasoningParams(model, body)
 	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, upstreamURL, cfg.ApplyAuth, body, auth.StripCredentialHeaders(r.Header))
 	return resp, respBody, attempts, err
 }

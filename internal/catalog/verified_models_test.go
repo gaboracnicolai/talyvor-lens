@@ -43,6 +43,13 @@ var verifiedAnthropicModels = map[string]struct{}{
 	// 404'd a live request). If Mythos 5 is dispatchable, the fallback prices it and the detection job
 	// added in this PR alerts on it — that is the safe order: alert first, then price.
 
+	// B15.4 — NOT from a /v1/models capture either (still no key here). Evidence: both are the CURRENT
+	// lineup on https://platform.claude.com/docs/en/about-claude/models/overview (fetched 2026-09-26),
+	// listed with these exact "Claude API ID"s, NOT marked limited availability, and priced on the
+	// pricing page. That is the difference from claude-mythos-5 below, which stays out.
+	"claude-opus-5-5":  {},
+	"claude-fable-5-1": {},
+
 	// returned undated by /v1/models
 	"claude-sonnet-5":   {},
 	"claude-fable-5":    {},
