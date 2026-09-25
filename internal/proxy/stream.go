@@ -118,6 +118,10 @@ type streamOps interface {
 	// processLine inspects an SSE line, appends any extracted content to
 	// the accumulator, and reports whether the stream should terminate.
 	processLine(line []byte, accumulated *strings.Builder) (done bool)
+	// endsAnswer reports whether line is the provider's end-of-answer event (OpenAI's [DONE],
+	// Anthropic's message_stop). A stream whose connection closes before that line was cut off,
+	// and its text is never cached (B15.2).
+	endsAnswer(line []byte) bool
 	// extractUsage inspects one SSE line for provider-reported usage,
 	// updating u in place. No-op for lines that carry no usage.
 	extractUsage(line []byte, u *streamUsage)
@@ -193,6 +197,10 @@ func (openAIStreamOps) extractUsage(line []byte, u *streamUsage) {
 	u.cachedInputTokens = cached
 	u.cacheWriteInputTokens = write
 	u.present = true
+}
+
+func (openAIStreamOps) endsAnswer(line []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))), []byte(openAIDoneMarker))
 }
 
 func (openAIStreamOps) processLine(line []byte, acc *strings.Builder) bool {
@@ -271,6 +279,16 @@ func (anthropicStreamOps) extractUsage(line []byte, u *streamUsage) {
 		u.cacheWriteInputTokens = un.CacheCreationInputTokens
 		u.present = true
 	}
+}
+
+func (anthropicStreamOps) endsAnswer(line []byte) bool {
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return false
+	}
+	var ev struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))), &ev) == nil && ev.Type == "message_stop"
 }
 
 func (anthropicStreamOps) processLine(line []byte, acc *strings.Builder) bool {
@@ -381,6 +399,7 @@ func (s *StreamHandler) serve(
 
 	var accumulated strings.Builder
 	var usage streamUsage
+	ended := false // the provider sent its end-of-answer event
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), sseScannerMax)
 
@@ -403,6 +422,9 @@ func (s *StreamHandler) serve(
 		}
 
 		ops.extractUsage(line, &usage)
+		if ops.endsAnswer(line) {
+			ended = true
+		}
 		if ops.processLine(line, &accumulated) {
 			break
 		}
@@ -418,7 +440,17 @@ func (s *StreamHandler) serve(
 	// instead of stranding the hold for the sweeper to refund (which made streaming requests free).
 	storeCtx := context.WithoutCancel(r.Context())
 	cached := ops.synthesizeCachePayload(accumulated.String())
-	shouldCache := !piiDetected
+	// B15.2: a streamed answer is stored only if it ENDED (a stream cut off before the provider's
+	// end event is a partial answer; a cancelled one already returned above) and, where the
+	// workspace's output guardrails are on, only if the finished text passes them. They cannot run
+	// while a stream is in flight, so this client already has the text — but an answer that fails
+	// them must never be served to the next asker, in this workspace or through the pool.
+	shouldCache := !piiDetected && ended
+	if shouldCache && s.proxy.guardrails != nil && s.proxy.guardrails.OutputEnabled() {
+		if ogr := s.proxy.guardrails.CheckOutput(storeCtx, sc.wsID, accumulated.String()); !ogr.Passed || len(ogr.Violations) > 0 {
+			shouldCache = false
+		}
+	}
 	if shouldCache && s.proxy.scorer != nil {
 		// Score against the accumulated text content, not the synthesized
 		// JSON, so the heuristics see what the user would see.

@@ -73,6 +73,10 @@ const (
 	defaultWorkspaceID          = "default"
 )
 
+// CacheBypassHeader, set to "bypass", makes a request skip every cache read (B15.2). The response
+// echoes it as "bypassed".
+const CacheBypassHeader = "X-Talyvor-Cache"
+
 // alertSink is the subset of *alerts.AlertManager that proxy.serve()
 // touches. Defined locally so tests can drop in a counter mock without
 // pulling in the full pgxpool / NATS stack the real manager needs.
@@ -1084,7 +1088,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// under the same settings — in this workspace and, through the pool, in any other.
 	reqFP := cache.RequestFingerprint(body)
 
-	if !piiDetected {
+	// B15.2: X-Talyvor-Cache: bypass asks for a fresh answer — no cache layer is read, own or
+	// pooled, on either path. The answer it gets is stored as usual, so the next asker is served the
+	// newest one. The chat's Regenerate sends it.
+	bypassCache := strings.EqualFold(r.Header.Get(CacheBypassHeader), "bypass")
+	if bypassCache {
+		w.Header().Set(CacheBypassHeader, "bypassed")
+	}
+
+	if !piiDetected && !bypassCache {
 		var cached []byte
 		var layer string
 		// pooledHit is non-nil ONLY when the response came from the shared
