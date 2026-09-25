@@ -24,3 +24,11 @@
 	# network. lens never needs a certificate, so its container stays read_only.
 	reverse_proxy lens:8080
 }
+
+talyvor.com {
+	redir https://app.talyvor.com/marketing 301
+}
+
+app.talyvor.com {
+	reverse_proxy host.docker.internal:8787
+}
