@@ -1614,6 +1614,11 @@ func run() error {
 	// LXC gating (Stage 2.4/2.5) — pre-serve block; inert unless LXCGatingEnabled
 	// AND LXCShadowSpendEnabled are both on. Default off.
 	p.SetLXCGate(dualToken, func() bool { return cfg.LXCGatingEnabled })
+	// B9.8 — every browser-chat request is charged (allowance, then prepaid) and one chat session may be
+	// charged at most what an agent key may by default. Needs the session-key store, so only when enabled.
+	if sessionKeyStore != nil {
+		p.SetSessionSpend(sessionKeyStore, economy.DefaultAgentCeilingLXC)
+	}
 	// F4-capstone step C.1 — the agent allocator: pre-serve estimate-debit against the per-scoped-key LXC
 	// sub-budget (SpendLXCForAgent), gated on LXCAgentAllocationEnabled. Non-agent traffic (empty APIKeyID)
 	// is unaffected. Mints the server-derived debit-key salt on wire.

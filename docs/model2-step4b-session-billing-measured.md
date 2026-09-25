@@ -1,5 +1,12 @@
 # W4.6.1 step 4b — measured before it is built: a session-key request bills nothing
 
+> **Superseded by B9.8 (`internal/proxy/chat_billing.go`).** Mechanism (2) plus the per-session
+> bound of (3) is now built: every session-key request is charged (the plan allowance first, then
+> prepaid LXC), admitted only when allowance + prepaid covers its conservative estimate, and bounded
+> per session (`session_keys.spent_ulxc`, ceiling `economy.DefaultAgentCeilingLXC`). The measurement
+> below describes the code before that change; `session_key_billing_realpg_test.go` now asserts what
+> a chat request books.
+
 Step 4b is "the per-session spend bound". Step 4's own handover recorded why it was deferred:
 
 > **PER-SESSION SPEND BOUND: NOT BUILT, AND THE COLUMN IS ABSENT RATHER THAN PRESENT-AND-UNREAD** —

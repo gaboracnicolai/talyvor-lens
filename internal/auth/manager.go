@@ -158,6 +158,9 @@ type AuthContext struct {
 	// methods. Consumed by the F4 allocator (C.1) to key the per-agent LXC sub-budget on the scoped key —
 	// so an EMPTY APIKeyID (JWT/admin) structurally cannot enter the agent-allocation path.
 	APIKeyID string `json:"api_key_id,omitempty"`
+	// SessionKeyID is the browser-chat session key's ID; EMPTY for every other method. It keys the
+	// per-session spend bound (B9.8) — never the agent allocator, which reads APIKeyID only.
+	SessionKeyID string `json:"session_key_id,omitempty"`
 }
 
 // HasScope reports whether the resolved identity carries `scope`.
@@ -384,12 +387,13 @@ func (m *Manager) Authenticate(r *http.Request) (*AuthContext, error) {
 			return nil, ErrInvalidAuth
 		}
 		return &AuthContext{
-			WorkspaceID: sk.WorkspaceID,
-			UserID:      sk.UserID,
-			Scopes:      []string{ScopeProxy},
-			AuthMethod:  MethodSessionKey,
-			IsAdmin:     false,
-			ExpiresAt:   sk.ExpiresAt,
+			WorkspaceID:  sk.WorkspaceID,
+			UserID:       sk.UserID,
+			Scopes:       []string{ScopeProxy},
+			AuthMethod:   MethodSessionKey,
+			IsAdmin:      false,
+			ExpiresAt:    sk.ExpiresAt,
+			SessionKeyID: sk.ID,
 		}, nil
 	}
 
