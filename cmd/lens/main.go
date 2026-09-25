@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -1599,14 +1600,20 @@ func run() error {
 	if cfg.BillingSubscriptionPriceID != "" {
 		billingSvc = billingSvc.WithSubscriptions(liveStripe, cfg.BillingSubscriptionPriceID)
 	}
+	// B13.1 — the named plans (Plus, Pro, Max). Each period's included usage is computed from the plan's
+	// price at grant time; LENS_SUBSCRIPTION_ALLOWANCE_ULXC is only the fallback for an unknown fee.
+	if len(cfg.BillingSubscriptionPlans) > 0 {
+		billingSvc = billingSvc.WithPlans(liveStripe, cfg.BillingSubscriptionPlans)
+	}
+	sellsSubscriptions := cfg.BillingSubscriptionPriceID != "" || len(cfg.BillingSubscriptionPlans) > 0
 	// B1.6 — D, the allowance each paid period grants. Zero (the default) grants
 	// nothing, and then there is nothing for a served request to draw down either.
 	billingSvc = billingSvc.WithAllowance(cfg.SubscriptionAllowanceULXC)
-	if cfg.SubscriptionAllowanceULXC > 0 {
+	if cfg.SubscriptionAllowanceULXC > 0 || (cfg.BillingEnabled && sellsSubscriptions) {
 		p.SetSubscriptionAllowance(billingSvc)
 	}
 	bill := billReg{on: cfg.BillingEnabled}
-	subs := billReg{on: cfg.BillingEnabled && cfg.BillingSubscriptionPriceID != ""}
+	subs := billReg{on: cfg.BillingEnabled && sellsSubscriptions}
 	// Stage 2.4/2.5 shadow LXC spend — observational, post-serve, flag-gated
 	// (LENS_LXC_SHADOW_SPEND_ENABLED, default off). The proxy debits LXC
 	// alongside the cost_usd write; void/non-gating, cannot affect serving.
@@ -3101,12 +3108,24 @@ func run() error {
 		// bypasses. Registered only when a Stripe Price is configured.
 		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscribe", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
-			url, err := billingSvc.CreateSubscriptionCheckout(req.Context(), wsID)
+			// B13.1 — {"plan":"plus"|"pro"|"max"}; an empty body is the single configured price.
+			var body struct {
+				Plan string `json:"plan"`
+			}
+			if req.ContentLength != 0 {
+				if err := json.NewDecoder(io.LimitReader(req.Body, 1<<10)).Decode(&body); err != nil {
+					writeJSONErr(w, http.StatusBadRequest, "body must be {\"plan\": \"<name>\"}")
+					return
+				}
+			}
+			url, err := billingSvc.CreatePlanCheckout(req.Context(), wsID, body.Plan)
 			if err != nil {
 				status := http.StatusInternalServerError
 				if errors.Is(err, billing.ErrNoSubscriptionPrice) {
 					// A capability this deployment does not have — not a fault.
 					status = http.StatusNotImplemented
+				} else if errors.Is(err, billing.ErrUnknownPlan) {
+					status = http.StatusBadRequest
 				}
 				writeJSONErr(w, status, err.Error())
 				return

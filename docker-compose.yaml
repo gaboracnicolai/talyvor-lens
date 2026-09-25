@@ -230,6 +230,8 @@ services:
       - LENS_BILLING_CANCEL_URL=${LENS_BILLING_CANCEL_URL:-}
       # Model 2 subscriptions. Empty ⇒ /billing/subscribe and its siblings are not registered.
       - LENS_BILLING_SUBSCRIPTION_PRICE_ID=${LENS_BILLING_SUBSCRIPTION_PRICE_ID:-}
+      # B13.1 — the named plans (plus=price_…,pro=price_…,max=price_…). Empty ⇒ only the single price above.
+      - LENS_BILLING_SUBSCRIPTION_PLANS=${LENS_BILLING_SUBSCRIPTION_PLANS:-}
       # D, the allowance each paid period grants, in µLXC. Empty/0 ⇒ subscribers get no allowance.
       - LENS_SUBSCRIPTION_ALLOWANCE_ULXC=${LENS_SUBSCRIPTION_ALLOWANCE_ULXC:-}
       # The browser chat's credential (B10.7). ON by default (Nicolai: every capability on): without it

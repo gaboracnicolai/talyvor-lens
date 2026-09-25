@@ -67,7 +67,22 @@ var terminalStatuses = map[string]bool{"canceled": true, "incomplete_expired": t
 // pays should be told so, not sent to a checkout that will bill them again and then
 // collide on the webhook — where the money has already moved.
 func (s *Service) CreateSubscriptionCheckout(ctx context.Context, workspaceID string) (string, error) {
-	if s.subPrice == "" || s.subStripe == nil {
+	return s.CreatePlanCheckout(ctx, workspaceID, "")
+}
+
+// ErrUnknownPlan is a checkout for a plan this deployment does not sell.
+var ErrUnknownPlan = errors.New("billing: unknown subscription plan")
+
+// CreatePlanCheckout is CreateSubscriptionCheckout for a named plan (B13.1). plan "" is the single
+// configured price, when there is one.
+func (s *Service) CreatePlanCheckout(ctx context.Context, workspaceID, plan string) (string, error) {
+	price := s.subPrice
+	if plan != "" {
+		if price = s.subPlans[plan]; price == "" {
+			return "", fmt.Errorf("%w %q", ErrUnknownPlan, plan)
+		}
+	}
+	if price == "" || s.subStripe == nil {
 		return "", ErrNoSubscriptionPrice
 	}
 	live, err := s.liveSubscriptionID(ctx, workspaceID)
@@ -84,7 +99,7 @@ func (s *Service) CreateSubscriptionCheckout(ctx context.Context, workspaceID st
 	url, _, err := s.subStripe.CreateSubscriptionCheckoutSession(ctx, SubscriptionParams{
 		WorkspaceID: workspaceID,
 		CustomerID:  customerID,
-		PriceID:     s.subPrice,
+		PriceID:     price,
 	})
 	if err != nil {
 		return "", fmt.Errorf("billing: create subscription checkout: %w", err)

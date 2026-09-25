@@ -54,6 +54,9 @@ type callerRecord struct {
 }
 
 var remainingCallers = map[string]callerRecord{
+	"internal/billing/included_usage.go": {1, "ONE: a pooled chat serve's metered value when measuring h " +
+		"(B13.1). A zero for an unpriced model counts that serve as worth nothing, which can only LOWER the " +
+		"pooled share h and so the plan's included usage D — the conservative direction; nothing is booked or paid."},
 	"cmd/pairverify/main.go": {2, "TWO, both in a measurement harness (B9.2): the price of one pair " +
 		"check and of one real answer. Nothing is booked, gated or paid; a zero from either is printed " +
 		"as 'the catalog prices <model> at $0 — the ratio below is meaningless' and no break-even is reported."},
