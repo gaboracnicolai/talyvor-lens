@@ -14,6 +14,9 @@
 //
 //	sim-only    — similarity >= t. What a threshold-tuning conversation implicitly assumes.
 //	production  — similarity >= t AND discriminator.Match(A, B). What the SQL does.
+//	as-written  — production, with A's discriminators computed as the serve path STORES them:
+//	              over cache.PooledPromptKey(A), the marker-prefixed key material (B9.1). A pair
+//	              counts if either side, stored first, would serve the other.
 //
 // The gap between those two columns is the finding. The entity gate is threshold-independent, so
 // the production column has a CEILING that no threshold can raise: the fraction of pairs whose
@@ -30,6 +33,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/discriminator"
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/poolsafety"
@@ -52,8 +56,11 @@ type scored struct {
 	name     string
 	sim      float64
 	entityOK bool
-	canonA   string
-	canonB   string
+	// writtenOK is entityOK as the pooled row is actually written: storeCaches hands SetPooled
+	// the marker-prefixed key, so the stored discriminators are Canon(PooledPromptKey(stored)).
+	writtenOK bool
+	canonA    string
+	canonB    string
 }
 
 func main() {
@@ -117,8 +124,11 @@ func score(ctx context.Context, emb poolsafety.Embedder, pairs []poolsafety.Reph
 			name:     p.Pair.Name,
 			sim:      p.Similarity,
 			entityOK: discriminator.Match(p.Pair.A, p.Pair.B),
-			canonA:   string(discriminator.Canon(p.Pair.A)),
-			canonB:   string(discriminator.Canon(p.Pair.B)),
+			writtenOK: discriminator.Match(p.Pair.A, p.Pair.B) &&
+				(discriminator.Canon(cache.PooledPromptKey(p.Pair.A)) == discriminator.Canon(p.Pair.B) ||
+					discriminator.Canon(cache.PooledPromptKey(p.Pair.B)) == discriminator.Canon(p.Pair.A)),
+			canonA: string(discriminator.Canon(p.Pair.A)),
+			canonB: string(discriminator.Canon(p.Pair.B)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].sim > out[j].sim })
@@ -129,14 +139,16 @@ func report(lane string, reph, dang []scored) {
 	fmt.Printf("═══ %s ═══  %d rephrase pairs (should serve) · %d danger pairs (must not)\n",
 		lane, len(reph), len(dang))
 
-	fmt.Printf("\n  %-7s │ %-21s │ %-21s\n", "", "HIT RATE (rephrase)", "FALSE-SERVE (danger)")
-	fmt.Printf("  %-7s │ %-10s %-10s │ %-10s %-10s\n", "thresh", "sim-only", "production", "sim-only", "production")
-	fmt.Printf("  ────────┼──────────────────────┼──────────────────────\n")
+	fmt.Printf("\n  %-7s │ %-38s │ %-38s\n", "", "HIT RATE (rephrase)", "FALSE-SERVE (danger)")
+	fmt.Printf("  %-7s │ %-12s %-12s %-12s │ %-12s %-12s %-12s\n", "thresh",
+		"sim-only", "production", "as-written", "sim-only", "production", "as-written")
+	fmt.Printf("  ────────┼───────────────────────────────────────┼───────────────────────────────────────\n")
 	for _, t := range thresholds {
-		hs, hp := count(reph, t)
-		ds, dp := count(dang, t)
-		fmt.Printf("  %-7.2f │ %-10s %-10s │ %-10s %-10s\n", t,
-			frac(hs, len(reph)), frac(hp, len(reph)), frac(ds, len(dang)), frac(dp, len(dang)))
+		hs, hp, hw := count(reph, t)
+		ds, dp, dw := count(dang, t)
+		fmt.Printf("  %-7.2f │ %-12s %-12s %-12s │ %-12s %-12s %-12s\n", t,
+			frac(hs, len(reph)), frac(hp, len(reph)), frac(hw, len(reph)),
+			frac(ds, len(dang)), frac(dp, len(dang)), frac(dw, len(dang)))
 	}
 
 	// The threshold-independent bound. Printed separately because it is the number that decides
@@ -190,12 +202,15 @@ func report(lane string, reph, dang []scored) {
 	fmt.Println()
 }
 
-func count(ss []scored, t float64) (simOnly, production int) {
+func count(ss []scored, t float64) (simOnly, production, asWritten int) {
 	for _, s := range ss {
 		if s.sim >= t {
 			simOnly++
 			if s.entityOK {
 				production++
+			}
+			if s.writtenOK {
+				asWritten++
 			}
 		}
 	}

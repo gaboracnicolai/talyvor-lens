@@ -47,7 +47,7 @@ func TestCount(t *testing.T) {
 		{0.92, 4, 3},
 		{0.70, 7, 4},
 	} {
-		gotSim, gotProd := count(fixture(), tc.thresh)
+		gotSim, gotProd, _ := count(fixture(), tc.thresh)
 		if gotSim != tc.wantSim || gotProd != tc.wantProd {
 			t.Errorf("count(t=%.2f) = (sim %d, prod %d), want (sim %d, prod %d)",
 				tc.thresh, gotSim, gotProd, tc.wantSim, tc.wantProd)
@@ -61,7 +61,7 @@ func TestCount(t *testing.T) {
 // every table in the report reads backwards.
 func TestCountProductionNeverExceedsSimOnly(t *testing.T) {
 	for _, th := range []float64{0.99, 0.98, 0.95, 0.92, 0.88, 0.5, 0.0} {
-		sim, prod := count(fixture(), th)
+		sim, prod, _ := count(fixture(), th)
 		if prod > sim {
 			t.Errorf("at t=%.2f production %d exceeds sim-only %d — the columns are swapped", th, prod, sim)
 		}
