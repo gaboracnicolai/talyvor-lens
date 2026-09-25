@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/metrics"
 )
@@ -181,8 +182,20 @@ func providerForModel(model string) string {
 
 const insertTokenEventSQL = `INSERT INTO token_events
   (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method,
-   tare_kind, tare_tokens_in, tare_tokens_out, tare_delta_cost_usd, tare_work_item_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`
+   tare_kind, tare_tokens_in, tare_tokens_out, tare_delta_cost_usd, tare_work_item_id, auth_method)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`
+
+// authMethodOf is the credential kind that made this request, recorded on every token_events row
+// (B9.3, migration 0129) so a serve is never again of unknown origin. ” when no credential reached ctx.
+func authMethodOf(ctx context.Context) string {
+	if a := auth.GetAuthContext(ctx); a != nil {
+		return a.AuthMethod
+	}
+	if auth.GetAPIKey(ctx) != nil {
+		return auth.MethodWorkspaceKey
+	}
+	return ""
+}
 
 // RecordSpend takes a `prompt` (or already-redacted equivalent) so the
 // cache warmer can later JOIN prompt_embeddings against token_events to
@@ -244,7 +257,7 @@ func (a *AlertManager) RecordCacheServe(ctx context.Context, workspaceID, team, 
 		modality = "text"
 	}
 	if _, err := a.pool.Exec(ctx, insertCacheServeSQL,
-		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, sessionID, requestID, modality, serveSource,
+		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, sessionID, requestID, modality, serveSource, authMethodOf(ctx),
 	); err != nil {
 		return fmt.Errorf("alerts: insert cache-serve token_event: %w", err)
 	}
@@ -260,8 +273,8 @@ func (a *AlertManager) RecordCacheServe(ctx context.Context, workspaceID, team, 
 // TRUE (length-derived tokens), distill_method = ” (a cache serve distills nothing). Column
 // order mirrors insertTokenEventSQL with serve_source appended.
 const insertCacheServeSQL = `INSERT INTO token_events
-  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, TRUE, '', $12)`
+  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source, auth_method)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, TRUE, '', $12, $13)`
 
 // RecordNodeServe writes the token_events row for a request served by a REGISTERED INFERENCE NODE —
 // so it COUNTS in the cache hit-rate denominator as a MISS (no cache produced the bytes), closing the
@@ -280,7 +293,7 @@ func (a *AlertManager) RecordNodeServe(ctx context.Context, workspaceID, team, s
 		modality = "text"
 	}
 	if _, err := a.pool.Exec(ctx, insertCacheServeSQL,
-		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, sessionID, requestID, modality, "node",
+		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, sessionID, requestID, modality, "node", authMethodOf(ctx),
 	); err != nil {
 		return fmt.Errorf("alerts: insert node-serve token_event: %w", err)
 	}
@@ -296,7 +309,7 @@ func (a *AlertManager) recordSpend(ctx context.Context, workspaceID, team, sprin
 
 	if _, err := a.pool.Exec(ctx, insertTokenEventSQL,
 		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, cost, prompt, sessionID, requestID, modality, estimated, distillMethod,
-		tare.Kind, tare.TokensIn, tare.TokensOut, tare.deltaCostUSD(model), tare.WorkItemID,
+		tare.Kind, tare.TokensIn, tare.TokensOut, tare.deltaCostUSD(model), tare.WorkItemID, authMethodOf(ctx),
 	); err != nil {
 		return fmt.Errorf("alerts: insert token_event: %w", err)
 	}

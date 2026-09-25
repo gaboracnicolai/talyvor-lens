@@ -424,40 +424,48 @@ func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID strin
 // proxy bills against on each AI call. Fails with ErrInsufficientLXC
 // when the balance can't cover the spend.
 func (s *DualTokenStore) SpendLXC(ctx context.Context, workspaceID string, lxcAmount int64, description string) error {
+	_, err := s.SpendLXCMeta(ctx, workspaceID, lxcAmount, description, nil)
+	return err
+}
+
+// SpendLXCMeta is SpendLXC with metadata on the ledger row, returning the CASH-BACKED part of the spend —
+// the only part that may fund a royalty (B9.3: a browser-chat pooled serve, like an agent's settle).
+func (s *DualTokenStore) SpendLXCMeta(ctx context.Context, workspaceID string, lxcAmount int64, description string, metadata map[string]interface{}) (cashBacked int64, err error) {
 	if lxcAmount <= 0 {
-		return errors.New("economy: spend amount must be positive")
+		return 0, errors.New("economy: spend amount must be positive")
 	}
 	if s.pool == nil {
-		return nil
+		return 0, nil
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("economy: begin spend: %w", err)
+		return 0, fmt.Errorf("economy: begin spend: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	bal, minted, spent, err := readLXCBalance(ctx, tx, workspaceID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if bal < lxcAmount {
-		return ErrInsufficientLXC
+		return 0, ErrInsufficientLXC
 	}
 	newBal := bal - lxcAmount // exact integer µLXC
 	if err := insertLXCLedger(ctx, tx, workspaceID, -lxcAmount, newBal,
-		LXCTypeSpend, description, nil); err != nil {
-		return err
+		LXCTypeSpend, description, metadata); err != nil {
+		return 0, err
 	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, spent+lxcAmount); err != nil {
-		return err
+		return 0, err
 	}
 	// A direct spend consumes backing exactly as a settled reservation does. Without this the
 	// invariant cash_backed <= balance breaks and a LATER settle mints against backing this spend
 	// already used. `bal` is the pre-spend balance and carries no hold on this path.
-	if _, err := consumeCashBacked(ctx, tx, workspaceID, bal, lxcAmount); err != nil {
-		return err
+	fromCash, err := consumeCashBacked(ctx, tx, workspaceID, bal, lxcAmount)
+	if err != nil {
+		return 0, err
 	}
-	return tx.Commit(ctx)
+	return fromCash, tx.Commit(ctx)
 }
 
 // CreditLXCTx credits LXC WITHOUT spending LENS — the fiat-purchase path (U18b):

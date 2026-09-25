@@ -1,5 +1,12 @@
 # Cross-tenant pooling as it runs in production — measured 2026-09-25 (B9.1)
 
+> **Since measured:**
+> - B9.8 (#544) charges every browser-chat request.
+> - B9.3 charges a chat **pooled** serve like an agent-key one: list × 0.70 from the allowance or prepaid, with the contributor's held royalty at half the charge. Tested in `TestPoolB93_ChatPooledServe_ChargedDiscountedAndRoyaltyPaid`.
+> - Every `token_events` row now records its `auth_method`.
+>
+> The chat rows below describe the code as it was on 2026-09-25.
+
 Re-run everything below with `scripts/measure-pool.sh <ssh-target>`. It only reads production: a
 read-only Postgres transaction, the running container's environment, and a one-off container
 that scores the corpora and never touches the database. No threshold or gate was changed.

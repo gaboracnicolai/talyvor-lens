@@ -3272,6 +3272,10 @@ func (p *Proxy) settlePooledServe(ctx context.Context, price pooledPrice) float6
 		p.releaseReservation(ctx, "own cache hit")
 		return 0
 	}
+	// B9.3 — the browser chat has no reservation; its pooled serve is charged here instead.
+	if funded, chat := p.chargeChatPooled(ctx, price); chat {
+		return funded
+	}
 	chargedUSD := float64(price.ChargedULXC) * economy.LXCUSDValue / 1e6
 	return p.settleReservationPooled(ctx, chargedUSD, price)
 }
