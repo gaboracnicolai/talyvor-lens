@@ -9,6 +9,7 @@
 #   2. production counts, in a read-only Postgres transaction (default_transaction_read_only=on);
 #   3. the committed poolsafety corpora scored by cmd/hitrate with production's embedding key and
 #      model, in a one-off container that inherits the lens service's environment and touches no DB.
+# With PAIRVERIFY=1, also the B9.2 pair verifier (docs/pool-b92-measured.md).
 # Then, if LENS_TEST_DATABASE_URL is set locally, the end-to-end exact-lane tests (real Postgres).
 #
 # Nothing here writes to production. `lens poolcheck` is deliberately NOT run: it rewrites the
@@ -56,6 +57,17 @@ rm -f "$bin"
 model="$(remote 'docker compose exec -T lens sh -c "echo \${LENS_EMBEDDING_MODEL:-text-embedding-3-small}"')"
 remote "docker compose run --rm --no-deps -T -e LENS_EMBEDDING_MODEL=$model \
   -v /tmp/hitrate-measure-pool:/hitrate:ro --entrypoint /hitrate lens; rm -f /tmp/hitrate-measure-pool"
+
+if [ "${PAIRVERIFY:-}" = 1 ]; then
+  echo
+  echo "═══ 3b. the B9.2 pair verifier over the same corpora (cmd/pairverify, ~460 small-model calls) ═══"
+  bin="$(mktemp)"
+  (cd "$here" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$bin" ./cmd/pairverify)
+  scp -q "$bin" "$target:/tmp/pairverify-measure-pool"
+  rm -f "$bin"
+  remote "docker compose run --rm --no-deps -T -e LENS_EMBEDDING_MODEL=$model \
+    -v /tmp/pairverify-measure-pool:/pairverify:ro --entrypoint /pairverify lens; rm -f /tmp/pairverify-measure-pool"
+fi
 
 if [ -n "${LENS_TEST_DATABASE_URL:-}" ]; then
   echo
