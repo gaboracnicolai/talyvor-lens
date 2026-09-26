@@ -208,7 +208,8 @@ services:
       # in, and reports nothing: the royalty test simply shows no mint, with no way to
       # tell "not implemented" from "not switched on".
       - LENS_CACHE_POOLABLE_ENABLED=${LENS_CACHE_POOLABLE_ENABLED:-}
-      - LENS_DISTILL_POOLABLE_ENABLED=${LENS_DISTILL_POOLABLE_ENABLED:-}
+      # ON by default (B11.4): a shared conversion is reused only for a byte-identical document (distill.ContentHash).
+      - LENS_DISTILL_POOLABLE_ENABLED=${LENS_DISTILL_POOLABLE_ENABLED:-true}
       - LENS_ECONOMY_ENABLED=${LENS_ECONOMY_ENABLED:-}
       - LENS_POOL_ROYALTY_MINTING_ENABLED=${LENS_POOL_ROYALTY_MINTING_ENABLED:-}
       # Shadow mode for the six unproven mints: they compute what they WOULD pay, record it to

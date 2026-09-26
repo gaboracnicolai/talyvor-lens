@@ -2290,6 +2290,10 @@ func run() error {
 		}
 		authed.Post("/v1/admin/distill/preview", distillPreview.ServeHTTP)
 
+		// B11.4 — the Try-it previews, workspace-scoped: Tare on a paste, conversion on an upload. No model
+		// call, no charge, no token_events row.
+		mountPreviewRoutes(authed, &distill.ProcessIsolator{WorkerBin: cfg.DistillWorkerBin})
+
 		// ADMIN-ONLY distill attribution read (S1 read-surface commitment).
 		// requireAdmin-gated: content_hash + counterparty workspace ids are
 		// exposed here and must never be tenant-reachable. Default returns raw
