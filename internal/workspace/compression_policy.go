@@ -89,7 +89,7 @@ const (
 	// CompressionOptIn rewrites ONLY when the request also carries
 	// X-Talyvor-Compress: true (per-request opt-in).
 	CompressionOptIn CompressionPolicy = "opt_in"
-	// CompressionAlways rewrites every non-streaming request (no header needed).
+	// CompressionAlways rewrites every request, streamed or not (no header needed).
 	CompressionAlways CompressionPolicy = "always"
 )
 

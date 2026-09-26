@@ -76,28 +76,22 @@ type compressionObservation struct {
 //
 // ⚠⚠ AND THE WORD "EXACTLY" USED TO STAND WHERE THE COLON NOW DOES, WHICH WAS
 // FALSE IN THE DIRECTION THAT FLATTERS. The three exclusions above all happen
-// BELOW the gate — the request was rewritten, then not recorded. TWO MORE HAPPEN
-// ABOVE IT, and they are invisible from this file because the gate is never
-// consulted at all:
+// BELOW the gate — the request was rewritten, then not recorded. ONE MORE HAPPENS
+// ABOVE IT, and it is invisible from this file because the gate is never
+// consulted at all (streaming was the second until B15.3: a streamed request now
+// passes the gate, is rewritten, and is measured from the stream's own spend basis):
 //
-//   - STREAMING. proxy.go#serve's streaming branch returns before the gate
-//     exists, so `always` rewrites no streamed request and none is measured.
-//     This is the load-bearing one: streaming is the shape coding agents use, and
-//     poolsafety.Corpus() — this repo's own model of agent traffic — is the
-//     corpus the rewriter was measured to modify 8 of 8 times. The traffic the
-//     feature was justified on is the traffic it does not run on.
 //   - CACHE HITS. The exact/semantic hit branch also returns above the gate. A
 //     hit is a 200, is not output-blocked, is logged and is un-shed, so it is
 //     excluded by none of the three conditions named above; it simply never
 //     arrives. Hits are also the cheapest requests, so their absence biases the
 //     denominator towards the expensive tail.
 //
-// Both were MEASURED through the wire rather than reasoned about, and both are
-// pinned in compression_population_test.go WITH FLOORS — an absence is evidence
-// only when something is proven to have happened beside it. Neither is fixed;
-// each is a decision, recorded there.
+// It was MEASURED through the wire rather than reasoned about, and is pinned in
+// compression_population_test.go WITH A FLOOR — an absence is evidence only when
+// something is proven to have happened beside it. It is a decision, recorded there.
 //
-// So `requests` counts UPSTREAM-SERVED, NON-STREAMED, BILLED gated requests. That
+// So `requests` counts UPSTREAM-SERVED, BILLED gated requests, streamed or not. That
 // is a defensible denominator. It is not the one the word "exactly" promised.
 //
 // ⚠ modified IS A STRING COMPARISON. Deriving it from the rewriter's SavingsPct

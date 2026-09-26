@@ -67,10 +67,9 @@ const captureWriteTimeout = 5 * time.Second
 // CAPTURE ONLY SCORED RESPONSES: scored is false whenever the response carries
 // no real quality score (a served non-200 passthrough, or no scorer wired). An
 // unscored observation would be written with output_quality=0 and drag down the
-// Advisor's quality average for that model — the same poison the streaming
-// deferral avoids. So unscored ⇒ no capture. This is the unifying invariant:
-// streaming (no scorer on that path) and non-200 (scorer skipped) are both
-// unscored, hence both uncaptured.
+// Advisor's quality average for that model. So unscored ⇒ no capture: a non-200
+// (scorer skipped) and a stream cut off before its end event (never scored,
+// stream.go) are both uncaptured. A finished stream is scored and captured (B15.3).
 func (p *Proxy) capturePattern(ctx context.Context, piiDetected, guardrailFired bool, loggingPolicy workspace.LoggingPolicy, workspaceID, feature, model, provider string, inputTokens, outputTokens int, quality float64, scored bool, latencyMs int64, cacheHit bool, complexityBucket string) {
 	if p == nil || p.patternSink == nil || p.patternCaptureEnabled == nil || !p.patternCaptureEnabled() {
 		return

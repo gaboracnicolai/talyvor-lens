@@ -1249,16 +1249,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
-	// Streaming path: detected by "stream": true in the request JSON. The
-	// stream handler forwards SSE chunks unbuffered, then caches the
-	// assembled response after the upstream stream completes. We skip the
-	// compression + routing path for streams since that would rewrite the
-	// body and break wire-compatibility with the live SSE.
-	// Streaming skips the routing/capability path below (to preserve SSE
-	// wire-compatibility — it must not rewrite the body), so the capability
-	// gate is enforced here: a multimodal stream to a model that can't serve
-	// the modality fails fast rather than streaming a wrong answer.
-	if streaming && modSet.Multimodal() && !modality.Supports(model, modSet) {
+	// A PINNED multimodal stream to a model that can't serve the modality fails fast here rather than
+	// streaming a wrong answer. An auto-routed one goes on to the capability redirect below, which
+	// streams now reach (B15.3), exactly as a buffered auto request does.
+	if streaming && modSet.Multimodal() && !modality.Supports(model, modSet) && !isAutoRoute(r, model) {
 		metrics.ModalityUnsupported()
 		writeError(w, http.StatusUnprocessableEntity,
 			"streaming request contains "+modSet.Label()+" content but model "+model+" does not support it")
@@ -1274,37 +1268,6 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		w.Header().Set("X-Talyvor-Stream-Buffered", "true")
 		streaming = false
 		bufferedStream = true
-	}
-	if streaming {
-		if p.guardrails != nil && p.guardrails.OutputEnabled() {
-			w.Header().Set("X-Talyvor-Output-Guardrails", "not-applied-streaming")
-		}
-		sh := &StreamHandler{proxy: p}
-		// Streaming skips routing, so the billed model is the requested
-		// model. The fallback input estimate mirrors the non-streaming path:
-		// modality-aware for multimodal, else len(prompt)/4.
-		estIn := len(prompt) / 4
-		if modSet.Multimodal() {
-			estIn = modSet.EstimateInputTokens()
-		}
-		sc := streamSpend{
-			wsID: wsID, team: team, sprint: sprint, feature: feature,
-			model: model, requestID: requestID, sessionID: sessionID,
-			modality: modSet.Label(), logging: loggingPolicy, estInputTokens: estIn,
-			tare: tareMeter, distillMethod: distillMethod, visionOCR: visionOCR, reqFP: reqFP,
-		}
-		var serr error
-		if cfg.ProviderName() == "openai" {
-			serr = sh.ServeOpenAI(w, r, cfg.ProviderName(), model, prompt, cachePrompt, body, piiDetected, sc)
-		} else {
-			serr = sh.ServeAnthropic(w, r, cfg.ProviderName(), model, prompt, cachePrompt, body, piiDetected, sc)
-		}
-		if serr != nil {
-			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "stream_error").Inc()
-			return
-		}
-		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "streamed").Inc()
-		return
 	}
 
 	// Compress the prompt before forwarding upstream — ONLY when this workspace
@@ -1496,6 +1459,81 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				"request contains "+modSet.Label()+" content but the requested model "+model+" does not support it")
 			return
 		}
+	}
+
+	// Streaming path: detected by "stream": true in the request JSON. The stream handler forwards SSE
+	// chunks unbuffered, then caches the assembled response after the upstream stream completes.
+	// B15.3: it branches HERE, after compression, routing (auto, cost-optimised, the brain), the
+	// circuit breaker and the capability redirect, so a stream is sent to the same model with the same
+	// prompt a buffered request would be, and billed at that model. The provider's own SSE carries the
+	// answering model's id, so a client names the model that actually answered.
+	if streaming {
+		if p.guardrails != nil && p.guardrails.OutputEnabled() {
+			w.Header().Set("X-Talyvor-Output-Guardrails", "not-applied-streaming")
+		}
+		// The routing headers the buffered path sets before WriteHeader, set before the stream commits.
+		if overrideModel != "" {
+			w.Header().Set("X-Talyvor-Model-Override", overrideModel)
+		}
+		if overrideReason != "" {
+			w.Header().Set("X-Talyvor-Route-Reason", overrideReason)
+		}
+		if circuitOpen {
+			w.Header().Set("X-Talyvor-Circuit-Open", "true")
+		}
+		if attr.Branch != "" {
+			w.Header().Set("X-Talyvor-Branch", attr.Branch)
+		}
+		if willAttribute {
+			w.Header().Set("X-Talyvor-Attributed", "true")
+		}
+		// The caller's body goes upstream as sent unless something above changed it: the compressed
+		// prompt (rebuilt exactly as the buffered path rebuilds it) or a routed model.
+		streamBody := body
+		if compressedPrompt != prompt {
+			rb, rerr := rebuildBody(body, upstreamModel, compressedPrompt)
+			if rerr != nil {
+				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "error").Inc()
+				writeError(w, http.StatusBadGateway, "rebuild request body: "+rerr.Error())
+				return
+			}
+			streamBody = rb
+		} else if upstreamModel != model {
+			streamBody = setModelInBody(body, upstreamModel)
+		}
+		sh := &StreamHandler{proxy: p}
+		// The billed model is the one sent upstream. The fallback input estimate mirrors the
+		// non-streaming path: modality-aware for multimodal, else len(prompt)/4.
+		estIn := len(prompt) / 4
+		if modSet.Multimodal() {
+			estIn = modSet.EstimateInputTokens()
+		}
+		sc := streamSpend{
+			wsID: wsID, team: team, sprint: sprint, feature: feature,
+			model: upstreamModel, requestID: requestID, sessionID: sessionID,
+			modality: modSet.Label(), logging: loggingPolicy, estInputTokens: estIn,
+			tare: tareMeter, distillMethod: distillMethod, visionOCR: visionOCR, reqFP: reqFP,
+			post: streamPostServe{
+				provider: cfg.ProviderName(), requestBody: body, requestStart: requestStart,
+				trackSession: sess != nil, piiDetected: piiDetected, guardrailFired: guardrailFired,
+				compressedPrompt: compressedPrompt, savingsPct: savingsPct, compressionGateOpened: compressionGateOpened,
+				routeWasAuto: rdRouteWasAuto, baselineModel: rdBaselineModel, cohortBasis: rdCohortBasis,
+				cohortOverrode: rdCohortOverrode, cohortN: rdCohortN, cohortModel: rdCohortModel,
+				complexityBucket: rdComplexityBucket, distillFacts: distillFacts,
+			},
+		}
+		var serr error
+		if cfg.ProviderName() == "openai" {
+			serr = sh.ServeOpenAI(w, r, cfg.ProviderName(), model, prompt, cachePrompt, streamBody, piiDetected, sc)
+		} else {
+			serr = sh.ServeAnthropic(w, r, cfg.ProviderName(), model, prompt, cachePrompt, streamBody, piiDetected, sc)
+		}
+		if serr != nil {
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "stream_error").Inc()
+			return
+		}
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "streamed").Inc()
+		return
 	}
 
 	upstreamBodyOut, err := rebuildBody(body, upstreamModel, compressedPrompt)
@@ -1813,9 +1851,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// debit (a LoggingNone workspace gets neither); the opt-in WRITE gate
 			// is in the sink SQL. cacheHit=false: this is the upstream model-call
 			// path (cache hits short-circuit far earlier). Quality is the
-			// just-scored value; latency is the real request elapsed. Streaming
-			// is deliberately NOT captured (no scored quality on that path —
-			// see pattern_capture.go).
+			// just-scored value; latency is the real request elapsed. A finished
+			// stream is scored and captured by its own seam (recordStreamPostServe).
 			// scored = we actually computed a quality score (scorer wired AND
 			// statusCode==200); an unscored/non-200 response must NOT write a
 			// quality=0 row that poisons the Advisor's averages.
@@ -2224,39 +2261,23 @@ func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt st
 // Respects the workspace logging policy (None opts out, like non-streaming).
 // Prompt text isn't persisted on the streamed spend row (metadata-equivalent);
 // the durable prompt record is the learner token-event written alongside.
-func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamUsage, outputText string) {
+// recordStreamSpend writes a streamed request's spend row and charge, and returns what the consumer
+// actually paid (the settled reservation, 0 when reservations are off) — the distill royalty's funding,
+// as on the buffered seam.
+func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamUsage, outputText string) float64 {
+	inT, outT, estimated, servedCostUSD := streamServedCost(sc, u, outputText)
+	// Feed the in-memory budget totals from the SAME billed cost whatever the logging policy, as the
+	// buffered seam does (B15.3: this sat behind the logging gate, so a none-logging workspace's streams
+	// never reached its budgets).
+	if p.budgetService != nil {
+		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, servedCostUSD)
+	}
 	if p.alertManager == nil || sc.logging == workspace.LoggingNone {
-		return
+		return 0
 	}
-	inT, outT := sc.estInputTokens, len(outputText)/4
-	estimated := true
 	source := "estimated"
-	// servedCostUSD: the ONE cost basis for the streamed response — the reservation SETTLE (the customer's
-	// bill), the budget feed, and the shadow debit. Cache-aware when the provider reports usage; the flat
-	// estimate otherwise. Mirrors the buffered path exactly.
-	//
-	// ⚠ AND "EXACTLY" NOW MEANS IT (W6.13-series, W6.16). This priced through alerts.CostUSDDetailed /
-	// alerts.CostUSD, and BOTH return exactly ZERO for a model the catalog does not hold — while the
-	// buffered path prices through the RESOLVER on both of its branches, for the reason it states there:
-	// "so an unknown model still cannot come out at zero". The catalog holds 45 models; `gpt-4`,
-	// `gpt-4-turbo` and `claude-3-opus` are not among them. So the same request cost two different
-	// amounts depending on whether the client asked for a stream, and a hard_block budget could not be
-	// reached by streamed traffic it booked at zero. The fallback is not a price invented here: it is the
-	// one alerts.WarnUnpricedModel already describes — the provider's cheapest known model for a charge,
-	// "a floor, never an over-bill".
-	// The fallback, when it is taken, announces itself: CostUSDResolved calls
-	// alerts.WarnUnpricedModel, which increments UnpricedModelRequests and logs at
-	// ERROR with the model name. That is the half the plain helpers had no way to do.
-	var servedCostUSD float64
-	if u.present {
-		inT, outT = u.inputTokens, u.outputTokens
-		estimated = false
+	if !estimated {
 		source = "provider_usage"
-		servedCostUSD, _ = alerts.CostUSDResolved(sc.model, catalog.PurposeCharge,
-			u.uncachedInputTokens, u.cachedInputTokens, u.cacheWriteInputTokens, u.outputTokens)
-	}
-	if estimated {
-		servedCostUSD, _ = alerts.CostUSDResolved(sc.model, catalog.PurposeCharge, inT, 0, 0, outT)
 	}
 	metrics.SpendRecord(source)
 	var recErr error
@@ -2273,19 +2294,44 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", recErr.Error()))
 	}
 	p.recordVisionOCRSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.sessionID, sc.requestID, sc.visionOCR)
-	if p.budgetService != nil {
-		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, servedCostUSD)
-	}
 	// Reservation SETTLE (the customer's bill) or the shadow debit, mutually exclusive by the flag. Fires
 	// on storeCtx = WithoutCancel(r.Context()) (stream.go), which now carries the reservation handle, so the
 	// streamed settle happens in-band instead of stranding the hold for the sweeper to refund.
 	// B1.6: the same allowance draw as the buffered seam (see there).
 	subscriber := p.chargeChatUsage(ctx, sc.wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
 	if p.reservationActive() {
-		p.settleReservation(ctx, servedCostUSD, sc.model)
+		return p.settleReservation(ctx, servedCostUSD, sc.model)
 	} else if !subscriber {
 		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
 	}
+	return 0
+}
+
+// streamServedCost is the ONE cost basis for a streamed response — the reservation SETTLE (the customer's
+// bill), the budget feed, the shadow debit and the attribution row. Cache-aware when the provider reports
+// usage; the flat estimate otherwise. Mirrors the buffered path exactly.
+//
+// ⚠ AND "EXACTLY" NOW MEANS IT (W6.13-series, W6.16). This priced through alerts.CostUSDDetailed /
+// alerts.CostUSD, and BOTH return exactly ZERO for a model the catalog does not hold — while the
+// buffered path prices through the RESOLVER on both of its branches, for the reason it states there:
+// "so an unknown model still cannot come out at zero". The catalog holds 45 models; `gpt-4`,
+// `gpt-4-turbo` and `claude-3-opus` are not among them. So the same request cost two different
+// amounts depending on whether the client asked for a stream, and a hard_block budget could not be
+// reached by streamed traffic it booked at zero. The fallback is not a price invented here: it is the
+// one alerts.WarnUnpricedModel already describes — the provider's cheapest known model for a charge,
+// "a floor, never an over-bill".
+// The fallback, when it is taken, announces itself: CostUSDResolved calls
+// alerts.WarnUnpricedModel, which increments UnpricedModelRequests and logs at
+// ERROR with the model name. That is the half the plain helpers had no way to do.
+func streamServedCost(sc streamSpend, u streamUsage, outputText string) (inT, outT int, estimated bool, costUSD float64) {
+	if u.present {
+		costUSD, _ = alerts.CostUSDResolved(sc.model, catalog.PurposeCharge,
+			u.uncachedInputTokens, u.cachedInputTokens, u.cacheWriteInputTokens, u.outputTokens)
+		return u.inputTokens, u.outputTokens, false, costUSD
+	}
+	inT, outT = sc.estInputTokens, len(outputText)/4
+	costUSD, _ = alerts.CostUSDResolved(sc.model, catalog.PurposeCharge, inT, 0, 0, outT)
+	return inT, outT, true, costUSD
 }
 
 // recordVisionOCRSpend books a distilled request's vision-OCR sub-call as its OWN 'vision_ocr'
