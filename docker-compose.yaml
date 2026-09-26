@@ -224,6 +224,10 @@ services:
       # pooling when it is below the attested safety floor (lens poolcheck; 0.9377 on 2026-09-25, set by the
       # consumer danger pair isa-year — at 0.92 it would be served). Raise it freely; lowering it turns pooling off.
       - LENS_SEMANTIC_THRESHOLD=${LENS_SEMANTIC_THRESHOLD:-0.98}
+      # The "would have pooled" log (B9.6): one fingerprint-only pooled_shadow_observations row per fresh,
+      # cacheable answer, so pooling is measured on real traffic, not test corpora. Persist-only — it cannot
+      # serve, pool or mint. ON by default; config's own default is off, so without this line it never runs.
+      - LENS_POOL_SHADOW_LOG_ENABLED=${LENS_POOL_SHADOW_LOG_ENABLED:-true}
       - LENS_MINT_RATE_CAP_LENS_24H=${LENS_MINT_RATE_CAP_LENS_24H:-}
 
       # ── Customer money IN. Mute ⇒ nobody can buy LXC, and nothing says so. ────
