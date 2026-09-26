@@ -69,6 +69,12 @@ func (a Attestation) MatchesLive(model string, threshold float64) (bool, string)
 	if a.EmbeddingModel != model {
 		return false, fmt.Sprintf("embedding model changed: attested %q, live %q", a.EmbeddingModel, model)
 	}
+	// B9.4 — the committed floor binds even an attestation recorded before it existed: production's row
+	// holds 0.92, the threshold that was live when poolcheck last ran, and at 0.92 a danger pair is served.
+	if floor, ok := MeasuredFloors[model]; ok && threshold < floor {
+		return false, fmt.Sprintf("similarity threshold %.4f is below the measured safety floor %.4f for %s: "+
+			"a committed danger pair is served there", threshold, floor, model)
+	}
 	// The threshold is compared DIRECTIONALLY, not for equality. Raising it makes matching
 	// strictly harder, so it is covered by the measurement that already passed at a lower
 	// value — forcing pooling off there would be a false alarm on the conservative change,

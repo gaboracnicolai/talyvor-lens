@@ -220,6 +220,10 @@ services:
       # Also a SECURITY parameter: the anti-self-dealing property is that a Sybil pair
       # loses (1-s)*C per cycle, so s must stay < 1 (config.go refuses to boot at >= 1).
       - LENS_POOL_ROYALTY_SHARE=${LENS_POOL_ROYALTY_SHARE:-}
+      # The pooling similarity threshold, DECLARED rather than left to config's default (B9.4). Boot refuses
+      # pooling when it is below the attested safety floor (lens poolcheck; 0.9377 on 2026-09-25, set by the
+      # consumer danger pair isa-year — at 0.92 it would be served). Raise it freely; lowering it turns pooling off.
+      - LENS_SEMANTIC_THRESHOLD=${LENS_SEMANTIC_THRESHOLD:-0.98}
       - LENS_MINT_RATE_CAP_LENS_24H=${LENS_MINT_RATE_CAP_LENS_24H:-}
 
       # ── Customer money IN. Mute ⇒ nobody can buy LXC, and nothing says so. ────
