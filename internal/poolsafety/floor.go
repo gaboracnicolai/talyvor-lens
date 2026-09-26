@@ -40,6 +40,13 @@ func SafetyFloor(ctx context.Context, emb Embedder, entityMatch func(a, b string
 	return floorAbove(score), pair, score, nil
 }
 
+// MeasuredFloors is SafetyFloor's result per embedding model, committed so boot enforces it whatever the
+// stored attestation says (Attestation.MatchesLive). Re-measure with `lens poolcheck` when the corpora
+// change and raise the value here; never lower it without a new measurement.
+var MeasuredFloors = map[string]float64{
+	"text-embedding-3-small": 0.9377, // isa-year at 0.937669, 2026-09-25 (docs/pool-b91-measured.md)
+}
+
 // floorAbove is the smallest 4-decimal threshold STRICTLY above score — a pair is served at
 // similarity ≥ threshold, so a floor equal to the worst score would still serve it.
 func floorAbove(score float64) float64 {

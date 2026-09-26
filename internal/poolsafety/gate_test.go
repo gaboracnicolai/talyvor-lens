@@ -18,7 +18,7 @@ import (
 
 const (
 	liveModel     = "text-embedding-3-small"
-	liveThreshold = 0.92
+	liveThreshold = 0.98
 )
 
 func attestedRow() stubRow {

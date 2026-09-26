@@ -21,7 +21,7 @@ import (
 func TestMatchesLive_DecisionTable(t *testing.T) {
 	attested := poolsafety.Attestation{
 		EmbeddingModel: "text-embedding-3-small",
-		Threshold:      0.92,
+		Threshold:      0.95,
 		WorstPair:      "review preamble · tiny diffs",
 		WorstScore:     0.6534,
 	}
@@ -34,12 +34,12 @@ func TestMatchesLive_DecisionTable(t *testing.T) {
 		why       string
 	}{
 		{
-			name: "unchanged configuration", model: "text-embedding-3-small", threshold: 0.92,
+			name: "unchanged configuration", model: "text-embedding-3-small", threshold: 0.95,
 			wantOK: true,
 			why:    "the running configuration IS the measured one",
 		},
 		{
-			name: "embedding model swapped for a cheaper one", model: "text-embedding-ada-002", threshold: 0.92,
+			name: "embedding model swapped for a cheaper one", model: "text-embedding-ada-002", threshold: 0.95,
 			wantOK: false,
 			why:    "a different model embeds into a different space; the measurement does not transfer",
 		},
@@ -51,7 +51,7 @@ func TestMatchesLive_DecisionTable(t *testing.T) {
 		{
 			// The conservative direction MUST NOT trip the guard. A control that cries wolf
 			// on a safety improvement is one operators learn to route around.
-			name: "threshold raised", model: "text-embedding-3-small", threshold: 0.95,
+			name: "threshold raised", model: "text-embedding-3-small", threshold: 0.98,
 			wantOK: true,
 			why:    "raising the threshold makes matching strictly harder than what passed",
 		},

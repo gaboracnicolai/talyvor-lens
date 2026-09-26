@@ -40,7 +40,7 @@ type stubReader struct{ row stubRow }
 func (s *stubReader) QueryRow(context.Context, string, ...any) poolsafety.Row { return s.row }
 
 func TestPoolFlagOverride_CarriesTheGatesReason(t *testing.T) {
-	cfg := &config.Config{CachePoolableEnabled: true, EmbeddingModel: "text-embedding-3-small", SemanticThreshold: 0.92}
+	cfg := &config.Config{CachePoolableEnabled: true, EmbeddingModel: "text-embedding-3-small", SemanticThreshold: 0.98}
 	gate := poolsafety.NewGate()
 	db := &stubReader{row: stubRow{err: poolsafety.ErrNoAttestation}}
 	gate.Refresh(context.Background(), db, cfg.EmbeddingModel, cfg.SemanticThreshold)
@@ -62,7 +62,7 @@ func TestPoolFlagOverride_CarriesTheGatesReason(t *testing.T) {
 
 	// Step 6b: the attestation appears. The override must follow WITHOUT a restart — it is
 	// re-evaluated per request precisely so it can show recovery.
-	db.row = stubRow{vals: []any{"text-embedding-3-small", 0.92, "p", 0.6534}}
+	db.row = stubRow{vals: []any{"text-embedding-3-small", 0.98, "p", 0.6534}}
 	gate.Refresh(context.Background(), db, cfg.EmbeddingModel, cfg.SemanticThreshold)
 	ovs = poolFlagOverride(cfg, gate)()
 	if !ovs[0].Effective {

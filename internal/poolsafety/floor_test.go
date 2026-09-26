@@ -24,3 +24,15 @@ func TestAttestedFloor_RefusesALowerLiveThreshold_AdmitsTheDeclaredOne(t *testin
 		t.Errorf("live 0.98 is above the floor and must serve: %s", why)
 	}
 }
+
+// Production's attestation predates the floor and reads 0.92. The committed floor must still refuse a live
+// 0.92 against it, and still serve the declared 0.98.
+func TestMeasuredFloor_BindsAStaleAttestation(t *testing.T) {
+	stale := Attestation{EmbeddingModel: "text-embedding-3-small", Threshold: 0.92, WorstPair: "review preamble · tiny diffs", WorstScore: 0.6534}
+	if ok, _ := stale.MatchesLive("text-embedding-3-small", 0.92); ok {
+		t.Error("live 0.92 is below the measured floor and must turn pooling off, whatever the stored row says")
+	}
+	if ok, why := stale.MatchesLive("text-embedding-3-small", 0.98); !ok {
+		t.Errorf("live 0.98 is above the floor and must serve: %s", why)
+	}
+}
