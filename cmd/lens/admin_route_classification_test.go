@@ -66,6 +66,7 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/held-mints/routing_prediction_mints/adjudicate":   "REVOKES A PAYOUT (loop-generated).",
 	"/v1/admin/held-mints/node_latency_mints/adjudicate":         "REVOKES A PAYOUT (loop-generated).",
 	"/v1/admin/held-mints/confidential_compute_mints/adjudicate": "REVOKES A PAYOUT (loop-generated).",
+	"/v1/admin/catalog/models/{id}/price":                        "SETS A PRICE (B10.5: puts a discovered model in the catalog at the rate a person confirmed).",
 
 	// ⚠ MEASURED, AND THE PROVISIONAL CLASSIFICATION WAS WRONG. The W1.3 groundwork report listed
 	// attest/{output_id} as provisionally READ because it is registered with r.Handle and reads

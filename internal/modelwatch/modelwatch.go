@@ -15,6 +15,8 @@
 // └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 //
 // ┌─ ⚠ DETECTION ONLY. THIS PACKAGE MUST NEVER SET A PRICE. ────────────────────────────────────────┐
+// │ (B10.5: discovery.go carries a price a PERSON confirmed, with its source URL, into the catalog.  │
+// │ That is the human step below, made immediate — nothing here ever reads a price from anywhere.)  │
 // │ NOT a limitation of the current implementation — a permanent rule, and here is the reason, so    │
 // │ nobody has to re-derive it before deciding to "improve" this:                                    │
 // │                                                                                                  │
@@ -77,6 +79,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/talyvor/lens/internal/catalog"
@@ -134,6 +137,13 @@ type Watcher struct {
 	// model 24 times a day. In memory only, deliberately: a restart re-alerting once is harmless and
 	// far better than a persistence layer (and a migration) for a notification dedup.
 	alerted map[string]bool
+
+	// B10.5 — the catalog side of discovery (discovery.go). store is nil when there is no database,
+	// and then the Watcher only alerts, as before.
+	store   *Store
+	applyMu sync.Mutex
+	retired map[string]catalog.Model // catalog models this Watcher marked retired, as they were before
+	applied map[string]bool          // ids whose price came from a confirmed discovery, not the seed
 }
 
 // New builds a Watcher for whichever providers have a key configured. A provider without a key is
@@ -145,6 +155,8 @@ func New(anthropicKey, openAIKey string, notifier Notifier) *Watcher {
 		client:   &http.Client{Timeout: listTimeout},
 		notifier: notifier,
 		alerted:  map[string]bool{},
+		retired:  map[string]catalog.Model{},
+		applied:  map[string]bool{},
 	}
 	if anthropicKey != "" {
 		w.providers = append(w.providers, provider{
@@ -241,7 +253,14 @@ func (w *Watcher) StartLoop(ctx context.Context, interval time.Duration) {
 // Check polls every configured provider and returns the models the catalog cannot price exactly.
 // Errors are per-provider and non-fatal: one unreachable provider must not suppress another's findings.
 func (w *Watcher) Check(ctx context.Context) ([]Finding, []error) {
-	var findings []Finding
+	lists, errs := w.poll(ctx)
+	return findingsIn(lists), errs
+}
+
+// poll lists every provider's models. A provider whose list failed is absent from the map (and its
+// error returned), so nothing downstream mistakes an unreachable provider for an empty one.
+func (w *Watcher) poll(ctx context.Context) (map[string][]string, []error) {
+	lists := map[string][]string{}
 	var errs []error
 	for _, p := range w.providers {
 		ids, err := w.listModels(ctx, p)
@@ -249,6 +268,15 @@ func (w *Watcher) Check(ctx context.Context) ([]Finding, []error) {
 			errs = append(errs, fmt.Errorf("%s: %w", p.name, err))
 			continue
 		}
+		lists[p.name] = ids
+	}
+	return lists, errs
+}
+
+// findingsIn is every listed id the money path cannot price exactly, sorted.
+func findingsIn(lists map[string][]string) []Finding {
+	var findings []Finding
+	for name, ids := range lists {
 		for _, id := range ids {
 			// ⚠ The question is NOT "is this id in the seed table" but "can the money path price it
 			// exactly" — which is what ResolveRates answers, and it accounts for aliases and for
@@ -259,7 +287,7 @@ func (w *Watcher) Check(ctx context.Context) ([]Finding, []error) {
 			if prov == catalog.ProvenanceExact {
 				continue
 			}
-			findings = append(findings, Finding{Provider: p.name, ModelID: id, FallbackOutputPer1M: rates.OutputPer1M})
+			findings = append(findings, Finding{Provider: name, ModelID: id, FallbackOutputPer1M: rates.OutputPer1M})
 		}
 	}
 	sort.Slice(findings, func(i, j int) bool {
@@ -268,11 +296,16 @@ func (w *Watcher) Check(ctx context.Context) ([]Finding, []error) {
 		}
 		return findings[i].ModelID < findings[j].ModelID
 	})
-	return findings, errs
+	return findings
 }
 
 func (w *Watcher) checkAndAlert(ctx context.Context) {
-	findings, errs := w.Check(ctx)
+	lists, errs := w.poll(ctx)
+	// B10.5 — record what each provider lists, then bring the catalog in line with it (confirmed
+	// prices in, unlisted models retired) BEFORE deciding what is unpriced: a model priced since the
+	// last poll must not be reported again.
+	w.recordAndApply(ctx, lists)
+	findings := findingsIn(lists)
 	for _, err := range errs {
 		// A provider we cannot reach is a REAL failure of this check, not a silent skip: it means the
 		// deployment is running blind on that provider until the next successful poll.
@@ -330,7 +363,8 @@ func renderAlert(fresh []Finding) string {
 	b.WriteString("  1. Look up the published rate on the provider's own pricing page:\n")
 	b.WriteString("       anthropic  https://platform.claude.com/docs/en/about-claude/pricing\n")
 	b.WriteString("       openai     https://developers.openai.com/api/docs/pricing\n")
-	b.WriteString("  2. Immediate, no rebuild: add it via LENS_MODEL_CATALOG_OVERRIDES.\n")
+	b.WriteString("  2. Immediate, no rebuild: PUT /v1/admin/catalog/models/{id}/price with\n")
+	b.WriteString("     {input_per_1m, output_per_1m, source} — or LENS_MODEL_CATALOG_OVERRIDES.\n")
 	b.WriteString("  3. Durable: add it to internal/catalog/seed.go AND to published_rates_test.go\n")
 	b.WriteString("     with the source URL, so the rate is pinned to a citation.\n")
 	b.WriteString("\n⚠ DO NOT let an automated process fill in the price. No provider serves rates in\n")

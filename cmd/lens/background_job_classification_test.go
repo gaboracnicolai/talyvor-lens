@@ -33,6 +33,9 @@ import (
 // makes running it on every replica correct. ⚠ A REASON HERE IS A CLAIM ABOUT CODE, not a label:
 // each was read before being written down.
 var perReplica = map[string]string{
+	"watcher.ApplyLoop": "IN-PROCESS STATE (B10.5). Apply reads the discovery record and writes only this " +
+		"replica's in-memory catalog (catalog.Override); it never writes a row. Leader-gating it would leave " +
+		"every follower offering retired models and missing confirmed prices.",
 	"batchRouter.StartPoller": "IN-PROCESS STATE. pollAll iterates r.pending, a map held in this " +
 		"replica's memory, so a replica polls only the jobs submitted to it. Nothing to duplicate.",
 	"sessionTracker.StartCleanup": "IN-PROCESS STATE. evictStale walks t.sessions under t.mu — an " +
@@ -68,6 +71,7 @@ var perReplica = map[string]string{
 // which every anonymous goroutine in this file begins with, so any new one silently inherited
 // that entry's money-path reason. A call is not a spelling; these are calls.
 var perReplicaMatch = map[string]string{
+	"watcher.ApplyLoop":            "watcher.ApplyLoop",
 	"batchRouter.StartPoller":      "batchRouter.StartPoller",
 	"sessionTracker.StartCleanup":  "sessionTracker.StartCleanup",
 	"statusPage.StartCacher":       "statusPage.StartCacher",

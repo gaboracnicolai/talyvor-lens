@@ -108,6 +108,7 @@ var shipped = map[string]recorded{
 	"localrouter.DefaultHealthCheckInterval":      {localrouter.DefaultHealthCheckInterval, 30 * time.Second, "health check interval"},
 	"mining.DefaultPatternEarnCapPerWorkspace":    {mining.DefaultPatternEarnCapPerWorkspace, 50_000, "pattern earn cap"},
 	"modelwatch.DefaultInterval":                  {modelwatch.DefaultInterval, time.Hour, "model-watch interval"},
+	"modelwatch.DefaultApplyInterval":             {modelwatch.DefaultApplyInterval, 5 * time.Minute, "how soon every replica applies a confirmed price or a retirement"},
 	"poolroyalty.DefaultMinConsensusAttesters":    {poolroyalty.DefaultMinConsensusAttesters, 2, "anti-collusion floor"},
 	"poolroyalty.DefaultMinUnlinkedGraders":       {poolroyalty.DefaultMinUnlinkedGraders, 3, "sybil floor"},
 	"poolroyalty.DefaultRoyaltyShare":             {poolroyalty.DefaultRoyaltyShare, 0.5, "revenue split"},

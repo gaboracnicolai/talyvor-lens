@@ -868,6 +868,7 @@ func run() error {
 	// ReportReadiness runs on EVERY instance, before leader election, and deliberately so: whether an
 	// alert can reach a person is a property of the deployment's configuration, not of which pod won an
 	// election, and it must be stated at boot even on a follower that will never poll.
+	var watcher *modelwatch.Watcher // B10.5: also serves the discovered-models and price routes below
 	if cfg.ModelWatchEnabled {
 		alertSink, err := modelwatch.NewWebhookNotifier(cfg.OperatorAlertWebhookURL, cfg.OperatorAlertWebhookSecret)
 		if err != nil {
@@ -883,8 +884,12 @@ func run() error {
 		if alertSink != nil {
 			notifier = alertSink
 		}
-		watcher := modelwatch.New(cfg.AnthropicAPIKey, cfg.OpenAIAPIKey, notifier)
+		watcher = modelwatch.New(cfg.AnthropicAPIKey, cfg.OpenAIAPIKey, notifier)
 		watcher.ReportReadiness()
+		// B10.5 — the leader's poll records each provider's list and new models; EVERY instance applies
+		// that record (retirements, confirmed prices) to its own in-memory catalog.
+		watcher.SetStore(modelwatch.NewStore(pool))
+		go watcher.ApplyLoop(ctx, modelwatch.DefaultApplyInterval)
 		go haComps.leader.Run(ctx, "model-catalog-drift", 30*time.Second, func(lctx context.Context) {
 			watcher.StartLoop(lctx, cfg.ModelWatchInterval)
 		})
@@ -2950,6 +2955,9 @@ func run() error {
 		authed.Get("/v1/catalog/models", func(w http.ResponseWriter, req *http.Request) {
 			writeJSONOK(w, http.StatusOK, catalog.All())
 		})
+		// B10.5 — models a provider lists that wait for a price, and the admin act that prices one.
+		authed.Get("/v1/catalog/discovered", newCatalogDiscoveredHandler(watcher))
+		authed.Put("/v1/admin/catalog/models/{id}/price", requireAdmin(authManager, newCatalogPriceHandler(watcher)))
 		authed.Get("/v1/catalog/models/{id}", func(w http.ResponseWriter, req *http.Request) {
 			m, ok := catalog.Get(chi.URLParam(req, "id"))
 			if !ok {

@@ -271,7 +271,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 //
 // 122 → 124 (B6.4/B6.5): PUT /v1/workspaces/{wsID}/tare and GET /v1/workspaces/{wsID}/tare/savings,
 // added undocumented beside their compression-policy sibling, which is undocumented too.
-const undocumentedNonAdminV1Routes = 124
+//
+// 124 → 125 (B10.5): GET /v1/catalog/discovered, the models waiting for a price, beside the
+// undocumented GET /v1/catalog/models it complements.
+const undocumentedNonAdminV1Routes = 125
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)
