@@ -1726,7 +1726,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// writing a metadata row for a tenant that asked for no rows would not be.
 		if shouldCache && loggingPolicy != workspace.LoggingNone {
 			p.shadowPoolObservation(ctx, wsID, cfg.ProviderName(), model, prompt,
-				p.poolGate.DecidePoolableOnWrite(ctx, wsID))
+				p.sharesAnswers(ctx, wsID))
 		}
 		eventPrompt := prompt
 		if piiDetected {
@@ -2634,8 +2634,9 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 		// Private (workspace-scoped) entry — today's behavior, now owner-stamped.
 		_ = p.exact.SetWithOwner(ctx, provider, model, cache.FingerprintedKey(cachePrompt, reqFP), wsID, response)
 		// Pooled (cross-tenant) copy under the reserved, namespace-disjoint pooled
-		// key — opt-in, inert by default.
-		if p.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+		// key — opt-in, inert by default, and only from a workspace whose prompts are
+		// checked for personal data (B15.7, sharesAnswers).
+		if p.sharesAnswers(ctx, wsID) {
 			_ = p.exact.SetWithOwner(ctx, provider, model, cache.FingerprintedKey(pooledPromptKey(rawPrompt), reqFP), wsID, response)
 		}
 	}
@@ -2664,12 +2665,21 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 		// ⚠ SCOPED TO THE SEMANTIC WRITE ON PURPOSE. The exact pooled write above is keyed on
 		// byte-identical prompt text, so it is servable without an entity gate. Gating it too
 		// would drop real cross-tenant exact hits.
-		if p.poolGate.DecidePoolableOnWrite(ctx, wsID) && discriminator.Canon(rawPrompt).Verifiable() {
+		if p.sharesAnswers(ctx, wsID) && discriminator.Canon(rawPrompt).Verifiable() {
 			if vec, err := p.embedder.Embed(ctx, rawPrompt); err == nil {
 				_ = p.semantic.SetPooled(ctx, provider, model, pooledPromptKey(rawPrompt), reqFP, wsID, response, vec)
 			}
 		}
 	}
+}
+
+// sharesAnswers decides whether this workspace's answer may be written to the shared pool: it opted in
+// (DecidePoolableOnWrite) AND its prompts are checked for personal data. B15.7 — "personal data is never
+// shared" rests on that check, which keeps a flagged answer out of every cache (callers write only when
+// !piiDetected); a workspace that turned it off would contribute answers nobody checked. Its own cache
+// is unaffected, and turning detection back on resumes sharing on the next answer.
+func (p *Proxy) sharesAnswers(ctx context.Context, wsID string) bool {
+	return p.poolGate.DecidePoolableOnWrite(ctx, wsID) && p.guardrails.DetectsPII(wsID)
 }
 
 // forward wraps the upstream call in retry.Do so transient 429/5xx

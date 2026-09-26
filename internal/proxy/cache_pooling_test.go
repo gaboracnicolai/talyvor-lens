@@ -237,3 +237,47 @@ func TestPooling_NoOwnerEntryNotServed(t *testing.T) {
 		t.Errorf("an un-owned pooled entry must not be served (backward-compat safety); upstream delta=%d want 1", atomic.LoadInt64(calls)-before)
 	}
 }
+
+// B15.7 — A WORKSPACE WHOSE PERSONAL-DATA DETECTION IS OFF SHARES NOTHING. "Personal data is never
+// shared" rests on the check that keeps a flagged answer out of every cache; with the check off, an
+// answer is unchecked, so it is never written to the pool — while the workspace's own cache keeps
+// working — and turning detection back on resumes sharing with the next answer. The resumed half is
+// also the floor: it proves this harness pools at all, so the first half's miss means something.
+func TestPooling_DetectionOffNeverPooled_TurningItBackOnResumes(t *testing.T) {
+	global := true
+	p, wsm, _, exact, calls := newPoolingProxy(t, &global)
+	ctx := context.Background()
+	_ = wsm.SetCachePoolable(ctx, "wsA", true)
+	_ = wsm.SetCachePoolable(ctx, "wsB", true)
+	if err := p.guardrails.SetPolicy(ctx, "wsA", guardrails.GuardrailPolicy{
+		EnablePII: false, EnableInjection: true, InjectionAction: guardrails.ActionBlock,
+	}); err != nil {
+		t.Fatalf("turn detection off: %v", err)
+	}
+
+	dispatchWS(t, p, "wsA", "what is the capital of Peru") // upstream #1
+	before := atomic.LoadInt64(calls)
+	dispatchWS(t, p, "wsA", "what is the capital of Peru")
+	if d := atomic.LoadInt64(calls) - before; d != 0 {
+		t.Fatalf("wsA's own cache must still serve its repeat; upstream delta=%d want 0", d)
+	}
+	if b, _, _ := exact.GetWithOwner(ctx, "openai", "gpt-4o", cache.FingerprintedKey(pooledPromptKey("what is the capital of Peru"), plainFP)); b != nil {
+		t.Errorf("a pooled entry was written for wsA's answer with detection off")
+	}
+	dispatchWS(t, p, "wsB", "what is the capital of Peru")
+	if d := atomic.LoadInt64(calls) - before; d != 1 {
+		t.Errorf("an answer from a workspace with detection off was served to another workspace; upstream delta=%d want 1", d)
+	}
+
+	if err := p.guardrails.SetPolicy(ctx, "wsA", guardrails.GuardrailPolicy{
+		EnablePII: true, PIIAction: guardrails.ActionRedact, EnableInjection: true, InjectionAction: guardrails.ActionBlock,
+	}); err != nil {
+		t.Fatalf("turn detection back on: %v", err)
+	}
+	dispatchWS(t, p, "wsA", "what is the capital of Chile")
+	before = atomic.LoadInt64(calls)
+	dispatchWS(t, p, "wsB", "what is the capital of Chile")
+	if d := atomic.LoadInt64(calls) - before; d != 0 {
+		t.Errorf("with detection back on, wsB must be served wsA's answer from the pool; upstream delta=%d want 0", d)
+	}
+}

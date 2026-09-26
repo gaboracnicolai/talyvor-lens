@@ -220,6 +220,12 @@ func (e *Engine) GetPolicy(wsID string) *GuardrailPolicy {
 	return &cp
 }
 
+// DetectsPII reports whether this workspace's prompts are checked for personal data — its policy
+// enables the PII stage and the engine has a detector. B15.7: answer sharing rests on it.
+func (e *Engine) DetectsPII(wsID string) bool {
+	return e != nil && e.pii != nil && e.GetPolicy(wsID).EnablePII
+}
+
 // AddCustomGuardrail registers an external check. Thread-safe.
 func (e *Engine) AddCustomGuardrail(g CustomGuardrail) {
 	e.mu.Lock()

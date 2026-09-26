@@ -538,7 +538,7 @@ func (s *StreamHandler) serve(
 	// policy, exactly as the buffered seam is. Void, post-serve, default-off.
 	if shouldCache && s.proxy.loggingPolicyFor(sc.wsID) != workspace.LoggingNone {
 		s.proxy.shadowPoolObservation(storeCtx, sc.wsID, provider, model, prompt,
-			s.proxy.poolGate.DecidePoolableOnWrite(storeCtx, sc.wsID))
+			s.proxy.sharesAnswers(storeCtx, sc.wsID))
 	}
 	eventPrompt := prompt
 	if piiDetected && s.proxy.piiDetector != nil {
