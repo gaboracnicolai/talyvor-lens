@@ -9,18 +9,19 @@ import (
 	"github.com/talyvor/lens/internal/workspace"
 )
 
-// shouldTare applies the workspace policy + per-request opt-in to Tare (internal/tare), the
+// shouldTare applies the workspace policy + per-request header to Tare (internal/tare), the
 // context-reduction layer. B6.5. Same shape as shouldCompress: the workspace must allow it AND
-// (the policy is always-on OR the request carries X-Talyvor-Tare: true). Every failure direction is
-// OFF — no workspace manager, an unregistered workspace, a stale cache — and a header alone can
-// never turn it on.
+// (the policy is always-on and the request does not carry X-Talyvor-Tare: false, OR the policy is
+// opt-in and the request carries X-Talyvor-Tare: true). Every failure direction is OFF — no
+// workspace manager, an unregistered workspace, a stale cache — and a header alone can never turn
+// it on.
 func (p *Proxy) shouldTare(r *http.Request, wsID string) bool {
 	if p.workspaceManager == nil {
 		return false
 	}
 	switch p.workspaceManager.GetTarePolicy(wsID) {
 	case workspace.TareAlways:
-		return true
+		return r == nil || !strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Talyvor-Tare")), "false")
 	case workspace.TareOptIn:
 		return r != nil && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Talyvor-Tare")), "true")
 	default: // TareDisabled

@@ -131,7 +131,7 @@ func TestTare_OffLeavesTheRequestUnchanged_BothPaths(t *testing.T) {
 		policy workspace.TarePolicy
 		hdr    map[string]string
 	}{
-		{"default policy, header set", workspace.DefaultTarePolicy, map[string]string{"X-Talyvor-Tare": "true"}},
+		{"disabled, header set", workspace.TareDisabled, map[string]string{"X-Talyvor-Tare": "true"}},
 		{"opt_in, no header", workspace.TareOptIn, nil},
 	} {
 		for _, stream := range []bool{false, true} {
