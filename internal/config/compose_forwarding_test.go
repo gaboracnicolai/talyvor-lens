@@ -13,11 +13,11 @@ import (
 // compose_forwarding_test.go — B7.2: every LENS_* variable config.go reads must be FORWARDED by
 // docker-compose.yaml's lens service, or it cannot reach the process in production.
 //
-// docker-compose.yaml has an explicit `environment:` list and no `env_file:`. `.env` on the server
-// is read only for ${VAR} substitution inside the compose file, so a variable config.go reads and
-// the lens service does not list is set in .env, silently dropped, and read as unset. That has
-// shipped six times, the last being LENS_SUBSCRIPTION_ALLOWANCE_ULXC: B1.6 was live code that
-// granted nothing under compose.
+// `.env` on the server is read only for ${VAR} substitution inside the compose file, so a variable
+// config.go reads and the lens service does not list is set in .env, silently dropped, and read as
+// unset. That has shipped six times, the last being LENS_SUBSCRIPTION_ALLOWANCE_ULXC: B1.6 was live
+// code that granted nothing under compose. The service also loads `env_file: lens.env` (#377), and
+// that is where every name in testdata/compose_unforwarded.txt is set — see that file's header.
 //
 // A RATCHET, NOT ZERO. When this was written config.go read 116 LENS_* names the lens service does
 // not forward (testdata/compose_unforwarded.txt). Forwarding them all as ${VAR:-} would set each to

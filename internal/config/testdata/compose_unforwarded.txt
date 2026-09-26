@@ -1,12 +1,18 @@
-# LENS_* variables config.go reads that docker-compose.yaml's lens service does NOT forward (B7.2).
+# LENS_* variables config.go reads that docker-compose.yaml's lens service does not name in its
+# `environment:` list (B7.2).
 #
-# Under compose each of these is unset in the lens process whatever .env says: .env feeds only
-# ${VAR} substitution inside docker-compose.yaml. TestComposeForwardsEveryLensVarConfigReads fails
-# on any read NOT listed here, so a new variable cannot repeat the trap; and it fails on a listed
-# name that becomes forwarded or unread, so this list only shrinks.
+# THE REASON EVERY NAME BELOW IS HERE: it is set in lens.env, not in docker-compose.yaml. The lens
+# service loads `env_file: lens.env` (#377), so each of these reaches the process in production the
+# moment an operator writes it into lens.env beside the checkout; unset, it takes config.go's own
+# default. They are NOT forwarded through `environment:` on purpose: `environment:` overrides
+# env_file, and both `- NAME=${NAME:-}` and a bare `- NAME` arrive as "" (verified in a real
+# container, lens_env_shadow_test.go), so forwarding one would silently discard its lens.env value.
+# (.env is different: it feeds only ${VAR} substitution inside docker-compose.yaml.)
 #
-# To make one settable in production: add `- NAME=${NAME:-}` to the lens environment: list (check
-# first that config.go treats "" the same as unset for it) and delete its line here.
+# TestComposeForwardsEveryLensVarConfigReads fails on any read neither forwarded nor listed here,
+# and on a listed name that becomes forwarded or unread, so this list only shrinks. Move a name to
+# the curated `environment:` list only if it must be set from .env; then delete its line here and
+# keep it out of lens.env.example.
 LENS_ANNOTATION_MINTING_ENABLED
 LENS_ANTIGAMING_AUTO_REVOKE_ENABLED
 LENS_ANTIGAMING_INTERVAL
