@@ -142,17 +142,16 @@ ON CONFLICT (id) DO UPDATE SET
   max_input_tokens       = EXCLUDED.max_input_tokens,
   active                 = EXCLUDED.active,
   logging_policy         = EXCLUDED.logging_policy,
-  distill_policy         = EXCLUDED.distill_policy,
-  -- compression_policy follows distill_policy: registration may set it, and an
-  -- omitted body field decodes to "" which normalizes to the DEFAULT. The default
-  -- is DISABLED, so the only direction a blind re-POST can move this column is
-  -- towards OFF — it can revoke an opt-in (loudly: prompts stop being rewritten),
-  -- never grant one. That asymmetry is why it is safe here and why the three
-  -- CONSENT columns below are not.
+  -- compression_policy: registration may set it, and an omitted body field decodes
+  -- to "" which normalizes to the DEFAULT. The default is DISABLED, so the only
+  -- direction a blind re-POST can move this column is towards OFF — it can revoke
+  -- an opt-in (loudly: prompts stop being rewritten), never grant one. That
+  -- asymmetry is why it is safe here and why the columns below are not.
   compression_policy     = EXCLUDED.compression_policy,
-  -- tare_policy follows compression_policy for the same reason: its default is DISABLED, so a
-  -- blind re-POST can only turn it off.
-  tare_policy            = EXCLUDED.tare_policy,
+  -- distill_policy and tare_policy are DELIBERATELY absent (B8.3). Both default to
+  -- ALWAYS, so a blind re-POST — the boot default-workspace registration runs on every
+  -- start — would switch a customer's explicit "off" back on. Registration sets them
+  -- when it CREATES a workspace; SetDistillPolicy / SetTarePolicy change them after.
   -- The three CONSENT columns — cache_poolable, distill_poolable, cost_optimize_routing
   -- — are DELIBERATELY absent from this list. Registration CREATES consent; it never
   -- CHANGES it. Leaving them here moved them in BOTH directions on a blind re-POST:
@@ -166,7 +165,7 @@ ON CONFLICT (id) DO UPDATE SET
   -- Preserving them here also guards a replica whose in-memory cache doesn't yet hold
   -- the row from writing a default over consent it never knew about.
   updated_at             = NOW()
-RETURNING cache_poolable, distill_poolable, cost_optimize_routing`
+RETURNING cache_poolable, distill_poolable, cost_optimize_routing, distill_policy, tare_policy`
 
 const updateLoggingPolicySQL = `UPDATE workspaces
 SET logging_policy = $2, updated_at = NOW()
@@ -240,9 +239,10 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 	// blind re-POST must not silently (re-)pool an existing tenant's content.
 	//
 	// Precedence, in order:
-	//   EXISTING workspace -> whatever it already had, for ALL THREE consent flags. Neither an
-	//     omitted field nor an explicit value changes them; the ON CONFLICT clause enforces the
-	//     same thing in the DB, and RETURNING reconciles this cache to it below.
+	//   EXISTING workspace -> whatever it already had, for ALL THREE consent flags and for the
+	//     distill and Tare policies (B8.3: both default ON, so a re-POST must not undo an "off").
+	//     Neither an omitted field nor an explicit value changes them; the ON CONFLICT clause
+	//     enforces the same thing in the DB, and RETURNING reconciles this cache to it below.
 	//   NEW + explicit choice (WithCachePoolableChoice) -> honour it, including a DECLINE. This is
 	//     what lets a privacy-conscious tenant say no AT creation rather than discovering the
 	//     default afterwards and calling SetCachePoolable.
@@ -254,6 +254,8 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 		stored.CachePoolable = existing.CachePoolable
 		stored.DistillPoolable = existing.DistillPoolable
 		stored.CostOptimizeRouting = existing.CostOptimizeRouting
+		stored.DistillPolicy = existing.DistillPolicy
+		stored.TarePolicy = existing.TarePolicy
 	} else if o.cachePoolable != nil {
 		stored.CachePoolable = *o.cachePoolable
 	} else {
@@ -275,23 +277,28 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 		// the body's values into memory — cannot change consent even transiently. The persisted
 		// boundary holds in memory too.
 		var dbPoolable, dbDistillPoolable, dbCostOptimizeRouting bool
+		var dbDistillPolicy, dbTarePolicy string
 		if err := m.pool.QueryRow(ctx, insertWorkspaceSQL,
 			stored.ID, stored.Name, stored.CachePrefix, stored.SpendLimitUSD,
 			stored.AllowedModels, stored.AllowedProviders, stored.MaxTokensPerRequest,
 			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active, string(stored.LoggingPolicy),
 			string(stored.DistillPolicy), stored.CachePoolable, stored.DistillPoolable, stored.CostOptimizeRouting,
 			string(stored.CompressionPolicy), string(stored.TarePolicy),
-		).Scan(&dbPoolable, &dbDistillPoolable, &dbCostOptimizeRouting); err != nil {
+		).Scan(&dbPoolable, &dbDistillPoolable, &dbCostOptimizeRouting, &dbDistillPolicy, &dbTarePolicy); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
 		}
 		if dbPoolable != stored.CachePoolable ||
 			dbDistillPoolable != stored.DistillPoolable ||
-			dbCostOptimizeRouting != stored.CostOptimizeRouting {
+			dbCostOptimizeRouting != stored.CostOptimizeRouting ||
+			DistillPolicy(dbDistillPolicy) != stored.DistillPolicy ||
+			TarePolicy(dbTarePolicy) != stored.TarePolicy {
 			m.mu.Lock()
 			if cur, ok := m.workspaces[ws.ID]; ok {
 				cur.CachePoolable = dbPoolable
 				cur.DistillPoolable = dbDistillPoolable
 				cur.CostOptimizeRouting = dbCostOptimizeRouting
+				cur.DistillPolicy = DistillPolicy(dbDistillPolicy)
+				cur.TarePolicy = TarePolicy(dbTarePolicy)
 			}
 			m.mu.Unlock()
 		}

@@ -9,21 +9,24 @@ import (
 // layer — on this workspace's requests. B6.5. It mirrors DistillPolicy and CompressionPolicy: a
 // stored policy plus a per-request header, X-Talyvor-Tare.
 //
-// ⚠ OFF BY DEFAULT. Tare's JSON and log reducers are lossless, but its code trimmer is LOSSY: it
-// replaces function bodies with an announced elision. A workspace turns it on itself.
+// ON BY DEFAULT (B8.3 — Nicolai: every capability is on; the customer turns off what they do not
+// want, from the Features screen). Tare's JSON and log reducers are lossless; its code trimmer is
+// LOSSY (it replaces function bodies with an announced elision), so every reducer refuses when
+// unsure and a single request opts out with X-Talyvor-Tare: false.
 type TarePolicy string
 
 const (
-	// TareDisabled never reduces — fully inert. The default.
+	// TareDisabled never reduces — fully inert. An explicit opt-out.
 	TareDisabled TarePolicy = "disabled"
 	// TareOptIn reduces ONLY when the request also carries X-Talyvor-Tare: true.
 	TareOptIn TarePolicy = "opt_in"
-	// TareAlways reduces every request (no header needed).
+	// TareAlways reduces every request (no header needed) unless it carries X-Talyvor-Tare: false.
+	// The default.
 	TareAlways TarePolicy = "always"
 )
 
 // DefaultTarePolicy is what a workspace gets when it sets NO policy.
-const DefaultTarePolicy = TareDisabled
+const DefaultTarePolicy = TareAlways
 
 // normalizeTarePolicy honours a valid value, resolves EMPTY to the default, and fails anything
 // else SAFE to TareDisabled, so a typo can never start reducing requests.
