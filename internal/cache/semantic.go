@@ -272,7 +272,7 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 		ctx,
 		semanticUpsertPooledSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
-		string(discriminator.Canon(prompt)), fp,
+		pooledDiscriminators(prompt), fp,
 	)
 	return err
 }
@@ -299,14 +299,14 @@ func (c *SemanticCache) SetPooledWithVariants(ctx context.Context, provider, mod
 	var originalID string
 	if err := c.pool.QueryRow(ctx, semanticUpsertPooledReturningSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
-		string(discriminator.Canon(prompt)), fp,
+		pooledDiscriminators(prompt), fp,
 	).Scan(&originalID); err != nil {
 		return err
 	}
 
 	// Computed ONCE, from the original, and reused for every variant — so there is no code path
 	// on which a variant's own text can reach the discriminators column.
-	inherited := string(discriminator.Canon(prompt))
+	inherited := pooledDiscriminators(prompt)
 	for _, v := range variants {
 		// A variant answers only under the original's fingerprint, exactly as it inherits its entities.
 		vsum := sha256.Sum256([]byte(provider + ":" + model + ":variant:" + FingerprintedKey(v.Question, fp)))
