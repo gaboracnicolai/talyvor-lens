@@ -213,26 +213,15 @@ func TestCompressionMeasure_ACacheHitIsNotInTheDenominator(t *testing.T) {
 	}
 }
 
-// ⚠ A STREAMING REQUEST IS NEITHER COMPRESSED NOR MEASURED, IN A WORKSPACE WHOSE
-// POLICY IS `always`.
+// B15.3 — A STREAMING REQUEST IN A WORKSPACE WHOSE POLICY IS `always` IS COMPRESSED
+// AND MEASURED, like a non-streaming one.
 //
-// proxy.go#serve's streaming branch returns before the gate exists, handing the
-// caller's ORIGINAL body to StreamHandler. So `always` does not mean "every
-// request": it means every non-streaming request, which is what
-// workspace.CompressionAlways's own docstring says — and which the measurement
-// layer's population enumeration does not.
-//
-// WHY IT IS THE LOAD-BEARING EXCLUSION RATHER THAN A CORNER: streaming is the
-// shape coding agents use, and poolsafety.Corpus() — this repo's model of real
-// agent traffic — is the corpus the rewriter was measured to modify 8 of 8 times.
-// The traffic the feature was justified on is the traffic it does not run on, and
-// `requests` never mentions it.
-//
-// ⚠ NOT FIXED. Compressing the streaming path means rewriting the body the
-// StreamHandler forwards verbatim, on the same seam that deliberately skips
-// routing; and the measurement would then need a post-stream hook that does not
-// exist. A product decision, not a tidy-up.
-func TestCompressionGate_AStreamingRequestIsNeitherCompressedNorMeasured(t *testing.T) {
+// Until B15.3, proxy.go#serve's streaming branch returned before the gate existed and
+// handed the caller's ORIGINAL body to StreamHandler, so `always` meant "every
+// non-streaming request" — and streaming is the shape coding agents and the chat use.
+// The branch now sits after the gate: the stream is sent the rewrite, and the
+// post-stream seam (recordStreamPostServe) writes its measurement row.
+func TestCompressionGate_AStreamingRequestIsCompressedAndMeasured(t *testing.T) {
 	ws := workspace.Workspace{
 		ID: "ws-stream", Name: "always", Active: true,
 		LoggingPolicy:     workspace.LoggingMetadata,
@@ -261,10 +250,15 @@ func TestCompressionGate_AStreamingRequestIsNeitherCompressedNorMeasured(t *test
 	if len(up.bodies) != upstreamBefore+1 {
 		t.Fatalf("floor: the streaming request made no upstream call (%d → %d) — nothing below was exercised", upstreamBefore, len(up.bodies))
 	}
-	if got := up.lastPrompt(t); got != compressiblePrompt {
-		t.Fatalf("a streaming request in an `always` workspace is now compressed\n got  %q\n want the caller's own bytes %q\n(the rewrite would have been %q) — the comment above and workspace.CompressionAlways's docstring both need updating", got, compressiblePrompt, rewrite)
+	if got := up.lastPrompt(t); got != rewrite {
+		t.Fatalf("a streaming request in an `always` workspace was not compressed\n got  %q\n want the rewrite %q", got, rewrite)
 	}
-	if rows := sink.all(); len(rows) != 1 {
-		t.Fatalf("the streaming request wrote a measurement row (%d rows total, want the control's 1) — captureCompression's population enumeration needs updating", len(rows))
+	rows := sink.all()
+	if len(rows) != 2 {
+		t.Fatalf("the streaming request wrote no measurement row (%d rows total, want the control's 1 + the stream's 1)", len(rows))
+	}
+	if got := rows[1]; !got.Modified || got.SentBytes != len(rewrite) || got.OriginalBytes != len(compressiblePrompt) || got.CostEstimated {
+		t.Fatalf("the stream's measurement row = %+v, want Modified, %d sent / %d original bytes, billed on the stream's reported usage",
+			got, len(rewrite), len(compressiblePrompt))
 	}
 }

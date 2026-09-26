@@ -13,11 +13,15 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/retry"
+	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/workspace"
+	"github.com/talyvor/lens/internal/worktier"
 )
 
 // streamUsage accumulates the provider's reported token counts as they
@@ -50,6 +54,30 @@ type streamSpend struct {
 	distillMethod               string           // B7.3: "convert" when this request was distilled, as on the buffered row
 	visionOCR                   visionSpend      // B7.3: the OCR sub-call's cost, owed its own vision_ocr row
 	reqFP                       string           // B15.1: the request fingerprint the cache write is keyed under
+	post                        streamPostServe  // B15.3: what the buffered seam's post-flush records read
+}
+
+// streamPostServe carries what the buffered path's post-flush records read and a stream would
+// otherwise not have (B15.3): the prompt as sent, the routing evidence, the request's start. Zero
+// value = nothing to record beyond the spend row, which is what a direct StreamHandler call gets.
+type streamPostServe struct {
+	provider              string
+	requestBody           []byte
+	requestStart          time.Time
+	trackSession          bool // X-Talyvor-Session named a tracked session
+	piiDetected           bool
+	guardrailFired        bool
+	compressedPrompt      string // the prompt sent upstream; equals the caller's prompt unless compressed
+	savingsPct            float64
+	compressionGateOpened bool
+	routeWasAuto          bool
+	baselineModel         string
+	cohortBasis           string
+	cohortOverrode        bool
+	cohortN               int
+	cohortModel           string
+	complexityBucket      string
+	distillFacts          []distillServeFact
 }
 
 const (
@@ -122,6 +150,8 @@ type streamOps interface {
 	// Anthropic's message_stop). A stream whose connection closes before that line was cut off,
 	// and its text is never cached (B15.2).
 	endsAnswer(line []byte) bool
+	// applyPoolKey replaces the deployment key applyAuth set with a pooled one (B15.3).
+	applyPoolKey(req *http.Request, key string)
 	// extractUsage inspects one SSE line for provider-reported usage,
 	// updating u in place. No-op for lines that carry no usage.
 	extractUsage(line []byte, u *streamUsage)
@@ -137,6 +167,9 @@ type openAIStreamOps struct {
 
 func (o openAIStreamOps) upstreamURL() string         { return o.url }
 func (o openAIStreamOps) applyAuth(req *http.Request) { o.setAuth(req) }
+func (openAIStreamOps) applyPoolKey(req *http.Request, key string) {
+	req.Header.Set("Authorization", "Bearer "+key)
+}
 
 // prepareBody injects stream_options.include_usage so OpenAI-compatible
 // providers emit a final usage chunk. Best-effort: a parse failure returns
@@ -243,6 +276,9 @@ type anthropicStreamOps struct {
 
 func (a anthropicStreamOps) upstreamURL() string         { return a.url }
 func (a anthropicStreamOps) applyAuth(req *http.Request) { a.setAuth(req) }
+func (anthropicStreamOps) applyPoolKey(req *http.Request, key string) {
+	req.Header.Set("x-api-key", key)
+}
 
 // prepareBody is identity: Anthropic emits usage natively (message_start +
 // message_delta), so there is no include_usage flag to inject.
@@ -343,8 +379,22 @@ func (s *StreamHandler) serve(
 	// Ask the provider to surface usage in the stream (OpenAI-family:
 	// stream_options.include_usage; identity for Anthropic). Best-effort.
 	body = ops.prepareBody(body)
-	// GPT-6 rejects max_tokens and temperature — the same rewrite forward applies (reasoning_params.go).
-	body = adaptReasoningParams(model, body)
+	// GPT-6 rejects max_tokens and temperature — the same rewrite forward applies (reasoning_params.go),
+	// for the model the body is SENT to, which routing may have changed (sc.model).
+	upstreamModel := sc.model
+	if upstreamModel == "" {
+		upstreamModel = model
+	}
+	body = adaptReasoningParams(upstreamModel, body)
+
+	// The key pool, as forwardWithFallback uses it: a healthy pooled key for this provider when the
+	// operator configured any, else the deployment's single key. A transport failure counts against it.
+	var poolKey *keypool.PoolKey
+	if s.proxy.keyPool != nil {
+		if pk, perr := s.proxy.keyPool.Get(provider); perr == nil && pk != nil {
+			poolKey = pk
+		}
+	}
 
 	// Retry the initial upstream call on transient failures. Once we
 	// commit to streaming (after WriteHeader below) there's no second
@@ -375,8 +425,18 @@ func (s *StreamHandler) serve(
 			}
 		}
 		ops.applyAuth(req)
+		if poolKey != nil {
+			ops.applyPoolKey(req, poolKey.Key)
+		}
 		return s.proxy.httpClient.Do(req)
 	})
+	if poolKey != nil {
+		if result.LastError != nil {
+			s.proxy.keyPool.RecordError(poolKey.ID)
+		} else {
+			s.proxy.keyPool.RecordSuccess(poolKey.ID)
+		}
+	}
 	if result.LastError != nil {
 		metrics.RecordUpstream(upstreamProviderLabel(provider), "error", time.Since(upstreamStart))
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+result.LastError.Error())
@@ -453,10 +513,14 @@ func (s *StreamHandler) serve(
 			shouldCache = false
 		}
 	}
-	if shouldCache && s.proxy.scorer != nil {
-		// Score against the accumulated text content, not the synthesized
-		// JSON, so the heuristics see what the user would see.
+	// Score every finished answer, as the buffered path scores every 200: the score gates the cache
+	// here and feeds the routing corpus below (B15.3). Against the accumulated text content, not the
+	// synthesized JSON, so the heuristics see what the user would see. A cut-off answer is not scored.
+	var qualityScore float64
+	scored := false
+	if ended && s.proxy.scorer != nil {
 		q := s.proxy.scorer.ScoreResponse(storeCtx, prompt, accumulated.String(), provider, model)
+		qualityScore, scored = q.Score, true
 		if !q.ShouldCache {
 			shouldCache = false
 		}
@@ -483,10 +547,61 @@ func (s *StreamHandler) serve(
 	// Gated on the logging policy inside recordTokenEvent (full only) — sc.wsID
 	// is the same workspace recordStreamSpend below reads its policy from, so a
 	// none/metadata streamed request feeds neither the learner nor the spend row.
-	s.proxy.recordTokenEvent(storeCtx, provider, model, eventPrompt, cached, 0, piiDetected, sc.wsID)
+	s.proxy.recordTokenEvent(storeCtx, provider, model, eventPrompt, cached, sc.post.savingsPct, piiDetected, sc.wsID)
 	// Close the streamed-spend gap: bill on the captured provider usage when
 	// present, else the len/4 estimate. A streamed request must never again
 	// be invisible to budgets/alerts.
-	s.proxy.recordStreamSpend(storeCtx, sc, usage, accumulated.String())
+	settled := s.proxy.recordStreamSpend(storeCtx, sc, usage, accumulated.String())
+	s.proxy.recordStreamPostServe(storeCtx, r, sc, usage, prompt, accumulated.String(), cached, qualityScore, scored, settled)
 	return nil
+}
+
+// recordStreamPostServe is the streamed seam's copy of the buffered path's post-flush records (B15.3),
+// under the same gates in the same order: the session turn, the routing corpus (earn or capture), the
+// work tier, the route decision and its prediction, the compression measurement, the distill serves and
+// the per-request attribution. Void and post-serve like every one of them — nothing here can reach the
+// client, who already has the answer. Two buffered records are NOT here, because a stream has committed
+// its headers before the answer exists: the session totals and quality score headers, and the K4 output
+// verdict, whose id the caller only ever receives in a header.
+func (p *Proxy) recordStreamPostServe(ctx context.Context, r *http.Request, sc streamSpend, u streamUsage,
+	prompt, outputText string, payload []byte, quality float64, scored bool, settledChargeUSD float64) {
+	pp := sc.post
+	inT, outT, estimated, servedCostUSD := streamServedCost(sc, u, outputText)
+	if pp.trackSession && sc.logging != workspace.LoggingNone {
+		p.recordSessionTurn(ctx, sc.sessionID, prompt, outputText, sc.model, servedCostUSD, false)
+	}
+	if p.alertManager != nil && sc.logging != workspace.LoggingNone {
+		sentTokens := len(pp.compressedPrompt) / 4
+		latencyMs := time.Since(pp.requestStart).Milliseconds()
+		bucket := string(worktier.ComplexityBucketFor(router.AnalyseComplexity(pp.compressedPrompt).Score()))
+		if !p.earnPattern(ctx, pp.piiDetected, pp.guardrailFired, sc.logging, sc.feature, sc.model, pp.provider, prompt, payload,
+			sentTokens, outT, quality, scored, latencyMs, bucket) {
+			p.capturePattern(ctx, pp.piiDetected, pp.guardrailFired, sc.logging, sc.wsID, sc.feature, sc.model, pp.provider,
+				sentTokens, outT, quality, scored, latencyMs, false, bucket)
+		}
+		p.captureWorkTier(ctx, sc.wsID, sc.feature, sc.model, pp.provider, pp.compressedPrompt,
+			sentTokens, outT, pp.piiDetected, pp.guardrailFired, string(sc.logging))
+		if pp.routeWasAuto {
+			tk := routeTokens{UncachedInput: sentTokens, Output: outT}
+			if u.present {
+				tk = routeTokens{UncachedInput: u.uncachedInputTokens, CachedInput: u.cachedInputTokens,
+					CacheWriteInput: u.cacheWriteInputTokens, Output: u.outputTokens, ProviderReported: true}
+			}
+			p.captureRouteDecision(ctx, sc.wsID, pp.baselineModel, sc.model, pp.cohortBasis, pp.cohortOverrode, pp.cohortN, tk)
+			p.emitRoutingPrediction(ctx, sc.wsID, sc.feature, pp.cohortModel, pp.provider, pp.cohortOverrode, sentTokens, pp.complexityBucket)
+		}
+		if pp.compressionGateOpened {
+			p.captureCompression(ctx, compressionObservation{
+				requestID: sc.requestID, workspaceID: sc.wsID, model: sc.model,
+				original: prompt, sent: pp.compressedPrompt,
+				billedInputTokens: inT, costEstimated: estimated,
+			})
+		}
+		p.recordDistillServes(ctx, sc.wsID, sc.logging, pp.distillFacts, settledChargeUSD)
+	}
+	if p.attrStore != nil && sc.logging != workspace.LoggingNone {
+		attrCtx := attribution.ExtractFromRequest(r)
+		attrCtx.RequestID = sc.requestID
+		p.attrStore.RecordAsync(attrCtx, inT, outT, servedCostUSD, sc.model, pp.provider, time.Since(pp.requestStart))
+	}
 }
