@@ -1,96 +1,47 @@
-# `logging_policy = none` does not stop the semantic cache — measured
+# `logging_policy = none` stores no content — decided 27 Sep 2026, built in B18.4
 
-**Status: a MEASUREMENT and a DECISION REQUEST. Nothing in the commit that added this file changes
-behaviour.** What it adds is `internal/proxy/logging_none_cache_test.go`, which turns the fact below
-from a comment that is currently wrong into something CI re-measures on every run.
+## What it means
 
-## The two claims
+A workspace whose `logging_policy` is `none` has **no prompt or response content stored**:
 
-`internal/proxy/proxy.go`, beside the per-request observability writes:
+- **no exact cache** entry (Redis) — private or pooled;
+- **no semantic cache** row (`prompt_embeddings`) — private or pooled;
+- **no pool contribution** of any kind, including shared document conversions;
+- **no document conversion** cached (the private distill cache is read-only for it);
+- **no prompt template** recorded (`prompt_templates` keeps a system prompt's text), so it forgoes
+  the pinned prompt-caching rewrite;
+- **no content logs**: `token_events`, session turns, request attribution, the learner stream and the
+  pool shadow log were already skipped for `none`.
 
-> Logging policy gates the per-request observability writes. None is the privacy escape hatch —
-> **every DB and NATS sink is bypassed.** Metadata keeps cost/token rows but strips `prompt_text`.
-> Full keeps everything.
+It **may still be served from the shared pool** when it has opted into sharing: reading stores
+nothing. What it gives up is its own cache — every repeat of its own question goes to the model, so
+**its bill goes up**. That is the trade Nicolai decided on 27 Sep.
 
-talyvor-suite `apps/web/src/areas/marketing/Landing.tsx` — the shipped marketing page:
+## How it is enforced
 
-> Prompts, issues, pages, and spend records sit in your Postgres. **Retention is a per-workspace
-> policy you set — including "log nothing"** — not a plan tier.
+`Proxy.storeCaches` returns before writing anything when the workspace resolves to `none`. It is the
+one choke point for every cache write — the buffered path, local and node routing, and the streamed
+path all call it — so no call site can forget. The distill integration makes the private conversion
+cache read-only and skips both pooled writes for `none`; the template recorder is skipped for `none`.
 
-## What was measured
+## How it is proved
 
-`TestMeasured_LoggingNoneStillPersistsTheAnswerToTheSemanticCache`, against a real Postgres, using
-the real `workspace.Manager`, the real `SemanticCache` and the real `Proxy.storeCaches`:
+`internal/proxy/b184_logging_none_realpg_test.go`, through the real handler, with the exact cache, the
+semantic cache and the template recorder wired to a fully migrated Postgres: a `none` workspace asks
+a question carrying a unique marker in its system prompt and its question, and the answer carries it
+too. The marker is then searched for in **every text, json and array column of every table** and in
+**every Redis key and value** — zero hits. A control proves the scan sees content: the same kind of
+question from a `metadata` workspace IS found. The `none` workspace is then served another
+workspace's pooled answer, with no model call, and owns no `prompt_embeddings` row and no exact
+entry afterwards.
 
-- the workspace is registered with `LoggingPolicy: none`, and the **Proxy itself** resolves it that
-  way (`p.loggingPolicyFor(wsID) == none` is asserted before anything else happens);
-- `storeCaches` is called once;
-- the response body is then in `prompt_embeddings.response`, **verbatim**.
+On the code before B18.4 the same test found the `none` workspace's content in
+`prompt_templates.content`, `prompt_embeddings.response` and `prompt_text` (private and pooled), and
+two exact-cache entries it owned.
 
-`prompt_embeddings` is the table this repo's own tenant-data manifest describes as *"the cached
-ANSWERS — the most sensitive thing held"*.
+## History
 
-## Why it happens
-
-Three facts, each asserted by a census in the same file:
-
-1. **`storeCaches` takes no logging policy and fetches none.** It cannot honour one.
-2. **None of its four call sites** (`proxy.go` ×3, `stream.go` ×1) mentions the policy. They guard
-   on HTTP status, PII detection and a quality score.
-3. **`internal/cache` does not import `internal/workspace` at all**, so `SemanticCache.Set` has
-   nothing to consult either. Its SQL writes `string(response)` unconditionally.
-
-The policy ladder is enforced, carefully and with tests, for `token_events` — `none` skips the row,
-`metadata` strips `prompt_text`, `full` keeps it. The semantic cache simply is not on that path.
-
-## Scope — stated precisely, not dramatised
-
-- The private semantic entry is **workspace-scoped**. It is not readable by another tenant; the
-  cross-tenant *pooled* copy is a separate write behind an explicit `cache_poolable` opt-in.
-- It is swept by `LENS_SEMANTIC_CACHE_RETENTION`, so it is not kept forever.
-- The semantic cache is constructed **unconditionally** in `cmd/lens/main.go` — there is no feature
-  flag — so this applies to any deployment with an embedding key configured.
-- The exact (Redis) cache also holds the answer. This document is about the **Postgres** sink,
-  because that is what "sit in your Postgres" and "log nothing" are about.
-
-## The decision (NOT taken here)
-
-Two readings are defensible and they lead to different products.
-
-**(a) `none` must bypass the semantic-cache write too.** This is what the proxy's own comment and
-the landing page say. ⚠ **It is not free**: a `none` workspace would lose every semantic cache hit,
-so its requests go upstream and **its bill goes up**. That is a cost consequence for existing
-customers, which is why a session must not merge it — this queue's rule about money paths.
-
-**(b) The cache is operational, not observability, and is exempt.** Defensible: an entry has to hold
-the answer to be a cache, it is workspace-private, and it is swept. ⚠ **Then two pieces of text are
-wrong and must change**: the proxy comment claiming *every* DB sink is bypassed, and the marketing
-page's "log nothing", which a customer reads as "no content of mine is retained".
-
-**There is no third option where both the current behaviour and the current wording stand.**
-
-A middle path exists — a separate cache-retention consent, orthogonal to `logging_policy`, the way
-`cache_poolable` is orthogonal to it — but that is a new product concept and squarely a product
-decision.
-
-## What is merged
-
-- `TestMeasured_LoggingNoneStillPersistsTheAnswerToTheSemanticCache` — the fact, executable.
-  **Expected to go red when the behaviour is fixed**; its failure message says so and says to delete
-  it then.
-- `TestCensus_NoStoreCachesCallSiteConsultsTheLoggingPolicy` — asserts the absence, and **carries
-  its own control**: the same search window, run over `recordTokenEvent` (a sink that *is* gated),
-  must FIND that guard. Without it, "no guard found" would be indistinguishable from "this census
-  cannot find guards".
-- `TestCensus_StoreCachesItselfCannotHonourAPolicy` — the function neither receives a policy nor
-  fetches one.
-
-Controls: `w461-retention-controls-k7v3.py`, **4/4 CAUGHT**.
-
-⚠ **Control F1 caught a flaw in this file's own evidence, and it is the part worth reading.** The
-first fixture built a `Proxy` with no `workspaceManager` and registered the policy on a manager the
-Proxy never saw — so `loggingPolicyFor` returned the `metadata` default and the workspace's `none`
-was decorative. Gating `storeCaches` on the policy left the test **green**, because the policy was
-never reachable from the code under test. The manager is now wired in and the resolved policy is
-asserted before anything else runs. A test that proves a privacy claim is broken had better be
-reaching the privacy setting.
+This file previously recorded the measurement that `none` did NOT stop the semantic cache (#461,
+W4.6.2), with executable tests pinning that fact and a request for the decision. The decision is
+taken; those tests were deleted with the behaviour they described, as their own failure messages
+instructed.
