@@ -18,6 +18,7 @@ import (
 	"github.com/talyvor/lens/internal/discriminator"
 	"github.com/talyvor/lens/internal/doc2query"
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/pairverify"
 )
 
 // Embedder turns a text prompt into an embedding vector.
@@ -61,6 +62,54 @@ type SemanticCache struct {
 	// window. retention <= 0 disables both halves: rows are served regardless of
 	// age and never swept (kept indefinitely).
 	retention time.Duration
+	// verifier is B9.7's pair verifier. nil keeps the pooled read exactly as it was before B9.7: the
+	// entity lane only, at the threshold. Set, it is the gate for a question with no entity and a
+	// second gate after the entity gate — see GetPooled.
+	verifier pairverify.Verifier
+}
+
+// NoEntityLowerBound is the cosine a stored question must reach to be OFFERED to the pair verifier
+// for an asked question that names no entity. It is a candidate bound, not a serve threshold: every
+// candidate is served only on the verifier's YES. Measured on the committed corpora with
+// text-embedding-3-small and claude-haiku-4-5 (docs/pool-b97-measured.md): entity-free consumer
+// rephrasings sit between 0.55 and 0.86, far under the 0.98 threshold, and danger stays 0 at every
+// bound from 0.60 to 0.90. 0.60 serves the most (21 of 68 rephrasings, 2 today) and saves the most
+// net of checks: 36% of checks end in a serve against a 22% break-even. 0.85 would serve 3.
+const NoEntityLowerBound = 0.60
+
+// maxVerifiedChars refuses a pair either of whose questions is longer than this, instead of paying
+// to send two documents to the verifier. The measured cost per check ($0.000149) is for questions.
+const maxVerifiedChars = 4000
+
+// verifyTimeout bounds the verifier call on the serve path; a timeout refuses, and the request goes
+// upstream as a miss.
+const verifyTimeout = 3 * time.Second
+
+// SetPairVerifier wires B9.7's pair verifier into the pooled read. A setter, like the proxy's, so
+// NewSemanticCache keeps its signature and a cache without one behaves exactly as before.
+func (c *SemanticCache) SetPairVerifier(v pairverify.Verifier) { c.verifier = v }
+
+// VerifiesPairs reports whether the no-entity lane is open, which is what makes an entity-free
+// question worth writing to the pool (storeCaches).
+func (c *SemanticCache) VerifiesPairs() bool { return c != nil && c.verifier != nil }
+
+// PooledCandidate is the rule the pooled SQL applies, in Go, with the verifier wired: may the stored
+// question be offered to the verifier for the asked one at this similarity? cmd/pairverify measures
+// the corpora through it, so the measured gate and the served gate are the same rule.
+//   - the asked question names an entity: the entity gate (equal discriminators) at the threshold;
+//   - it names none: the stored question names none either, at NoEntityLowerBound.
+func PooledCandidate(stored, asked string, similarity, threshold float64) bool {
+	return PooledCandidateAt(stored, asked, similarity, threshold, NoEntityLowerBound)
+}
+
+// PooledCandidateAt is PooledCandidate at another no-entity bound — what cmd/pairverify sweeps to
+// measure where the bound belongs.
+func PooledCandidateAt(stored, asked string, similarity, threshold, bound float64) bool {
+	ca, cs := discriminator.Canon(asked), discriminator.Canon(stored)
+	if ca.Verifiable() {
+		return ca == cs && similarity >= threshold
+	}
+	return !cs.Verifiable() && similarity >= bound
 }
 
 func NewSemanticCache(pool *pgxpool.Pool, embedder Embedder, threshold float64, retention time.Duration) *SemanticCache {
@@ -133,7 +182,8 @@ LIMIT 1`
 // verify the contributor's live opt-in. The `updated_at > $4` serve window and
 // its cutoff are identical to the private path (see semanticSelectSQL). COALESCE
 // makes a missing contributor an empty string (→ the gate blocks it).
-const semanticSelectPooledSQL = `SELECT COALESCE(variant_of, id) AS entry_id, response, COALESCE(contributor_workspace_id, '') AS contributor, 1 - (embedding <=> $1) AS similarity
+const semanticSelectPooledSQL = `SELECT COALESCE(variant_of, id) AS entry_id, response, COALESCE(contributor_workspace_id, '') AS contributor, 1 - (embedding <=> $1) AS similarity,
+  COALESCE(prompt_text, '') AS prompt_text
 FROM prompt_embeddings
 WHERE provider = $2 AND model = $3
   AND embedding_model = $5
@@ -147,6 +197,28 @@ WHERE provider = $2 AND model = $3
   -- B15.1: similarity judges the prompt; the fingerprint is everything else that shapes the answer
   -- (system, tools, temperature, max_tokens, ...). Equal or no serve; a pre-B15.1 row is NULL here.
   AND request_fp = $7
+ORDER BY embedding <=> $1
+LIMIT 1`
+
+// semanticSelectPooledNoEntitySQL is B9.7's lane for a question that names no entity — most consumer
+// traffic, which the entity gate above can never serve. It exists only while the pair verifier is
+// wired: the row offered here is a CANDIDATE, and GetPooled serves it only if the verifier says the
+// stored question and the asked one have the same answer.
+//
+// `discriminators IS NULL` keeps the lane symmetric: an entity-free question is offered only an
+// entity-free stored question, never "how do I validate a field in Pydantic v2?" for "how do I
+// validate a field?". `prompt_text IS NOT NULL` drops every row the verifier cannot judge: every row
+// written before 0135.
+const semanticSelectPooledNoEntitySQL = `SELECT COALESCE(variant_of, id) AS entry_id, response, COALESCE(contributor_workspace_id, '') AS contributor, 1 - (embedding <=> $1) AS similarity,
+  prompt_text
+FROM prompt_embeddings
+WHERE provider = $2 AND model = $3
+  AND embedding_model = $5
+  AND updated_at > $4
+  AND is_poolable = true
+  AND discriminators IS NULL
+  AND prompt_text IS NOT NULL
+  AND request_fp = $6
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -178,8 +250,8 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
 // is_poolable=true (a literal). Its prompt_hash is keyed on a NUL-sentinel-
 // prefixed prompt (the caller's job), provably disjoint from any private hash.
 const semanticUpsertPooledSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, request_fp)
-VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9)
+  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, request_fp, prompt_text)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9, NULLIF($10, ''))
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
@@ -192,6 +264,8 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
   -- findable by that prompt's entities and not the previous one's.
   discriminators = EXCLUDED.discriminators,
   request_fp = EXCLUDED.request_fp,
+  -- B9.7: the question the row now answers, for the pair verifier.
+  prompt_text = EXCLUDED.prompt_text,
   updated_at = NOW()`
 
 // freshnessCutoff is the lower bound a row's updated_at must exceed to remain
@@ -264,6 +338,9 @@ func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt, fp str
 // the NUL-sentinel pooled marker, so the row's prompt_hash is provably disjoint
 // from any workspace-private hash (which carries a "wsID:" prefix). Used only on
 // the opt-in path — Stage 2.0b's cross-tenant write surface.
+//
+// B9.7: the row also keeps the bare question (the prompt without the marker), because the pair
+// verifier cannot judge a match without it — with the same protection as the response beside it.
 func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, fp, contributorWsID string, response []byte, embedding []float32) error {
 	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + FingerprintedKey(prompt, fp)))
 	hash := hex.EncodeToString(sum[:])
@@ -272,7 +349,7 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 		ctx,
 		semanticUpsertPooledSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
-		pooledDiscriminators(prompt), fp,
+		pooledDiscriminators(prompt), fp, strings.TrimPrefix(prompt, PoolKeyMarker),
 	)
 	return err
 }
@@ -299,7 +376,7 @@ func (c *SemanticCache) SetPooledWithVariants(ctx context.Context, provider, mod
 	var originalID string
 	if err := c.pool.QueryRow(ctx, semanticUpsertPooledReturningSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
-		pooledDiscriminators(prompt), fp,
+		pooledDiscriminators(prompt), fp, strings.TrimPrefix(prompt, PoolKeyMarker),
 	).Scan(&originalID); err != nil {
 		return err
 	}
@@ -356,8 +433,12 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt, 
 	//
 	// It sits ahead of Embed deliberately: a prompt that can never be served must not cost a
 	// paid embedding call to discover that.
+	//
+	// B9.7: WITH THE PAIR VERIFIER WIRED, such a prompt gets its own lane instead of a refusal —
+	// the verifier compares the stored question with the asked one, which is where direction and
+	// negation live, so it can judge the pair the entity gate had nothing to compare on.
 	canon := discriminator.Canon(prompt)
-	if !canon.Verifiable() {
+	if !canon.Verifiable() && c.verifier == nil {
 		return nil, "", "", 0, nil
 	}
 
@@ -371,17 +452,31 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt, 
 		response    string
 		contributor string
 		similarity  float64
+		stored      string
+		floor       = c.threshold
 	)
-	err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
-		string(canon), fp).
-		Scan(&id, &response, &contributor, &similarity)
+	if canon.Verifiable() {
+		err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
+			string(canon), fp).
+			Scan(&id, &response, &contributor, &similarity, &stored)
+	} else {
+		floor = NoEntityLowerBound
+		err = c.pool.QueryRow(ctx, semanticSelectPooledNoEntitySQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
+			fp).
+			Scan(&id, &response, &contributor, &similarity, &stored)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", "", 0, nil
 	}
 	if err != nil {
 		return nil, "", "", 0, err
 	}
-	if similarity < c.threshold {
+	if similarity < floor {
+		return nil, "", "", 0, nil
+	}
+	// The verifier after the entity gate, and AS the gate with no entity. A row with no question
+	// text cannot be judged, so it is refused rather than served on similarity alone.
+	if c.verifier != nil && !c.sameAnswer(ctx, stored, prompt) {
 		return nil, "", "", 0, nil
 	}
 	if _, err := c.pool.Exec(ctx, semanticTouchSQL, id); err != nil {
@@ -390,6 +485,22 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt, 
 
 	metrics.CacheHitsTotal.WithLabelValues("semantic_pooled").Inc()
 	return []byte(response), contributor, id, similarity, nil
+}
+
+// sameAnswer asks the pair verifier whether the stored question and the asked one have the same
+// answer. Anything but a YES refuses: no stored text, an over-long pair, an error or a timeout.
+func (c *SemanticCache) sameAnswer(ctx context.Context, stored, asked string) bool {
+	if stored == "" || len(stored) > maxVerifiedChars || len(asked) > maxVerifiedChars {
+		return false
+	}
+	vctx, cancel := context.WithTimeout(ctx, verifyTimeout)
+	defer cancel()
+	v, err := c.verifier.Verify(vctx, stored, asked)
+	if err != nil {
+		slog.Warn("pooled cache: pair verifier failed, candidate refused", slog.String("err", err.Error()))
+		return false
+	}
+	return v.Same
 }
 
 // DeleteStale removes semantic-cache rows that haven't been used within the

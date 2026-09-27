@@ -10,6 +10,9 @@
 //	after live gates    — only pairs production would already admit (similarity >= the live
 //	                      threshold AND equal discriminators), i.e. the verifier as a SECOND gate.
 //	                      Needs LENS_OPENAI_API_KEY for the embeddings; skipped without it.
+//	wired gate (B9.7)   — the gate as it serves: cache.PooledCandidateAt decides which pairs reach
+//	                      the verifier (entity gate at the threshold; with no entity on either side,
+//	                      similarity >= a bound), the verifier decides. Swept over candidate bounds.
 //
 // And the economics: mean cost per check, the cost of the answer a hit saves (a real generation on
 // the same model over a sample of the corpus), and the break-even hit rate — the share of checked
@@ -29,6 +32,7 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/canonq"
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/discriminator"
@@ -101,7 +105,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		ds, un := report(ln.Traffic, reph, dang, emb != nil)
+		ds, un := report(ln.Traffic, reph, dang, emb != nil, threshold)
 		dangerServed += ds
 		unmeasured += un
 	}
@@ -183,7 +187,11 @@ func check(ctx context.Context, v pairverify.Verifier, emb poolsafety.Embedder, 
 	return out, nil
 }
 
-func report(lane string, reph, dang []result, gated bool) (dangerServed, unmeasured int) {
+// bounds are the no-entity candidate bounds the wired gate is measured at; cache.NoEntityLowerBound
+// is the one that serves.
+var bounds = []float64{0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90}
+
+func report(lane string, reph, dang []result, gated bool, threshold float64) (dangerServed, unmeasured int) {
 	fmt.Printf("\n═══ %s ═══  %d rephrase pairs (should serve) · %d danger pairs (must not)\n", lane, len(reph), len(dang))
 	recovered, unstable := 0, 0
 	for _, r := range reph {
@@ -231,6 +239,7 @@ func report(lane string, reph, dang []result, gated bool) (dangerServed, unmeasu
 			}
 		}
 		fmt.Printf("  after live gates: candidates admitted today — rephrase %d, danger %d; with the verifier as a second gate: rephrase served %d, danger served %d\n", ar, ad, rr, dd)
+		wired(reph, dang, threshold)
 	}
 	sort.Slice(reph, func(i, j int) bool { return reph[i].pair.Name < reph[j].pair.Name })
 	var refused []string
@@ -241,6 +250,50 @@ func report(lane string, reph, dang []result, gated bool) (dangerServed, unmeasu
 	}
 	fmt.Printf("  rephrasings refused in every run: %s\n", strings.Join(refused, ", "))
 	return len(served), unmeasured
+}
+
+// wired reports the B9.7 gate as it serves, at each candidate bound: how many pairs reach the
+// verifier (each a paid check), how many rephrasings it serves (YES in every run) and how many
+// danger pairs (YES in any run). served/checked is what the break-even hit rate is compared with.
+func wired(reph, dang []result, threshold float64) {
+	fmt.Printf("  wired gate (B9.7): entity lane at %.2f, no-entity lane at the bound, verifier decides\n", threshold)
+	fmt.Printf("    %-7s %-18s %-18s %-14s %s\n", "bound", "rephrase served", "danger served", "checks", "served/checks")
+	for _, b := range bounds {
+		rc, rs, dc, ds := 0, 0, 0, 0
+		for _, r := range reph {
+			if cache.PooledCandidateAt(r.pair.A, r.pair.B, r.sim, threshold, b) {
+				rc++
+				if r.measured == runs && r.yes == runs {
+					rs++
+				}
+			}
+		}
+		for _, r := range dang {
+			if cache.PooledCandidateAt(r.pair.A, r.pair.B, r.sim, threshold, b) {
+				dc++
+				if r.yes > 0 {
+					ds++
+				}
+			}
+		}
+		live := ""
+		if b == cache.NoEntityLowerBound {
+			live = "  ← live"
+		}
+		share := "n/a"
+		if rc+dc > 0 {
+			share = fmt.Sprintf("%.0f%%", 100*float64(rs)/float64(rc+dc))
+		}
+		fmt.Printf("    %-7.2f %-18s %-18s %-14d %s%s\n", b, frac(rs, len(reph)), frac(ds, len(dang)), rc+dc, share, live)
+	}
+	var near []string
+	for _, r := range reph {
+		if !discriminator.Canon(r.pair.B).Verifiable() && !discriminator.Canon(r.pair.A).Verifiable() {
+			near = append(near, fmt.Sprintf("%s %.4f", r.pair.Name, r.sim))
+		}
+	}
+	sort.Strings(near)
+	fmt.Printf("    entity-free rephrasings and their similarity: %s\n", strings.Join(near, ", "))
 }
 
 // economics prices one check against the answer a hit saves, both on the same model.

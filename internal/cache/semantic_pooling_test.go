@@ -22,7 +22,7 @@ func TestSemanticCache_SetPooled_TagsContributor(t *testing.T) {
 		// 8th arg: the entity discriminators of the stored prompt. A pooled row that does not
 		// carry them cannot be matched safely later, so the write is where they must appear.
 		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "resp", "wsA", testEmbeddingModel,
-			string(discriminator.Canon("pooledprompt")), testFP).
+			string(discriminator.Canon("pooledprompt")), testFP, "pooledprompt").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := c.SetPooled(context.Background(), "openai", "gpt-4", "pooledprompt", testFP, "wsA", []byte("resp"), []float32{0.1, 0.2}); err != nil {
@@ -56,8 +56,8 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
 		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
-				AddRow(id, "pooled_payload", "wsA", 0.95),
+			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity", "prompt_text"}).
+				AddRow(id, "pooled_payload", "wsA", 0.95, ""),
 		)
 	mock.ExpectExec(`UPDATE prompt_embeddings`).
 		WithArgs(id).
@@ -89,8 +89,8 @@ func TestSemanticCache_GetPooled_BelowThreshold(t *testing.T) {
 		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
 		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
-				AddRow("id1", "x", "wsA", 0.5),
+			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity", "prompt_text"}).
+				AddRow("id1", "x", "wsA", 0.5, ""),
 		)
 	body, owner, entryID, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", pooledFixturePrompt, testFP)
 	if err != nil || body != nil || owner != "" || entryID != "" {
@@ -110,8 +110,8 @@ func TestSemanticCache_GetPooled_EmptyContributor(t *testing.T) {
 		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
 		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity"}).
-				AddRow("id1", "x", "", 0.99),
+			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity", "prompt_text"}).
+				AddRow("id1", "x", "", 0.99, ""),
 		)
 	mock.ExpectExec(`UPDATE prompt_embeddings`).WithArgs("id1").WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	body, owner, _, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", pooledFixturePrompt, testFP)

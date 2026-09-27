@@ -1,5 +1,8 @@
 # The pair verifier, measured on the committed corpora — 2026-09-25 (B9.2)
 
+> **B9.7 (2026-09-27) wired it** as the pool's gate — docs/pool-b97-measured.md. "Wired to nothing"
+> below is the state this page measured.
+
 **The verifier:** `internal/pairverify`. It asks a small model one question about the pair — "would
 these two questions have exactly the same correct answer?" — and allows a serve only on a bare
 YES. It is wired to nothing.
