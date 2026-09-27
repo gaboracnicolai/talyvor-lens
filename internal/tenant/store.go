@@ -212,6 +212,14 @@ func (s *Store) UpsertConfig(ctx context.Context, c WorkspaceConfig) error {
 	if !c.CreatedAt.IsZero() {
 		createdAt = c.CreatedAt
 	}
+	// B18.3: an omitted allowlist is "all allowed" — an empty array. Left nil it is written as NULL
+	// into a NOT NULL column, and a PUT setting only a spending cap was refused.
+	if c.AllowedModels == nil {
+		c.AllowedModels = []string{}
+	}
+	if c.AllowedProviders == nil {
+		c.AllowedProviders = []string{}
+	}
 	_, err := s.pool.Exec(ctx, upsertConfigSQL,
 		c.ID, c.Name, c.SpendingCapUSD, c.MonthlyBudget,
 		c.RateLimitRPM, c.RateLimitTPM,

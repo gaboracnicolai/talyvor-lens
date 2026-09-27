@@ -645,6 +645,8 @@ func run() error {
 	}
 	tenantStore := tenant.NewStore(pool)
 	spendTracker := tenant.NewSpendTracker(tenantStore)
+	// B18.3: the spending cap and rate limits set through PUT /v1/workspaces/{ws}/config are enforced.
+	p.SetWorkspaceLimits(tenantStore, spendTracker)
 	rateLimiter := ratelimit.New(redisClient, ratelimit.DefaultRules())
 
 	// Token-bucket multi-tier limiter (Item 8). ⚠ ONE TIER, NO CALLER.
@@ -2654,6 +2656,7 @@ func run() error {
 			// Drop any cached spend snapshot so the new cap kicks
 			// in on the next request instead of waiting for the TTL.
 			spendTracker.InvalidateCache(wsID)
+			p.InvalidateWorkspaceLimits(wsID)
 			writeJSONOK(w, http.StatusOK, in)
 		})
 
