@@ -2665,7 +2665,11 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 		// ⚠ SCOPED TO THE SEMANTIC WRITE ON PURPOSE. The exact pooled write above is keyed on
 		// byte-identical prompt text, so it is servable without an entity gate. Gating it too
 		// would drop real cross-tenant exact hits.
-		if p.sharesAnswers(ctx, wsID) && discriminator.Canon(rawPrompt).Verifiable() {
+		//
+		// B9.7: WITH THE PAIR VERIFIER WIRED the entity-free prompt IS servable — the verifier judges
+		// the stored question against the asked one — so it is written, and the row keeps the
+		// question text (SetPooled).
+		if p.sharesAnswers(ctx, wsID) && (discriminator.Canon(rawPrompt).Verifiable() || p.semantic.VerifiesPairs()) {
 			if vec, err := p.embedder.Embed(ctx, rawPrompt); err == nil {
 				_ = p.semantic.SetPooled(ctx, provider, model, pooledPromptKey(rawPrompt), reqFP, wsID, response, vec)
 			}

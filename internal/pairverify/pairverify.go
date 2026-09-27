@@ -7,9 +7,9 @@
 // and the danger — direction and negation, "enable" vs "disable" — lives in the difference between
 // two questions, not in either alone.
 //
-// ⚠ NOT WIRED INTO ANY SERVE PATH. B9.2 allows wiring only if the committed danger corpus is served
-// ZERO times across three runs; cmd/pairverify is the measurement, docs/pool-b92-measured.md the
-// result.
+// B9.2 allowed wiring only if the committed danger corpus is served ZERO times across three runs;
+// cmd/pairverify is the measurement, docs/pool-b92-measured.md the result. B9.7 wired it: the pooled
+// semantic read (cache.SemanticCache.GetPooled) serves only on its YES — docs/pool-b97-measured.md.
 package pairverify
 
 import (

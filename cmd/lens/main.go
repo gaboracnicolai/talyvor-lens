@@ -86,6 +86,7 @@ import (
 	"github.com/talyvor/lens/internal/nodelatency"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/outputverify"
+	"github.com/talyvor/lens/internal/pairverify"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/poolshadow"
@@ -388,6 +389,12 @@ func run() error {
 	// change to LENS_EMBEDDING_MODEL can no longer make vectors from two different spaces
 	// look comparable.
 	semanticCache := cache.NewSemanticCache(pool, openAIEmbedder, cfg.SemanticThreshold, cfg.SemanticCacheRetention)
+	// B9.7: the pair verifier (docs/pool-b92-measured.md, 0/86 danger pairs) gates every pooled
+	// semantic serve, and is the only gate for a question that names no entity. Without an
+	// Anthropic key the pooled read stays exactly as before: entity lane only.
+	if cfg.AnthropicAPIKey != "" {
+		semanticCache.SetPairVerifier(pairverify.NewAnthropicVerifier(cfg.AnthropicAPIKey, ""))
+	}
 	promptCompressor := compressor.New()
 	modelRouter := router.New()
 	piiDetector := pii.New()
