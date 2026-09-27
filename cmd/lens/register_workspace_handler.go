@@ -61,6 +61,8 @@ func newRegisterWorkspaceHandler(reg registrar) http.HandlerFunc {
 		}
 		// Only pass a choice when the caller actually made one; silence must reach the manager as
 		// silence so the new-workspace default applies.
+		// B18.6: the prompt rewriter is retired — a registration cannot turn it on.
+		in.CompressionPolicy = workspace.CompressionDisabled
 		var opts []workspace.RegisterOption
 		if in.CachePoolable != nil {
 			opts = append(opts, workspace.WithCachePoolableChoice(*in.CachePoolable))
