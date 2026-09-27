@@ -4043,32 +4043,9 @@ func run() error {
 			})
 		})
 
-		// Per-workspace PROMPT-REWRITER policy toggle (migration 0117). Applies
-		// immediately — proxy.serve() reads via GetCompressionPolicy on every
-		// non-streaming request. Default is DISABLED for every workspace, existing
-		// ones included: the rewriter measured 0.000% over 308 committed corpus
-		// prompts while rewriting 8 of 8 agent-traffic ones (unfenced code loses its
-		// indentation), so it is opt-in until a reduction technique earns the
-		// default back. See internal/workspace/compression_policy.go.
-		authed.Put("/v1/workspaces/{wsID}/compression", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			var in struct {
-				CompressionPolicy workspace.CompressionPolicy `json:"compression_policy"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			if err := wsManager.SetCompressionPolicy(req.Context(), wsID, in.CompressionPolicy); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			ws, _ := wsManager.GetWorkspace(wsID)
-			writeJSONOK(w, http.StatusOK, map[string]any{
-				"ok":                 true,
-				"compression_policy": ws.CompressionPolicy,
-			})
-		})
+		// B18.6: the prompt rewriter is retired. This route no longer turns it on — 410 — and still
+		// accepts "disabled", which is every workspace's policy. See compression_handler.go.
+		authed.Put("/v1/workspaces/{wsID}/compression", newCompressionPolicyHandler(wsManager))
 
 		// B6.5 — per-workspace TARE policy (migration 0126): disabled | opt_in | always. DISABLED by
 		// default; opt_in reduces only requests that also carry X-Talyvor-Tare: true. Applies on the

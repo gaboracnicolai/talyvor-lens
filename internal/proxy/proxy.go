@@ -1524,7 +1524,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
-	upstreamBodyOut, err := rebuildBody(body, upstreamModel, compressedPrompt)
+	// B18.6: the caller's body goes upstream as sent — every turn, every role — with only the model
+	// replaced when routing chose another, exactly as the streaming branch does. It used to be rebuilt
+	// here as ONE user message holding every turn joined by "\n" whether or not anything had been
+	// compressed, so a system instruction and the model's own earlier answers reached the provider as
+	// things the user said. rebuildBody now runs only for a compressed prompt, which no workspace can
+	// ask for any more (the prompt rewriter is retired).
+	upstreamBodyOut := body
+	err = nil
+	if compressedPrompt != prompt {
+		upstreamBodyOut, err = rebuildBody(body, upstreamModel, compressedPrompt)
+	} else if upstreamModel != model {
+		upstreamBodyOut = setModelInBody(body, upstreamModel)
+	}
 	if err == nil && bufferedStream {
 		// Buffering for output guardrails: force the UPSTREAM call non-streaming
 		// so it returns a parseable completion CheckOutput can inspect (the
