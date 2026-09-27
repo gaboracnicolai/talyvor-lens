@@ -133,20 +133,20 @@ func TestDistill_PooledDenied_RequesterNotOptedIn(t *testing.T) {
 	}
 }
 
-// TestDistill_PooledDenied_OwnerOptOut: the OWNER's opt-in is checked at SERVE
-// time — if the producer opts out after publishing, its pooled artifact is no
-// longer servable to others.
-func TestDistill_PooledDenied_OwnerOptOut(t *testing.T) {
+// TestDistill_PooledServed_AfterOwnerOptOut: B21.3 (decided 28 Sep 2026) — switching
+// sharing off stops NEW sharing only. A conversion the producer published before it
+// opted out is still served to others, until the producer deletes it.
+func TestDistill_PooledServed_AfterOwnerOptOut(t *testing.T) {
 	conv := &countingConv{}
 	poolable := map[string]bool{"wsA": true, "wsB": true}
 	d := newScopedDistiller(t, conv, true, poolable)
 	ctx := context.Background()
 	doc := docBlockBytes("doc")
 	_, _, _, _ = d.tryConvertBlock(ctx, doc, nil, "wsA") // wsA publishes pooled
-	poolable["wsA"] = false                              // wsA revokes its consent
+	poolable["wsA"] = false                              // wsA switches sharing off
 	mdB, _, _, ok := d.tryConvertBlock(ctx, doc, nil, "wsB")
-	if !ok || mdB != "converted-2" {
-		t.Fatalf("owner opt-out must deny the pooled serve; ok=%v md=%q", ok, mdB)
+	if !ok || mdB != "converted-1" {
+		t.Fatalf("a conversion shared before the owner opted out must still be served; ok=%v md=%q", ok, mdB)
 	}
 }
 

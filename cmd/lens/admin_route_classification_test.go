@@ -56,6 +56,8 @@ var operatorReadable = map[string]string{
 // a line here cannot quietly widen the credential.
 var operatorMustNotReach = map[string]string{
 	"/v1/admin/lxc/grant":                                        "MINTS LXC. Moves money.",
+	"/v1/admin/deletion-requests":                                "B21.3: which workspaces asked Talyvor to delete their data. requireAdmin only.",
+	"/v1/admin/deletion-requests/{id}/complete":                  "B21.3: DELETES a workspace's stored answers and conversions. Irreversible.",
 	"/v1/admin/conversion-rate/approve":                          "CHANGES A PRICE.",
 	"/v1/admin/bonds/{bond_id}/settle":                           "slashes or releases a provenance bond. Moves money.",
 	"/v1/admin/distill-royalty/adjudicate":                       "REVOKES A PAYOUT.",

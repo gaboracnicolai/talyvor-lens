@@ -37,8 +37,9 @@ func TestGate_GlobalOffBlocksAll(t *testing.T) {
 	}
 }
 
-// A pooled hit requires ALL THREE: global on, requester opted in, contributor
-// opted in. Each missing one blocks.
+// A pooled hit requires global on and the requester opted in. B21.3: the
+// contributor's CURRENT opt-in is not consulted — what it shared before switching
+// off stays shared until it deletes it.
 func TestGate_PooledHitRequiresAllThree(t *testing.T) {
 	// All three present → allowed.
 	if !gate(true, "req", "owner").MaybeAllowPooledHit(context.Background(), "req", "owner") {
@@ -48,9 +49,9 @@ func TestGate_PooledHitRequiresAllThree(t *testing.T) {
 	if gate(true, "owner").MaybeAllowPooledHit(context.Background(), "req", "owner") {
 		t.Error("requester not opted in → blocked")
 	}
-	// Contributor (owner) NOT opted in → blocked.
-	if gate(true, "req").MaybeAllowPooledHit(context.Background(), "req", "owner") {
-		t.Error("contributor not opted in → blocked")
+	// Contributor (owner) switched sharing off since → still served (B21.3).
+	if !gate(true, "req").MaybeAllowPooledHit(context.Background(), "req", "owner") {
+		t.Error("contributor switched sharing off → its earlier shared answer must still be served")
 	}
 	// Global off → blocked (covered above, asserted here for the matrix).
 	if gate(false, "req", "owner").MaybeAllowPooledHit(context.Background(), "req", "owner") {

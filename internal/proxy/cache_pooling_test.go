@@ -157,21 +157,21 @@ func TestPooling_RequesterNotOptedIn_Blocked(t *testing.T) {
 	}
 }
 
-// CONTRIBUTOR CONSENT VERIFIED AT READ TIME: wsA contributes a pooled entry
-// while poolable, then revokes its opt-in. wsB (poolable) must NOT be served the
-// entry — the owner's consent is checked against the live flag, not just at write.
-func TestPooling_ContributorRevoked_Blocked(t *testing.T) {
+// B21.3 (decided 28 Sep 2026): wsA contributes a pooled entry while poolable, then
+// switches sharing off. That stops NEW sharing only — wsB (poolable) is still served
+// the entry wsA shared before, until wsA deletes it (internal/storedanswers).
+func TestPooling_ContributorSwitchedOff_EarlierShareStillServed(t *testing.T) {
 	global := true
 	p, wsm, _, _, calls := newPoolingProxy(t, &global)
 	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
 	_ = wsm.SetCachePoolable(context.Background(), "wsB", true)
 
 	dispatchWS(t, p, "wsA", "what is 2+2")                       // wsA contributes a pooled entry (owner=wsA)
-	_ = wsm.SetCachePoolable(context.Background(), "wsA", false) // wsA revokes consent
+	_ = wsm.SetCachePoolable(context.Background(), "wsA", false) // wsA switches sharing off
 	before := atomic.LoadInt64(calls)
 	dispatchWS(t, p, "wsB", "what is 2+2")
-	if atomic.LoadInt64(calls)-before != 1 {
-		t.Errorf("contributor revoked: pooled hit must be blocked at read time; upstream delta=%d want 1", atomic.LoadInt64(calls)-before)
+	if atomic.LoadInt64(calls)-before != 0 {
+		t.Errorf("an answer shared before switching off must still be served; upstream delta=%d want 0", atomic.LoadInt64(calls)-before)
 	}
 }
 

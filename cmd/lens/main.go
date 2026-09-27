@@ -110,6 +110,7 @@ import (
 	"github.com/talyvor/lens/internal/sessionkey"
 	"github.com/talyvor/lens/internal/shadowmint"
 	"github.com/talyvor/lens/internal/status"
+	"github.com/talyvor/lens/internal/storedanswers"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/warmer"
@@ -142,6 +143,15 @@ func main() {
 	// LENS_EMBEDDING_MODEL, LENS_SEMANTIC_THRESHOLD, or a major client's prompt templates.
 	// It is also the only thing standing between "today's model happens to be safe" and
 	// "we would notice if it stopped being".
+	// `lens deletion-requests` (B21.3): list and complete requests to delete everything Talyvor holds
+	// for a workspace. See deletion_requests_cli.go and docs/deletion-requests-runbook.md.
+	if len(os.Args) > 1 && os.Args[1] == "deletion-requests" {
+		if err := runDeletionRequests(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "poolcheck" {
 		if err := runPoolCheck(); err != nil {
 			slog.Error("poolcheck failed", slog.String("err", err.Error()))
@@ -4067,6 +4077,16 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]any{"ok": true, "tare_policy": ws.TarePolicy})
 		})
 
+		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
+		// See internal/storedanswers.
+		storedAnswers := storedanswers.New(pool, redisClient)
+		authed.Get("/v1/workspaces/{wsID}/stored-answers", storedanswers.CountsHandler(storedAnswers))
+		authed.Delete("/v1/workspaces/{wsID}/stored-answers", storedanswers.DeleteHandler(storedAnswers, wsManager))
+		authed.Post("/v1/workspaces/{wsID}/deletion-requests", storedanswers.FileRequestHandler(storedAnswers))
+		authed.Get("/v1/workspaces/{wsID}/deletion-requests", storedanswers.RequestStatusHandler(storedAnswers))
+		authed.Get("/v1/admin/deletion-requests", requireAdmin(authManager, storedanswers.AdminListHandler(storedAnswers)))
+		authed.Post("/v1/admin/deletion-requests/{id}/complete", requireAdmin(authManager, storedanswers.AdminCompleteHandler(storedAnswers)))
+
 		// B6.4 — what Tare saved in this workspace, per work item (X-Talyvor-Issue), read from the
 		// tare_* columns of token_events. work_item_id is CALLER-DECLARED — a label, not an audit.
 		authed.Get("/v1/workspaces/{wsID}/tare/savings", func(w http.ResponseWriter, req *http.Request) {
@@ -4202,7 +4222,8 @@ func run() error {
 		// Per-workspace opt-in for cross-tenant DISTILL-cache sharing (S0). A
 		// separate consent from cache-poolable — distill artifacts are
 		// document-derived. Default false (private); cross-tenant serving also
-		// requires LENS_DISTILL_POOLABLE_ENABLED + the owner's own opt-in.
+		// requires LENS_DISTILL_POOLABLE_ENABLED, and the owner opted in when it
+		// shared the artifact (switching off stops new sharing only — B21.3).
 		authed.Put("/v1/workspaces/{wsID}/distill-poolable", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {

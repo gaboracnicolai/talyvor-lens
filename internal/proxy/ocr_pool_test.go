@@ -83,10 +83,10 @@ func TestOCRPool_ConsentedServe_ByteIdentical_OwnerStamped(t *testing.T) {
 	}
 }
 
-// TestOCRPool_OwnerOptedOut_NoServe — fail-closed (owner side): the owner's opt-in
-// is checked at SERVE time, so if A opts out after publishing, B is no longer
-// served A's OCR and re-dispatches.
-func TestOCRPool_OwnerOptedOut_NoServe(t *testing.T) {
+// TestOCRPool_OwnerOptedOut_EarlierShareStillServed — B21.3 (decided 28 Sep 2026):
+// switching sharing off stops NEW sharing only, so an OCR result A published before
+// opting out is still served to B (no re-dispatch), until A deletes it.
+func TestOCRPool_OwnerOptedOut_EarlierShareStillServed(t *testing.T) {
 	poolable := map[string]bool{"wsA": true, "wsB": true}
 	d := newScopedDistiller(t, needsVisionConv{}, true, poolable)
 	vis := &ocrPlanner{model: "m"}
@@ -94,12 +94,12 @@ func TestOCRPool_OwnerOptedOut_NoServe(t *testing.T) {
 	doc := docBlockBytes("doc")
 
 	_, _, _, _ = d.tryConvertBlock(ctx, doc, vis, "wsA") // A publishes (dispatch #1)
-	poolable["wsA"] = false                              // A revokes consent
+	poolable["wsA"] = false                              // A switches sharing off
 	if _, _, _, ok := d.tryConvertBlock(ctx, doc, vis, "wsB"); !ok {
 		t.Fatal("wsB: not ok")
 	}
-	if vis.calls != 2 {
-		t.Fatalf("owner opt-out must deny the pooled OCR serve → B re-dispatches: calls=%d, want 2", vis.calls)
+	if vis.calls != 1 {
+		t.Fatalf("an OCR result shared before the owner opted out must still be served: calls=%d, want 1", vis.calls)
 	}
 }
 
