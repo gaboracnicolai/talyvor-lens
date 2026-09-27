@@ -36,9 +36,10 @@ import (
 // a decision, not a guess.
 
 // settableConfigFields are the fields PUT /v1/workspaces/{wsID}/config accepts and stores. Every
-// one of them is a threshold, a limit, an allowlist or a retention policy, and not one is read by
-// anything that gates traffic — measured, not asserted: TestTenantWorkspaceConfigHasNoEnforcementReader
-// shows the TYPE has no production reader, so no field of it can have one either.
+// one of them is a threshold, a limit, an allowlist or a retention policy. Since B18.3 three gate
+// traffic — SpendingCapUSD, RateLimitRPM, RateLimitTPM, in internal/proxy/workspace_limits.go — and
+// the rest are read by nothing: TestTenantWorkspaceConfigHasNoEnforcementReader pins the TYPE's
+// production readers to that one file and the PUT decode.
 //
 // The list is kept so it can be checked against the struct. A field added to WorkspaceConfig and
 // not added here is a new published setting nobody has said anything about.
@@ -154,6 +155,11 @@ func productionGoFiles(t *testing.T, skip func(rel string) bool) map[string]stri
 // ⚠ THE CENSUS. tenant.WorkspaceConfig must not gain a production reader without somebody saying
 // what it now does — and equally, it must not LOSE one silently, because a reader appearing here
 // is the good outcome this item is asking for.
+//
+// B18.3 IS THAT OUTCOME FOR THREE FIELDS: internal/proxy/workspace_limits.go reads
+// spending_cap_usd, rate_limit_rpm and rate_limit_tpm and refuses traffic over them, before the
+// provider is called, for the workspace that set them. MonthlyBudget, the allowlists, LogLevel and
+// RetentionDays are still read by nothing.
 func TestTenantWorkspaceConfigHasNoEnforcementReader(t *testing.T) {
 	// The store defines the type; main.go decodes the PUT body into it. Those two are the surface,
 	// not enforcement, and are excluded by name so the exclusion is visible.
@@ -176,12 +182,26 @@ func TestTenantWorkspaceConfigHasNoEnforcementReader(t *testing.T) {
 	}
 	sort.Strings(readers)
 
-	const wantOnly = "cmd/lens/main.go: var in tenant.WorkspaceConfig"
-	if len(readers) != 1 || readers[0] != wantOnly {
+	const wantDecode = "cmd/lens/main.go: var in tenant.WorkspaceConfig"
+	enforcer := filepath.Join("internal", "proxy", "workspace_limits.go") + ": "
+	var other []string
+	decode, enforced := 0, 0
+	for _, r := range readers {
+		switch {
+		case r == wantDecode:
+			decode++
+		case strings.HasPrefix(r, enforcer):
+			enforced++
+		default:
+			other = append(other, r)
+		}
+	}
+	if decode != 1 || enforced == 0 || len(other) > 0 {
 		t.Errorf("tenant.WorkspaceConfig is used in %d production place(s):\n  %s\n\n"+
-			"W6.27 measured exactly one — the PUT handler decoding the request body. Anything else "+
-			"means a field that was inert now DOES something (say what, and to whose traffic) or "+
-			"that the decode moved (then this census is aimed at nothing).",
+			"Expected the PUT handler decoding the request body and B18.3's enforcement in "+
+			"internal/proxy/workspace_limits.go, nothing else. Anything else means a field that was "+
+			"inert now DOES something (say what, and to whose traffic) or that the decode or the "+
+			"enforcement moved (then this census is aimed at nothing).",
 			len(readers), strings.Join(readers, "\n  "))
 	}
 }

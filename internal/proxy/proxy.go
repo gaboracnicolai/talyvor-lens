@@ -168,6 +168,10 @@ type Proxy struct {
 	royaltyMinter     royaltySink
 	poolDiscount      float64 // r — consumer discount on CROSS-TENANT pooled hits; 0 = charge list
 
+	// limits enforces the spending cap and rate limits a workspace set through PUT .../config
+	// (B18.3). nil = none enforced.
+	limits *workspaceLimits
+
 	// Shadow LXC spend (Stage 2.4/2.5) — optional, nil-safe. lxcShadowEnabled
 	// is read per-call so the flag stays live. See shadow_lxc.go.
 	lxcSink          lxcSpendSink
@@ -869,6 +873,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "budget_blocked").Inc()
 			return
 		}
+	}
+
+	// B18.3 — the spending cap and rate limits this workspace set through PUT .../config, checked
+	// before the provider is called on both seams (the streaming split is below).
+	if status, msg := p.limits.admit(ctx, wsID, budgetEstimateUSD(model, prompt),
+		len(prompt)/4+boundedMaxOut(extractMaxTokens(body), p.reservationMaxOut)); status != 0 {
+		writeError(w, status, msg)
+		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "workspace_limit_blocked").Inc()
+		return
 	}
 
 	// LXC gating (Stage 2.4/2.5) — pre-serve block when the workspace can't
@@ -1906,6 +1919,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		if p.budgetService != nil {
 			p.budgetService.RecordSpend(ctx, wsID, team, sprint, servedCostUSD)
 		}
+		p.limits.recordSpend(ctx, wsID, servedCostUSD) // B18.3: the month the spending cap is checked against
 		// (The legacy branch_spend double-write was retired in #157 — it had no
 		// reader since #158. request_attribution below is the sole attribution
 		// write now; attr/willAttribute still drive the X-Talyvor-Branch echo.)
@@ -2245,6 +2259,7 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	if p.budgetService != nil {
 		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, servedCostUSD)
 	}
+	p.limits.recordSpend(ctx, sc.wsID, servedCostUSD) // B18.3: as on the buffered seam
 	if p.alertManager == nil || sc.logging == workspace.LoggingNone {
 		return 0
 	}
