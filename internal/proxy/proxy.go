@@ -957,7 +957,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// crosses the pin threshold we rewrite the body to opt the upstream
 	// call into Anthropic's prompt-caching feature; OpenAI caches long
 	// system prompts automatically, so its hook is a no-op.
-	if p.templateDetector != nil {
+	// B18.4: a logging_policy = none workspace's system prompt is not recorded — prompt_templates
+	// keeps its text — so it forgoes the pinned prompt-caching rewrite.
+	if p.templateDetector != nil && loggingPolicy != workspace.LoggingNone {
 		if sysPrompt, found := p.templateDetector.ExtractSystemPrompt(body); found {
 			contentForRecord := sysPrompt
 			if p.piiDetector != nil {
@@ -1703,13 +1705,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// response the product would not cache could never have been pooled either, so including
 		// it would deflate the rate by construction.
 		//
-		// ⚠ IT HONOURS LoggingNone, AND THAT NARROWS THE POPULATION IN A DIRECTION WORTH STATING.
-		// storeCaches deliberately does NOT consult the policy — that is the open decision
-		// docs/retention-none-and-the-semantic-cache.md records and logging_none_cache_test.go
-		// pins — so a LoggingNone workspace's response IS cached, and would be pooled, while this
-		// observation is skipped. The measured rate is therefore a FLOOR: it under-counts by
-		// whatever share of traffic sits on LoggingNone. Reporting a floor is correct here;
-		// writing a metadata row for a tenant that asked for no rows would not be.
+		// It honours LoggingNone, as storeCaches does since B18.4: a LoggingNone workspace's
+		// response is neither cached nor pooled, so leaving it out of the observations is exact —
+		// and writing a metadata row for a tenant that asked for no rows would not be acceptable.
 		if shouldCache && loggingPolicy != workspace.LoggingNone {
 			p.shadowPoolObservation(ctx, wsID, cfg.ProviderName(), model, prompt,
 				p.sharesAnswers(ctx, wsID))
@@ -2619,6 +2617,14 @@ func (p *Proxy) tryExactPooled(ctx context.Context, provider, model, rawPrompt, 
 // the same one. turn (B16.1) is what the semantic entries answer: its latest question, after its
 // history.
 func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, rawPrompt, reqFP string, turn cache.Turn, wsID string, response []byte) {
+	// ⚠ B18.4: logging_policy = none STORES NO CONTENT — no exact entry, no semantic entry, no pool
+	// contribution. Decided 27 Sep (docs/retention-none-and-the-semantic-cache.md): until then this
+	// wrote the answer verbatim into prompt_embeddings whatever the policy. Gated HERE, not per call
+	// site, so all four (buffered, local and node routing, streamed) are covered by construction.
+	// Such a workspace can still be served from the shared pool: reading stores nothing.
+	if p.loggingPolicyFor(wsID) == workspace.LoggingNone {
+		return
+	}
 	if p.exact != nil {
 		// Private (workspace-scoped) entry — today's behavior, now owner-stamped.
 		_ = p.exact.SetWithOwner(ctx, provider, model, cache.FingerprintedKey(cachePrompt, reqFP), wsID, response)

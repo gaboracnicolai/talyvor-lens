@@ -63,11 +63,9 @@ figures **from one pass**, so they always describe the same population:
 
 Stated here rather than discovered by whoever quotes it:
 
-1. **`LoggingNone` traffic is excluded.** `storeCaches` deliberately does *not* consult the logging
-   policy — that is the open decision `retention-none-and-the-semantic-cache.md` records and
-   `logging_none_cache_test.go` pins — so a `LoggingNone` workspace's response **is** cached and
-   would be pooled, while this observation is skipped. Writing a metadata row for a tenant that asked
-   for no rows would not be acceptable, so the log under-counts by that share of traffic instead.
+1. **`LoggingNone` traffic is excluded — and, since B18.4, that is exact rather than a floor.**
+   `storeCaches` now honours the policy, so a `LoggingNone` workspace's response is neither cached
+   nor pooled; it could never have been a pooled hit (see `retention-none-and-the-semantic-cache.md`).
 2. **Locally-served and node-served lanes are excluded.** `tryLocalRouting` and `tryNodeRouting`
    write the cache without a paid cloud call, so a pooled hit on one avoids no provider spend — but
    `storeCaches` *does* put their responses in the pooled keyspace, so in production a cloud request

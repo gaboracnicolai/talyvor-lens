@@ -45,6 +45,16 @@ func (s scopedDistillCache) Set(ctx context.Context, contentHash, version string
 	return s.inner.Set(ctx, s.scope+contentHash, version, value)
 }
 
+// readOnlyDistillCache reads through and writes nothing — the private cache of a workspace whose
+// logging_policy is none (B18.4).
+type readOnlyDistillCache struct{ inner distill.Cache }
+
+func (c readOnlyDistillCache) Get(ctx context.Context, contentHash, version string) ([]byte, error) {
+	return c.inner.Get(ctx, contentHash, version)
+}
+
+func (readOnlyDistillCache) Set(context.Context, string, string, []byte) error { return nil }
+
 // distillIntegration wires the request path to the DISTILL orchestrator: it
 // converts a document carried in a chat request to clean Markdown via the
 // ISOLATED subprocess BEFORE the model call, when the workspace + request opt
@@ -242,6 +252,9 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	hash := distill.ContentHash(raw)
 	cacheVer := distill.CacheVersion(distill.TierFaithful)
 	pooled, _ := d.cache.(ownerDistillCache) // nil when the cache can't carry an owner → pooling off
+	// B18.4: a logging_policy = none workspace may READ conversions (its own, none, or a pooled one)
+	// but none of its document text is written anywhere.
+	keepsContent := d.wsManager == nil || d.wsManager.GetLoggingPolicy(wsID) != workspace.LoggingNone
 
 	// (1) POOLED READ — a cross-tenant artifact may be served ONLY when all
 	//     three hold: the global switch is on, the REQUESTER opted in
@@ -309,6 +322,10 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	var privateCache distill.Cache
 	if d.cache != nil {
 		privateCache = scopedDistillCache{inner: d.cache, scope: wsID + ":"}
+		// B18.4: logging_policy = none stores no content — a conversion is read, never written.
+		if !keepsContent {
+			privateCache = readOnlyDistillCache{privateCache}
+		}
 	}
 	res, sav, err := distill.Orchestrate(ctx, d.converter, privateCache, vision, raw, format, distill.TierFaithful)
 	if err != nil || res.NeedsVision || strings.TrimSpace(res.Markdown) == "" {
@@ -322,7 +339,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	//     are EXCLUDED here — they are pooled by (3b) into the OCR keyspace WITH
 	//     their avoided-COGS basis, so a cost-basis-less copy can't shadow them in
 	//     the conversion keyspace (which (1) would otherwise serve first).
-	if pooled != nil && res.Method != distill.MethodVisionOCR && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+	if pooled != nil && keepsContent && res.Method != distill.MethodVisionOCR && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
 		if b, mErr := distill.MarshalCached(res); mErr == nil {
 			_ = pooled.SetWithOwner(ctx, distill.PoolMarker+hash, cacheVer, wsID, b)
 		}
@@ -341,7 +358,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 		//      MarshalCachedOCR preserves the avoided-COGS basis (token split +
 		//      model) the S4 royalty (PR2) needs. Same dual-consent gate as (3).
 		//      Best-effort; never fails the request.
-		if pooled != nil && strings.TrimSpace(sav.VisionModel) != "" && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+		if pooled != nil && keepsContent && strings.TrimSpace(sav.VisionModel) != "" && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
 			if b, mErr := distill.MarshalCachedOCR(res, sav); mErr == nil {
 				_ = pooled.SetWithOwner(ctx, distill.PoolMarker+hash, distill.OCRCacheVersion(sav.VisionModel), wsID, b)
 			}
