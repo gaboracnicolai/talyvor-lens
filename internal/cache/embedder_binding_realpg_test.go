@@ -138,7 +138,7 @@ func TestSemantic_VectorFromAnotherEmbedder_IsNotServed(t *testing.T) {
 	embA := fixedEmbedder{name: "text-embedding-3-small", vec: vec(dim, 1.0)}
 	cacheA := cache.NewSemanticCacheWithDB(pool, embA, 0.92, time.Hour)
 	vA, _ := embA.Embed(ctx, promptA)
-	if err := cacheA.Set(ctx, "anthropic", "claude-sonnet-4-6", promptA, "test-fp", []byte(responseA), vA, "ws-1"); err != nil {
+	if err := cacheA.Set(ctx, "anthropic", "claude-sonnet-4-6", promptA, cache.SingleTurn(promptA), "test-fp", []byte(responseA), vA, "ws-1"); err != nil {
 		t.Fatalf("Set under embedder A: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestSemantic_VectorFromAnotherEmbedder_IsNotServed(t *testing.T) {
 	embB := fixedEmbedder{name: "text-embedding-ada-002", vec: vec(dim, 1.0001)}
 	cacheB := cache.NewSemanticCacheWithDB(pool, embB, 0.92, time.Hour)
 
-	got, err := cacheB.Get(ctx, "anthropic", "claude-sonnet-4-6", promptB, "test-fp", "ws-1")
+	got, err := cacheB.Get(ctx, "anthropic", "claude-sonnet-4-6", cache.SingleTurn(promptB), "test-fp", "ws-1")
 	if err != nil {
 		t.Fatalf("Get under embedder B: %v", err)
 	}
@@ -175,15 +175,14 @@ func TestSemanticPooled_VectorFromAnotherEmbedder_IsNotServed(t *testing.T) {
 	embA := fixedEmbedder{name: "text-embedding-3-small", vec: vec(dim, 1.0)}
 	cacheA := cache.NewSemanticCacheWithDB(pool, embA, 0.92, time.Hour)
 	vA, _ := embA.Embed(ctx, "contributor prompt")
-	if err := cacheA.SetPooled(ctx, "anthropic", "claude-sonnet-4-6",
-		cache.PooledPromptKey("contributor prompt"), "test-fp", "ws-owner", []byte("POOLED-FROM-A"), vA); err != nil {
+	if err := cacheA.SetPooled(ctx, "anthropic", "claude-sonnet-4-6", cache.PooledPromptKey("contributor prompt"), cache.SingleTurn("contributor prompt"), "test-fp", "ws-owner", []byte("POOLED-FROM-A"), vA); err != nil {
 		t.Fatalf("SetPooled: %v", err)
 	}
 
 	embB := fixedEmbedder{name: "text-embedding-ada-002", vec: vec(dim, 1.0001)}
 	cacheB := cache.NewSemanticCacheWithDB(pool, embB, 0.92, time.Hour)
 
-	got, owner, _, _, err := cacheB.GetPooled(ctx, "anthropic", "claude-sonnet-4-6", "unrelated requester prompt", "test-fp")
+	got, owner, _, _, err := cacheB.GetPooled(ctx, "anthropic", "claude-sonnet-4-6", cache.SingleTurn("unrelated requester prompt"), "test-fp")
 	if err != nil {
 		t.Fatalf("GetPooled: %v", err)
 	}
@@ -205,11 +204,13 @@ func TestSemantic_SameEmbedder_StillServes(t *testing.T) {
 
 	emb := fixedEmbedder{name: "text-embedding-3-small", vec: vec(dim, 1.0)}
 	c := cache.NewSemanticCacheWithDB(pool, emb, 0.92, time.Hour)
-	v, _ := emb.Embed(ctx, "a prompt")
-	if err := c.Set(ctx, "anthropic", "claude-sonnet-4-6", "a prompt", "test-fp", []byte("THE-ANSWER"), v, "ws-1"); err != nil {
+	// A question naming an entity: with no pair verifier wired, only the entity lane serves (B16.1).
+	const q = "What is the capital of France?"
+	v, _ := emb.Embed(ctx, q)
+	if err := c.Set(ctx, "anthropic", "claude-sonnet-4-6", q, cache.SingleTurn(q), "test-fp", []byte("THE-ANSWER"), v, "ws-1"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	got, err := c.Get(ctx, "anthropic", "claude-sonnet-4-6", "a prompt", "test-fp", "ws-1")
+	got, err := c.Get(ctx, "anthropic", "claude-sonnet-4-6", cache.SingleTurn(q), "test-fp", "ws-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestSemantic_LegacyNullProvenanceRow_IsNotServed(t *testing.T) {
 	c := cache.NewSemanticCacheWithDB(pool, emb, 0.92, time.Hour)
 	v, _ := emb.Embed(ctx, "legacy prompt")
 
-	if err := c.Set(ctx, "anthropic", "claude-sonnet-4-6", "legacy prompt", "test-fp", []byte("LEGACY-ANSWER"), v, "ws-1"); err != nil {
+	if err := c.Set(ctx, "anthropic", "claude-sonnet-4-6", "legacy prompt", cache.SingleTurn("legacy prompt"), "test-fp", []byte("LEGACY-ANSWER"), v, "ws-1"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 	// Simulate a pre-0110 row: provenance unknown.
@@ -237,7 +238,7 @@ func TestSemantic_LegacyNullProvenanceRow_IsNotServed(t *testing.T) {
 		t.Fatalf("null out provenance: %v", err)
 	}
 
-	got, err := c.Get(ctx, "anthropic", "claude-sonnet-4-6", "legacy prompt", "test-fp", "ws-1")
+	got, err := c.Get(ctx, "anthropic", "claude-sonnet-4-6", cache.SingleTurn("legacy prompt"), "test-fp", "ws-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

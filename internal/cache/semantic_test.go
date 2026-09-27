@@ -30,6 +30,13 @@ func (s stubEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	return s.vec, nil
 }
 
+// privateQ names an entity, so the private read's entity lane serves it without a pair verifier
+// (B16.1); privateQCanon is its discriminators, which that lane binds as $9.
+const (
+	privateQ      = "What is the capital of France?"
+	privateQCanon = "propn:france"
+)
+
 func newTestSemanticCache(t *testing.T, embedder Embedder, threshold float64) (*SemanticCache, pgxmock.PgxPoolIface) {
 	t.Helper()
 	mock, err := pgxmock.NewPool()
@@ -44,10 +51,10 @@ func TestSemanticCache_GetNoRowsReturnsNilNil(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel, testFP).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel, testFP, EmptyPrefix, privateQCanon).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity", "prompt_text"}))
 
-	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", testFP, "ws-1")
+	got, err := c.Get(context.Background(), "openai", "gpt-4", SingleTurn(privateQ), testFP, "ws-1")
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
@@ -63,13 +70,13 @@ func TestSemanticCache_GetBelowThresholdReturnsNilNil(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel, testFP).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel, testFP, EmptyPrefix, privateQCanon).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "response", "similarity"}).
-				AddRow("11111111-1111-1111-1111-111111111111", "cached", 0.5),
+			pgxmock.NewRows([]string{"id", "response", "similarity", "prompt_text"}).
+				AddRow("11111111-1111-1111-1111-111111111111", "cached", 0.5, privateQ),
 		)
 
-	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", testFP, "ws-1")
+	got, err := c.Get(context.Background(), "openai", "gpt-4", SingleTurn(privateQ), testFP, "ws-1")
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
@@ -86,16 +93,16 @@ func TestSemanticCache_GetAboveThresholdReturnsResponse(t *testing.T) {
 
 	const id = "11111111-1111-1111-1111-111111111111"
 	mock.ExpectQuery(`SELECT id, response`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel, testFP).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel, testFP, EmptyPrefix, privateQCanon).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "response", "similarity"}).
-				AddRow(id, "cached_payload", 0.95),
+			pgxmock.NewRows([]string{"id", "response", "similarity", "prompt_text"}).
+				AddRow(id, "cached_payload", 0.95, privateQ),
 		)
 	mock.ExpectExec(`UPDATE prompt_embeddings`).
 		WithArgs(id).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", testFP, "ws-1")
+	got, err := c.Get(context.Background(), "openai", "gpt-4", SingleTurn(privateQ), testFP, "ws-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -111,7 +118,7 @@ func TestSemanticCache_GetEmbedderErrorPropagates(t *testing.T) {
 	embErr := errors.New("embed failed")
 	c, mock := newTestSemanticCache(t, stubEmbedder{err: embErr}, 0.9)
 
-	got, err := c.Get(context.Background(), "openai", "gpt-4", "hello", testFP, "ws-1")
+	got, err := c.Get(context.Background(), "openai", "gpt-4", SingleTurn(privateQ), testFP, "ws-1")
 	if !errors.Is(err, embErr) {
 		t.Fatalf("expected embedder error to propagate, got %v", err)
 	}
@@ -217,10 +224,10 @@ func TestSemanticCache_GetServeWindowUsesRetentionCutoff(t *testing.T) {
 	c := NewSemanticCacheWithDB(mock, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9, retention)
 
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", cutoffMatcher{retention: retention, slack: time.Minute}, "ws-1", testEmbeddingModel, testFP).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", cutoffMatcher{retention: retention, slack: time.Minute}, "ws-1", testEmbeddingModel, testFP, EmptyPrefix, privateQCanon).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity", "prompt_text"}))
 
-	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", testFP, "ws-1"); err != nil {
+	if _, err := c.Get(context.Background(), "openai", "gpt-4", SingleTurn(privateQ), testFP, "ws-1"); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -240,10 +247,10 @@ func TestSemanticCache_GetServeWindowDisabledServesAllAges(t *testing.T) {
 	c := NewSemanticCacheWithDB(mock, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9, 0)
 
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", zeroTimeMatcher{}, "ws-1", testEmbeddingModel, testFP).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", zeroTimeMatcher{}, "ws-1", testEmbeddingModel, testFP, EmptyPrefix, privateQCanon).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity", "prompt_text"}))
 
-	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", testFP, "ws-1"); err != nil {
+	if _, err := c.Get(context.Background(), "openai", "gpt-4", SingleTurn(privateQ), testFP, "ws-1"); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -258,12 +265,13 @@ func TestSemanticCache_SetInsertsWithCorrectArgs(t *testing.T) {
 	wantHash := hex.EncodeToString(sum[:])
 
 	mock.ExpectExec(`INSERT INTO prompt_embeddings`).
-		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "response_body", "ws-1", testEmbeddingModel, testFP).
+		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "response_body", "ws-1", testEmbeddingModel, testFP,
+			"", "hello", EmptyPrefix).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	err := c.Set(
 		context.Background(),
-		"openai", "gpt-4", "hello",
+		"openai", "gpt-4", "hello", SingleTurn("hello"),
 		testFP, []byte("response_body"),
 		[]float32{0.1, 0.2, 0.3},
 		"ws-1",
@@ -284,10 +292,10 @@ func TestSemanticCache_SetInsertsWithCorrectArgs(t *testing.T) {
 func TestSemanticCache_Get_ScopesByWorkspace(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}, 0.9)
 	mock.ExpectQuery(`workspace_id = \$5`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "wsB", testEmbeddingModel, testFP).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "wsB", testEmbeddingModel, testFP, EmptyPrefix, privateQCanon).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity", "prompt_text"}))
 
-	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", testFP, "wsB"); err != nil {
+	if _, err := c.Get(context.Background(), "openai", "gpt-4", SingleTurn(privateQ), testFP, "wsB"); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

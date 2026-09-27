@@ -13,6 +13,10 @@
 //	wired gate (B9.7)   — the gate as it serves: cache.PooledCandidateAt decides which pairs reach
 //	                      the verifier (entity gate at the threshold; with no entity on either side,
 //	                      similarity >= a bound), the verifier decides. Swept over candidate bounds.
+//	conversations (B16.1) — the multi-turn traps (poolsafety.ConversationDanger/Rephrase) as both
+//	                      semantic reads serve them: cache.LatestTurn splits each chat body, and
+//	                      cache.ConversationCandidate (the same history, then the rule above on the
+//	                      two latest questions) decides which reach the verifier.
 //
 // And the economics: mean cost per check, the cost of the answer a hit saves (a real generation on
 // the same model over a sample of the corpus), and the break-even hit rate — the share of checked
@@ -109,6 +113,13 @@ func run() error {
 		dangerServed += ds
 		unmeasured += un
 	}
+
+	ds, un, err := conversations(ctx, v, emb, threshold)
+	if err != nil {
+		return err
+	}
+	dangerServed += ds
+	unmeasured += un
 
 	economics(ctx, key, model)
 
@@ -294,6 +305,79 @@ func wired(reph, dang []result, threshold float64) {
 	}
 	sort.Strings(near)
 	fmt.Printf("    entity-free rephrasings and their similarity: %s\n", strings.Join(near, ", "))
+}
+
+// conversations measures the multi-turn corpus. Each pair is split exactly as the proxy splits a
+// request (cache.LatestTurn on the chat body); the verifier and the embedder see the two LATEST
+// questions, as they do when serving. The private and the pooled read apply the same rule — they
+// differ in whose rows they range over, not in the gate — so one measurement is both paths'.
+func conversations(ctx context.Context, v pairverify.Verifier, emb poolsafety.Embedder, threshold float64) (dangerServed, unmeasured int, err error) {
+	split := func(cs []poolsafety.ConversationPair) ([]poolsafety.RephrasePair, [][2]cache.Turn) {
+		pairs := make([]poolsafety.RephrasePair, len(cs))
+		turns := make([][2]cache.Turn, len(cs))
+		for i, c := range cs {
+			turns[i] = [2]cache.Turn{cache.LatestTurn(poolsafety.ChatBody(c.Stored)), cache.LatestTurn(poolsafety.ChatBody(c.Asked))}
+			pairs[i] = poolsafety.RephrasePair{Name: c.Name, A: turns[i][0].Latest, B: turns[i][1].Latest}
+		}
+		return pairs, turns
+	}
+	dp, dt := split(poolsafety.ConversationDanger)
+	rp, rt := split(poolsafety.ConversationRephrase)
+	dang, err := check(ctx, v, emb, threshold, dp)
+	if err != nil {
+		return 0, 0, err
+	}
+	reph, err := check(ctx, v, emb, threshold, rp)
+	if err != nil {
+		return 0, 0, err
+	}
+	fmt.Printf("\n═══ CONVERSATIONS (B16.1) ═══  %d rephrase pairs (should serve) · %d danger pairs (must not)\n", len(reph), len(dang))
+	fmt.Printf("  private and pooled reads: same history (prefix hash), then entity lane at %.2f / no-entity lane at %.2f, verifier decides\n",
+		threshold, cache.NoEntityLowerBound)
+	fmt.Printf("    %-34s %-8s %-7s %-9s %-8s %s\n", "pair", "history", "sim", "candidate", "YES", "served")
+	row := func(r result, t [2]cache.Turn, danger bool) bool {
+		if r.measured < runs {
+			unmeasured++
+		}
+		cand := emb != nil && cache.ConversationCandidate(t[0], t[1], r.sim, threshold)
+		served := cand && r.yes > 0
+		if !danger {
+			served = cand && r.measured == runs && r.yes == runs
+		}
+		history := "same"
+		if t[0].Prefix != t[1].Prefix {
+			history = "differs"
+		}
+		mark := ""
+		if danger && served {
+			mark = "  ⚠ SERVED"
+		}
+		fmt.Printf("    %-34s %-8s %-7.4f %-9v %d/%-6d %v%s\n", r.pair.Name, history, r.sim, cand, r.yes, r.measured, served, mark)
+		return served
+	}
+	servedReph, aloneDanger := 0, 0
+	fmt.Println("  danger:")
+	for i, r := range dang {
+		if row(r, dt[i], true) {
+			dangerServed++
+		}
+		if r.yes > 0 {
+			aloneDanger++
+		}
+	}
+	fmt.Println("  rephrase:")
+	for i, r := range reph {
+		if row(r, rt[i], false) {
+			servedReph++
+		}
+	}
+	if emb == nil {
+		fmt.Println("  NOT MEASURED: no LENS_OPENAI_API_KEY, so no similarity — the gate cannot be scored")
+		unmeasured += len(dang)
+	}
+	fmt.Printf("  verifier alone on the latest questions: danger YES in some run %s\n", frac(aloneDanger, len(dang)))
+	fmt.Printf("  as served: rephrasings served %s · danger served %s\n", frac(servedReph, len(reph)), frac(dangerServed, len(dang)))
+	return dangerServed, unmeasured, nil
 }
 
 // economics prices one check against the answer a hit saves, both on the same model.

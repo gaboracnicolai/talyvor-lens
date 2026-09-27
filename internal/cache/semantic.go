@@ -112,6 +112,14 @@ func PooledCandidateAt(stored, asked string, similarity, threshold, bound float6
 	return !cs.Verifiable() && similarity >= bound
 }
 
+// ConversationCandidate is the rule both semantic reads, private and pooled, apply in SQL since
+// B16.1: the same history, then PooledCandidate on the two latest questions — similarity being
+// theirs alone. cmd/pairverify measures the multi-turn corpus through it.
+func ConversationCandidate(stored, asked Turn, similarity, threshold float64) bool {
+	return stored.Comparable() && asked.Comparable() && stored.Prefix == asked.Prefix &&
+		PooledCandidate(stored.Latest, asked.Latest, similarity, threshold)
+}
+
 func NewSemanticCache(pool *pgxpool.Pool, embedder Embedder, threshold float64, retention time.Duration) *SemanticCache {
 	return newSemanticCache(pool, embedder, threshold, retention)
 }
@@ -166,7 +174,12 @@ func newSemanticCache(pool SemanticDB, embedder Embedder, threshold float64, ret
 //
 // `= $N` also excludes legacy NULL rows by construction (NULL = x is never true), which is
 // the intended treatment of unknown provenance.
-const semanticSelectSQL = `SELECT id, response, 1 - (embedding <=> $1) AS similarity
+//
+// B16.1: `prefix_hash = $8` — the row answers only a question asked after the SAME history, and the
+// embedding is the latest question's alone. `discriminators = $9` is the entity gate on that
+// question, as on the pooled read: "how much is 2+2?" never matches "so how much is 2+3?".
+const semanticSelectSQL = `SELECT id, response, 1 - (embedding <=> $1) AS similarity,
+  COALESCE(prompt_text, '') AS prompt_text
 FROM prompt_embeddings
 WHERE provider = $2 AND model = $3
   AND updated_at > $4
@@ -174,6 +187,25 @@ WHERE provider = $2 AND model = $3
   AND workspace_id = $5
   AND embedding_model = $6
   AND request_fp = $7
+  AND prefix_hash = $8
+  AND discriminators = $9
+ORDER BY embedding <=> $1
+LIMIT 1`
+
+// semanticSelectNoEntitySQL is the private read's lane for a question that names no entity, open only
+// while the pair verifier is wired — the private twin of semanticSelectPooledNoEntitySQL.
+const semanticSelectNoEntitySQL = `SELECT id, response, 1 - (embedding <=> $1) AS similarity,
+  prompt_text
+FROM prompt_embeddings
+WHERE provider = $2 AND model = $3
+  AND updated_at > $4
+  AND is_poolable = false
+  AND workspace_id = $5
+  AND embedding_model = $6
+  AND request_fp = $7
+  AND prefix_hash = $8
+  AND discriminators IS NULL
+  AND prompt_text IS NOT NULL
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -197,6 +229,8 @@ WHERE provider = $2 AND model = $3
   -- B15.1: similarity judges the prompt; the fingerprint is everything else that shapes the answer
   -- (system, tools, temperature, max_tokens, ...). Equal or no serve; a pre-B15.1 row is NULL here.
   AND request_fp = $7
+  -- B16.1: and the history. Similarity judges the latest question only; a pre-0136 row is NULL here.
+  AND prefix_hash = $8
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -219,6 +253,7 @@ WHERE provider = $2 AND model = $3
   AND discriminators IS NULL
   AND prompt_text IS NOT NULL
   AND request_fp = $6
+  AND prefix_hash = $7
 ORDER BY embedding <=> $1
 LIMIT 1`
 
@@ -235,23 +270,28 @@ WHERE id = $1`
 // (is_poolable) rows.
 const semanticDeleteStaleSQL = `DELETE FROM prompt_embeddings WHERE updated_at < $1`
 
+// B16.1: a private row keeps what its read gates on — the latest question's entities and text, and
+// the history's hash.
 const semanticUpsertSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, workspace_id, embedding_model, request_fp)
-VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8)
+  (provider, model, prompt_hash, embedding, response, workspace_id, embedding_model, request_fp, discriminators, prompt_text, prefix_hash)
+VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, $11)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
   workspace_id = EXCLUDED.workspace_id,
   embedding_model = EXCLUDED.embedding_model,
   request_fp = EXCLUDED.request_fp,
+  discriminators = EXCLUDED.discriminators,
+  prompt_text = EXCLUDED.prompt_text,
+  prefix_hash = EXCLUDED.prefix_hash,
   updated_at = NOW()`
 
 // semanticUpsertPooledSQL writes a shared-pool row: contributor stamped,
 // is_poolable=true (a literal). Its prompt_hash is keyed on a NUL-sentinel-
 // prefixed prompt (the caller's job), provably disjoint from any private hash.
 const semanticUpsertPooledSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, request_fp, prompt_text)
-VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9, NULLIF($10, ''))
+  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, request_fp, prompt_text, prefix_hash)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9, NULLIF($10, ''), $11)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
@@ -266,6 +306,8 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
   request_fp = EXCLUDED.request_fp,
   -- B9.7: the question the row now answers, for the pair verifier.
   prompt_text = EXCLUDED.prompt_text,
+  -- B16.1: and the history it was asked after.
+  prefix_hash = EXCLUDED.prefix_hash,
   updated_at = NOW()`
 
 // freshnessCutoff is the lower bound a row's updated_at must exceed to remain
@@ -282,10 +324,23 @@ func (c *SemanticCache) freshnessCutoff() time.Time {
 	return time.Now().UTC().Add(-c.retention)
 }
 
-// Get serves the caller's own row most similar to prompt, only if it was stored under the same
-// request fingerprint fp (RequestFingerprint).
-func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, fp, workspaceID string) ([]byte, error) {
-	vec, err := c.embedder.Embed(ctx, prompt)
+// Get serves the caller's own answer to turn's latest question, only if it was asked after the same
+// history (turn.Prefix) under the same request fingerprint fp (RequestFingerprint).
+//
+// ⚠ B16.1: IT IS GATED EXACTLY AS THE POOLED READ IS. It used to serve the nearest row above the
+// threshold with no entity gate and no verifier — those protected pooled rows only — and served
+// Nicolai "It's still 5" for "how much is 2+2?". Now: the entity gate on the latest question at the
+// threshold, and the pair verifier after it or, for a question naming no entity, instead of it.
+// Without a verifier that question is refused, as on the pooled read.
+func (c *SemanticCache) Get(ctx context.Context, provider, model string, turn Turn, fp, workspaceID string) ([]byte, error) {
+	if !turn.Comparable() {
+		return nil, nil
+	}
+	canon := discriminator.Canon(turn.Latest)
+	if !canon.Verifiable() && c.verifier == nil {
+		return nil, nil
+	}
+	vec, err := c.embedder.Embed(ctx, turn.Latest)
 	if err != nil {
 		return nil, err
 	}
@@ -294,11 +349,21 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, fp, wo
 		id         string
 		response   string
 		similarity float64
+		stored     string
+		floor      = c.threshold
 	)
 	// workspace_id is the HARD tenant filter (#142): a private lookup can only
 	// match the caller's own rows; the embedding ranks within that boundary.
-	err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp).
-		Scan(&id, &response, &similarity)
+	if canon.Verifiable() {
+		err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp,
+			turn.Prefix, string(canon)).
+			Scan(&id, &response, &similarity, &stored)
+	} else {
+		floor = NoEntityLowerBound
+		err = c.pool.QueryRow(ctx, semanticSelectNoEntitySQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp,
+			turn.Prefix).
+			Scan(&id, &response, &similarity, &stored)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -306,7 +371,10 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, fp, wo
 		return nil, err
 	}
 
-	if similarity < c.threshold {
+	if similarity < floor {
+		return nil, nil
+	}
+	if c.verifier != nil && !c.sameAnswer(ctx, stored, turn.Latest) {
 		return nil, nil
 	}
 
@@ -318,8 +386,14 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model, prompt, fp, wo
 	return []byte(response), nil
 }
 
-func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt, fp string, response []byte, embedding []float32, workspaceID string) error {
-	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + FingerprintedKey(prompt, fp)))
+// Set writes the caller's own answer to turn. key is the row's idempotency material (the
+// workspace-scoped conversation); embedding is turn.Latest's, which is what Get compares. An
+// incomparable turn writes nothing — Get could never read it.
+func (c *SemanticCache) Set(ctx context.Context, provider, model, key string, turn Turn, fp string, response []byte, embedding []float32, workspaceID string) error {
+	if !turn.Comparable() {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + FingerprintedKey(key, fp)))
 	hash := hex.EncodeToString(sum[:])
 
 	// prompt_hash is unchanged (still sha256 of the wsID-prefixed prompt — the
@@ -329,6 +403,7 @@ func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt, fp str
 		ctx,
 		semanticUpsertSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), workspaceID, c.embeddingModel, fp,
+		pooledDiscriminators(turn.Latest), turn.Latest, turn.Prefix,
 	)
 	return err
 }
@@ -339,9 +414,13 @@ func (c *SemanticCache) Set(ctx context.Context, provider, model, prompt, fp str
 // from any workspace-private hash (which carries a "wsID:" prefix). Used only on
 // the opt-in path — Stage 2.0b's cross-tenant write surface.
 //
-// B9.7: the row also keeps the bare question (the prompt without the marker), because the pair
-// verifier cannot judge a match without it — with the same protection as the response beside it.
-func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, fp, contributorWsID string, response []byte, embedding []float32) error {
+// B9.7: the row also keeps the question, because the pair verifier cannot judge a match without it —
+// with the same protection as the response beside it. B16.1: that is turn's latest question, whose
+// embedding this is, and the row keeps the history's hash beside it.
+func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt string, turn Turn, fp, contributorWsID string, response []byte, embedding []float32) error {
+	if !turn.Comparable() {
+		return nil
+	}
 	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + FingerprintedKey(prompt, fp)))
 	hash := hex.EncodeToString(sum[:])
 
@@ -349,7 +428,7 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 		ctx,
 		semanticUpsertPooledSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
-		pooledDiscriminators(prompt), fp, strings.TrimPrefix(prompt, PoolKeyMarker),
+		pooledDiscriminators(turn.Latest), fp, turn.Latest, turn.Prefix,
 	)
 	return err
 }
@@ -369,27 +448,30 @@ func (c *SemanticCache) SetPooled(ctx context.Context, provider, model, prompt, 
 // Inheriting confines doc2query to widening recall INSIDE an entity class, which is the only place
 // it is safe: it can find you a different phrasing of a Pydantic v2 question, and can never find
 // you a Pydantic v1 one.
-func (c *SemanticCache) SetPooledWithVariants(ctx context.Context, provider, model, prompt, fp, contributorWsID string, response []byte, embedding []float32, variants []doc2query.Variant) error {
+func (c *SemanticCache) SetPooledWithVariants(ctx context.Context, provider, model, prompt string, turn Turn, fp, contributorWsID string, response []byte, embedding []float32, variants []doc2query.Variant) error {
+	if !turn.Comparable() {
+		return nil
+	}
 	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + FingerprintedKey(prompt, fp)))
 	hash := hex.EncodeToString(sum[:])
 
 	var originalID string
 	if err := c.pool.QueryRow(ctx, semanticUpsertPooledReturningSQL,
 		provider, model, hash, vectorLiteral(embedding), string(response), contributorWsID, c.embeddingModel,
-		pooledDiscriminators(prompt), fp, strings.TrimPrefix(prompt, PoolKeyMarker),
+		pooledDiscriminators(turn.Latest), fp, turn.Latest, turn.Prefix,
 	).Scan(&originalID); err != nil {
 		return err
 	}
 
 	// Computed ONCE, from the original, and reused for every variant — so there is no code path
 	// on which a variant's own text can reach the discriminators column.
-	inherited := pooledDiscriminators(prompt)
+	inherited := pooledDiscriminators(turn.Latest)
 	for _, v := range variants {
 		// A variant answers only under the original's fingerprint, exactly as it inherits its entities.
 		vsum := sha256.Sum256([]byte(provider + ":" + model + ":variant:" + FingerprintedKey(v.Question, fp)))
 		if _, err := c.pool.Exec(ctx, semanticUpsertVariantSQL,
 			provider, model, hex.EncodeToString(vsum[:]), vectorLiteral(v.Embedding), string(response),
-			contributorWsID, c.embeddingModel, inherited, originalID, fp,
+			contributorWsID, c.embeddingModel, inherited, originalID, fp, turn.Prefix,
 		); err != nil {
 			return err
 		}
@@ -401,8 +483,8 @@ const semanticUpsertPooledReturningSQL = semanticUpsertPooledSQL + `
 RETURNING id`
 
 const semanticUpsertVariantSQL = `INSERT INTO prompt_embeddings
-  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, variant_of, request_fp)
-VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9, $10)
+  (provider, model, prompt_hash, embedding, response, contributor_workspace_id, is_poolable, embedding_model, discriminators, variant_of, request_fp, prefix_hash)
+VALUES ($1, $2, $3, $4, $5, $6, true, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11)
 ON CONFLICT (prompt_hash) DO UPDATE SET
   response = EXCLUDED.response,
   embedding = EXCLUDED.embedding,
@@ -411,6 +493,7 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
   discriminators = EXCLUDED.discriminators,
   variant_of = EXCLUDED.variant_of,
   request_fp = EXCLUDED.request_fp,
+  prefix_hash = EXCLUDED.prefix_hash,
   updated_at = NOW()`
 
 // GetPooled is the cross-tenant similarity lookup: it searches ONLY is_poolable
@@ -422,7 +505,14 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
 // blocks it. The entry id + similarity are Stage-2.1 attribution data for the
 // royalty claim row — NOT an idempotency key (a retried request can re-match a
 // different row: ORDER BY similarity LIMIT 1 over a moving 24h window).
-func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt, fp string) ([]byte, string, string, float64, error) {
+//
+// B16.1: prompt is turn's latest question, asked after the history turn.Prefix; a row answers only
+// the same history.
+func (c *SemanticCache) GetPooled(ctx context.Context, provider, model string, turn Turn, fp string) ([]byte, string, string, float64, error) {
+	if !turn.Comparable() {
+		return nil, "", "", 0, nil
+	}
+	prompt := turn.Latest
 	// ⚠ AN UNVERIFIABLE PROMPT CANNOT BE SERVED FROM THE POOL, AND THIS IS CHECKED BEFORE THE
 	// QUERY RATHER THAN INSIDE IT. Canon returns "" for a prompt naming no version, code,
 	// identifier, proper noun or listed technology — most consumer traffic — and `discriminators
@@ -457,12 +547,12 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model, prompt, 
 	)
 	if canon.Verifiable() {
 		err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
-			string(canon), fp).
+			string(canon), fp, turn.Prefix).
 			Scan(&id, &response, &contributor, &similarity, &stored)
 	} else {
 		floor = NoEntityLowerBound
 		err = c.pool.QueryRow(ctx, semanticSelectPooledNoEntitySQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
-			fp).
+			fp, turn.Prefix).
 			Scan(&id, &response, &contributor, &similarity, &stored)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {

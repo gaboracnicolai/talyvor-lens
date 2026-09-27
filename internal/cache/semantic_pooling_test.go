@@ -22,10 +22,10 @@ func TestSemanticCache_SetPooled_TagsContributor(t *testing.T) {
 		// 8th arg: the entity discriminators of the stored prompt. A pooled row that does not
 		// carry them cannot be matched safely later, so the write is where they must appear.
 		WithArgs("openai", "gpt-4", wantHash, pgxmock.AnyArg(), "resp", "wsA", testEmbeddingModel,
-			string(discriminator.Canon("pooledprompt")), testFP, "pooledprompt").
+			string(discriminator.Canon("pooledprompt")), testFP, "pooledprompt", EmptyPrefix).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-	if err := c.SetPooled(context.Background(), "openai", "gpt-4", "pooledprompt", testFP, "wsA", []byte("resp"), []float32{0.1, 0.2}); err != nil {
+	if err := c.SetPooled(context.Background(), "openai", "gpt-4", "pooledprompt", SingleTurn("pooledprompt"), testFP, "wsA", []byte("resp"), []float32{0.1, 0.2}); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -54,7 +54,7 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 	mock.ExpectQuery(`is_poolable = true`).
 		// 6th arg: the ASKING prompt's discriminators — the entity gate. Equality against the
 		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP, EmptyPrefix).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity", "prompt_text"}).
 				AddRow(id, "pooled_payload", "wsA", 0.95, ""),
@@ -63,7 +63,7 @@ func TestSemanticCache_GetPooled_FiltersAndReturnsContributor(t *testing.T) {
 		WithArgs(id).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	body, owner, entryID, sim, err := c.GetPooled(context.Background(), "openai", "gpt-4", pooledFixturePrompt, testFP)
+	body, owner, entryID, sim, err := c.GetPooled(context.Background(), "openai", "gpt-4", SingleTurn(pooledFixturePrompt), testFP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,12 +87,12 @@ func TestSemanticCache_GetPooled_BelowThreshold(t *testing.T) {
 	mock.ExpectQuery(`is_poolable = true`).
 		// 6th arg: the ASKING prompt's discriminators — the entity gate. Equality against the
 		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP, EmptyPrefix).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity", "prompt_text"}).
 				AddRow("id1", "x", "wsA", 0.5, ""),
 		)
-	body, owner, entryID, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", pooledFixturePrompt, testFP)
+	body, owner, entryID, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", SingleTurn(pooledFixturePrompt), testFP)
 	if err != nil || body != nil || owner != "" || entryID != "" {
 		t.Fatalf("below threshold must miss; got (%q,%q,%q,%v)", body, owner, entryID, err)
 	}
@@ -108,13 +108,13 @@ func TestSemanticCache_GetPooled_EmptyContributor(t *testing.T) {
 	mock.ExpectQuery(`is_poolable = true`).
 		// 6th arg: the ASKING prompt's discriminators — the entity gate. Equality against the
 		// stored row's value is what refuses Pydantic v1/v2, which similarity cannot.
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP).
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), testEmbeddingModel, pgxmock.AnyArg(), testFP, EmptyPrefix).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "response", "contributor", "similarity", "prompt_text"}).
 				AddRow("id1", "x", "", 0.99, ""),
 		)
 	mock.ExpectExec(`UPDATE prompt_embeddings`).WithArgs("id1").WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	body, owner, _, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", pooledFixturePrompt, testFP)
+	body, owner, _, _, err := c.GetPooled(context.Background(), "openai", "gpt-4", SingleTurn(pooledFixturePrompt), testFP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,9 +133,9 @@ func TestSemanticCache_PrivateGet_ExcludesPoolable(t *testing.T) {
 	c, mock := newTestSemanticCache(t, stubEmbedder{vec: []float32{0.1}}, 0.9)
 	// The regex asserts the private SELECT carries the is_poolable=false filter.
 	mock.ExpectQuery(`is_poolable = false`).
-		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel, testFP).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity"}))
-	if _, err := c.Get(context.Background(), "openai", "gpt-4", "hello", testFP, "ws-1"); err != nil {
+		WithArgs(pgxmock.AnyArg(), "openai", "gpt-4", pgxmock.AnyArg(), "ws-1", testEmbeddingModel, testFP, EmptyPrefix, privateQCanon).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "response", "similarity", "prompt_text"}))
+	if _, err := c.Get(context.Background(), "openai", "gpt-4", SingleTurn(privateQ), testFP, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
