@@ -284,12 +284,10 @@ Build all four: `make binaries` (drops them into `./bin/`).
 Each of these is implemented, wired to a route, and gated on the economy master switch. All of
 them additionally need a workspace that already holds LENS.
 
-- **Staking**: 5% / 12% / 20% APY for 30 / 90 / 180-day locks. Rates are hardcoded
-  (`economy.APY30/APY90/APY180`) so a misconfigured deployment cannot pay an arbitrary yield;
-  read via `/v1/workspaces/{ws}/tokens/stakes`.
-- **Marketplace**: peer-to-peer LENS trading with a **5% platform fee**
-  (`economy.TalyvorFeeRate = 0.05`) — seller receives 95%. Listings at
-  `/v1/marketplace/listings`.
+- **Staking** and the **Marketplace** (peer-to-peer LENS trading) are **not served** since B18.1:
+  buying credited the buyer without debiting anyone, and stake yield had no ceiling. Their routes
+  are unregistered until Nicolai decides whether to retire or fix them; the logic remains in
+  `internal/economy`.
 - **Quality oracle stake**: **10 LENS** minimum lockup before an annotation is accepted
   (`mining.StakeRequirement`), Sybil-resistant.
 - **LXC peg**: 1 LXC = $0.10, fixed (see above).
@@ -377,7 +375,6 @@ export EMBED_NODE_DIMENSIONS=768
 There are no built-in browser pages for these; the reads are API endpoints:
 
 - `/v1/workspaces/{ws}/tokens/balance`, `.../tokens/mining/*` — balance and mining (authenticated)
-- `/v1/workspaces/{ws}/tokens/stakes`, `/v1/marketplace/listings` — staking and listings
 - `/v1/economy/stats`, `/v1/tokens/rates`, `/v1/oracle/stats` — global supply, rates and the
   oracle queue (public, present only when the economy is enabled)
 
