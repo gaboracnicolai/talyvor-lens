@@ -294,6 +294,44 @@ func openAPIPaths() map[string]any {
 				"responses": map[string]any{"200": map[string]any{"description": "spend snapshot"}},
 			},
 		},
+		"/v1/workspaces/{wsID}/stored-answers": map[string]any{
+			"get": map[string]any{
+				"summary": "Count this workspace's stored answers and document conversions, by scope",
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{"200": map[string]any{"description": "shared_answers, private_answers, shared_conversions, private_conversions, cached_copies"}},
+			},
+			"delete": map[string]any{
+				"summary":     "Delete this workspace's stored answers — irreversible, owner or admin only",
+				"description": `Body {"scope":"shared"|"all","confirm":"<workspace>"}. "shared" deletes every answer and document conversion this workspace shared; "all" also deletes its private ones. Earnings already final are kept.`,
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "what was deleted, as counts"},
+					"400": map[string]any{"description": "unknown scope, or confirm does not match the workspace"},
+					"403": map[string]any{"description": "not the owner or an admin"},
+				},
+			},
+		},
+		"/v1/workspaces/{wsID}/deletion-requests": map[string]any{
+			"post": map[string]any{
+				"summary":     "Ask Talyvor to delete everything it holds for this workspace",
+				"description": `Body {"note":"…"} (optional). An operator completes the request; billing and ledger records are kept, as the law requires.`,
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{"201": map[string]any{"description": "the request, status requested"}},
+			},
+			"get": map[string]any{
+				"summary": "List this workspace's deletion requests and their status",
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{"200": map[string]any{"description": "requests: id, status (requested|done), requested_at, completed_at"}},
+			},
+		},
 		"/v1/local/endpoints": map[string]any{
 			"get": map[string]any{
 				"summary": "List registered local-model endpoints",
