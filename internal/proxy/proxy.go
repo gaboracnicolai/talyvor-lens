@@ -157,7 +157,6 @@ type Proxy struct {
 
 	injectionDetector *injection.Detector
 	budgetEnforcer    *budget.Enforcer
-	batchRouter       *batch.BatchRouter
 	sessionTracker    *session.SessionTracker
 	promptManager     *prompts.Manager
 	fallbackRouter    *fallback.FallbackRouter
@@ -314,7 +313,7 @@ func New(
 	localRouter *localrouter.LocalRouter,
 	injectionDetector *injection.Detector,
 	budgetEnforcer *budget.Enforcer,
-	batchRouter *batch.BatchRouter,
+	_ *batch.BatchRouter, // B18.2: no longer read — the proxy ignores X-Talyvor-Batch
 	sessionTracker *session.SessionTracker,
 	promptManager *prompts.Manager,
 	fallbackRouter *fallback.FallbackRouter,
@@ -340,7 +339,6 @@ func New(
 		localRouter:       localRouter,
 		injectionDetector: injectionDetector,
 		budgetEnforcer:    budgetEnforcer,
-		batchRouter:       batchRouter,
 		sessionTracker:    sessionTracker,
 		promptManager:     promptManager,
 		fallbackRouter:    fallbackRouter,
@@ -680,39 +678,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	metrics.RequestByModality(modSet.Label())
 	w.Header().Set("X-Talyvor-Modality", modSet.Label())
 
-	// Batch dispatch: when the caller flips X-Talyvor-Batch we route the
-	// whole request through Anthropic's async batches endpoint instead of
-	// the normal proxy flow. We deliberately run this BEFORE any workspace
-	// or cache work — the batch endpoint replies 202 immediately and the
-	// background poller picks up the response hours later.
-	if p.batchRouter != nil && r.Header.Get("X-Talyvor-Batch") == "true" {
-		batchBody := withBatchEligibleFlag(body)
-		preWsID := r.Header.Get("X-Talyvor-Workspace")
-		if preWsID == "" {
-			preWsID = defaultWorkspaceID
-		}
-		if elig := p.batchRouter.IsEligible(batchBody, preWsID); elig.Eligible {
-			job, err := p.batchRouter.Submit(ctx, preWsID, model, prompt, batchBody)
-			if err == nil {
-				writeJSON(w, http.StatusAccepted, map[string]any{
-					"request_id":           job.RequestID,
-					"batch_id":             job.ID,
-					"status":               string(job.Status),
-					"estimated_completion": "within 24 hours",
-					"cost_reduction":       "50%",
-				})
-				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "batched").Inc()
-				return
-			}
-			slog.Warn("batch: Submit failed; falling through to live request",
-				slog.String("err", err.Error()),
-			)
-		} else {
-			slog.Info("batch: not eligible; falling through",
-				slog.String("reason", elig.Reason),
-			)
-		}
-	}
+	// ⚠ B18.2: X-Talyvor-Batch IS IGNORED — the request is served and billed like any other. It used
+	// to take every non-streaming claude-* request to Anthropic's batch API ahead of the workspace,
+	// budget and billing work: 202, nothing billed, and no route to fetch the result (the batch
+	// routes are unregistered). Talyvor paid the provider and charged no one. Batch is not on the
+	// roadmap.
 
 	// Workspace identification + logging policy come BEFORE the workspace
 	// policy gate so even a 403 response carries the X-Talyvor-Logging
@@ -2888,33 +2858,6 @@ func setSessionHeaders(w http.ResponseWriter, p *Proxy, sessionID string) {
 		w.Header().Set("X-Talyvor-Session-Cost", strconv.FormatFloat(s.TotalCostUSD, 'f', 6, 64))
 		w.Header().Set("X-Talyvor-Session-Turns", strconv.Itoa(s.TurnCount))
 	}
-}
-
-// writeJSON is the structured-body equivalent of writeBytes — used by the
-// batch dispatch and any other endpoint that wants to emit JSON without
-// going through map[string]string.
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-// withBatchEligibleFlag injects "batch_eligible": true into the body so
-// the BatchRouter's IsEligible — which is body-only by signature — can
-// see the trigger that was actually carried on the X-Talyvor-Batch HTTP
-// header. The downstream Anthropic submit ignores unknown fields, so
-// this extra key is harmless when the request does ultimately fly.
-func withBatchEligibleFlag(body []byte) []byte {
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return body
-	}
-	m["batch_eligible"] = true
-	out, err := json.Marshal(m)
-	if err != nil {
-		return body
-	}
-	return out
 }
 
 // replayAsSSE re-emits a cached non-streaming response as the provider's
