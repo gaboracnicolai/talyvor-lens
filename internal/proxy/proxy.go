@@ -1510,12 +1510,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				complexityBucket: rdComplexityBucket, distillFacts: distillFacts,
 			},
 		}
-		var serr error
-		if cfg.ProviderName() == "openai" {
-			serr = sh.ServeOpenAI(w, r, cfg.ProviderName(), model, prompt, cachePrompt, streamBody, piiDetected, sc)
-		} else {
-			serr = sh.ServeAnthropic(w, r, cfg.ProviderName(), model, prompt, cachePrompt, streamBody, piiDetected, sc)
+		// B18.7: each provider streams through its OWN upstream and key — this was "OpenAI, else
+		// Anthropic", so every other provider's stream was sent to Anthropic's URL with its key.
+		ops, oerr := providerStreamOps(cfg, upstreamModel)
+		if oerr != nil {
+			writeError(w, http.StatusBadRequest, oerr.Error())
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "stream_unsupported").Inc()
+			return
 		}
+		serr := sh.serve(w, r, cfg.ProviderName(), model, prompt, cachePrompt, streamBody, piiDetected, sc, ops)
 		if serr != nil {
 			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "stream_error").Inc()
 			return
@@ -2902,7 +2905,8 @@ func replayAsSSE(w http.ResponseWriter, provider string, cached []byte) error {
 	var frames [][]byte
 	var err error
 	switch provider {
-	case "openai":
+	case "openai", "google", "mistral", "groq", "vllm", "bedrock":
+		// B18.7: every provider but Anthropic streams OpenAI chunks, and its cached entry is OpenAI-shaped.
 		frames, err = openAIReplayFrames(cached)
 	case "anthropic":
 		frames, err = anthropicReplayFrames(cached)
