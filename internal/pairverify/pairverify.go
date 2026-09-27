@@ -34,6 +34,33 @@ Any difference that could change the answer means NO: direction (enable/disable,
 
 Reply with exactly one word: YES or NO.`
 
+// StandalonePrompt is B16.2's check for a question asked MID-CONVERSATION: would its correct reply
+// be the same had the conversation never happened? It is asked WITHOUT the stored question on
+// purpose, and as a counterfactual — both measured on 27 Sep with claude-haiku-4-5 (docs/b162-
+// standalone-answer-measured.md): one prompt judging "stands alone" and "same answer as Question A"
+// together served 10 of 30 context-dependent traps (shown "and what about France?" twice, it judged
+// the identical pair, not the conversation), and "could it be answered by someone who has not seen
+// the conversation?" still served "how do I say hello?" after "I'm learning Spanish". The pair check
+// (Prompt) stays a separate call. %s, %s = the conversation before the message, the message.
+const StandalonePrompt = `Below is a conversation and the user's next message.
+
+Conversation:
+%s
+
+Next message: %s
+
+Would the correct reply to the next message be exactly the same if the conversation above had never happened?
+Think about what the conversation establishes: a topic, something the user is learning or doing, a place, a language, a person or thing that "it", "that", "he", "there" or "the same" refers to, an instruction about format, length or tone, a preference or a personal detail. If any of it changes what the right reply is, the answer is NO.
+Answer YES only if someone who never saw the conversation would give exactly the right reply.
+
+Reply with exactly one word: YES or NO.`
+
+// ContextVerifier checks whether a question asked after history stands alone. A Verifier that does
+// not implement it leaves B16.2's lane closed.
+type ContextVerifier interface {
+	StandsAlone(ctx context.Context, history, asked string) (Verdict, error)
+}
+
 // Verdict is one check. Raw is kept because "the model said no" and "the model said something
 // else" are different findings, and both refuse the serve.
 type Verdict struct {
@@ -75,11 +102,20 @@ func NewAnthropicVerifier(apiKey, model string) *AnthropicVerifier {
 }
 
 func (v *AnthropicVerifier) Verify(ctx context.Context, stored, asked string) (Verdict, error) {
+	return v.ask(ctx, fmt.Sprintf(Prompt, stored, asked))
+}
+
+// StandsAlone is B16.2's check: could asked, at the end of history, be answered without it?
+func (v *AnthropicVerifier) StandsAlone(ctx context.Context, history, asked string) (Verdict, error) {
+	return v.ask(ctx, fmt.Sprintf(StandalonePrompt, history, asked))
+}
+
+func (v *AnthropicVerifier) ask(ctx context.Context, prompt string) (Verdict, error) {
 	body, _ := json.Marshal(map[string]any{
 		"model":       v.Model,
 		"max_tokens":  5,
 		"temperature": 0,
-		"messages":    []map[string]string{{"role": "user", "content": fmt.Sprintf(Prompt, stored, asked)}},
+		"messages":    []map[string]string{{"role": "user", "content": prompt}},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.URL, bytes.NewReader(body))
 	if err != nil {

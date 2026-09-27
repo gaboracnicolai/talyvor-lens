@@ -100,7 +100,12 @@ func run() error {
 
 	dangerServed := 0
 	unmeasured := 0
+	// PAIRVERIFY_CONVERSATIONS_ONLY=1 measures only the multi-turn sections (B16.1, B16.2).
+	onlyConversations := os.Getenv("PAIRVERIFY_CONVERSATIONS_ONLY") == "1"
 	for _, ln := range poolsafety.ByTraffic() {
+		if onlyConversations {
+			break
+		}
 		reph, err := check(ctx, v, emb, threshold, ln.Rephrase)
 		if err != nil {
 			return err
@@ -121,7 +126,9 @@ func run() error {
 	dangerServed += ds
 	unmeasured += un
 
-	economics(ctx, key, model)
+	if !onlyConversations {
+		economics(ctx, key, model)
+	}
 
 	fmt.Printf("\n══════════ VERDICT ══════════\n")
 	switch {
@@ -137,6 +144,15 @@ func run() error {
 
 // check runs every pair `runs` times through the verifier, and scores similarity + entity gate.
 func check(ctx context.Context, v pairverify.Verifier, emb poolsafety.Embedder, threshold float64, pairs []poolsafety.RephrasePair) ([]result, error) {
+	return checkWith(ctx, emb, threshold, pairs, func(ctx context.Context, i int) (pairverify.Verdict, error) {
+		return v.Verify(ctx, pairs[i].A, pairs[i].B)
+	})
+}
+
+// checkWith is check with the verifier call supplied per pair — B16.2's in-context check needs each
+// pair's own history.
+func checkWith(ctx context.Context, emb poolsafety.Embedder, threshold float64, pairs []poolsafety.RephrasePair,
+	verify func(ctx context.Context, i int) (pairverify.Verdict, error)) ([]result, error) {
 	out := make([]result, len(pairs))
 	for i, p := range pairs {
 		out[i].pair = p
@@ -165,11 +181,10 @@ func check(ctx context.Context, v pairverify.Verifier, emb poolsafety.Embedder, 
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				p := out[j.i].pair
 				var got pairverify.Verdict
 				var err error
 				for a := 0; a < attempts; a++ {
-					if got, err = v.Verify(ctx, p.A, p.B); err == nil {
+					if got, err = verify(ctx, j.i); err == nil {
 						break
 					}
 					time.Sleep(time.Duration(a+1) * 2 * time.Second)
@@ -376,6 +391,87 @@ func conversations(ctx context.Context, v pairverify.Verifier, emb poolsafety.Em
 		unmeasured += len(dang)
 	}
 	fmt.Printf("  verifier alone on the latest questions: danger YES in some run %s\n", frac(aloneDanger, len(dang)))
+	fmt.Printf("  as served: rephrasings served %s · danger served %s\n", frac(servedReph, len(reph)), frac(dangerServed, len(dang)))
+
+	ds, un, err := standalone(ctx, v, emb, threshold)
+	return dangerServed + ds, unmeasured + un, err
+}
+
+// standalone measures B16.2's lane: a stored single-turn question against the same or similar words
+// asked mid-conversation, gated by cache.StandaloneCandidate and decided by the in-context verifier,
+// which is shown the asked conversation. The danger set includes every B16.1 danger pair re-cast for
+// this lane, so every context-dependent follow-up there is tried against a standalone answer.
+func standalone(ctx context.Context, v pairverify.Verifier, emb poolsafety.Embedder, threshold float64) (dangerServed, unmeasured int, err error) {
+	cv, ok := v.(pairverify.ContextVerifier)
+	if !ok {
+		return 0, 0, fmt.Errorf("the verifier has no in-context check")
+	}
+	measure := func(cs []poolsafety.ConversationPair) ([]result, [][2]cache.Turn, error) {
+		pairs := make([]poolsafety.RephrasePair, len(cs))
+		turns := make([][2]cache.Turn, len(cs))
+		for i, c := range cs {
+			turns[i] = [2]cache.Turn{cache.LatestTurn(poolsafety.ChatBody(c.Stored)), cache.LatestTurn(poolsafety.ChatBody(c.Asked))}
+			pairs[i] = poolsafety.RephrasePair{Name: c.Name, A: turns[i][0].Latest, B: turns[i][1].Latest}
+		}
+		// One serve attempt is both calls, as cache.standsAlone makes them: the pair check, then the
+		// stands-alone check on the asked conversation. Raw keeps both replies.
+		res, err := checkWith(ctx, emb, threshold, pairs, func(ctx context.Context, i int) (pairverify.Verdict, error) {
+			p, err := v.Verify(ctx, pairs[i].A, pairs[i].B)
+			if err != nil {
+				return p, err
+			}
+			a, err := cv.StandsAlone(ctx, turns[i][1].History, pairs[i].B)
+			if err != nil {
+				return a, err
+			}
+			return pairverify.Verdict{Same: p.Same && a.Same, Raw: strings.TrimSpace(p.Raw) + "/" + strings.TrimSpace(a.Raw),
+				InTokens: p.InTokens + a.InTokens, OutTokens: p.OutTokens + a.OutTokens}, nil
+		})
+		return res, turns, err
+	}
+	dang, dt, err := measure(poolsafety.StandaloneDanger())
+	if err != nil {
+		return 0, 0, err
+	}
+	reph, rt, err := measure(poolsafety.StandaloneRephrase)
+	if err != nil {
+		return 0, 0, err
+	}
+	fmt.Printf("\n═══ STANDALONE ANSWER MID-CONVERSATION (B16.2) ═══  %d rephrase pairs (should serve) · %d danger pairs (must not)\n", len(reph), len(dang))
+	fmt.Printf("  a single-turn row, the same rule on the two questions; served on the pair check's YES AND the stands-alone check's (pairverify.StandalonePrompt)\n")
+	fmt.Printf("    %-44s %-7s %-9s %-8s %-8s %s\n", "pair", "sim", "candidate", "YES", "served", "replies (pair/stands-alone)")
+	row := func(r result, t [2]cache.Turn, danger bool) bool {
+		if r.measured < runs {
+			unmeasured++
+		}
+		cand := emb != nil && cache.StandaloneCandidate(t[0], t[1], r.sim, threshold)
+		served := cand && r.yes > 0
+		if !danger {
+			served = cand && r.measured == runs && r.yes == runs
+		}
+		mark := ""
+		if danger && served {
+			mark = "  ⚠ SERVED"
+		}
+		fmt.Printf("    %-44s %-7.4f %-9v %d/%-6d %-8v %s%s\n", r.pair.Name, r.sim, cand, r.yes, r.measured, served, strings.Join(r.raws, " "), mark)
+		return served
+	}
+	servedReph := 0
+	fmt.Println("  danger:")
+	for i, r := range dang {
+		if row(r, dt[i], true) {
+			dangerServed++
+		}
+	}
+	fmt.Println("  rephrase:")
+	for i, r := range reph {
+		if row(r, rt[i], false) {
+			servedReph++
+		}
+	}
+	if emb == nil {
+		unmeasured += len(dang)
+	}
 	fmt.Printf("  as served: rephrasings served %s · danger served %s\n", frac(servedReph, len(reph)), frac(dangerServed, len(dang)))
 	return dangerServed, unmeasured, nil
 }
