@@ -77,10 +77,11 @@ type Config struct {
 	// served until it is this old — a deliberate reuse-over-freshness tradeoff;
 	// lower this single value to tighten both together.
 	//
-	// Default 21 days (504h). Env: LENS_SEMANTIC_CACHE_RETENTION (Go duration;
-	// units h/m/s — NOT "d"; use "504h" for 21 days). A value <= 0 DISABLES
-	// both halves: rows are served regardless of age and never swept (kept
-	// indefinitely — the pre-retention behavior).
+	// Default 0 (B21.2, decided 28 Sep 2026): a stored answer is never deleted
+	// because of its age — it is served regardless of age and never swept, private
+	// and pooled alike. What deletes one is quality eviction and deletion by the
+	// workspace. Env: LENS_SEMANTIC_CACHE_RETENTION (Go duration; units h/m/s —
+	// NOT "d"; "504h" is 21 days) lets a self-hosted operator turn the window on.
 	SemanticCacheRetention time.Duration
 
 	// SemanticCacheSweepInterval is how often the retention sweeper runs.
@@ -1907,9 +1908,9 @@ func Load() (*Config, error) {
 	}
 
 	// Semantic-cache retention sweeper. Retention <= 0 disables the sweeper
-	// (rows kept indefinitely); the sweep interval must be > 0 because a
-	// time.Ticker panics on a non-positive duration.
-	c.SemanticCacheRetention = 21 * 24 * time.Hour
+	// (rows kept indefinitely) and is the default (B21.2); the sweep interval
+	// must be > 0 because a time.Ticker panics on a non-positive duration.
+	c.SemanticCacheRetention = 0
 	if v := os.Getenv("LENS_SEMANTIC_CACHE_RETENTION"); v != "" {
 		d, err := time.ParseDuration(v) // Go duration units (h/m/s); e.g. 504h = 21 days
 		if err != nil {
