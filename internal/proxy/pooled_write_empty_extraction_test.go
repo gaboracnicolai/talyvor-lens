@@ -172,11 +172,13 @@ func TestStoreCaches_UnverifiablePromptBuysNoPooledEmbedding(t *testing.T) {
 		t.Fatalf("fixture is not the case under test: %q has a verifiable canon", raw)
 	}
 
-	p.storeCaches(context.Background(), "openai", "gpt-4o", "wsA:"+raw, raw, "", "wsA", []byte(okResp))
+	p.storeCaches(context.Background(), "openai", "gpt-4o", "wsA:"+raw, raw, "", cache.SingleTurn(raw), "wsA", []byte(okResp))
 
-	if n := emb.callsFor(raw); n != 0 {
-		t.Errorf("pooled embedding calls on an unverifiable prompt = %d, want 0 "+
-			"(each is a billed HTTP POST for a row `discriminators = $6` can never match)", n)
+	// B16.1: the private and pooled rows share ONE embedding of the latest question, so the one
+	// call is the private row's; the pooled write buys nothing.
+	if n := emb.callsFor(raw); n != 1 {
+		t.Errorf("embedding calls on an unverifiable prompt = %d, want 1 — the private row's only "+
+			"(a second is a billed HTTP POST for a row `discriminators = $6` can never match)", n)
 	}
 	if n := db.pooledUpserts(); n != 0 {
 		t.Errorf("pooled upserts on an unverifiable prompt = %d, want 0", n)
@@ -195,7 +197,7 @@ func TestStoreCaches_VerifiablePromptStillPoolsAndStillPaysExactlyOnce(t *testin
 		t.Fatalf("fixture is not the case under test: %q has an empty canon", raw)
 	}
 
-	p.storeCaches(context.Background(), "openai", "gpt-4o", "wsA:"+raw, raw, "", "wsA", []byte(okResp))
+	p.storeCaches(context.Background(), "openai", "gpt-4o", "wsA:"+raw, raw, "", cache.SingleTurn(raw), "wsA", []byte(okResp))
 
 	if n := emb.callsFor(raw); n != 1 {
 		t.Errorf("pooled embedding calls on a verifiable prompt = %d, want exactly 1 "+
@@ -217,9 +219,9 @@ func TestStoreCaches_PrivateSemanticWriteSurvivesAnUnverifiablePrompt(t *testing
 	const raw = "How long should I boil an egg?"
 	cachePrompt := "wsA:" + raw
 
-	p.storeCaches(context.Background(), "openai", "gpt-4o", cachePrompt, raw, "", "wsA", []byte(okResp))
+	p.storeCaches(context.Background(), "openai", "gpt-4o", cachePrompt, raw, "", cache.SingleTurn(raw), "wsA", []byte(okResp))
 
-	if n := emb.callsFor(cachePrompt); n != 1 {
+	if n := emb.callsFor(raw); n != 1 {
 		t.Errorf("private embedding calls = %d, want 1 — the private cache must still store "+
 			"prompts that name nothing", n)
 	}

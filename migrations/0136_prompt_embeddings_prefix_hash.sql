@@ -1,0 +1,21 @@
+-- 0136_prompt_embeddings_prefix_hash.sql — B16.1: a cached answer carries over only to the same history.
+--
+-- Measured 27 Sep 2026, Nicolai's own chat: after "how much is 2+3?" → "2 + 3 = 5" he asked "how much
+-- is 2+2?" and was served "It's still 5. 🙂" — another chat's answer to "so how much is 2+3?". The
+-- semantic cache embedded the WHOLE conversation, and two conversations that share their history
+-- embed almost identically whatever their last question says.
+--
+-- prefix_hash is cache.Turn's Prefix: the SHA-256 of every message before the latest user message.
+-- Both semantic lookups, private and pooled, now embed only the latest question and require
+-- prefix_hash = the caller's, so an answer is reused only after an IDENTICAL history, and then only
+-- through the entity gate and the pair verifier on the two latest questions. A first question has
+-- the empty history, which is how a rephrased single-turn question still hits.
+--
+-- Private rows now also keep discriminators and prompt_text (the latest question), which the entity
+-- gate and the verifier need, with the protection the row's response already has.
+--
+-- Rows written before this migration are NULL here, and NULL = x is never true: every existing row,
+-- private and pooled, stops matching and ages out. The semantic cache starts cold; the exact cache
+-- (byte-identical conversations) is unaffected.
+
+ALTER TABLE prompt_embeddings ADD COLUMN IF NOT EXISTS prefix_hash TEXT;

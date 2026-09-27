@@ -67,7 +67,7 @@ func (s *Seeder) SeedSemantic(ctx context.Context, provider, model, prompt strin
 	if err != nil {
 		return fmt.Errorf("seedcache: embed: %w", err)
 	}
-	return s.semantic.SetPooled(ctx, provider, model, cache.PooledPromptKey(prompt), BareQuestionFP, Owner, response, vec)
+	return s.semantic.SetPooled(ctx, provider, model, cache.PooledPromptKey(prompt), cache.SingleTurn(prompt), BareQuestionFP, Owner, response, vec)
 }
 
 // SeedDistill writes a POOLED distill-OCR entry owned by the seed workspace: it content-hashes the

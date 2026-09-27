@@ -83,7 +83,9 @@ func noneCachePool(t *testing.T) *pgxpool.Pool {
 			embedding_model TEXT,
 			discriminators  TEXT,
 			variant_of      UUID,
-			request_fp      TEXT
+			request_fp      TEXT,
+			prompt_text     TEXT,
+			prefix_hash     TEXT
 		);
 	`); err != nil {
 		t.Fatalf("build fixture schema: %v", err)
@@ -135,7 +137,7 @@ func TestMeasured_LoggingNoneStillPersistsTheAnswerToTheSemanticCache(t *testing
 		t.Fatalf("the PROXY resolves this workspace to %q, not %q — the policy is not reachable "+
 			"from the code under test, so nothing below would be measuring retention at all", got, workspace.LoggingNone)
 	}
-	p.storeCaches(ctx, "openai", "gpt-4o", wsID+":"+"what is my diagnosis", "what is my diagnosis", "", wsID, []byte(secret))
+	p.storeCaches(ctx, "openai", "gpt-4o", wsID+":"+"what is my diagnosis", "what is my diagnosis", "", cache.SingleTurn("what is my diagnosis"), wsID, []byte(secret))
 
 	var rows int
 	var stored string
