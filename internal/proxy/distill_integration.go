@@ -66,6 +66,10 @@ type distillIntegration struct {
 	cache     distill.Cache                  // optional conversion cache (may be nil)
 	wsManager *workspace.Manager             //
 	poolGate  *cache_pooling.PoolabilityGate // cross-tenant distill-share consent (nil-safe; nil = private-only)
+	// detectsPII reports whether a workspace's requests are checked for personal data (B18.5, the
+	// B15.7 rule): a conversion from a workspace whose detection is off is never shared. nil shares
+	// as before B18.5 — only a distillIntegration built without SetDistiller has none.
+	detectsPII func(wsID string) bool
 }
 
 // SetDistiller enables the request-path DISTILL integration. converter is the
@@ -77,10 +81,11 @@ type distillIntegration struct {
 // is strictly per-workspace, and with attribSink nil nothing is attributed.
 func (p *Proxy) SetDistiller(converter distill.IsolatedConverter, cache distill.Cache, poolGate *cache_pooling.PoolabilityGate, attribSink distillAttributionSink) {
 	p.distiller = &distillIntegration{
-		converter: converter,
-		cache:     cache,
-		wsManager: p.workspaceManager,
-		poolGate:  poolGate,
+		converter:  converter,
+		cache:      cache,
+		wsManager:  p.workspaceManager,
+		poolGate:   poolGate,
+		detectsPII: p.guardrails.DetectsPII,
 	}
 	p.distillAttribSink = attribSink
 }
@@ -255,6 +260,10 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	// B18.4: a logging_policy = none workspace may READ conversions (its own, none, or a pooled one)
 	// but none of its document text is written anywhere.
 	keepsContent := d.wsManager == nil || d.wsManager.GetLoggingPolicy(wsID) != workspace.LoggingNone
+	// B18.5: and a conversion is shared only from a workspace whose requests are checked for personal
+	// data — "personal data is never shared" rests on that check (B15.7). Its own cache is unaffected;
+	// turning detection back on resumes sharing with the next conversion.
+	shares := keepsContent && (d.detectsPII == nil || d.detectsPII(wsID))
 
 	// (1) POOLED READ — a cross-tenant artifact may be served ONLY when all
 	//     three hold: the global switch is on, the REQUESTER opted in
@@ -339,7 +348,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	//     are EXCLUDED here — they are pooled by (3b) into the OCR keyspace WITH
 	//     their avoided-COGS basis, so a cost-basis-less copy can't shadow them in
 	//     the conversion keyspace (which (1) would otherwise serve first).
-	if pooled != nil && keepsContent && res.Method != distill.MethodVisionOCR && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+	if pooled != nil && shares && res.Method != distill.MethodVisionOCR && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
 		if b, mErr := distill.MarshalCached(res); mErr == nil {
 			_ = pooled.SetWithOwner(ctx, distill.PoolMarker+hash, cacheVer, wsID, b)
 		}
@@ -358,7 +367,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 		//      MarshalCachedOCR preserves the avoided-COGS basis (token split +
 		//      model) the S4 royalty (PR2) needs. Same dual-consent gate as (3).
 		//      Best-effort; never fails the request.
-		if pooled != nil && keepsContent && strings.TrimSpace(sav.VisionModel) != "" && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
+		if pooled != nil && shares && strings.TrimSpace(sav.VisionModel) != "" && d.poolGate.DecidePoolableOnWrite(ctx, wsID) {
 			if b, mErr := distill.MarshalCachedOCR(res, sav); mErr == nil {
 				_ = pooled.SetWithOwner(ctx, distill.PoolMarker+hash, distill.OCRCacheVersion(sav.VisionModel), wsID, b)
 			}
