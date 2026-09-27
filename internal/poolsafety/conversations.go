@@ -100,3 +100,70 @@ var ConversationRephrase = []ConversationPair{
 	{"same-history-knead", then(bread, "how long should I knead the dough?"), then(bread, "for how long do I need to knead the dough?")},
 	{"same-history-cat-sleep", then(myCat, "how many hours a day does it sleep?"), then(myCat, "how much does it sleep each day?")},
 }
+
+// B16.2 — THE STANDALONE LANE. An answer stored for a question asked ON ITS OWN may serve the same
+// question asked mid-conversation, only when it stands alone. Every pair here has a single-turn
+// Stored and a mid-conversation Asked.
+
+var (
+	unrelated = []Message{u("what is the capital of the UK?"), a("London.")}
+	cooking   = []Message{u("give me a quick pasta sauce idea"), a("Garlic, olive oil, chilli and parsley — aglio e olio.")}
+)
+
+// StandaloneRephrase: the question stands alone, so the standalone answer is its answer.
+var StandaloneRephrase = []ConversationPair{
+	{"rainbow-after-unrelated", []Message{u("what are the rainbow colours?")}, then(unrelated, "what are the rainbow colours?")},
+	{"rainbow-rephrased-after-unrelated", []Message{u("what are the rainbow colours?")}, then(unrelated, "which colours are in a rainbow?")},
+	{"spider-legs-after-cooking", []Message{u("how many legs does a spider have?")}, then(cooking, "how many legs do spiders have?")},
+	{"boil-egg-after-unrelated", []Message{u("how long should I boil an egg?")}, then(unrelated, "how many minutes should I boil an egg for?")},
+	{"water-boils-after-cat", []Message{u("at what temperature does water boil at sea level?")}, then(myCat, "at what temperature does water boil at sea level?")},
+	{"leap-year-after-cooking", []Message{u("how many days are in a leap year?")}, then(cooking, "how many days does a leap year have?")},
+	{"gold-symbol-after-unrelated", []Message{u("what is the chemical symbol for gold?")}, then(unrelated, "what is the chemical symbol for gold?")},
+}
+
+// standaloneTraps: the words stand alone, the question does not — the history changes its answer.
+var standaloneTraps = []ConversationPair{
+	{"hello-after-learning-spanish", []Message{u("how do I say hello?")},
+		then([]Message{u("I'm learning Spanish."), a("¡Qué bien! How can I help?")}, "how do I say hello?")},
+	{"rainbow-after-answer-in-french", []Message{u("what are the rainbow colours?")},
+		then([]Message{u("from now on answer everything in French"), a("D'accord !")}, "what are the rainbow colours?")},
+	{"spider-legs-after-one-word", []Message{u("how many legs does a spider have?")},
+		then([]Message{u("keep every answer to a single word from now on"), a("Understood.")}, "how many legs does a spider have?")},
+	{"is-it-safe-after-mushroom", []Message{u("is it safe to eat?")},
+		then([]Message{u("I found a mushroom with a red cap and white spots"), a("That sounds like a fly agaric.")}, "is it safe to eat?")},
+	{"cook-time-after-whole-chicken", []Message{u("how long should I cook it?")},
+		then([]Message{u("I bought a 2 kg whole chicken"), a("Great — roasting is a good choice.")}, "how long should I cook it?")},
+	{"good-morning-after-italy", []Message{u("how do I say good morning?")},
+		then([]Message{u("I'm going to Italy next week and want some phrases"), a("Happy to help!")}, "how do I say good morning?")},
+	{"capital-after-country", []Message{u("what is its capital?")},
+		then([]Message{u("tell me about Kenya"), a("Kenya is a country in East Africa.")}, "what is its capital?")},
+	{"boil-egg-after-altitude", []Message{u("how long should I boil an egg?")},
+		then([]Message{u("I live in La Paz, at 3,600 metres"), a("That's very high up!")}, "how long should I boil an egg?")},
+	{"calories-after-portion", []Message{u("how many calories is that?")},
+		then([]Message{u("I ate two slices of pepperoni pizza"), a("Tasty!")}, "how many calories is that?")},
+	// Labelled a rephrasing in the first measurement: the history's "quiz me back after each answer"
+	// changes the right reply, and the check said so.
+	{"boil-egg-after-quiz-me-back", []Message{u("how long should I boil an egg?")}, then(practising, "how long should I boil an egg?")},
+	// Added with the counterfactual prompt, before it was measured.
+	{"wear-after-iceland-wedding", []Message{u("what should I wear?")},
+		then([]Message{u("I'm going to a wedding in Iceland in January"), a("How lovely!")}, "what should I wear?")},
+	{"tip-after-tokyo", []Message{u("how much should I tip?")},
+		then([]Message{u("I'm having dinner at a restaurant in Tokyo tonight"), a("Enjoy your meal!")}, "how much should I tip?")},
+	{"count-to-ten-after-german", []Message{u("how do I count to ten?")},
+		then([]Message{u("my daughter has started learning German"), a("That's wonderful!")}, "how do I count to ten?")},
+	{"time-difference-after-flight", []Message{u("what's the time difference?")},
+		then([]Message{u("I'm flying from London to New York tomorrow"), a("Have a good flight!")}, "what's the time difference?")},
+	{"name-after-kitten", []Message{u("what's a good name?")},
+		then([]Message{u("we just adopted a black kitten"), a("Congratulations!")}, "what's a good name?")},
+}
+
+// StandaloneDanger is standaloneTraps plus EVERY B16.1 danger pair re-cast for this lane: its stored
+// last question asked on its own, against its asked conversation. So every context-dependent
+// follow-up in that corpus is tried against a standalone answer to the very same words.
+func StandaloneDanger() []ConversationPair {
+	out := append([]ConversationPair{}, standaloneTraps...)
+	for _, p := range ConversationDanger {
+		out = append(out, ConversationPair{p.Name + "/alone", []Message{p.Stored[len(p.Stored)-1]}, p.Asked})
+	}
+	return out
+}

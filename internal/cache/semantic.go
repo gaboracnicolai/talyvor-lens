@@ -120,6 +120,15 @@ func ConversationCandidate(stored, asked Turn, similarity, threshold float64) bo
 		PooledCandidate(stored.Latest, asked.Latest, similarity, threshold)
 }
 
+// StandaloneCandidate is B16.2's lane as both reads apply it: a question asked mid-conversation
+// against a row stored for a question asked on its own, by the same rule on the two questions; the
+// pair verifier and the stands-alone check decide. cmd/pairverify measures the standalone corpus
+// through it.
+func StandaloneCandidate(stored, asked Turn, similarity, threshold float64) bool {
+	return stored.Comparable() && stored.Prefix == EmptyPrefix && asked.MidConversation() &&
+		PooledCandidate(stored.Latest, asked.Latest, similarity, threshold)
+}
+
 func NewSemanticCache(pool *pgxpool.Pool, embedder Embedder, threshold float64, retention time.Duration) *SemanticCache {
 	return newSemanticCache(pool, embedder, threshold, retention)
 }
@@ -340,42 +349,22 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model string, turn Tu
 	if !canon.Verifiable() && c.verifier == nil {
 		return nil, nil
 	}
-	vec, err := c.embedder.Embed(ctx, turn.Latest)
+	emb, err := c.embedder.Embed(ctx, turn.Latest)
 	if err != nil {
 		return nil, err
 	}
+	vec := vectorLiteral(emb)
 
-	var (
-		id         string
-		response   string
-		similarity float64
-		stored     string
-		floor      = c.threshold
-	)
-	// workspace_id is the HARD tenant filter (#142): a private lookup can only
-	// match the caller's own rows; the embedding ranks within that boundary.
-	if canon.Verifiable() {
-		err = c.pool.QueryRow(ctx, semanticSelectSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp,
-			turn.Prefix, string(canon)).
-			Scan(&id, &response, &similarity, &stored)
-	} else {
-		floor = NoEntityLowerBound
-		err = c.pool.QueryRow(ctx, semanticSelectNoEntitySQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp,
-			turn.Prefix).
-			Scan(&id, &response, &similarity, &stored)
+	id, response, err := c.privateCandidate(ctx, vec, provider, model, canon, workspaceID, turn.Prefix, fp,
+		func(stored string) bool { return c.verifier == nil || c.sameAnswer(ctx, stored, turn.Latest) })
+	// B16.2: a question asked mid-conversation may be served the answer stored for it asked on its
+	// own — only on the in-context verifier's YES that it stands alone and has that answer.
+	if err == nil && id == "" && c.standaloneOpen(turn) {
+		id, response, err = c.privateCandidate(ctx, vec, provider, model, canon, workspaceID, EmptyPrefix, turn.AloneFP,
+			func(stored string) bool { return c.standsAlone(ctx, turn, stored) })
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil || id == "" {
 		return nil, err
-	}
-
-	if similarity < floor {
-		return nil, nil
-	}
-	if c.verifier != nil && !c.sameAnswer(ctx, stored, turn.Latest) {
-		return nil, nil
 	}
 
 	if _, err := c.pool.Exec(ctx, semanticTouchSQL, id); err != nil {
@@ -384,6 +373,39 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model string, turn Tu
 
 	metrics.CacheHitsTotal.WithLabelValues("semantic").Inc()
 	return []byte(response), nil
+}
+
+// privateCandidate is one private lookup: the workspace's nearest row asked after the history prefix
+// under fingerprint fp, through the entity lane or the no-entity lane, passed by gate. An empty id
+// when nothing passes. workspace_id is the HARD tenant filter (#142): a private lookup can only
+// match the caller's own rows; the embedding ranks within that boundary.
+func (c *SemanticCache) privateCandidate(ctx context.Context, vec, provider, model string, canon discriminator.Canonical,
+	workspaceID, prefix, fp string, gate func(stored string) bool) (id, response string, err error) {
+	var (
+		similarity float64
+		stored     string
+		floor      = c.threshold
+	)
+	if canon.Verifiable() {
+		err = c.pool.QueryRow(ctx, semanticSelectSQL, vec, provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp,
+			prefix, string(canon)).
+			Scan(&id, &response, &similarity, &stored)
+	} else {
+		floor = NoEntityLowerBound
+		err = c.pool.QueryRow(ctx, semanticSelectNoEntitySQL, vec, provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp,
+			prefix).
+			Scan(&id, &response, &similarity, &stored)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if similarity < floor || !gate(stored) {
+		return "", "", nil
+	}
+	return id, response, nil
 }
 
 // Set writes the caller's own answer to turn. key is the row's idempotency material (the
@@ -532,42 +554,23 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model string, t
 		return nil, "", "", 0, nil
 	}
 
-	vec, err := c.embedder.Embed(ctx, prompt)
+	emb, err := c.embedder.Embed(ctx, prompt)
 	if err != nil {
 		return nil, "", "", 0, err
 	}
+	vec := vectorLiteral(emb)
 
-	var (
-		id          string
-		response    string
-		contributor string
-		similarity  float64
-		stored      string
-		floor       = c.threshold
-	)
-	if canon.Verifiable() {
-		err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
-			string(canon), fp, turn.Prefix).
-			Scan(&id, &response, &contributor, &similarity, &stored)
-	} else {
-		floor = NoEntityLowerBound
-		err = c.pool.QueryRow(ctx, semanticSelectPooledNoEntitySQL, vectorLiteral(vec), provider, model, c.freshnessCutoff(), c.embeddingModel,
-			fp, turn.Prefix).
-			Scan(&id, &response, &contributor, &similarity, &stored)
-	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, "", "", 0, nil
-	}
-	if err != nil {
-		return nil, "", "", 0, err
-	}
-	if similarity < floor {
-		return nil, "", "", 0, nil
-	}
 	// The verifier after the entity gate, and AS the gate with no entity. A row with no question
 	// text cannot be judged, so it is refused rather than served on similarity alone.
-	if c.verifier != nil && !c.sameAnswer(ctx, stored, prompt) {
-		return nil, "", "", 0, nil
+	id, response, contributor, similarity, err := c.pooledCandidate(ctx, vec, provider, model, canon, turn.Prefix, fp,
+		func(stored string) bool { return c.verifier == nil || c.sameAnswer(ctx, stored, prompt) })
+	// B16.2: the standalone lane, as on the private read.
+	if err == nil && id == "" && c.standaloneOpen(turn) {
+		id, response, contributor, similarity, err = c.pooledCandidate(ctx, vec, provider, model, canon, EmptyPrefix, turn.AloneFP,
+			func(stored string) bool { return c.standsAlone(ctx, turn, stored) })
+	}
+	if err != nil || id == "" {
+		return nil, "", "", 0, err
 	}
 	if _, err := c.pool.Exec(ctx, semanticTouchSQL, id); err != nil {
 		return nil, "", "", 0, err
@@ -575,6 +578,60 @@ func (c *SemanticCache) GetPooled(ctx context.Context, provider, model string, t
 
 	metrics.CacheHitsTotal.WithLabelValues("semantic_pooled").Inc()
 	return []byte(response), contributor, id, similarity, nil
+}
+
+// pooledCandidate is one pooled lookup, as privateCandidate is one private one.
+func (c *SemanticCache) pooledCandidate(ctx context.Context, vec, provider, model string, canon discriminator.Canonical,
+	prefix, fp string, gate func(stored string) bool) (id, response, contributor string, similarity float64, err error) {
+	var (
+		stored string
+		floor  = c.threshold
+	)
+	if canon.Verifiable() {
+		err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vec, provider, model, c.freshnessCutoff(), c.embeddingModel,
+			string(canon), fp, prefix).
+			Scan(&id, &response, &contributor, &similarity, &stored)
+	} else {
+		floor = NoEntityLowerBound
+		err = c.pool.QueryRow(ctx, semanticSelectPooledNoEntitySQL, vec, provider, model, c.freshnessCutoff(), c.embeddingModel,
+			fp, prefix).
+			Scan(&id, &response, &contributor, &similarity, &stored)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", "", 0, nil
+	}
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	if similarity < floor || !gate(stored) {
+		return "", "", "", 0, nil
+	}
+	return id, response, contributor, similarity, nil
+}
+
+// standaloneOpen reports whether B16.2's lane is open for turn: it was asked mid-conversation, and
+// the verifier can be shown the conversation.
+func (c *SemanticCache) standaloneOpen(turn Turn) bool {
+	_, ok := c.verifier.(pairverify.ContextVerifier)
+	return ok && turn.MidConversation()
+}
+
+// standsAlone is B16.2's gate for a standalone row: the pair verifier's YES that the two questions
+// have the same answer, AND the context verifier's YES that turn's question, at the end of its
+// conversation, could be answered without it. Two calls, because one prompt judging both served 10
+// of 30 context-dependent traps (pairverify.StandalonePrompt). Anything but two YESes refuses.
+func (c *SemanticCache) standsAlone(ctx context.Context, turn Turn, stored string) bool {
+	if !c.sameAnswer(ctx, stored, turn.Latest) {
+		return false
+	}
+	vctx, cancel := context.WithTimeout(ctx, verifyTimeout)
+	defer cancel()
+	v, err := c.verifier.(pairverify.ContextVerifier).StandsAlone(vctx, turn.History, turn.Latest)
+	if err != nil {
+		slog.Warn("semantic cache: stands-alone check failed, standalone candidate refused", slog.String("err", err.Error()))
+		return false
+	}
+	return v.Same
 }
 
 // sameAnswer asks the pair verifier whether the stored question and the asked one have the same

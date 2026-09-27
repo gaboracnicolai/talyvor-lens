@@ -22,7 +22,22 @@ type Turn struct {
 	// Prefix is the hex SHA-256 of every message before Latest, role and content. EmptyPrefix for a
 	// single-turn request.
 	Prefix string
+	// History and AloneFP open B16.2's lane for a question asked mid-conversation: an answer stored
+	// for the same question asked ON ITS OWN may serve it, if the verifier, shown History, confirms
+	// the question stands alone. AloneFP is the request fingerprint the latest message would have
+	// were it the whole conversation — what a standalone row was stored under. Both are empty for a
+	// first question, and for a history the verifier cannot be shown faithfully (a system or tool
+	// message, non-text content, more than maxHistoryChars).
+	History string
+	AloneFP string
 }
+
+// maxHistoryChars bounds the history shown to the verifier: a longer conversation is not offered
+// B16.2's lane rather than cut, since the part cut could be the part the question depends on.
+const maxHistoryChars = 4000
+
+// MidConversation reports whether B16.2's lane is open for this request.
+func (t Turn) MidConversation() bool { return t.Comparable() && t.AloneFP != "" }
 
 // EmptyPrefix is the Prefix of a request with no history: a first question.
 var EmptyPrefix = prefixHash(nil)
@@ -50,7 +65,64 @@ func LatestTurn(body []byte) Turn {
 	if last.Role != "user" || !ok || strings.TrimSpace(text) == "" {
 		return Turn{}
 	}
-	return Turn{Latest: text, Prefix: prefixHash(req.Messages[:len(req.Messages)-1])}
+	t := Turn{Latest: text, Prefix: prefixHash(req.Messages[:len(req.Messages)-1])}
+	if history, ok := renderHistory(req.Messages[:len(req.Messages)-1]); ok {
+		t.History, t.AloneFP = history, aloneFingerprint(body)
+	}
+	return t
+}
+
+// renderHistory is the conversation before the latest question as the verifier reads it. Not ok for
+// no history, a role other than user/assistant (a system prompt changes every answer after it), or
+// content that is not text.
+func renderHistory(msgs []chatMessage) (string, bool) {
+	if len(msgs) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	for i, m := range msgs {
+		text, ok := messageText(m.Content)
+		if !ok {
+			return "", false
+		}
+		switch m.Role {
+		case "user":
+			b.WriteString("User: ")
+		case "assistant":
+			b.WriteString("Assistant: ")
+		default:
+			return "", false
+		}
+		b.WriteString(text)
+		if i < len(msgs)-1 {
+			b.WriteString("\n\n")
+		}
+	}
+	if b.Len() > maxHistoryChars {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// aloneFingerprint is RequestFingerprint of body with its messages cut to the last one: every
+// setting kept, the history gone.
+func aloneFingerprint(body []byte) string {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var req map[string]any
+	if dec.Decode(&req) != nil {
+		return ""
+	}
+	msgs, ok := req["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return ""
+	}
+	req["messages"] = msgs[len(msgs)-1:]
+	b, err := json.Marshal(req)
+	if err != nil {
+		return ""
+	}
+	return RequestFingerprint(b)
 }
 
 type chatMessage struct {
