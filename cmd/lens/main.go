@@ -1913,16 +1913,8 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, stats)
 		})
 
-		// Marketplace listings (read-only — browsing is public; buying requires auth).
-		econ.get(pub, "/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
-			limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
-			listings, err := marketplace.GetListings(req.Context(), limit)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, listings)
-		})
+		// B18.1: the token exchange (/v1/marketplace/listings*, /v1/marketplace/trades) is no longer
+		// registered — see the note where its authenticated routes were.
 
 		// Aggregated routing patterns across opted-in workspaces.
 		econ.get(pub, "/v1/insights/routing", func(w http.ResponseWriter, req *http.Request) {
@@ -3803,144 +3795,19 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 
-		econ.post(authed, "/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
-			var in economy.MarketplaceListing
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			// Authz (#146): a non-admin lists only as ITSELF (the seller is the
-			// caller); admin may list on behalf of any seller via the body.
-			eff, _, ok := effectiveWorkspaceID(req, in.SellerID)
-			if !ok {
-				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
-				return
-			}
-			in.SellerID = eff
-			if in.SellerID == "" {
-				writeJSONErr(w, http.StatusBadRequest, "seller_id required")
-				return
-			}
-			out, err := marketplace.CreateListing(req.Context(), in)
-			if err != nil {
-				status := http.StatusBadRequest
-				if errors.Is(err, economy.ErrInsufficientBalance) {
-					status = http.StatusPaymentRequired
-				}
-				writeJSONErr(w, status, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, out)
-		})
-
-		econ.post(authed, "/v1/marketplace/listings/{id}/buy", func(w http.ResponseWriter, req *http.Request) {
-			id := chi.URLParam(req, "id")
-			var in struct {
-				BuyerWorkspace string  `json:"buyer_workspace"`
-				AmountUSD      float64 `json:"amount_usd"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			// Authz (#146): the buyer is the CALLER for non-admins; admin honors the body.
-			eff, _, ok := effectiveWorkspaceID(req, in.BuyerWorkspace)
-			if !ok {
-				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
-				return
-			}
-			in.BuyerWorkspace = eff
-			trade, err := marketplace.ExecuteTrade(req.Context(), id, in.BuyerWorkspace, in.AmountUSD)
-			if err != nil {
-				status := http.StatusBadRequest
-				if errors.Is(err, economy.ErrListingNotFound) {
-					status = http.StatusNotFound
-				} else if errors.Is(err, economy.ErrListingNotActive) {
-					status = http.StatusGone
-				} else if errors.Is(err, economy.ErrInsufficientBalance) {
-					status = http.StatusPaymentRequired
-				}
-				writeJSONErr(w, status, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, trade)
-		})
-
-		econ.del(authed, "/v1/marketplace/listings/{id}", func(w http.ResponseWriter, req *http.Request) {
-			id := chi.URLParam(req, "id")
-			// Authz (#146): a non-admin may cancel only its OWN listing; admin
-			// may act on any seller via the param.
-			wsID, _, ok := effectiveWorkspaceID(req, req.URL.Query().Get("workspace_id"))
-			if !ok {
-				writeJSONErr(w, http.StatusForbidden, "forbidden: no workspace identity")
-				return
-			}
-			if wsID == "" {
-				writeJSONErr(w, http.StatusBadRequest, "workspace_id query param required")
-				return
-			}
-			if err := marketplace.CancelListing(req.Context(), id, wsID); err != nil {
-				status := http.StatusBadRequest
-				if errors.Is(err, economy.ErrListingNotFound) {
-					status = http.StatusNotFound
-				} else if errors.Is(err, economy.ErrNotSeller) {
-					status = http.StatusForbidden
-				}
-				writeJSONErr(w, status, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
-		})
-
-		econ.get(authed, "/v1/marketplace/trades", newMarketplaceTradesHandler(marketplace))
-
-		econ.post(authed, "/v1/workspaces/{wsID}/tokens/stake", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			var in struct {
-				Amount   int64 `json:"amount_ulens"` // µLENS (SEC-2)
-				LockDays int   `json:"lock_days"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			pos, err := marketplace.Stake(req.Context(), wsID, in.Amount, in.LockDays)
-			if err != nil {
-				status := http.StatusBadRequest
-				if errors.Is(err, economy.ErrInsufficientBalance) {
-					status = http.StatusPaymentRequired
-				}
-				writeJSONErr(w, status, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, pos)
-		})
-
-		econ.post(authed, "/v1/workspaces/{wsID}/tokens/stake/{positionID}/unstake", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			positionID := chi.URLParam(req, "positionID")
-			if err := marketplace.Unstake(req.Context(), positionID, wsID); err != nil {
-				status := http.StatusBadRequest
-				if errors.Is(err, economy.ErrPositionNotFound) {
-					status = http.StatusNotFound
-				} else if errors.Is(err, economy.ErrStakeLocked) {
-					status = http.StatusForbidden
-				}
-				writeJSONErr(w, status, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
-		})
-
-		econ.get(authed, "/v1/workspaces/{wsID}/tokens/stakes", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			positions, err := marketplace.GetStakePositions(req.Context(), wsID)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, positions)
-		})
+		// ⚠ B18.1: THE TOKEN EXCHANGE AND TOKEN STAKING ARE NOT REGISTERED. Measured 27 Sep at 682da06:
+		// POST /v1/marketplace/listings/{id}/buy credited the buyer, the fee and the seller's unsold
+		// remainder and debited NO ONE — the buyer received LENS and paid nothing — and a stake's
+		// yield ran from time.Since(StartedAt) with no ceiling at unlocks_at
+		// (internal/economy/marketplace.go). Both served by default behind LENS_ECONOMY_ENABLED, which
+		// also runs pooling royalties, so no switch could close them alone.
+		//
+		// Retire or fix is Nicolai's decision, after the lawyer's answer. Until then nothing can list,
+		// buy, cancel, stake or unstake, so no LENS moves and no yield is minted (it is minted only at
+		// unstake). Not one listing, position or balance was changed: production held 0 listings,
+		// 0 trades and 0 stake positions. The logic stays in internal/economy (MarketplaceStore) and
+		// the authz-hardened trades handler in authz_handlers.go, for whichever way it is decided.
+		// POVI's /annotate/stake and /v1/povi/nodes/{nodeID}/stake are a different mechanism and stay.
 
 		authed.Get("/v1/workspaces/{wsID}/spend/current-month", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
