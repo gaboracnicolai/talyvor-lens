@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -90,47 +89,6 @@ const (
 // while accumulating the assembled text content for caching + learning.
 type StreamHandler struct {
 	proxy *Proxy
-}
-
-// ServeOpenAI streams an OpenAI chat-completions response. The accumulated
-// text content is cached as a non-streaming JSON shape so future cache hits
-// (streaming or not) can return a complete response immediately.
-func (s *StreamHandler) ServeOpenAI(
-	w http.ResponseWriter,
-	r *http.Request,
-	provider string,
-	model string,
-	prompt string,
-	cachePrompt string,
-	body []byte,
-	piiDetected bool,
-	sc streamSpend,
-) error {
-	return s.serve(w, r, provider, model, prompt, cachePrompt, body, piiDetected, sc, openAIStreamOps{
-		url:     s.proxy.openAIURL,
-		setAuth: func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+s.proxy.openAIKey) },
-	})
-}
-
-// ServeAnthropic streams an Anthropic /v1/messages response.
-func (s *StreamHandler) ServeAnthropic(
-	w http.ResponseWriter,
-	r *http.Request,
-	provider string,
-	model string,
-	prompt string,
-	cachePrompt string,
-	body []byte,
-	piiDetected bool,
-	sc streamSpend,
-) error {
-	return s.serve(w, r, provider, model, prompt, cachePrompt, body, piiDetected, sc, anthropicStreamOps{
-		url: s.proxy.anthropicURL,
-		setAuth: func(req *http.Request) {
-			req.Header.Set("x-api-key", s.proxy.anthropicKey)
-			req.Header.Set("anthropic-version", "2023-06-01")
-		},
-	})
 }
 
 // streamOps abstracts the per-provider differences in stream parsing and
@@ -463,10 +421,21 @@ func (s *StreamHandler) serve(
 	var accumulated strings.Builder
 	var usage streamUsage
 	ended := false // the provider sent its end-of-answer event
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), sseScannerMax)
+	// B18.7: the upstream's lines (Bedrock's are decoded from its binary event stream), and what the
+	// client is sent for each (Google and Bedrock are translated to OpenAI chunks).
+	src := upstreamLines(ops, resp.Body)
+	translator, translates := ops.(clientTranslator)
+	send := func(lines [][]byte) {
+		for _, l := range lines {
+			_, _ = w.Write(l)
+			_, _ = w.Write([]byte("\n"))
+		}
+		if flusher != nil && len(lines) > 0 {
+			flusher.Flush()
+		}
+	}
 
-	for scanner.Scan() {
+	for src.Next() {
 		// Stop forwarding if the client disconnected.
 		select {
 		case <-r.Context().Done():
@@ -474,14 +443,14 @@ func (s *StreamHandler) serve(
 		default:
 		}
 
-		line := scanner.Bytes()
+		line := src.Line()
 		// Reconstruct the SSE wire format on the way out: each scanner line
 		// strips its trailing \n; the original blank-line separators arrive
 		// as zero-length lines. Writing line+"\n" round-trips both.
-		_, _ = w.Write(line)
-		_, _ = w.Write([]byte("\n"))
-		if flusher != nil {
-			flusher.Flush()
+		if translates {
+			send(translator.toClient(line))
+		} else {
+			send([][]byte{line})
 		}
 
 		ops.extractUsage(line, &usage)
@@ -492,8 +461,11 @@ func (s *StreamHandler) serve(
 			break
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if err := src.Err(); err != nil {
 		return err
+	}
+	if translates {
+		send(translator.clientTail())
 	}
 
 	// Post-serve seam (cache write, learner, streamed spend + reservation SETTLE). Detach from the
