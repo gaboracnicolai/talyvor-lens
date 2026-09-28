@@ -123,6 +123,7 @@ var Manifest = map[string]Entry{
 	"agent_tool_calls":        {Retain, "B19.9: audit-guarded (0145, append-only): every call an agent made to the bank's tools; the record of what it asked and was refused"},
 	"market_earnings":         {Retain, "B20.2: audit-guarded (0149, append-only): a seller's share of each cleared use — money owed to them, paid out by B20.5"},
 	"market_refunds":          {Retain, "B20.4: audit-guarded (0152, append-only but for its Stripe credit): each refunded use of a taken-down listing — money given back to its buyer and taken from its seller"},
+	"market_payouts":          {Retain, "B20.5: audit-guarded (0153, append-only but for its Stripe transfer): each payout of a seller's earnings, in money through Stripe or in credits"},
 
 	// token_events is audit-guarded TOO, but migration 0055's trigger carries a sanctioned
 	// exception: DELETE is permitted while the retention-bypass session flag is set — the flag the
@@ -204,6 +205,7 @@ var Manifest = map[string]Entry{
 	"market_listings":              {Delete, "B20.1: the listings a workspace published; their versions cascade"},
 	"market_uses":                  {Delete, "B20.2: keys `seller_workspace_id`+`buyer_workspace_id`: each use of a listing, what it was billed and when it cleared"},
 	"market_bills":                 {Delete, "B20.2: the Stripe subscription a buyer's marketplace uses are metered onto"},
+	"market_sellers":               {Delete, "B20.5: the seller's connected Stripe account and what Stripe last said of it"},
 	"market_listing_reports":       {Delete, "B20.4: keys `reporter_workspace_id`: the reports a workspace made of listings; reports of its own listings cascade with them"},
 	"workspace_passkeys":           {Delete, "B19.16: the owner's passkeys' public keys"},
 	"webauthn_challenges":          {Delete, ""},

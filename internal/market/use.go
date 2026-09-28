@@ -436,11 +436,13 @@ type Earnings struct {
 	// and what the seller's share of them would be today. They become earnings when the invoice is paid.
 	PendingUses         int64     `json:"pending_uses"`
 	PendingUSDMicros    int64     `json:"pending_usd_micros"`
-	PayableUSDMicros    int64     `json:"payable_usd_micros"`     // every share earned (and not yet paid out, B20.5)
+	PayableUSDMicros    int64     `json:"payable_usd_micros"`     // every share earned and not yet paid out (B20.5)
 	InHoldbackUSDMicros int64     `json:"in_holdback_usd_micros"` // of which still inside the 14-day holdback
 	AvailableUSDMicros  int64     `json:"available_usd_micros"`   // of which past it
+	PaidOutUSDMicros    int64     `json:"paid_out_usd_micros"`    // every payout, in money or credits (B20.5)
+	OwedUSDMicros       int64     `json:"owed_usd_micros"`        // reversed after it was paid out: recovered from future earnings
 	LifetimeGrossMicros int64     `json:"lifetime_gross_usd_micros"`
-	RefundedUSDMicros   int64     `json:"refunded_usd_micros"` // shares reversed by refunds (B20.4), already out of the totals above
+	RefundedUSDMicros   int64     `json:"refunded_usd_micros"` // shares reversed by refunds and chargebacks, already out of the totals above
 	Earnings            []Earning `json:"earnings"`
 }
 
@@ -456,20 +458,25 @@ type Earning struct {
 	RefundedAt     *time.Time `json:"refunded_at,omitempty"` // its share was reversed: the listing was taken down
 }
 
-// SellerEarnings reads a seller's earnings: the totals and the latest 100. An earning a refund reversed
-// (B20.4) counts in none of the totals but RefundedUSDMicros.
+// SellerEarnings reads a seller's earnings: the totals and the latest 100. An earning a refund or chargeback
+// reversed counts in none of the totals but RefundedUSDMicros, and every payout comes out of what is
+// available; a payout the reversals have since overtaken is owed, out of what the holdback still holds.
 func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, now time.Time) (Earnings, error) {
 	e := Earnings{Earnings: []Earning{}}
-	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(sum(e.share_usd_micros) FILTER (WHERE r.use_id IS NULL), 0)::bigint,
-		       COALESCE(sum(e.share_usd_micros) FILTER (WHERE r.use_id IS NULL AND e.payable_at > $2), 0)::bigint,
-		       COALESCE(sum(e.gross_usd_micros), 0)::bigint,
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(sum(e.gross_usd_micros), 0)::bigint,
 		       COALESCE(sum(r.reversed_share_usd_micros), 0)::bigint
 		FROM market_earnings e LEFT JOIN market_refunds r ON r.use_id = e.use_id
-		WHERE e.seller_workspace_id = $1`, sellerWorkspaceID, now).
-		Scan(&e.PayableUSDMicros, &e.InHoldbackUSDMicros, &e.LifetimeGrossMicros, &e.RefundedUSDMicros); err != nil {
+		WHERE e.seller_workspace_id = $1`, sellerWorkspaceID).
+		Scan(&e.LifetimeGrossMicros, &e.RefundedUSDMicros); err != nil {
 		return e, fmt.Errorf("market: earnings: %w", err)
 	}
-	e.AvailableUSDMicros = e.PayableUSDMicros - e.InHoldbackUSDMicros
+	released, inHoldback, paid, err := sellerBalance(ctx, s.pool, sellerWorkspaceID, now)
+	if err != nil {
+		return e, fmt.Errorf("market: earnings: %w", err)
+	}
+	e.InHoldbackUSDMicros, e.PaidOutUSDMicros = inHoldback, paid
+	e.AvailableUSDMicros, e.OwedUSDMicros = max(released-paid, 0), max(paid-released, 0)
+	e.PayableUSDMicros = max(inHoldback+released-paid, 0)
 	var pendingULXC int64
 	if err := s.pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(price_ulxc), 0)::bigint FROM market_uses u
 		WHERE seller_workspace_id = $1 AND charge = 'billed' AND ran_at IS NOT NULL AND cleared_at IS NULL

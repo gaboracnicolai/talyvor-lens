@@ -1666,6 +1666,16 @@ func run() error {
 			refundTakenDownMarketUses(lctx, marketStore, billingSvc)
 		})
 	}
+	// B20.5 — sellers connect a Stripe account and are paid monthly; a buyer's refund or chargeback reverses
+	// the earnings it paid for.
+	var marketConnect market.ConnectStripe
+	if cfg.BillingEnabled {
+		marketConnect = liveStripe
+		billingSvc = billingSvc.WithMarketPayouts(liveStripe, marketStore)
+		go haComps.leader.Run(ctx, "market-payouts", 30*time.Second, func(lctx context.Context) {
+			payMarketSellers(lctx, marketStore, liveStripe)
+		})
+	}
 	// B1.6 — D, the allowance each paid period grants. Zero (the default) grants
 	// nothing, and then there is nothing for a served request to draw down either.
 	billingSvc = billingSvc.WithAllowance(cfg.SubscriptionAllowanceULXC)
@@ -4170,8 +4180,10 @@ func run() error {
 
 		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.
 		mountAgentAccountRoutes(authed, dualToken, tenantStore)
-		mountMarketRoutes(authed, marketStore)                               // B20.1
-		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken) // B20.2
+		mountMarketRoutes(authed, marketStore)                                 // B20.1
+		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)   // B20.2
+		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken, // B20.5
+			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
 		// See internal/storedanswers.

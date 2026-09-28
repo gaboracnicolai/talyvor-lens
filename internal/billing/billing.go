@@ -123,6 +123,9 @@ type Service struct {
 	marketPrice   string
 	marketEvent   string
 	marketClearer MarketClearer
+	// B20.5 — seller payouts (connect.go). Unset ⇒ disputes are acknowledged and ignored.
+	connectStripe connectStripeAPI
+	marketPayouts MarketPayouts
 
 	// D, in µLXC — the Model 2 allowance per billing period (W4.6.1 step 2).
 	// ZERO is the default and means "no allowance configured": no grant row is ever
@@ -275,7 +278,11 @@ func (s *Service) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "checkout.session.completed", "checkout.session.async_payment_succeeded":
 		s.handleSessionCredit(w, r.Context(), &event)
 	case "charge.refunded":
-		s.handleRefund(w, r.Context(), &event)
+		if s.reverseMarketCharge(w, r.Context(), &event) { // B20.5 — a refunded marketplace bill reverses its sellers' earnings
+			s.handleRefund(w, r.Context(), &event)
+		}
+	case "charge.dispute.created": // B20.5 — a charged-back marketplace bill reverses its sellers' earnings
+		s.handleDispute(w, r.Context(), &event)
 	case "checkout.session.async_payment_failed":
 		w.WriteHeader(http.StatusOK) // no money moved → ack, no action
 	// MODEL 2 (W4.6.1 step 1) — the recurring half. See subscriptions.go.
