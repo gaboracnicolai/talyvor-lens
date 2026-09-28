@@ -63,34 +63,27 @@ def anchored(path, old, new):
     open(path, "w").write(s.replace(old, new, 1))
 
 CLS = "TestEveryBackgroundGoroutineIsClassified"
-WRM = "TestTheCacheWarmerIsLeaderGated"
 
 CONTROLS = [
-    ("Y1 the warmer un-gated again", MAIN,
-     'go haComps.leader.Run(ctx, "cache-warmer", 30*time.Second, func(lctx context.Context) {\n\t\tcacheWarmer.Start(lctx, 1*time.Hour)\n\t})',
-     'go cacheWarmer.Start(ctx, 1*time.Hour)',
-     WRM, None, "the money-spending job cannot drift back to running on every replica"),
-
     ("Y2 a new ungated background job appears", MAIN,
      "\tgo cpSyncer.Run(ctx, 30*time.Second)",
      "\tgo cpSyncer.Run(ctx, 30*time.Second)\n\tgo semanticCache.DeleteStale(ctx)",
-     CLS, WRM, "an unclassified goroutine is caught rather than inherited"),
+     CLS, None, "an unclassified goroutine is caught rather than inherited"),
 
     ("Y3 a per-replica classification loses its reason", TEST,
      '"cpSyncer.Run": "IN-PROCESS STATE. Rebuilds this replica\'s compression-policy cache; main.go " +\n\t\t"says so directly at the reload-interval comment — each replica must refresh its OWN cache.",',
      '"cpSyncer.Run": "",',
-     CLS, WRM, "a bare classification is a label, not a decision"),
+     CLS, None, "a bare classification is a label, not a decision"),
 
     # ⚠ RE-POINTED FROM THE DELETED `anyGoroutine` REGEX TO THE WALK THAT REPLACED IT. The
     # property is unchanged and it is the one scanGoStatements' own docstring names: "a scan that
     # enumerates no goroutines reports every goroutine as classified". Dropping the collection
     # leaves the walk running and returning nothing, which is what a refactor that goes wrong here
-    # actually looks like. It must red on the FLOOR (`found 0 leader-gated jobs, expected 30+`) and
-    # WRM must stay green, because scanLeaderJobs is a different function.
+    # actually looks like. It must red on the FLOOR (`found 0 leader-gated jobs, expected 30+`).
     ("Y4 the goroutine scan neutered", SCAN,
      "\t\tout = append(out, site)",
      "\t\t_ = site",
-     CLS, WRM, "a broken scan hits the floor rather than reporting every job classified"),
+     CLS, None, "a broken scan hits the floor rather than reporting every job classified"),
 
     # ⚠ RE-POINTED FROM THE DELETED `leaderGated` REGEX TO THE CONST THAT REPLACED IT. The
     # selector is matched against the RENDERED AST EXPRESSION of the call rather than against a
@@ -101,17 +94,13 @@ CONTROLS = [
      'const leaderRunSelector = "haComps.NOPE.Run"',
      CLS, None, "the census cannot pass by seeing zero singletons"),
 
-    ("Y6 both a gated AND an ungated warmer", MAIN,
-     "\tcacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)",
-     "\tcacheWarmer := warmer.New(pool, l, exactCache, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey)\n\tgo cacheWarmer.Start(ctx, 1*time.Hour)",
-     WRM, None, "a leftover ungated call beside the gated one is caught"),
 ]
 
 before = {p: sha(p) for p in FILES}
 print("BASELINE sha256")
 for p in FILES:
     print("  %-42s %s" % (os.path.basename(p), before[p]))
-ok, out = run("TestEveryBackgroundGoroutineIsClassified|TestTheCacheWarmerIsLeaderGated")
+ok, out = run("TestEveryBackgroundGoroutineIsClassified")
 if not ok:
     sys.exit("not green before the campaign:\n" + out[-2500:])
 print("\nbaseline: GREEN\n")
@@ -148,7 +137,7 @@ clean = all(before[p] == after[p] for p in FILES)
 print("RESTORE PROOF")
 for p in FILES:
     print("  %-42s %s" % (os.path.basename(p), "IDENTICAL" if before[p] == after[p] else "!! MUTATED !!"))
-ok, _ = run("TestEveryBackgroundGoroutineIsClassified|TestTheCacheWarmerIsLeaderGated")
+ok, _ = run("TestEveryBackgroundGoroutineIsClassified")
 print("\ngreen after restore: %s" % ok)
 c = results.count("CAUGHT")
 print("\n%d/%d controls CAUGHT" % (c, len(results)))

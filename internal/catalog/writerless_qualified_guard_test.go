@@ -32,7 +32,8 @@ import (
 // each SQL literal, works out which aliases are bound to token_events, and only complains about
 // uses that resolve to token_events.
 //
-// ⚠ ONE OFFENCE IS KNOWN, MEASURED, AND DELIBERATELY NOT FIXED HERE — see knownOffences below.
+// ⚠ The one known offence (internal/warmer candidatesSQL) went with the warmer in B18.9; knownOffences
+// is empty and any new entry must say what was measured.
 
 // writerlessQualified are columns that are writerless ON token_events but whose NAME may legally
 // appear on other tables. Entries here are matched only when they resolve to token_events.
@@ -50,31 +51,7 @@ var writerlessQualified = []string{
 // worse than no guard.
 //
 // Each entry must state what was measured and what decision it waits on.
-var knownOffences = map[string]string{
-	// internal/warmer/warmer.go candidatesSQL.
-	//
-	// MEASURED on real Postgres over the full migration chain, with a positive control: seed
-	// prompt_embeddings with a popular row keyed exactly as the production semantic-cache writer
-	// keys it, and GetWarmCandidates returns 0 candidates; insert ONE token_events row carrying
-	// that same hash — the value no production writer produces — and the same query returns 1.
-	// The cache warmer has therefore never had a candidate and cannot have one.
-	//
-	// NOT FIXED HERE BECAUSE EVERY REPAIR IS A DECISION, AND EACH ONE SPENDS MONEY:
-	//   · giving token_events.prompt_hash a writer means retaining a per-prompt fingerprint under
-	//     the DEFAULT `metadata` logging policy, whose stated purpose is to strip prompt identity;
-	//   · the prompt_text this join exists to recover is itself the empty string under that same
-	//     default policy (internal/proxy sets spendPrompt to empty for LoggingMetadata), and
-	//     WarmOne has no empty-prompt refusal — measured, it POSTs
-	//     {"messages":[{"content":"","role":"user"}]} to the provider on the OPERATOR's key and
-	//     reports success;
-	//   · and the warmer writes its result under the BARE prompt key while every production read
-	//     is workspace-prefixed or pooled-marked, so the entry it pays for cannot be hit.
-	// The warmer is inert three independent ways and is, by its own wiring comment, "the ONLY
-	// background job in this binary that spends money at an external provider".
-	"JOIN token_events te ON te.prompt_hash = pe.prompt_hash": "internal/warmer candidatesSQL — " +
-		"the cache warmer's join key. Measured inert (0 candidates, positive-controlled). Repair " +
-		"is a privacy + money decision, reported to the queue under W4.9; do not silence, fix.",
-}
+var knownOffences = map[string]string{}
 
 // aliasesForTokenEvents returns every name a SQL statement uses to refer to token_events: the bare
 // table name plus any alias bound to it (`token_events te`, `token_events AS te`).
@@ -282,8 +259,8 @@ func TestQualifiedGuardSeesBothRealUsesAndNeitherLegitimateOne(t *testing.T) {
 				"WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY prompt_hash HAVING COUNT(*) >= 3",
 		},
 		{
-			// internal/warmer candidatesSQL as it stands today.
-			name: "warmer JOIN ... ON (open)",
+			// internal/warmer candidatesSQL as it shipped, before the warmer was removed (B18.9).
+			name: "warmer JOIN ... ON (removed)",
 			sql: "SELECT pe.prompt_hash, pe.provider FROM prompt_embeddings pe " +
 				"JOIN token_events te ON te.prompt_hash = pe.prompt_hash WHERE pe.hit_count >= 5",
 		},
