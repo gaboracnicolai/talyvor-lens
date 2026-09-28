@@ -4104,6 +4104,9 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]any{"ok": true, "tare_policy": ws.TarePolicy})
 		})
 
+		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.
+		mountAgentAccountRoutes(authed, dualToken, tenantStore)
+
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
 		// See internal/storedanswers.
 		storedAnswers := storedanswers.New(pool, redisClient)
