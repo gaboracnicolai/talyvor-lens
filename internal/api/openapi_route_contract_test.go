@@ -274,7 +274,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 //
 // 124 → 125 (B10.5): GET /v1/catalog/discovered, the models waiting for a price, beside the
 // undocumented GET /v1/catalog/models it complements.
-const undocumentedNonAdminV1Routes = 125
+//
+// 125 → 117 (B18.10): the A/B experiments API was unregistered — the seven
+// /v1/workspaces/{wsID}/experiments* routes and GET /v1/workspaces/{wsID}/eval/ab/{experiment}.
+const undocumentedNonAdminV1Routes = 117
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)
