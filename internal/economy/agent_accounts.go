@@ -35,6 +35,9 @@ type Agent struct {
 	SpentULXC   int64     `json:"spent_ulxc"`
 	Keys        []string  `json:"keys"`
 	CreatedAt   time.Time `json:"created_at"`
+	// PausedAt is set while the agent is paused (B19.6): its every movement is refused until it is resumed.
+	PausedAt     *time.Time `json:"paused_at,omitempty"`
+	PausedReason string     `json:"paused_reason,omitempty"`
 }
 
 // AgentBook reconciles a workspace with its agents: WorkspaceBalanceULXC (lxc_balances) =
@@ -265,7 +268,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 		return book, fmt.Errorf("economy: workspace balance: %w", err)
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT a.id, a.name, a.created_at,
+		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
 		                   AND p.kind IN ('spend', 'hold', 'settle', 'release')), 0)::bigint,
@@ -278,7 +281,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 	for rows.Next() {
 		var a Agent
 		var spendLegs int64
-		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.BalanceULXC, &spendLegs, &a.Keys); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.BalanceULXC, &spendLegs, &a.Keys); err != nil {
 			return book, err
 		}
 		a.SpentULXC = -spendLegs

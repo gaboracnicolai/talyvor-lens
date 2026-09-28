@@ -50,6 +50,14 @@ import (
 // current month and to to now, so September is from=2026-09-01&to=2026-10-01. On an agent's route any of
 // the three asks for the period statement; with none it is the newest-first list above.
 //
+// B19.6 — unusual spend is flagged, an agent can be paused, and the month-end is forecast
+// (internal/economy/agent_alerts.go states the rule):
+//
+//	GET  /v1/workspaces/{wsID}/agents/alerts                 unusual-spend alerts, newest first
+//	GET  /v1/workspaces/{wsID}/agents/forecast?at=           each agent's and the workspace's month-end spend
+//	POST /v1/workspaces/{wsID}/agents/{id}/pause  {"reason"}  refuse its every movement until resumed
+//	POST /v1/workspaces/{wsID}/agents/{id}/resume
+//
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
 
@@ -68,6 +76,10 @@ type agentBank interface {
 	AgentStatement(ctx context.Context, workspaceID, agentID string, limit int) ([]economy.AgentStatementLine, error)
 	AgentPeriodStatement(ctx context.Context, workspaceID, agentID string, from, to time.Time) (economy.Statement, error)
 	WorkspaceAgentStatement(ctx context.Context, workspaceID string, from, to time.Time) (economy.Statement, error)
+	PauseAgent(ctx context.Context, workspaceID, agentID, reason string) error
+	ResumeAgent(ctx context.Context, workspaceID, agentID string) error
+	ListAgentSpendAlerts(ctx context.Context, workspaceID string) ([]economy.AgentSpendAlert, error)
+	AgentSpendForecast(ctx context.Context, workspaceID string, at time.Time) (economy.SpendForecast, error)
 }
 
 type agentKeyIssuer interface {
@@ -265,6 +277,43 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONOK(w, http.StatusOK, map[string]any{"agent_id": chi.URLParam(req, "agentID"), "lines": lines})
 		}
 	})
+	r.Get("/v1/workspaces/{wsID}/agents/alerts", func(w http.ResponseWriter, req *http.Request) {
+		list, err := bank.ListAgentSpendAlerts(req.Context(), chi.URLParam(req, "wsID"))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"alerts": list, "rule": economy.UnusualSpendRule})
+	})
+	r.Get("/v1/workspaces/{wsID}/agents/forecast", func(w http.ResponseWriter, req *http.Request) {
+		at := time.Now()
+		if v := req.URL.Query().Get("at"); v != "" {
+			t, err := time.Parse(time.RFC3339Nano, v)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "at must be an RFC 3339 instant")
+				return
+			}
+			at = t
+		}
+		f, err := bank.AgentSpendForecast(req.Context(), chi.URLParam(req, "wsID"), at)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, f)
+	})
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/pause", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&in)
+		agentID := chi.URLParam(req, "agentID")
+		writePaused(w, agentID, true, bank.PauseAgent(req.Context(), chi.URLParam(req, "wsID"), agentID, in.Reason))
+	}))
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/resume", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		agentID := chi.URLParam(req, "agentID")
+		writePaused(w, agentID, false, bank.ResumeAgent(req.Context(), chi.URLParam(req, "wsID"), agentID))
+	}))
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/pay", func(w http.ResponseWriter, req *http.Request) {
 		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
 		if _, owner := storedanswers.OwnerOrAdmin(req.Context()); !owner {
@@ -302,6 +351,17 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONOK(w, http.StatusOK, pay)
 		}
 	})
+}
+
+func writePaused(w http.ResponseWriter, agentID string, paused bool, err error) {
+	switch {
+	case errors.Is(err, economy.ErrAgentNotFound):
+		writeJSONErr(w, http.StatusNotFound, err.Error())
+	case err != nil:
+		writeJSONErr(w, http.StatusInternalServerError, err.Error())
+	default:
+		writeJSONOK(w, http.StatusOK, map[string]any{"agent_id": agentID, "paused": paused})
+	}
 }
 
 // ownerOnly admits the workspace's owner or an admin — the rule stored-answer deletion uses.
