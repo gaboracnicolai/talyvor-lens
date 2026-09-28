@@ -84,6 +84,7 @@ import (
 	"github.com/talyvor/lens/internal/modelcapability"
 	"github.com/talyvor/lens/internal/modelwatch"
 	"github.com/talyvor/lens/internal/nodelatency"
+	"github.com/talyvor/lens/internal/opsusage"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/outputverify"
 	"github.com/talyvor/lens/internal/pairverify"
@@ -2008,6 +2009,10 @@ func run() error {
 	// descriptive; the estimate is NOT money.
 	r.Handle("/v1/admin/routing-decisions/summary", requireAdminOrOperatorRead(authManager,
 		newRoutingDecisionsSummaryHandler(routeDecisionReader, time.Now)))
+	// B17.7 — the operator's usage and spend totals across every workspace, synthetic workspaces apart.
+	// Reads the PRIMARY pool (non-money read; keeps the U8/U9 ExactlySix replica-reader invariant unchanged).
+	r.Handle("/v1/admin/usage/summary", requireAdminOrOperatorRead(authManager,
+		newAdminUsageSummaryHandler(opsusage.NewReader(pool), time.Now)))
 
 	// H5.β — settle a provenance bond (slash-or-release; deadline-guarded + CAS-safe + idempotent).
 	// requireAdmin as defense-in-depth; registered ONLY when the flag is on.

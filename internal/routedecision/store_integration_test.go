@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // Real-PG round-trip: Record writes rows, Summarize aggregates the override rate + estimated delta over a
@@ -18,13 +20,22 @@ func routePool(t *testing.T) *pgxpool.Pool {
 	if url == "" {
 		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG routedecision test")
 	}
-	pool, err := pgxpool.New(context.Background(), url)
+	// Its own schema: the cross-tenant readout joins workspaces (B17.7), and the shared test database has
+	// no migrated workspaces table at this point in a run.
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = "routedecision_it"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
 	if _, err := pool.Exec(context.Background(), `
-		DROP TABLE IF EXISTS routing_decisions;
+		DROP SCHEMA IF EXISTS routedecision_it CASCADE;
+		CREATE SCHEMA routedecision_it;
+		CREATE TABLE workspaces (id TEXT PRIMARY KEY, synthetic BOOLEAN NOT NULL DEFAULT false);
 		CREATE TABLE routing_decisions (
 			id BIGSERIAL PRIMARY KEY,
 			workspace_id TEXT NOT NULL,
@@ -63,7 +74,7 @@ func TestRecordAndSummarize_Integration(t *testing.T) {
 
 	// Cross-tenant, explicitly: this test's 3 rows span wsA and wsB. The per-tenant view is proven in
 	// scope_integration_test.go.
-	s, err := NewReader(pool).SummarizeAllTenants(ctx, time.Now().Add(-time.Hour))
+	s, err := NewReader(pool).SummarizeAllTenants(ctx, workspace.AudienceReal, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("summarize: %v", err)
 	}
@@ -89,7 +100,7 @@ func TestSummarize_WindowFilter_Integration(t *testing.T) {
 		VALUES ('wsOld','big','small',true,10,10,1,2,'cache_aware', now() - interval '2 hours')`); err != nil {
 		t.Fatal(err)
 	}
-	s, err := NewReader(pool).SummarizeAllTenants(ctx, time.Now().Add(-time.Hour))
+	s, err := NewReader(pool).SummarizeAllTenants(ctx, workspace.AudienceReal, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

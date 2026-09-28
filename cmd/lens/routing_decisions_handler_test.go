@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/routedecision"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // The admin summary endpoint is CROSS-TENANT by design (forensic, requireAdmin-gated). When Summarize became
@@ -18,13 +19,15 @@ import (
 // would report one arbitrary tenant's numbers as if they were the fleet's.
 
 type fakeAllTenantsSummarizer struct {
-	calls  int
-	since  time.Time
-	result routedecision.Summary
+	calls    int
+	since    time.Time
+	audience workspace.Audience
+	result   routedecision.Summary
 }
 
-func (f *fakeAllTenantsSummarizer) SummarizeAllTenants(_ context.Context, since time.Time) (routedecision.Summary, error) {
+func (f *fakeAllTenantsSummarizer) SummarizeAllTenants(_ context.Context, audience workspace.Audience, since time.Time) (routedecision.Summary, error) {
 	f.calls++
+	f.audience = audience
 	f.since = since
 	return f.result, nil
 }

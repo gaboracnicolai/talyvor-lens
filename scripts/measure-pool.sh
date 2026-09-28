@@ -33,17 +33,19 @@ remote 'docker compose exec -T lens sh -c "for v in LENS_CACHE_POOLABLE_ENABLED 
 remote 'docker compose logs lens 2>&1 | grep -E "POOLING (ENABLED|DISABLED)|cross-tenant pooled hits|Pool-B royalty" | tail -3 | cut -c1-220' || true
 
 echo
-echo "═══ 2. production counts (read-only transaction) ═══"
+echo "═══ 2. production counts (read-only transaction; synthetic workspaces apart, B17.7) ═══"
 sql <<'SQL'
-SELECT 'workspaces: total | cache_poolable', count(*), count(*) FILTER (WHERE cache_poolable) FROM workspaces;
-SELECT 'semantic pool (prompt_embeddings): poolable | private', count(*) FILTER (WHERE is_poolable), count(*) FILTER (WHERE NOT is_poolable) FROM prompt_embeddings;
-SELECT 'serves by source: ' || serve_source, count(*), count(DISTINCT workspace_id) FROM token_events GROUP BY serve_source ORDER BY 1;
-SELECT 'pooled serves all time (exact | semantic)', count(*) FILTER (WHERE serve_source = 'cache_hit_pooled'), count(*) FILTER (WHERE serve_source = 'cache_hit_pooled_semantic') FROM token_events;
-SELECT 'pooled charges to the asker: rows | µLXC charged | µLXC saved', count(*), COALESCE(sum(-amount), 0), COALESCE(sum((metadata->>'pool_saved_ulxc')::numeric), 0) FROM lxc_ledger WHERE metadata ? 'pool_saved_ulxc';
+\set real 'NOT EXISTS (SELECT 1 FROM workspaces syn WHERE syn.id = workspace_id AND syn.synthetic)'
+SELECT 'workspaces: total | cache_poolable', count(*), count(*) FILTER (WHERE cache_poolable) FROM workspaces WHERE NOT synthetic;
+SELECT 'semantic pool (prompt_embeddings): poolable | private', count(*) FILTER (WHERE is_poolable), count(*) FILTER (WHERE NOT is_poolable) FROM prompt_embeddings WHERE :real;
+SELECT 'serves by source: ' || serve_source, count(*), count(DISTINCT workspace_id) FROM token_events WHERE :real GROUP BY serve_source ORDER BY 1;
+SELECT 'pooled serves all time (exact | semantic)', count(*) FILTER (WHERE serve_source = 'cache_hit_pooled'), count(*) FILTER (WHERE serve_source = 'cache_hit_pooled_semantic') FROM token_events WHERE :real;
+SELECT 'pooled charges to the asker: rows | µLXC charged | µLXC saved', count(*), COALESCE(sum(-amount), 0), COALESCE(sum((metadata->>'pool_saved_ulxc')::numeric), 0) FROM lxc_ledger WHERE metadata ? 'pool_saved_ulxc' AND :real;
 SELECT 'royalty claims: ' || status, count(*), sum(minted_amount) FROM pool_royalty_mints GROUP BY status;
 SELECT 'royalty ledger: ' || type, count(*), sum(amount) FROM lens_token_ledger WHERE type LIKE 'pool_royalty%' GROUP BY type;
 SELECT 'would-have-pooled log (pooled_shadow_observations)', count(*) FROM pooled_shadow_observations;
 SELECT 'attestation: model | threshold | worst pair | checked', embedding_model, threshold, worst_pair, checked_at FROM pool_safety_attestation;
+SELECT 'synthetic (test harness): workspaces | requests | pooled serves', (SELECT count(*) FROM workspaces WHERE synthetic), count(*), count(*) FILTER (WHERE serve_source LIKE 'cache_hit_pooled%') FROM token_events WHERE NOT :real;
 SQL
 echo "  exact pool (Redis keys lens:exact:*):"
 remote 'docker compose exec -T redis redis-cli --scan --pattern "lens:exact:*" | grep -vc ":owner$"' || true

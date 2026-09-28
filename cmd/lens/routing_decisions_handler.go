@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/routedecision"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // routeDecisionSummarizer is the read seam for the ADMIN forensic summary (*routedecision.Reader satisfies
@@ -13,13 +14,14 @@ import (
 // is requireAdmin-gated. A customer-facing surface must use the workspace-scoped Summarize instead — that
 // separation is why the cross-tenant read is named out loud.
 type routeDecisionSummarizer interface {
-	SummarizeAllTenants(ctx context.Context, since time.Time) (routedecision.Summary, error)
+	SummarizeAllTenants(ctx context.Context, audience workspace.Audience, since time.Time) (routedecision.Summary, error)
 }
 
 // newRoutingDecisionsSummaryHandler serves GET /v1/admin/routing-decisions/summary — THE go/no-go readout:
 // over a window (default 24h, ?window=<Go duration>), how many auto-routed requests, how often the cohort
 // OVERRODE the baseline (the override RATE), and the aggregate ESTIMATED cost delta. requireAdmin-gated.
-// The estimate is NOT money — the response says so plainly.
+// The estimate is NOT money — the response says so plainly. Synthetic workspaces are left out; ?synthetic=only
+// reads them alone (B17.7).
 func newRoutingDecisionsSummaryHandler(r routeDecisionSummarizer, now func() time.Time) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		window := 24 * time.Hour
@@ -28,13 +30,19 @@ func newRoutingDecisionsSummaryHandler(r routeDecisionSummarizer, now func() tim
 				window = d
 			}
 		}
-		s, err := r.SummarizeAllTenants(req.Context(), now().Add(-window))
+		audience, err := workspace.ParseAudience(req.URL.Query().Get(workspace.AudienceQueryParam))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s, err := r.SummarizeAllTenants(req.Context(), audience, now().Add(-window))
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{
 			"window":                          window.String(),
+			"audience":                        audience.String(),
 			"total_requests":                  s.TotalRequests,
 			"override_count":                  s.OverrideCount,
 			"override_rate":                   s.OverrideRate,

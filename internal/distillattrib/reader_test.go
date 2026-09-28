@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/pashagolub/pgxmock/v4"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 func TestReader_RawRows_QueriesTableWithLimit(t *testing.T) {
@@ -22,7 +24,7 @@ func TestReader_RawRows_QueriesTableWithLimit(t *testing.T) {
 		WithArgs(50).
 		WillReturnRows(pgxmock.NewRows(cols).AddRow("wsA", "wsB", "h1", int64(7), now, now))
 
-	rows, err := r.RawRows(context.Background(), 50)
+	rows, err := r.RawRows(context.Background(), workspace.AudienceReal, 50)
 	if err != nil {
 		t.Fatalf("RawRows: %v", err)
 	}
@@ -50,7 +52,7 @@ func TestReader_PairTotals_GroupsByOwnerRequester(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"owner", "requester", "serves", "last"}).
 			AddRow("wsA", "wsB", int64(42), now))
 
-	pairs, err := r.PairTotals(context.Background(), 100)
+	pairs, err := r.PairTotals(context.Background(), workspace.AudienceReal, 100)
 	if err != nil {
 		t.Fatalf("PairTotals: %v", err)
 	}
@@ -64,10 +66,10 @@ func TestReader_PairTotals_GroupsByOwnerRequester(t *testing.T) {
 
 func TestReader_NilDBInert(t *testing.T) {
 	r := NewReader(nil) // nil db → inert, no panic, empty results
-	if rows, err := r.RawRows(context.Background(), 10); err != nil || rows != nil {
+	if rows, err := r.RawRows(context.Background(), workspace.AudienceReal, 10); err != nil || rows != nil {
 		t.Fatalf("inert RawRows = (%v, %v), want (nil, nil)", rows, err)
 	}
-	if pairs, err := r.PairTotals(context.Background(), 10); err != nil || pairs != nil {
+	if pairs, err := r.PairTotals(context.Background(), workspace.AudienceReal, 10); err != nil || pairs != nil {
 		t.Fatalf("inert PairTotals = (%v, %v), want (nil, nil)", pairs, err)
 	}
 }

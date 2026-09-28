@@ -9,6 +9,7 @@ import (
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/distillattrib"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 type fakeDistillAttribReader struct {
@@ -16,12 +17,12 @@ type fakeDistillAttribReader struct {
 	rawCalled, pairCalled bool
 }
 
-func (f *fakeDistillAttribReader) RawRows(_ context.Context, limit int) ([]distillattrib.ServeRow, error) {
+func (f *fakeDistillAttribReader) RawRows(_ context.Context, _ workspace.Audience, limit int) ([]distillattrib.ServeRow, error) {
 	f.gotLimit, f.rawCalled = limit, true
 	return []distillattrib.ServeRow{{OwnerWorkspaceID: "wsA", RequesterWorkspaceID: "wsB", ContentHash: "h1", ServeCount: 7}}, nil
 }
 
-func (f *fakeDistillAttribReader) PairTotals(_ context.Context, limit int) ([]distillattrib.PairTotal, error) {
+func (f *fakeDistillAttribReader) PairTotals(_ context.Context, _ workspace.Audience, limit int) ([]distillattrib.PairTotal, error) {
 	f.gotLimit, f.pairCalled = limit, true
 	return []distillattrib.PairTotal{{OwnerWorkspaceID: "wsA", RequesterWorkspaceID: "wsB", Serves: 42}}, nil
 }

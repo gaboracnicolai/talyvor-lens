@@ -91,3 +91,28 @@ func TestAdminListWorkspaces_ReturnsAll(t *testing.T) {
 		t.Fatalf("admin roster: got %d, want 2", len(got))
 	}
 }
+
+// B17.7: the roster an operator reads leaves synthetic workspaces out; ?synthetic=only lists them alone.
+func TestAdminListWorkspaces_SyntheticOnlyBehindTheParameter(t *testing.T) {
+	roster := &fakeRoster{all: []*workspace.Workspace{{ID: "real"}, {ID: "syn-1", Synthetic: true}}}
+	ids := func(url string) []string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		newAdminListWorkspacesHandler(roster)(rec, httptest.NewRequest(http.MethodGet, url, nil))
+		var got []workspace.Workspace
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("%s: %d %s", url, rec.Code, rec.Body.String())
+		}
+		var out []string
+		for _, ws := range got {
+			out = append(out, ws.ID)
+		}
+		return out
+	}
+	if got := ids("/v1/admin/workspaces"); len(got) != 1 || got[0] != "real" {
+		t.Errorf("default roster = %v, want [real]", got)
+	}
+	if got := ids("/v1/admin/workspaces?synthetic=only"); len(got) != 1 || got[0] != "syn-1" {
+		t.Errorf("synthetic-only roster = %v, want [syn-1]", got)
+	}
+}

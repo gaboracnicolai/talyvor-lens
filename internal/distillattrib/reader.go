@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // readDB is the minimal READ seam — Query only, no Exec/Begin (so a Reader is
@@ -33,6 +35,13 @@ type Reader struct {
 // (every method returns empty), so it is safe to wire before any data exists.
 func NewReader(db readDB) *Reader { return &Reader{db: db} }
 
+// audiencePair keeps a row when BOTH workspaces belong to the audience (B17.7). A synthetic workspace
+// shares only with synthetic ones (B17.1), so the real view is every row with no synthetic side, and
+// the synthetic view is the harness's own reuse.
+func audiencePair(a workspace.Audience) string {
+	return a.SQL("owner_workspace_id") + " AND " + a.SQL("requester_workspace_id")
+}
+
 // ServeRow is one raw attribution row (admin-only — exposes both workspace ids
 // and the content_hash).
 type ServeRow struct {
@@ -47,17 +56,18 @@ type ServeRow struct {
 const rawRowsSQL = `SELECT owner_workspace_id, requester_workspace_id, content_hash,
        serve_count, first_served_at, last_served_at
 FROM distill_serve_attribution
+WHERE %s
 ORDER BY last_served_at DESC
 LIMIT $1`
 
 // RawRows returns raw attribution rows, most-recently-served first, capped at
 // limit (the caller enforces the upper bound — see the handler's cap). ADMIN
 // ONLY: content_hash + both workspace ids are returned verbatim.
-func (r *Reader) RawRows(ctx context.Context, limit int) ([]ServeRow, error) {
+func (r *Reader) RawRows(ctx context.Context, audience workspace.Audience, limit int) ([]ServeRow, error) {
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
-	rows, err := r.db.Query(ctx, rawRowsSQL, limit)
+	rows, err := r.db.Query(ctx, fmt.Sprintf(rawRowsSQL, audiencePair(audience)), limit)
 	if err != nil {
 		return nil, fmt.Errorf("distillattrib: raw rows: %w", err)
 	}
@@ -85,6 +95,7 @@ type PairTotal struct {
 const pairTotalsSQL = `SELECT owner_workspace_id, requester_workspace_id,
        SUM(serve_count) AS serves, MAX(last_served_at) AS last_served
 FROM distill_serve_attribution
+WHERE %s
 GROUP BY owner_workspace_id, requester_workspace_id
 ORDER BY serves DESC
 LIMIT $1`
@@ -93,11 +104,11 @@ LIMIT $1`
 // pair, heaviest first, capped at limit. Feeds the parked royalty's
 // condition-(b) decision ("is there material cross-tenant reuse in prod?").
 // Served by the PK (owner, requester, content_hash) prefix — no new index.
-func (r *Reader) PairTotals(ctx context.Context, limit int) ([]PairTotal, error) {
+func (r *Reader) PairTotals(ctx context.Context, audience workspace.Audience, limit int) ([]PairTotal, error) {
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
-	rows, err := r.db.Query(ctx, pairTotalsSQL, limit)
+	rows, err := r.db.Query(ctx, fmt.Sprintf(pairTotalsSQL, audiencePair(audience)), limit)
 	if err != nil {
 		return nil, fmt.Errorf("distillattrib: pair totals: %w", err)
 	}
