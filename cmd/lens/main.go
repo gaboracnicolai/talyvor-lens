@@ -84,6 +84,7 @@ import (
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/modelcapability"
 	"github.com/talyvor/lens/internal/modelwatch"
+	"github.com/talyvor/lens/internal/moderatorkey"
 	"github.com/talyvor/lens/internal/nodelatency"
 	"github.com/talyvor/lens/internal/opsusage"
 	"github.com/talyvor/lens/internal/oracle"
@@ -150,6 +151,14 @@ func main() {
 	// for a workspace. See deletion_requests_cli.go and docs/deletion-requests-runbook.md.
 	if len(os.Args) > 1 && os.Args[1] == "deletion-requests" {
 		if err := runDeletionRequests(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	// `lens moderator-keys` (B20.13): create, list and revoke the marketplace moderator keys.
+	if len(os.Args) > 1 && os.Args[1] == "moderator-keys" {
+		if err := runModeratorKeys(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -782,6 +791,11 @@ func run() error {
 	authManager := auth.NewManager(os.Getenv("LENS_API_KEY"), jwtKey, keyStore, tenantStore).
 		WithMintKey(os.Getenv("LENS_MINT_KEY")).
 		WithOperatorReadKey(os.Getenv("LENS_OPERATOR_READ_KEY"))
+
+	// B20.13 — the marketplace moderator key: the web app's credential for the review queue and
+	// nothing else. Created and revoked with `lens moderator-keys`; see docs/moderator-keys.md.
+	moderatorKeys := moderatorkey.NewStore(pool)
+	authManager = authManager.WithModeratorKeys(moderatorKeys)
 
 	// W4.6.1 step 4 — session-scoped keys, the credential a browser chat holds instead of a
 	// workspace key.
@@ -2039,9 +2053,9 @@ func run() error {
 		newKeelFindingsHandler(keelFindingsReader)))
 	// B20.4 — marketplace safety: the admin's queue of held and reported listings, keeping one up, and
 	// taking one down (which refunds its uses inside the holdback). market_handler.go.
-	r.Get("/v1/admin/marketplace/review", requireAdmin(authManager, newMarketReviewQueueHandler(marketStore)))
-	r.Post("/v1/admin/marketplace/listings/{listingID}/approve", requireAdmin(authManager, newMarketApproveHandler(marketStore)))
-	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdmin(authManager, newMarketTakedownHandler(marketStore, marketRefunder)))
+	r.Get("/v1/admin/marketplace/review", requireAdminOrModerator(authManager, moderatorKeys, newMarketReviewQueueHandler(marketStore)))
+	r.Post("/v1/admin/marketplace/listings/{listingID}/approve", requireAdminOrModerator(authManager, moderatorKeys, newMarketApproveHandler(marketStore)))
+	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdminOrModerator(authManager, moderatorKeys, newMarketTakedownHandler(marketStore, marketRefunder)))
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
 	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
 	// unchanged).

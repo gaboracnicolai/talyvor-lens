@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -28,6 +30,9 @@ type adminAuthenticator interface {
 func requireAdmin(am adminAuthenticator, next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		actx, err := am.Authenticate(r)
+		if refuseModerator(w, actx, err) {
+			return
+		}
 		if err != nil || actx == nil || !actx.IsAdmin {
 			writeJSONErr(w, http.StatusUnauthorized, "admin credentials required")
 			return
@@ -55,6 +60,9 @@ func requireAdmin(am adminAuthenticator, next http.Handler) http.HandlerFunc {
 func requireAdminOrOperatorRead(am adminAuthenticator, next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		actx, err := am.Authenticate(r)
+		if refuseModerator(w, actx, err) {
+			return
+		}
 		if err != nil || actx == nil {
 			writeJSONErr(w, http.StatusUnauthorized, "admin credentials required")
 			return
@@ -74,6 +82,59 @@ func requireAdminOrOperatorRead(am adminAuthenticator, next http.Handler) http.H
 			w.Header().Set("Allow", "GET, HEAD")
 			writeJSONErr(w, http.StatusMethodNotAllowed,
 				"this credential may only read: GET or HEAD")
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+// refuseModerator answers 403 to a valid moderator key (B20.13) on an admin route that is not the
+// marketplace review queue, and reports whether it did. 403, not 401: the key is genuine, it just
+// may not do this.
+func refuseModerator(w http.ResponseWriter, actx *auth.AuthContext, err error) bool {
+	if err != nil || actx == nil || actx.AuthMethod != auth.MethodModeratorKey {
+		return false
+	}
+	writeJSONErr(w, http.StatusForbidden, "a moderator key may only use the marketplace review queue")
+	return true
+}
+
+// moderatorUseRecorder is the slice of *moderatorkey.Store requireAdminOrModerator needs.
+type moderatorUseRecorder interface {
+	RecordUse(ctx context.Context, keyID int64, operator, method, path string) error
+}
+
+// moderatorOperatorHeader names the person the web app is acting for; every moderator-key use records it.
+const moderatorOperatorHeader = "X-Talyvor-Operator"
+
+// requireAdminOrModerator gates the marketplace review queue (B20.13): the global admin key as before,
+// or a moderator key — which must name the operator it acts for, and whose every use is recorded in
+// moderator_key_uses BEFORE the handler runs. If the record cannot be written nothing is done (503):
+// an unrecorded moderation is exactly what the audit log exists to rule out.
+//
+// FAILS CLOSED like requireAdmin: missing, invalid, revoked or nil ⇒ 401.
+func requireAdminOrModerator(am adminAuthenticator, uses moderatorUseRecorder, next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actx, err := am.Authenticate(r)
+		if err != nil || actx == nil {
+			writeJSONErr(w, http.StatusUnauthorized, "admin credentials required")
+			return
+		}
+		if actx.IsAdmin {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if actx.AuthMethod != auth.MethodModeratorKey || !actx.HasScope(auth.ScopeMarketModeration) {
+			writeJSONErr(w, http.StatusUnauthorized, "admin credentials required")
+			return
+		}
+		operator := strings.TrimSpace(r.Header.Get(moderatorOperatorHeader))
+		if operator == "" {
+			writeJSONErr(w, http.StatusBadRequest, "a moderator key must name the operator it acts for in "+moderatorOperatorHeader)
+			return
+		}
+		if err := uses.RecordUse(r.Context(), actx.ModeratorKeyID, operator, r.Method, r.URL.Path); err != nil {
+			writeJSONErr(w, http.StatusServiceUnavailable, "could not record this use in the audit log, so nothing was done")
 			return
 		}
 		next.ServeHTTP(w, r)
