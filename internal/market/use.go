@@ -72,10 +72,10 @@ type Meter interface {
 	MeterMarketUse(ctx context.Context, buyerWorkspaceID, useID string, ulxc int64, at time.Time) error
 }
 
-// AgentJudge judges an agent's paid use against its spending rules (B19.2), recording the use in the same
-// transaction so its daily and monthly limits count it.
+// AgentJudge judges an agent's use of a listing against its spending rules (B19.2, B19.14), recording the
+// use in the same transaction so its daily and monthly limits count it.
 type AgentJudge interface {
-	JudgeAgentPurchase(ctx context.Context, workspaceID, agentID string, amount int64, fingerprint string, record func(pgx.Tx) error) error
+	JudgeAgentPurchase(ctx context.Context, workspaceID, agentID, listingID string, amount int64, what string, record func(pgx.Tx) error) error
 }
 
 // UseRequest is what a buyer asks of a listing.
@@ -156,9 +156,10 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING used_at`,
 			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge).Scan(&u.UsedAt)
 	}
-	if agentID != "" && u.Charge == ChargeBilled && deps.Agents != nil {
-		fp := fmt.Sprintf("market:%s:%s:%d:%d", agentID, l.ID, version, u.PriceULXC)
-		if err := deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, u.PriceULXC, fp, record); err != nil {
+	// An agent's every use is judged — a free one too, since its rules may name the listings it may use.
+	if agentID != "" && deps.Agents != nil {
+		what := fmt.Sprintf("market:%s:%s:%d:%d", agentID, l.ID, version, u.PriceULXC)
+		if err := deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, u.PriceULXC, what, record); err != nil {
 			return Use{}, err
 		}
 	} else if err := pgx.BeginFunc(ctx, s.pool, record); err != nil {
