@@ -1,13 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -342,6 +348,206 @@ func TestAgentRoutes_AnAgentPaysAnotherInOnePairOfLedgerRows(t *testing.T) {
 		if l.Kind != "pay" || l.AmountULXC != want.amount || l.BalanceAfterULXC != want.after || l.Ref != want.memo ||
 			l.Counterparty != "agent:"+buyer {
 			t.Errorf("statement line %d = %+v, want pay %d against the buyer leaving %d", i, l, want.amount, want.after)
+		}
+	}
+}
+
+// B19.5 — a statement for any period re-derives the same totals from the audit log (agent_postings), per
+// agent and for the workspace, as JSON and as CSV; two adjoining periods chain into the whole; and asking
+// for a closed period again, after more movements, answers the same bytes.
+func TestAgentRoutes_AStatementForAnyPeriodReDerivesTheAuditLog(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const ws = "ws-agents"
+	if _, err := pool.Exec(ctx, `INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1, 50000000, 50000000)`, ws); err != nil {
+		t.Fatal(err)
+	}
+	store := economy.NewDualTokenStore(nil, pool, nil)
+	r := chi.NewRouter()
+	mountAgentAccountRoutes(r, store, tenant.NewStore(pool))
+	owner := &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "owner", Scopes: []string{auth.ScopeKeys}}
+	get := func(path string) (int, []byte) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req = req.WithContext(auth.WithAuthContext(req.Context(), owner))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code, w.Body.Bytes()
+	}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock := func() time.Time { // the database's clock, between two committed movements
+		t.Helper()
+		var c time.Time
+		must(pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&c))
+		time.Sleep(time.Millisecond)
+		return c.UTC()
+	}
+	newAgent := func(name, key string) string {
+		t.Helper()
+		a, err := store.CreateAgent(ctx, ws, name)
+		must(err)
+		must(store.AttachAgentKey(ctx, ws, a.ID, key))
+		return a.ID
+	}
+	fund := func(id string, v int64) { t.Helper(); _, err := store.FundAgent(ctx, ws, id, v); must(err) }
+
+	t0 := clock()
+	buyer, seller := newAgent("buyer", "key-buyer"), newAgent("seller", "key-seller")
+	fund(buyer, 10_000_000)
+	fund(seller, 2_000_000)
+	must(store.SpendLXCForAgent(ctx, "key-buyer", ws, "req-1", 260_000, "chat", economy.AgentDebitMeta{}))
+	t1 := clock()
+	_, err := store.PayAgent(ctx, ws, buyer, seller, 3_000_000, "=invoice 17")
+	must(err)
+	_, err = store.WithdrawAgent(ctx, ws, seller, 1_000_000)
+	must(err)
+	must(store.SpendLXCForAgent(ctx, "key-seller", ws, "req-2", 140_000, "chat", economy.AgentDebitMeta{}))
+	t2 := clock()
+	book, err := store.AgentBook(ctx, ws)
+	must(err)
+	balanceAtT2 := map[string]int64{}
+	for _, a := range book.Agents {
+		balanceAtT2["agent:"+a.ID] = a.BalanceULXC
+	}
+
+	period := func(from, to time.Time) string {
+		return "from=" + url.QueryEscape(from.Format(time.RFC3339Nano)) + "&to=" + url.QueryEscape(to.Format(time.RFC3339Nano))
+	}
+	statement := func(path string) (economy.Statement, []byte) {
+		t.Helper()
+		code, body := get(path)
+		var st economy.Statement
+		if err := json.Unmarshal(body, &st); code != http.StatusOK || err != nil {
+			t.Fatalf("GET %s = %d %s", path, code, body)
+		}
+		return st, body
+	}
+	agentPath := func(id, q string) string { return "/v1/workspaces/" + ws + "/agents/" + id + "/statement?" + q }
+	wsPath := "/v1/workspaces/" + ws + "/agents/statement?"
+
+	// The whole period closes each agent at the balance it had at t2.
+	whole := map[string]economy.Statement{}
+	for _, id := range []string{buyer, seller} {
+		st, _ := statement(agentPath(id, period(t0, t2)))
+		if len(st.Accounts) != 1 || st.Accounts[0].OpeningULXC != 0 || st.Accounts[0].ClosingULXC != balanceAtT2["agent:"+id] {
+			t.Errorf("%s over [t0,t2) = %+v, want 0 → %d", id, st.Accounts, balanceAtT2["agent:"+id])
+		}
+		whole[id] = st
+	}
+	if a := whole[buyer].Accounts[0]; a.InULXC != 10_000_000 || a.OutULXC != 3_260_000 || a.ClosingULXC != 6_740_000 {
+		t.Errorf("buyer = %+v, want in 10,000,000, out 3,260,000, closing 6,740,000", a)
+	}
+
+	// Two adjoining periods chain into the whole: the first closes where the second opens, and between
+	// them they hold exactly the whole period's postings, in order.
+	for _, id := range []string{buyer, seller} {
+		first, _ := statement(agentPath(id, period(t0, t1)))
+		second, _ := statement(agentPath(id, period(t1, t2)))
+		if first.Accounts[0].ClosingULXC != second.Accounts[0].OpeningULXC || second.Accounts[0].ClosingULXC != whole[id].Accounts[0].ClosingULXC {
+			t.Errorf("%s: [t0,t1) closes at %d, [t1,t2) opens at %d and closes at %d; the whole closes at %d",
+				id, first.Accounts[0].ClosingULXC, second.Accounts[0].OpeningULXC, second.Accounts[0].ClosingULXC, whole[id].Accounts[0].ClosingULXC)
+		}
+		var ids []int64
+		for _, l := range append(first.Lines, second.Lines...) {
+			ids = append(ids, l.PostingID)
+		}
+		var wantIDs []int64
+		for _, l := range whole[id].Lines {
+			wantIDs = append(wantIDs, l.PostingID)
+		}
+		if fmt.Sprint(ids) != fmt.Sprint(wantIDs) {
+			t.Errorf("%s: the two periods hold postings %v, the whole %v", id, ids, wantIDs)
+		}
+	}
+
+	// The workspace's statement for [t1,t2), re-derived from the audit log by hand: every account's
+	// opening and movement are sums of its agent_postings rows, every line is the row its posting_id
+	// names, and the movements net to zero.
+	wsSt, _ := statement(wsPath + period(t1, t2))
+	var net int64
+	for _, a := range wsSt.Accounts {
+		var opening, moved int64
+		must(pool.QueryRow(ctx, `SELECT
+			COALESCE(sum(amount_ulxc) FILTER (WHERE created_at < $3), 0)::bigint,
+			COALESCE(sum(amount_ulxc) FILTER (WHERE created_at >= $3 AND created_at < $4), 0)::bigint
+			FROM agent_postings WHERE workspace_id = $1 AND account = $2`, ws, a.Account, t1, t2).Scan(&opening, &moved))
+		if a.OpeningULXC != opening || a.ClosingULXC-a.OpeningULXC != moved || a.InULXC-a.OutULXC != moved {
+			t.Errorf("%s = %+v; the audit log says opening %d, moved %d", a.Account, a, opening, moved)
+		}
+		net += moved
+	}
+	if net != 0 || len(wsSt.Accounts) != 4 || len(wsSt.Lines) != 6 {
+		t.Errorf("workspace [t1,t2): %d accounts, %d lines, netting %d — want 4 accounts, 6 lines (three entries), netting 0", len(wsSt.Accounts), len(wsSt.Lines), net)
+	}
+	for _, l := range wsSt.Lines {
+		var entry, account, kind, ref string
+		var amount int64
+		must(pool.QueryRow(ctx, `SELECT entry_id::text, account, kind, amount_ulxc, ref FROM agent_postings WHERE id = $1`, l.PostingID).
+			Scan(&entry, &account, &kind, &amount, &ref))
+		if entry != l.EntryID || account != l.Account || kind != l.Kind || amount != l.AmountULXC || ref != l.Ref {
+			t.Errorf("line %+v does not match its audit-log row %s %s %s %d %q", l, entry, account, kind, amount, ref)
+		}
+	}
+
+	// The CSV says the same: each account's opening plus its lines' amounts is its closing, and a memo a
+	// spreadsheet would run is kept as text.
+	code, csvBody := get(wsPath + period(t1, t2) + "&format=csv")
+	records, err := csv.NewReader(bytes.NewReader(csvBody)).ReadAll()
+	if code != http.StatusOK || err != nil || len(records) != 1+4+6+4 {
+		t.Fatalf("CSV = %d %v: %s", code, err, csvBody)
+	}
+	running := map[string]int64{}
+	for _, rec := range records[1:] {
+		v, _ := strconv.ParseInt(rec[8], 10, 64)
+		switch rec[4] {
+		case "opening":
+			running[rec[3]] = v
+		case "closing":
+			if running[rec[3]] != v {
+				t.Errorf("CSV %s: opening + lines = %d, closing row says %d", rec[3], running[rec[3]], v)
+			}
+		default:
+			amt, _ := strconv.ParseInt(rec[5], 10, 64)
+			running[rec[3]] += amt
+			if running[rec[3]] != v {
+				t.Errorf("CSV line %v: running balance %d", rec, running[rec[3]])
+			}
+			if rec[4] == "pay" && rec[7] != "'=invoice 17" {
+				t.Errorf("CSV memo = %q, want it kept as text", rec[7])
+			}
+		}
+	}
+
+	// More movements after t2 do not change a statement for a period that ended at t2.
+	_, buyerJSON := statement(agentPath(buyer, period(t0, t2)))
+	_, wsJSON := statement(wsPath + period(t0, t2))
+	_, wsCSV := get(wsPath + period(t0, t2) + "&format=csv")
+	fund(buyer, 1_000_000)
+	_, err = store.PayAgent(ctx, ws, buyer, seller, 500_000, "later")
+	must(err)
+	if _, again := statement(agentPath(buyer, period(t0, t2))); !bytes.Equal(again, buyerJSON) {
+		t.Errorf("the buyer's [t0,t2) statement changed after later movements:\n%s\n%s", buyerJSON, again)
+	}
+	if _, again := statement(wsPath + period(t0, t2)); !bytes.Equal(again, wsJSON) {
+		t.Errorf("the workspace's [t0,t2) statement changed after later movements")
+	}
+	if _, again := get(wsPath + period(t0, t2) + "&format=csv"); !bytes.Equal(again, wsCSV) {
+		t.Errorf("the workspace's [t0,t2) CSV changed after later movements")
+	}
+
+	for path, want := range map[string]int{
+		agentPath(buyer, period(t2, t1)):         http.StatusBadRequest,
+		agentPath(buyer, "from=yesterday"):       http.StatusBadRequest,
+		agentPath(buyer, "format=xml"):           http.StatusBadRequest,
+		agentPath("agt_elsewhere", "format=csv"): http.StatusNotFound,
+	} {
+		if code, body := get(path); code != want {
+			t.Errorf("GET %s = %d %s, want %d", path, code, body, want)
 		}
 	}
 }
