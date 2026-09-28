@@ -220,7 +220,7 @@ LIMIT 1`
 
 // semanticSelectPooledSQL is the SHARED-POOL lookup: it ranges ONLY over
 // is_poolable=true rows and returns the contributing workspace so the caller can
-// verify the contributor's live opt-in. The `updated_at > $4` serve window and
+// gate on a recorded contributor (MaybeAllowPooledHit). The `updated_at > $4` serve window and
 // its cutoff are identical to the private path (see semanticSelectSQL). COALESCE
 // makes a missing contributor an empty string (→ the gate blocks it).
 const semanticSelectPooledSQL = `SELECT COALESCE(variant_of, id) AS entry_id, response, COALESCE(contributor_workspace_id, '') AS contributor, 1 - (embedding <=> $1) AS similarity,
@@ -522,7 +522,7 @@ ON CONFLICT (prompt_hash) DO UPDATE SET
 // rows and returns the cached response, the contributing workspace, the matched
 // row's prompt_embeddings.id, and the similarity score. A miss (no row, or
 // below threshold) is (nil, "", "", 0, nil). The contributor lets the caller
-// verify the contributor's live opt-in before serving; an empty contributor
+// gate on a recorded contributor before serving; an empty contributor
 // (defensive — should not occur for a poolable row) surfaces as "" so the gate
 // blocks it. The entry id + similarity are Stage-2.1 attribution data for the
 // royalty claim row — NOT an idempotency key (a retried request can re-match a

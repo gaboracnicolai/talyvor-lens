@@ -92,8 +92,8 @@ func (c *DistillCache) ownerKey(contentHash, version string) string {
 
 // SetWithOwner stores the artifact AND stamps `workspaceID` as the contributing
 // owner in a parallel key (same TTL). Used only for the pooled (shared)
-// keyspace, where the serve-time consent check needs the owner's identity to
-// verify the owner's own opt-in (PoolabilityGate.MaybeAllowPooledHit).
+// keyspace, where the serve-time gate needs a recorded owner
+// (PoolabilityGate.MaybeAllowPooledHit) and B21.3 deletion finds its owner's artifacts.
 func (c *DistillCache) SetWithOwner(ctx context.Context, contentHash, version, workspaceID string, value []byte) error {
 	if err := c.Set(ctx, contentHash, version, value); err != nil {
 		return err
@@ -102,6 +102,20 @@ func (c *DistillCache) SetWithOwner(ctx context.Context, contentHash, version, w
 		return nil
 	}
 	return c.client.Set(ctx, c.ownerKey(contentHash, version), workspaceID, c.ttl).Err()
+}
+
+// SetPrivate stores a workspace-PRIVATE artifact and names its workspace in a parallel ":ws" key
+// (same TTL), so the workspace can find and delete it (B21.3, internal/storedanswers). The marker is
+// never read on the serve path, and it is a different suffix from ":owner" so a private conversion
+// can never be mistaken for a shared one.
+func (c *DistillCache) SetPrivate(ctx context.Context, contentHash, version, workspaceID string, value []byte) error {
+	if err := c.Set(ctx, contentHash, version, value); err != nil {
+		return err
+	}
+	if workspaceID == "" {
+		return nil
+	}
+	return c.client.Set(ctx, c.Key(contentHash, version)+":ws", workspaceID, c.ttl).Err()
 }
 
 // GetWithOwner returns the pooled artifact AND the workspace that contributed

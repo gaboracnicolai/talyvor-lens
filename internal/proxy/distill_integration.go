@@ -35,6 +35,13 @@ type ownerDistillCache interface {
 type scopedDistillCache struct {
 	inner distill.Cache
 	scope string // e.g. "ws-123:" — prepended to the content hash
+	ws    string // the workspace, named on each write so it can delete its conversions (B21.3)
+}
+
+// privateDistillCache is the capability to name a private artifact's workspace beside it.
+// *cache.DistillCache satisfies it; a fake that implements only distill.Cache writes no marker.
+type privateDistillCache interface {
+	SetPrivate(ctx context.Context, contentHash, version, workspaceID string, value []byte) error
 }
 
 func (s scopedDistillCache) Get(ctx context.Context, contentHash, version string) ([]byte, error) {
@@ -42,6 +49,9 @@ func (s scopedDistillCache) Get(ctx context.Context, contentHash, version string
 }
 
 func (s scopedDistillCache) Set(ctx context.Context, contentHash, version string, value []byte) error {
+	if p, ok := s.inner.(privateDistillCache); ok && s.ws != "" {
+		return p.SetPrivate(ctx, s.scope+contentHash, version, s.ws, value)
+	}
 	return s.inner.Set(ctx, s.scope+contentHash, version, value)
 }
 
@@ -265,10 +275,12 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	// turning detection back on resumes sharing with the next conversion.
 	shares := keepsContent && (d.detectsPII == nil || d.detectsPII(wsID))
 
-	// (1) POOLED READ — a cross-tenant artifact may be served ONLY when all
-	//     three hold: the global switch is on, the REQUESTER opted in
-	//     (Participant), AND the OWNER opted in (MaybeAllowPooledHit). With the
-	//     switch off / no opt-in this is skipped and serving stays private.
+	// (1) POOLED READ — a cross-tenant artifact may be served ONLY when the
+	//     global switch is on, the REQUESTER opted in (Participant), and the
+	//     artifact has a recorded owner (MaybeAllowPooledHit). The owner's opt-in
+	//     governed the WRITE; switching it off since does not withdraw what it
+	//     shared (B21.3) — deleting does. With the switch off / no opt-in this is
+	//     skipped and serving stays private.
 	if pooled != nil && d.poolGate.Participant(wsID) {
 		if b, owner, _ := pooled.GetWithOwner(ctx, distill.PoolMarker+hash, cacheVer); len(b) > 0 &&
 			d.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
@@ -330,7 +342,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	//     only within its producing workspace. This is the leak fix.
 	var privateCache distill.Cache
 	if d.cache != nil {
-		privateCache = scopedDistillCache{inner: d.cache, scope: wsID + ":"}
+		privateCache = scopedDistillCache{inner: d.cache, scope: wsID + ":", ws: wsID}
 		// B18.4: logging_policy = none stores no content — a conversion is read, never written.
 		if !keepsContent {
 			privateCache = readOnlyDistillCache{privateCache}

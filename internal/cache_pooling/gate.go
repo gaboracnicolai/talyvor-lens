@@ -46,15 +46,17 @@ func (g *PoolabilityGate) DecidePoolableOnWrite(_ context.Context, contributorWs
 }
 
 // MaybeAllowPooledHit reports whether a pooled entry contributed by ownerWsID
-// may be served to requesterWsID. It requires ALL THREE: the global switch on,
-// the requester opted in, AND the contributor (owner) opted in. An empty owner
-// — a pre-feature entry with no recorded provenance — is never poolable.
+// may be served to requesterWsID: the global switch on, the requester opted in,
+// and a recorded owner. An empty owner — a pre-feature entry with no recorded
+// provenance — is never poolable.
+//
+// B21.3 (decided by Nicolai, 28 Sep 2026): the owner's CURRENT opt-in is not
+// consulted. Switching sharing off stops NEW sharing only (DecidePoolableOnWrite);
+// an answer shared before it stays shared, and keeps earning its contributor,
+// until the contributor deletes it (internal/storedanswers).
 func (g *PoolabilityGate) MaybeAllowPooledHit(_ context.Context, requesterWsID, ownerWsID string) bool {
 	if !g.Participant(requesterWsID) {
 		return false
 	}
-	if ownerWsID == "" {
-		return false
-	}
-	return g.poolable(ownerWsID)
+	return ownerWsID != ""
 }

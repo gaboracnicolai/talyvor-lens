@@ -205,9 +205,9 @@ func TestSemanticPooling_RequesterNotOptedIn_Blocked(t *testing.T) {
 	}
 }
 
-// CONTRIBUTOR REVOKED: wsA contributes, then revokes. wsB finds the pooled row
-// but is blocked at read time (live consent), falls through to a miss.
-func TestSemanticPooling_ContributorRevoked_Blocked(t *testing.T) {
+// B21.3 (decided 28 Sep 2026): wsA contributes, then switches sharing off. That stops
+// NEW sharing only — wsB is still served the row wsA shared before, until wsA deletes it.
+func TestSemanticPooling_ContributorSwitchedOff_EarlierShareStillServed(t *testing.T) {
 	global := true
 	p, wsm, _, m, calls := newSemPoolProxy(t, &global)
 	_ = wsm.SetCachePoolable(context.Background(), "wsA", true)
@@ -217,19 +217,16 @@ func TestSemanticPooling_ContributorRevoked_Blocked(t *testing.T) {
 	expPooledMiss(m)
 	expPrivateStore(m)
 	expPooledStore(m, "wsA")
-	// wsB: private miss, pooled row FOUND (owner wsA) + touch, but consent denied
-	// → miss → store (wsB is poolable, so private + pooled write).
+	// wsB: private miss, pooled row FOUND (owner wsA) + touch → served.
 	expPrivateMiss(m)
 	expPooledHit(m, "wsA")
-	expPrivateStore(m)
-	expPooledStore(m, "wsB")
 
 	dispatchSem(t, p, "wsA", "what is 2+2")
-	_ = wsm.SetCachePoolable(context.Background(), "wsA", false) // revoke
+	_ = wsm.SetCachePoolable(context.Background(), "wsA", false) // wsA switches sharing off
 	before := atomic.LoadInt64(calls)
 	dispatchSem(t, p, "wsB", "what is 2+2")
-	if atomic.LoadInt64(calls)-before != 1 {
-		t.Errorf("contributor revoked: pooled hit blocked at read time; delta=%d want 1", atomic.LoadInt64(calls)-before)
+	if atomic.LoadInt64(calls)-before != 0 {
+		t.Errorf("an answer shared before switching off must still be served; delta=%d want 0", atomic.LoadInt64(calls)-before)
 	}
 	if err := m.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
