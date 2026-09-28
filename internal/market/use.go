@@ -47,8 +47,8 @@ const (
 )
 
 var (
-	// ErrNotRunnable: a kind this version of the marketplace cannot run yet.
-	ErrNotRunnable = errors.New("market: a pipeline listing cannot be used yet")
+	// ErrNotRunnable: a kind this version of the marketplace cannot run.
+	ErrNotRunnable = errors.New("market: this listing cannot be run")
 	// ErrNoModel: nothing names the model to run the listing on.
 	ErrNoModel = errors.New(`market: name the model to run this listing on ("model")`)
 	// ErrNoBill: a paid use, but no marketplace bill is configured to put it on.
@@ -107,7 +107,22 @@ type Use struct {
 	Cases      []CaseResult `json:"cases,omitempty"`
 	UsedAt     time.Time    `json:"used_at"`
 	AgentID    string       `json:"agent_id,omitempty"`
+	Steps      []StepResult `json:"steps,omitempty"` // a pipeline's steps, in the order they ran (B20.7)
 	MeterError string       `json:"-"`
+}
+
+// StepResult is one step of a pipeline use: the listing it ran, what it answered, and — when the step is
+// another seller's listing — its own use on the buyer's bill.
+type StepResult struct {
+	Step      int    `json:"step"`
+	ListingID string `json:"listing_id"`
+	Version   int    `json:"version"`
+	Kind      string `json:"kind"`
+	Model     string `json:"model"`
+	Output    string `json:"output"`
+	UseID     string `json:"use_id,omitempty"` // "": the pipeline seller's own listing, covered by the pipeline's price
+	Charge    string `json:"charge,omitempty"`
+	PriceULXC int64  `json:"price_ulxc,omitempty"`
 }
 
 // UseDeps are what a use needs besides the catalog.
@@ -124,63 +139,111 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 	if err != nil {
 		return Use{}, err
 	}
-	calls, model, err := plan(l.Kind, artifact, req)
+	var calls []call
+	var model string
+	var steps []pipelineStep
+	if l.Kind == "pipeline" {
+		steps, err = s.pipelineSteps(ctx, l, artifact, buyerWorkspaceID, req)
+	} else {
+		calls, model, err = plan(l.Kind, artifact, req)
+	}
 	if err != nil {
 		return Use{}, err
 	}
 	u := Use{ID: "use_" + uuid.NewString(), ListingID: l.ID, Version: version, Kind: l.Kind, Model: model, AgentID: agentID}
-	switch {
-	case l.WorkspaceID == buyerWorkspaceID:
-		u.Charge = ChargeOwn
-	case l.PricePerUseULXC == 0:
-		u.Charge = ChargeFree
-	default:
-		linked, err := s.linked(ctx, l.WorkspaceID, buyerWorkspaceID)
-		if err != nil {
-			return Use{}, err
-		}
-		if linked {
-			u.Charge = ChargeLinked
-		} else {
-			u.Charge, u.PriceULXC = ChargeBilled, l.PricePerUseULXC
+	if u.Charge, u.PriceULXC, err = s.chargeFor(ctx, l, buyerWorkspaceID); err != nil {
+		return Use{}, err
+	}
+	// Every billed use this makes: the listing's own, and each pipeline step that is another seller's.
+	billed := map[string]int64{}
+	if u.Charge == ChargeBilled {
+		billed[u.ID] = u.PriceULXC
+	}
+	total := u.PriceULXC
+	for _, st := range steps {
+		if st.UseID != "" && st.Charge == ChargeBilled {
+			billed[st.UseID] = st.PriceULXC
+			total += st.PriceULXC
 		}
 	}
-	if u.Charge == ChargeBilled && deps.Meter == nil {
+	if len(billed) > 0 && deps.Meter == nil {
 		return Use{}, ErrNoBill
 	}
+	ids := []string{u.ID}
 
 	// The use is recorded before it runs, so an agent's limits count it the moment it is judged; a run that
 	// fails removes it again, and only a use that ran is ever metered.
 	record := func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge)
+		if err := tx.QueryRow(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING used_at`,
-			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge).Scan(&u.UsedAt)
+			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge).Scan(&u.UsedAt); err != nil {
+			return err
+		}
+		for _, st := range steps {
+			if st.UseID == "" {
+				continue
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge, used_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+				st.UseID, st.ListingID, st.Version, st.seller, buyerWorkspaceID, agentID, st.PriceULXC, st.Charge, u.UsedAt); err != nil {
+				return err
+			}
+			ids = append(ids, st.UseID)
+		}
+		return nil
 	}
-	// An agent's every use is judged — a free one too, since its rules may name the listings it may use.
+	// An agent's every use is judged — a free one too, since its rules may name the listings it may use. A
+	// pipeline is judged once, for all it bills.
 	if agentID != "" && deps.Agents != nil {
-		what := fmt.Sprintf("market:%s:%s:%d:%d", agentID, l.ID, version, u.PriceULXC)
-		if err := deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, u.PriceULXC, what, record); err != nil {
+		what := fmt.Sprintf("market:%s:%s:%d:%d", agentID, l.ID, version, total)
+		if err := deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, total, what, record); err != nil {
 			return Use{}, err
 		}
 	} else if err := pgx.BeginFunc(ctx, s.pool, record); err != nil {
 		return Use{}, fmt.Errorf("market: record use: %w", err)
 	}
 
-	if err := run(ctx, deps.Runner, calls, model, &u); err != nil {
-		if _, derr := s.pool.Exec(ctx, `DELETE FROM market_uses WHERE id = $1 AND metered_at IS NULL`, u.ID); derr != nil {
+	if l.Kind == "pipeline" {
+		err = runPipeline(ctx, deps.Runner, steps, req, &u)
+	} else {
+		err = run(ctx, deps.Runner, calls, model, &u)
+	}
+	if err != nil {
+		if _, derr := s.pool.Exec(ctx, `DELETE FROM market_uses WHERE id = ANY($1) AND metered_at IS NULL`, ids); derr != nil {
 			return Use{}, errors.Join(err, derr)
 		}
 		return Use{}, err
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE market_uses SET ran_at = now() WHERE id = $1`, u.ID); err != nil {
+	if _, err := s.pool.Exec(ctx, `UPDATE market_uses SET ran_at = now() WHERE id = ANY($1)`, ids); err != nil {
 		return u, fmt.Errorf("market: record use: %w", err)
 	}
-	if u.Charge == ChargeBilled {
-		if err := s.meter(ctx, deps.Meter, u.ID, buyerWorkspaceID, u.PriceULXC, u.UsedAt); err != nil {
-			u.MeterError = err.Error() // the buyer has the answer; MeterPending bills it on its next pass
+	for _, id := range ids {
+		if price, ok := billed[id]; ok {
+			if err := s.meter(ctx, deps.Meter, id, buyerWorkspaceID, price, u.UsedAt); err != nil {
+				u.MeterError = err.Error() // the buyer has the answer; MeterPending bills it on its next pass
+			}
 		}
 	}
 	return u, nil
+}
+
+// chargeFor says what one use of l costs buyer: nothing for their own or a free listing, nothing for a
+// seller they share a card or an owner with (a wash trade), else its price.
+func (s *Store) chargeFor(ctx context.Context, l Listing, buyer string) (string, int64, error) {
+	switch {
+	case l.WorkspaceID == buyer:
+		return ChargeOwn, 0, nil
+	case l.PricePerUseULXC == 0:
+		return ChargeFree, 0, nil
+	}
+	linked, err := s.linked(ctx, l.WorkspaceID, buyer)
+	if err != nil {
+		return "", 0, err
+	}
+	if linked {
+		return ChargeLinked, 0, nil
+	}
+	return ChargeBilled, l.PricePerUseULXC, nil
 }
 
 func (s *Store) meter(ctx context.Context, m Meter, useID, buyer string, ulxc int64, at time.Time) error {
@@ -293,7 +356,7 @@ func plan(kind string, artifact map[string]any, req UseRequest) ([]call, string,
 		model, _ = artifact["model"].(string)
 	}
 	if kind == "pipeline" {
-		return nil, "", ErrNotRunnable
+		return nil, "", ErrNotRunnable // a pipeline's steps are planned one at a time (pipeline.go)
 	}
 	if model == "" {
 		return nil, "", ErrNoModel

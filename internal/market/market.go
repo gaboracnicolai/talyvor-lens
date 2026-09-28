@@ -96,7 +96,7 @@ func needsOf(kind string, raw []byte) Needs {
 	}
 	n.Model, _ = a["model"].(string)
 	switch kind {
-	case "agent", "skill":
+	case "agent", "skill", "pipeline":
 		n.Input = true
 	case "prompt":
 		t, _ := a["template"].(string)
