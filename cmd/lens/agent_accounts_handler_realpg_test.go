@@ -211,3 +211,137 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 		t.Errorf("deciding an approval twice = %d, want 404", code)
 	}
 }
+
+// B19.3 — one company's agents pay each other inside the closed loop: a payment is ONE entry of two
+// postings, the workspace's LXC and its lxc_ledger do not move, only the paying agent's own key (or the
+// owner) can pay from it, and the payer's rules judge the payment.
+func TestAgentRoutes_AnAgentPaysAnotherInOnePairOfLedgerRows(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const ws = "ws-agents"
+	if _, err := pool.Exec(ctx, `INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1, 20000000, 20000000)`, ws); err != nil {
+		t.Fatal(err)
+	}
+	store := economy.NewDualTokenStore(nil, pool, nil)
+	r := chi.NewRouter()
+	mountAgentAccountRoutes(r, store, tenant.NewStore(pool))
+	call := func(who *auth.AuthContext, path, body string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req = req.WithContext(auth.WithAuthContext(req.Context(), who))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+	newAgent := func(name, key string, fund int64) string {
+		t.Helper()
+		a, err := store.CreateAgent(ctx, ws, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AttachAgentKey(ctx, ws, a.ID, key); err != nil {
+			t.Fatal(err)
+		}
+		if fund > 0 {
+			if _, err := store.FundAgent(ctx, ws, a.ID, fund); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return a.ID
+	}
+	buyer := newAgent("buyer", "key-buyer", 10_000_000)
+	seller := newAgent("seller", "key-seller", 0)
+	keyOf := func(id string) *auth.AuthContext {
+		return &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodWorkspaceKey, APIKeyID: id, Scopes: []string{auth.ScopeProxy}}
+	}
+	pay := func(who *auth.AuthContext, from, body string) (int, string) {
+		return call(who, "/v1/workspaces/"+ws+"/agents/"+from+"/pay", body)
+	}
+	ledgerRows := func() (rows, net int64) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(amount), 0)::bigint FROM lxc_ledger WHERE workspace_id = $1`, ws).Scan(&rows, &net); err != nil {
+			t.Fatal(err)
+		}
+		return rows, net
+	}
+	ledgerBefore, netBefore := ledgerRows()
+
+	if code, body := pay(keyOf("key-seller"), buyer, `{"to_agent_id":"`+seller+`","amount_ulxc":3000000}`); code != http.StatusForbidden {
+		t.Errorf("the seller's key paid itself from the buyer: %d %s, want 403", code, body)
+	}
+	code, body := pay(keyOf("key-buyer"), buyer, `{"to_agent_id":"`+seller+`","amount_ulxc":3000000,"memo":"invoice 17"}`)
+	var got economy.AgentPayment
+	if err := json.Unmarshal([]byte(body), &got); code != http.StatusOK || err != nil ||
+		got.FromBalanceULXC != 7_000_000 || got.ToBalanceULXC != 3_000_000 {
+		t.Fatalf("the buyer pays the seller 3 LXC = %d %s", code, body)
+	}
+
+	// ONE entry, TWO postings, summing to zero, between the two agents and nothing else.
+	var postings, sum int64
+	var accounts string
+	if err := pool.QueryRow(ctx, `SELECT count(*), sum(amount_ulxc)::bigint, string_agg(account || '=' || amount_ulxc, ' ' ORDER BY amount_ulxc)
+		FROM agent_postings WHERE entry_id = $1 AND kind = 'pay'`, got.EntryID).Scan(&postings, &sum, &accounts); err != nil {
+		t.Fatal(err)
+	}
+	if want := "agent:" + buyer + "=-3000000 agent:" + seller + "=3000000"; postings != 2 || sum != 0 || accounts != want {
+		t.Errorf("the payment posted %d rows summing to %d: %s — want %s", postings, sum, accounts, want)
+	}
+	// Inside the closed loop: the workspace's LXC and its lxc_ledger did not move, nor did what is allocated.
+	if rows, net := ledgerRows(); rows != ledgerBefore || net != netBefore {
+		t.Errorf("lxc_ledger moved: %d rows netting %d, was %d netting %d", rows, net, ledgerBefore, netBefore)
+	}
+	book, err := store.AgentBook(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.WorkspaceBalanceULXC != 20_000_000 || book.AllocatedULXC != 10_000_000 || book.SpentULXC != 0 {
+		t.Errorf("book = %+v: want 20 LXC in the workspace, 10 allocated, nothing spent", book)
+	}
+
+	// The seller can now spend what it was paid, and pay it back.
+	if code, body := pay(keyOf("key-seller"), seller, `{"to_agent_id":"`+buyer+`","amount_ulxc":1000000}`); code != http.StatusOK {
+		t.Errorf("the seller pays 1 LXC back = %d %s", code, body)
+	}
+	// Refusals: beyond the payer's balance, to itself, to an agent that is not this workspace's, and
+	// beyond the payer's daily limit (the 3 LXC it already paid counts; the 1 LXC it was paid does not).
+	if code, _ := pay(keyOf("key-buyer"), buyer, `{"to_agent_id":"`+seller+`","amount_ulxc":9000000}`); code != http.StatusConflict {
+		t.Errorf("paying beyond the balance = %d, want 409", code)
+	}
+	if code, _ := pay(keyOf("key-buyer"), buyer, `{"to_agent_id":"`+buyer+`","amount_ulxc":1}`); code != http.StatusBadRequest {
+		t.Errorf("paying itself = %d, want 400", code)
+	}
+	if code, _ := pay(keyOf("key-buyer"), buyer, `{"to_agent_id":"agt_elsewhere","amount_ulxc":1}`); code != http.StatusNotFound {
+		t.Errorf("paying another workspace's agent = %d, want 404", code)
+	}
+	if _, err := store.SetAgentRules(ctx, ws, buyer, economy.AgentRules{DailyLimitULXC: 3_500_000, AllowedModels: []string{"gpt-4o"}}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := pay(keyOf("key-buyer"), buyer, `{"to_agent_id":"`+seller+`","amount_ulxc":600000}`); code != http.StatusForbidden || !strings.Contains(body, "daily limit") {
+		t.Errorf("paying past the daily limit = %d %s, want 403 naming it", code, body)
+	}
+	if code, body := pay(keyOf("key-buyer"), buyer, `{"to_agent_id":"`+seller+`","amount_ulxc":400000}`); code != http.StatusOK {
+		t.Errorf("paying within the daily limit, with a model rule set = %d %s, want 200 — a payment has no model", code, body)
+	}
+
+	// The seller's statement: newest first, each line against its counterparty with the balance it left.
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+ws+"/agents/"+seller+"/statement", nil)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), keyOf("key-seller")))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var st struct {
+		Lines []economy.AgentStatementLine `json:"lines"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); w.Code != http.StatusOK || err != nil || len(st.Lines) != 3 {
+		t.Fatalf("statement = %d %s", w.Code, w.Body.String())
+	}
+	for i, want := range []struct {
+		amount, after int64
+		memo          string
+	}{{400_000, 2_400_000, ""}, {-1_000_000, 2_000_000, ""}, {3_000_000, 3_000_000, "invoice 17"}} {
+		l := st.Lines[i]
+		if l.Kind != "pay" || l.AmountULXC != want.amount || l.BalanceAfterULXC != want.after || l.Ref != want.memo ||
+			l.Counterparty != "agent:"+buyer {
+			t.Errorf("statement line %d = %+v, want pay %d against the buyer leaving %d", i, l, want.amount, want.after)
+		}
+	}
+}
