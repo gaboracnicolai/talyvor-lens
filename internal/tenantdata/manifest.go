@@ -117,13 +117,14 @@ var Manifest = map[string]Entry{
 	"povi_receipts":       {Retain, "audit-guarded (0055): signed compute receipts; tamper-evidence record"},
 	// B21.3 (0138): who asked for a deletion and what was deleted — the record that it was done. No
 	// question or answer is held in either.
-	"deletion_requests":       {Retain, "B21.3: the record that erasure was requested and completed"},
-	"stored_answer_deletions": {Retain, "B21.3: the audit log of each deletion of stored answers"},
-	"agent_postings":          {Retain, "B19.1: audit-guarded (0140, append-only): the agents' double-entry LXC ledger; financial-record retention"},
-	"agent_tool_calls":        {Retain, "B19.9: audit-guarded (0145, append-only): every call an agent made to its wallet tools; the record of what it asked and was refused"},
-	"market_earnings":         {Retain, "B20.2: audit-guarded (0149, append-only): a seller's share of each cleared use — money owed to them, paid out by B20.5"},
-	"market_refunds":          {Retain, "B20.4: audit-guarded (0152, append-only but for its Stripe credit): each refunded use of a taken-down listing — money given back to its buyer and taken from its seller"},
-	"market_payouts":          {Retain, "B20.5: audit-guarded (0153, append-only but for its Stripe transfer): each payout of a seller's earnings, in money through Stripe or in credits"},
+	"deletion_requests":         {Retain, "B21.3: the record that erasure was requested and completed"},
+	"stored_answer_deletions":   {Retain, "B21.3: the audit log of each deletion of stored answers"},
+	"agent_postings":            {Retain, "B19.1: audit-guarded (0140, append-only): the agents' double-entry LXC ledger; financial-record retention"},
+	"agent_card_authorizations": {Retain, "B19.12: audit-guarded (0156, append-only): every agent card authorisation, approved or declined, and the LXC it debited; financial-record retention"},
+	"agent_tool_calls":          {Retain, "B19.9: audit-guarded (0145, append-only): every call an agent made to its wallet tools; the record of what it asked and was refused"},
+	"market_earnings":           {Retain, "B20.2: audit-guarded (0149, append-only): a seller's share of each cleared use — money owed to them, paid out by B20.5"},
+	"market_refunds":            {Retain, "B20.4: audit-guarded (0152, append-only but for its Stripe credit): each refunded use of a taken-down listing — money given back to its buyer and taken from its seller"},
+	"market_payouts":            {Retain, "B20.5: audit-guarded (0153, append-only but for its Stripe transfer): each payout of a seller's earnings, in money through Stripe or in credits"},
 
 	// token_events is audit-guarded TOO, but migration 0055's trigger carries a sanctioned
 	// exception: DELETE is permitted while the retention-bypass session flag is set — the flag the
@@ -199,6 +200,7 @@ var Manifest = map[string]Entry{
 	// ─── DELETE: everything else. The bulk of what is actually sensitive. ─────────────────────
 	"agent_accounts":               {Delete, ""},
 	"agent_rules":                  {Delete, ""},
+	"agent_cards":                  {Delete, "B19.12: an agent's test-mode card — Stripe's card and cardholder ids, last 4, expiry"},
 	"agent_approvals":              {Delete, ""},
 	"agent_lxc_subbudgets":         {Delete, ""},
 	"agent_workspace_pauses":       {Delete, ""},

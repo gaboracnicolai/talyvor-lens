@@ -26,7 +26,7 @@ type StatementLine struct {
 	EntryID          string    `json:"entry_id"`
 	At               time.Time `json:"at"`
 	Account          string    `json:"account"` // workspace | spend | agent:<id>
-	Kind             string    `json:"kind"`    // fund | withdraw | spend | hold | settle | release | pay
+	Kind             string    `json:"kind"`    // fund | withdraw | spend | hold | settle | release | pay | card
 	AmountULXC       int64     `json:"amount_ulxc"`
 	Counterparty     string    `json:"counterparty"`
 	Ref              string    `json:"ref,omitempty"`

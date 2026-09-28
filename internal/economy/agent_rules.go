@@ -54,7 +54,7 @@ type AgentRequest struct {
 	Provider    string
 	Fingerprint string    // the key, model and prompt, hashed: what an approval is for
 	At          time.Time // zero means now
-	Payment     bool      // a payment to another agent (B19.3): no model or provider to judge
+	Payment     bool      // a payment to another agent (B19.3) or a card purchase (B19.12): no model or provider to judge
 	Listing     string    // the marketplace listing a use is of (B19.14)
 }
 
@@ -271,12 +271,12 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 	}
 	spentSince := func(since time.Time) (int64, error) {
 		var spent int64
-		// What it paid other agents counts (B19.3); what they paid it does not raise its limit. What it
+		// What it paid other agents counts (B19.3), and its card purchases (B19.12); what they paid it does not raise its limit. What it
 		// used of paid marketplace listings counts too (B20.2), though it is billed to its company.
 		err := tx.QueryRow(ctx, `SELECT (
 			(SELECT COALESCE(-sum(amount_ulxc), 0) FROM agent_postings
 			 WHERE workspace_id = $1 AND account = $2 AND created_at >= $3
-			   AND (kind IN ('spend', 'hold', 'settle', 'release') OR (kind = 'pay' AND amount_ulxc < 0)))
+			   AND (kind IN ('spend', 'hold', 'settle', 'release', 'card') OR (kind = 'pay' AND amount_ulxc < 0)))
 			+ (SELECT COALESCE(sum(price_ulxc), 0) FROM market_uses
 			   WHERE buyer_workspace_id = $1 AND agent_id = $4 AND charge = 'billed' AND used_at >= $3))::bigint`,
 			workspaceID, agentAccount(agentID), since, agentID).Scan(&spent)

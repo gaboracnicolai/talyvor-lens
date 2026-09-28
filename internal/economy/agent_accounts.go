@@ -334,7 +334,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
-		                   AND p.kind IN ('spend', 'hold', 'settle', 'release')), 0)::bigint,
+		                   AND p.kind IN ('spend', 'hold', 'settle', 'release', 'card')), 0)::bigint,
 		       COALESCE((SELECT array_agg(k.scoped_key_id ORDER BY k.created_at) FROM agent_account_keys k WHERE k.agent_id = a.id), '{}')
 		  FROM agent_accounts a WHERE a.workspace_id = $1 ORDER BY a.created_at, a.id`, workspaceID)
 	if err != nil {

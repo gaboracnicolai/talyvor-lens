@@ -901,6 +901,15 @@ type Config struct {
 	StripeSecretKey     string
 	StripeWebhookSecret string
 
+	// StripeIssuingWebhookSecret signs the real-time authorisation endpoint Stripe calls for every agent
+	// card purchase (B19.12) — Dashboard → Issuing → settings, a separate endpoint from the billing
+	// webhook. A SECRET, never logged. Empty ⇒ POST /v1/agent-cards/authorizations is unregistered (404)
+	// and no purchase can be approved. StripeIssuingCurrency is the currency agent cards are issued in:
+	// the platform's own (gbp for a UK platform). Envs: LENS_STRIPE_ISSUING_WEBHOOK_SECRET,
+	// LENS_STRIPE_ISSUING_CURRENCY.
+	StripeIssuingWebhookSecret string
+	StripeIssuingCurrency      string
+
 	// TrackWebhookURL / TrackWebhookSecret (SEC-7) configure the outbound Lens→Track
 	// spend-alert emitter. TrackWebhookURL is Track's POST /v1/lens/webhook;
 	// TrackWebhookSecret is the shared HMAC secret (must equal Track's
@@ -1244,11 +1253,13 @@ func Load() (*Config, error) {
 		RoutingPredictionEnabled:        parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
 		RoutingPredictionScoringEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_SCORING_ENABLED"),
 
-		BillingEnabled:          parseBoolEnv("LENS_BILLING_ENABLED"),
-		EarnRequireLivePurchase: parseBoolEnv("LENS_EARN_REQUIRE_LIVE_PURCHASE"),
-		DashboardEnabled:        parseBoolEnv("LENS_DASHBOARD_ENABLED"),
-		StripeSecretKey:         os.Getenv("LENS_STRIPE_SECRET_KEY"),
-		StripeWebhookSecret:     os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
+		BillingEnabled:             parseBoolEnv("LENS_BILLING_ENABLED"),
+		EarnRequireLivePurchase:    parseBoolEnv("LENS_EARN_REQUIRE_LIVE_PURCHASE"),
+		DashboardEnabled:           parseBoolEnv("LENS_DASHBOARD_ENABLED"),
+		StripeSecretKey:            os.Getenv("LENS_STRIPE_SECRET_KEY"),
+		StripeWebhookSecret:        os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
+		StripeIssuingWebhookSecret: os.Getenv("LENS_STRIPE_ISSUING_WEBHOOK_SECRET"),
+		StripeIssuingCurrency:      getEnv("LENS_STRIPE_ISSUING_CURRENCY", "gbp"),
 		// Catalog-drift detection (internal/modelwatch). Poller default-ON: it is read-only, costs one
 		// provider GET an hour, and its absence is what let a whole model family be served free. The
 		// SINK is separate and, if unset, reported as a boot-time ERROR rather than silently skipped.

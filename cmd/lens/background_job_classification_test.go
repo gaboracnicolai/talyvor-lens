@@ -67,6 +67,9 @@ var perReplica = map[string]string{
 		"top-up locks the agent's row and re-reads its balance, so the second replica finds it above the " +
 		"threshold. Measured by TestAgentRoutes_AWeeklyPaymentRunsOnceAWeekAndATopUpFiresOnce, which runs " +
 		"two stores at once on one tick and pays once.",
+	"ECB rate refresh": "IDEMPOTENT (B19.12). ecbRates.Refresh fetches the ECB's public file and inserts each " +
+		"published rate ON CONFLICT (rate_date, currency) DO NOTHING — a second replica's refresh inserts zero " +
+		"rows, and a published rate never changes. It moves no money: one GET every three hours per replica.",
 }
 
 // perReplicaMatch maps a classification key to the CALL that identifies its goroutine: either the
@@ -91,6 +94,7 @@ var perReplicaMatch = map[string]string{
 	"stranded reservation sweep": "dualToken.ReleaseStrandedReservations",
 	"audit export POST":          "auditExporter.ExportWebhook",
 	"agent schedule run":         "dualToken.RunAgentSchedules",
+	"ECB rate refresh":           "ecbRates.Refresh",
 }
 
 // ⚠ THE GUARD. A goroutine that is neither leader-gated nor classified is one nobody has decided
