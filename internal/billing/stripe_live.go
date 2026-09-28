@@ -69,6 +69,9 @@ func (l *LiveStripe) CreateCheckoutSession(ctx context.Context, p CheckoutParams
 			},
 			Quantity: stripe.Int64(1),
 		}},
+		// B22.2: the customer pays in their own currency and Stripe converts it at its rate (the customer pays
+		// its conversion fee); the credits are bought in USD, and Lens converts nothing.
+		AdaptivePricing: &stripe.CheckoutSessionAdaptivePricingParams{Enabled: stripe.Bool(true)},
 	}
 	params.Context = ctx
 	params.AddMetadata("workspace_id", p.WorkspaceID)

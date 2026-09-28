@@ -333,10 +333,19 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 
 	wsID := sess.Metadata["workspace_id"]
 	metaLXC, _ := strconv.ParseInt(sess.Metadata["lxc_amount"], 10, 64) // µLXC (SEC-2)
-	usdCents := sess.AmountTotal
+	// B22.2 — ADAPTIVE PRICING. A customer shown their own currency paid sess.Currency / sess.AmountTotal,
+	// and Stripe converted it; what they bought is the session's SOURCE amount, in USD, which Stripe reports
+	// in currency_conversion. Lens reads Stripe's USD figure and converts nothing. A session with no
+	// conversion is judged on its own currency, so one created in anything but USD stays anomalous.
+	currency, usdCents := string(sess.Currency), sess.AmountTotal
+	var paid map[string]interface{}
+	if cc := sess.CurrencyConversion; cc != nil && cc.SourceCurrency != "" {
+		paid = map[string]interface{}{"paid_currency": string(sess.Currency), "paid_amount": sess.AmountTotal, "stripe_fx_rate": cc.FxRate}
+		currency, usdCents = string(cc.SourceCurrency), cc.AmountTotal
+	}
 	recomp := lxcForCents(usdCents)
 
-	anomaly, rerr := s.classify(ctx, string(sess.Currency), usdCents, wsID, recomp, metaLXC)
+	anomaly, rerr := s.classify(ctx, currency, usdCents, wsID, recomp, metaLXC)
 	if rerr != nil {
 		// Could not VERIFY (e.g. workspace lookup failed) — do not guess; retry.
 		s.fail(w, "classify", event.ID, rerr)
@@ -460,12 +469,16 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 	if !event.Livemode {
 		funding = economy.FundingTest
 	}
-	if _, err := s.credits.CreditLXCTx(ctx, tx, wsID, recomp, "stripe top-up", map[string]interface{}{
+	meta := map[string]interface{}{
 		"usd_cents":         usdCents,
 		"stripe_event_id":   event.ID,
 		"stripe_session_id": sess.ID,
 		"funding":           funding,
-	}); err != nil {
+	}
+	for k, v := range paid { // what the customer actually paid, in their currency (B22.2)
+		meta[k] = v
+	}
+	if _, err := s.credits.CreditLXCTx(ctx, tx, wsID, recomp, "stripe top-up", meta); err != nil {
 		s.fail(w, "credit", event.ID, err) // rollback → claim not durable → Stripe retries
 		return
 	}
