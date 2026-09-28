@@ -330,6 +330,8 @@ type DualTokenStore struct {
 	ownerVerifier OwnerVerifier
 	// B19.17: the marketplace a schedule pays a listing through.
 	listings ListingCharger
+	// B19.15: the marketplace a payment to another company's agent goes through.
+	companyPayments CompanyPayments
 }
 
 // NewDualTokenStore wraps a real pool.

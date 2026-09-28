@@ -455,7 +455,8 @@ type Earning struct {
 	InvoiceID      string     `json:"invoice_id"`
 	ClearedAt      time.Time  `json:"cleared_at"`
 	PayableAt      time.Time  `json:"payable_at"`
-	RefundedAt     *time.Time `json:"refunded_at,omitempty"` // its share was reversed: the listing was taken down
+	RefundedAt     *time.Time `json:"refunded_at,omitempty"`    // its share was reversed: the listing was taken down
+	PayeeAgentID   string     `json:"payee_agent_id,omitempty"` // a payment to this company's agent, not a use of a listing (B19.15)
 }
 
 // SellerEarnings reads a seller's earnings: the totals and the latest 100. An earning a refund or chargeback
@@ -485,7 +486,8 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 		return e, fmt.Errorf("market: pending earnings: %w", err)
 	}
 	e.PendingUSDMicros = SellerShare(e.LifetimeGrossMicros, pendingULXC/ulxcPerUSDMicro)
-	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.invoice_id, e.cleared_at, e.payable_at, r.refunded_at
+	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.invoice_id, e.cleared_at, e.payable_at, r.refunded_at,
+		       COALESCE(u.payee_agent_id, '')
 		FROM market_earnings e LEFT JOIN market_uses u ON u.id = e.use_id LEFT JOIN market_refunds r ON r.use_id = e.use_id
 		WHERE e.seller_workspace_id = $1 ORDER BY e.cleared_at DESC, e.use_id LIMIT 100`, sellerWorkspaceID)
 	if err != nil {
@@ -494,7 +496,8 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 	defer rows.Close()
 	for rows.Next() {
 		var x Earning
-		if err := rows.Scan(&x.UseID, &x.ListingID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt, &x.RefundedAt); err != nil {
+		if err := rows.Scan(&x.UseID, &x.ListingID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt, &x.RefundedAt,
+			&x.PayeeAgentID); err != nil {
 			return e, err
 		}
 		e.Earnings = append(e.Earnings, x)
@@ -512,6 +515,9 @@ type BillLine struct {
 	UsedAt    time.Time  `json:"used_at"`
 	Cleared   *time.Time `json:"cleared_at,omitempty"`
 	Refunded  *time.Time `json:"refunded_at,omitempty"` // credited back: the listing was taken down (B20.4)
+	// A payment to another company's agent (B19.15): the agent paid, and the memo.
+	PayeeAgentID string `json:"payee_agent_id,omitempty"`
+	Memo         string `json:"memo,omitempty"`
 }
 
 // Bill is a buyer's marketplace uses billed in one month (UTC). The totals are what the buyer owes for
@@ -528,8 +534,10 @@ type Bill struct {
 func (s *Store) MonthBill(ctx context.Context, buyerWorkspaceID string, month time.Time) (Bill, error) {
 	from := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
 	b := Bill{Month: from.Format("2006-01"), Lines: []BillLine{}}
-	rows, err := s.pool.Query(ctx, `SELECT u.id, u.listing_id, COALESCE(l.title, ''), u.agent_id, u.price_ulxc, u.used_at, u.cleared_at, r.refunded_at
+	rows, err := s.pool.Query(ctx, `SELECT u.id, u.listing_id, COALESCE(l.title, 'Payment to ' || a.name, ''), u.agent_id, u.price_ulxc, u.used_at, u.cleared_at,
+		       r.refunded_at, u.payee_agent_id, u.memo
 		FROM market_uses u LEFT JOIN market_listings l ON l.id = u.listing_id LEFT JOIN market_refunds r ON r.use_id = u.id
+		LEFT JOIN agent_accounts a ON a.id = u.payee_agent_id AND u.payee_agent_id <> ''
 		WHERE u.buyer_workspace_id = $1 AND u.charge = 'billed' AND u.ran_at IS NOT NULL AND u.used_at >= $2 AND u.used_at < $3
 		ORDER BY u.used_at, u.id`, buyerWorkspaceID, from, from.AddDate(0, 1, 0))
 	if err != nil {
@@ -538,7 +546,8 @@ func (s *Store) MonthBill(ctx context.Context, buyerWorkspaceID string, month ti
 	defer rows.Close()
 	for rows.Next() {
 		var x BillLine
-		if err := rows.Scan(&x.UseID, &x.ListingID, &x.Title, &x.AgentID, &x.PriceULXC, &x.UsedAt, &x.Cleared, &x.Refunded); err != nil {
+		if err := rows.Scan(&x.UseID, &x.ListingID, &x.Title, &x.AgentID, &x.PriceULXC, &x.UsedAt, &x.Cleared, &x.Refunded,
+			&x.PayeeAgentID, &x.Memo); err != nil {
 			return b, err
 		}
 		if x.Refunded != nil {

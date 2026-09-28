@@ -1659,6 +1659,7 @@ func run() error {
 	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {
 		billingSvc = billingSvc.WithMarketBill(liveStripe, cfg.MarketBillPriceID, cfg.MarketMeterEvent, marketStore)
 		marketMeter, marketRefunder = billingSvc, billingSvc
+		dualToken.SetCompanyPayments(marketStore) // B19.15: an agent pays another company's agent on the monthly bill
 		go haComps.leader.Run(ctx, "market-meter-pending", 30*time.Second, func(lctx context.Context) {
 			meterPendingMarketUses(lctx, marketStore, billingSvc)
 		})
