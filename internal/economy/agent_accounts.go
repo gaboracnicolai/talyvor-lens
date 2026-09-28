@@ -238,16 +238,11 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 		if err != nil {
 			return 0, err
 		}
-		wsSide, err := accountBalance(ctx, tx, workspaceID, "workspace")
-		if err != nil {
-			return 0, err
+		var allocated int64
+		if err := tx.QueryRow(ctx, allocatedSQL, workspaceID).Scan(&allocated); err != nil {
+			return 0, fmt.Errorf("economy: allocated LXC: %w", err)
 		}
-		spent, err := accountBalance(ctx, tx, workspaceID, "spend")
-		if err != nil {
-			return 0, err
-		}
-		// Allocated = Σ agent balances = −(workspace side) − spend, since every entry sums to zero.
-		if unallocated := wsBal - (-wsSide - spent); unallocated < amount {
+		if unallocated := wsBal - allocated; unallocated < amount {
 			return 0, fmt.Errorf("%w: the workspace has %d µLXC not held by its agents", ErrAgentFunds, unallocated)
 		}
 		err = postEntry(ctx, tx, workspaceID, kind, "", leg{"workspace", -amount}, leg{agentAccount(agentID), amount})

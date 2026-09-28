@@ -145,4 +145,8 @@ func TestAgentTransfers_SendRequestRecurRefundAndTheClassOfEach(t *testing.T) {
 	if tf, _ := s.TestFundedLXC(ctx, person); tf != 40*lxc {
 		t.Errorf("B's test-funded credits = %d, want 40 LXC", tf)
 	}
+	// What B's agent received is held by it: B cannot fund another agent with it.
+	if _, err := s.FundAgent(ctx, person, bea.ID, 1); !errors.Is(err, ErrAgentFunds) {
+		t.Errorf("funding B's agent from credits its agent already holds = %v, want ErrAgentFunds", err)
+	}
 }
