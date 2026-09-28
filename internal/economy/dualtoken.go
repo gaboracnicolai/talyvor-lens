@@ -450,6 +450,10 @@ func (s *DualTokenStore) SpendLXCMeta(ctx context.Context, workspaceID string, l
 	if bal < lxcAmount {
 		return 0, ErrInsufficientLXC
 	}
+	// B19.13: every caller of this is the workspace's own spending, so it cannot use what its agents hold.
+	if err := requireUnallocated(ctx, tx, workspaceID, bal, lxcAmount); err != nil {
+		return 0, err
+	}
 	newBal := bal - lxcAmount // exact integer µLXC
 	if err := insertLXCLedger(ctx, tx, workspaceID, -lxcAmount, newBal,
 		LXCTypeSpend, description, metadata); err != nil {

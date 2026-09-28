@@ -432,6 +432,9 @@ func TestSpendLXC_DebitsBalance(t *testing.T) {
 		WithArgs("ws_s").
 		WillReturnRows(pgxmock.NewRows([]string{"balance", "lifetime_minted", "lifetime_spent"}).
 			AddRow(10*uLXC, 10*uLXC, int64(0)))
+	// B19.13: what the workspace's agents hold (none here) is not the workspace's to spend.
+	mock.ExpectQuery(`FROM agent_postings`).WithArgs("ws_s").
+		WillReturnRows(pgxmock.NewRows([]string{"allocated"}).AddRow(int64(0)))
 	mock.ExpectExec(`INSERT INTO lxc_ledger`).
 		WithArgs("ws_s", -25*uLXC/10, 75*uLXC/10, LXCTypeSpend, "ai call", pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))

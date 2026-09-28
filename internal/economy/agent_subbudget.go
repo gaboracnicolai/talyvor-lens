@@ -208,6 +208,11 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	if bal < lxcAmount {
 		return ErrInsufficientLXC // rollback ⇒ no orphan claim; retriable after funding
 	}
+	if !isAgent { // B19.13: a key attached to no agent is the workspace's own spending
+		if err := requireUnallocated(ctx, tx, workspaceID, bal, lxcAmount); err != nil {
+			return err
+		}
+	}
 	newBal := bal - lxcAmount // exact integer µLXC
 	// Stamp the non-content metadata (requested model + token_events request_id) so the ledger is readable
 	// and joins to token_events. meta.toMap() carries ONLY those two scalars — never content (0055 immutable).
@@ -313,6 +318,11 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 	}
 	if bal < heldLXC {
 		return ErrInsufficientLXC // rollback ⇒ no orphan reservation; retriable after funding
+	}
+	if !isAgent { // B19.13: a key attached to no agent is the workspace's own spending
+		if err := requireUnallocated(ctx, tx, workspaceID, bal, heldLXC); err != nil {
+			return err
+		}
 	}
 	newBal := bal - heldLXC
 	if err := insertLXCLedger(ctx, tx, workspaceID, -heldLXC, newBal, LXCTypeReservationHold, "reservation hold (pre-serve)", meta.toMap()); err != nil {

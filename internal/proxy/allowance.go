@@ -60,7 +60,7 @@ func (p *Proxy) allowanceGateBlocks(ctx context.Context, workspaceID, model, pro
 	if p.lxcGate == nil {
 		return false
 	}
-	balance, err := p.lxcGate.GetLXCBalance(ctx, workspaceID)
+	balance, err := p.lxcGate.GetUnallocatedLXC(ctx, workspaceID) // B19.13: not what its agents hold
 	if err != nil {
 		slog.Warn("billing: allowance gate balance read failed (failing open; request allowed)",
 			slog.String("workspace", workspaceID), slog.String("err", err.Error()))

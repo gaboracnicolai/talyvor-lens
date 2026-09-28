@@ -51,6 +51,8 @@ func fundingProxy(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.Pool)
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE TABLE IF NOT EXISTS agent_account_keys (scoped_key_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+		// B19.13: the workspace's own spend reads what its agents hold.
+		`CREATE TABLE IF NOT EXISTS agent_postings (workspace_id TEXT NOT NULL, account TEXT NOT NULL, amount_ulxc BIGINT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS lxc_reservations (reservation_id TEXT PRIMARY KEY, scoped_key_id TEXT NOT NULL,
 			workspace_id TEXT NOT NULL, held_ulxc BIGINT NOT NULL, settled_ulxc BIGINT,
 			status TEXT NOT NULL DEFAULT 'held' CHECK (status IN ('held','settled','released')),

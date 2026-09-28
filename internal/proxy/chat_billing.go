@@ -82,7 +82,7 @@ func (p *Proxy) chatAdmission(ctx context.Context, workspaceID, model, prompt st
 	if covered >= est || p.lxcGate == nil {
 		return "", false
 	}
-	balance, err := p.lxcGate.GetLXCBalance(ctx, workspaceID)
+	balance, err := p.lxcGate.GetUnallocatedLXC(ctx, workspaceID) // B19.13: not what its agents hold
 	if err != nil {
 		slog.Warn("billing: chat balance read failed (failing open)", slog.String("workspace", workspaceID), slog.String("err", err.Error()))
 		return "", false
