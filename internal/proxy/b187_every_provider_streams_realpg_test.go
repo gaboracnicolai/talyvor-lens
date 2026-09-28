@@ -172,6 +172,14 @@ func TestB187_EveryProviderStreamsThroughItsOwnUpstreamAtItsOwnPrice(t *testing.
 			if tc.provider != "anthropic" && !strings.Contains(got, "data: [DONE]") {
 				t.Errorf("the client stream does not end the OpenAI way: %.400q", got)
 			}
+			// B18.59: every OpenAI-shaped stream — Google's and Bedrock's translated ones too — ends with a
+			// usage frame carrying the tokens it is billed on, before [DONE], so the chat can price it.
+			if tc.provider != "anthropic" {
+				if in, out, ok := b187UsageFrame(got); !ok || in != 10000 || out != 100 {
+					t.Errorf("usage frame before [DONE]: found=%v prompt_tokens=%d completion_tokens=%d, want 10000/100 — %.600q",
+						ok, in, out, got)
+				}
+			}
 
 			// It reached its own provider, with its own credential — and no other provider at all.
 			for name, u := range ups {
@@ -207,4 +215,27 @@ func TestB187_EveryProviderStreamsThroughItsOwnUpstreamAtItsOwnPrice(t *testing.
 			}
 		})
 	}
+}
+
+// b187UsageFrame finds the usage-only chunk of an OpenAI-shaped client stream, before its [DONE].
+func b187UsageFrame(stream string) (prompt, completion int, ok bool) {
+	for _, line := range strings.Split(stream, "\n") {
+		data, isData := strings.CutPrefix(line, "data: ")
+		if !isData {
+			continue
+		}
+		if data == "[DONE]" {
+			return prompt, completion, ok
+		}
+		var c struct {
+			Usage *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal([]byte(data), &c) == nil && c.Usage != nil {
+			prompt, completion, ok = c.Usage.PromptTokens, c.Usage.CompletionTokens, true
+		}
+	}
+	return 0, 0, false
 }
