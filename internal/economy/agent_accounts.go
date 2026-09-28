@@ -23,6 +23,9 @@ import (
 // ErrAgentNotFound: no such agent in this workspace.
 var ErrAgentNotFound = errors.New("economy: no such agent in this workspace")
 
+// ErrAgentOwnerless: the agent has no owner, so it cannot hold a balance until a person claims it (B19.11).
+var ErrAgentOwnerless = errors.New("economy: this agent has no owner — a person of its workspace must claim it before it can hold a balance")
+
 // ErrAgentFunds: the workspace's unallocated LXC (its balance less what its agents hold), or for a
 // withdrawal the agent's balance, does not cover the amount.
 var ErrAgentFunds = errors.New("economy: not enough funds for this movement")
@@ -38,6 +41,11 @@ type Agent struct {
 	// PausedAt is set while the agent is paused (B19.6): its every movement is refused until it is resumed.
 	PausedAt     *time.Time `json:"paused_at,omitempty"`
 	PausedReason string     `json:"paused_reason,omitempty"`
+	// B19.11: the person who owns the agent, and whether that owner is verified — the badge. Lens knows a
+	// person only as their workspace, so the badge is the workspace's verification: a completed card
+	// purchase, or Talyvor's vouch (internal/earnverify). An agent with no owner is never verified.
+	OwnerUserID string `json:"owner_user_id"`
+	Verified    bool   `json:"verified"`
 }
 
 // AgentBook reconciles a workspace with its agents: WorkspaceBalanceULXC (lxc_balances) =
@@ -115,6 +123,41 @@ func (s *DualTokenStore) GetUnallocatedLXC(ctx context.Context, workspaceID stri
 	return unallocated, nil
 }
 
+// OwnerVerifier says whether a workspace's people are verified (internal/earnverify.Verifier).
+type OwnerVerifier interface {
+	MayEarn(ctx context.Context, tx pgx.Tx, workspaceID string) (bool, error)
+}
+
+// SetOwnerVerifier sets what the verified-agent badge follows (B19.11).
+func (s *DualTokenStore) SetOwnerVerifier(v OwnerVerifier) { s.ownerVerifier = v }
+
+// requireOwner refuses to give an agent with no owner a balance (B19.11).
+func requireOwner(ctx context.Context, tx pgx.Tx, agentID string) error {
+	var owner string
+	if err := tx.QueryRow(ctx, `SELECT owner_user_id FROM agent_accounts WHERE id = $1`, agentID).Scan(&owner); err != nil {
+		return fmt.Errorf("economy: agent owner: %w", err)
+	}
+	if owner == "" {
+		return ErrAgentOwnerless
+	}
+	return nil
+}
+
+// ClaimAgent makes userID the agent's owner.
+func (s *DualTokenStore) ClaimAgent(ctx context.Context, workspaceID, agentID, userID string) error {
+	if userID == "" {
+		return ErrAgentOwnerless
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE agent_accounts SET owner_user_id = $3 WHERE id = $1 AND workspace_id = $2`, agentID, workspaceID, userID)
+	if err != nil {
+		return fmt.Errorf("economy: claim agent: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAgentNotFound
+	}
+	return nil
+}
+
 // lockAgent locks the agent's row — every movement of its balance serialises on it — and checks it
 // belongs to workspaceID.
 func lockAgent(ctx context.Context, tx pgx.Tx, workspaceID, agentID string) error {
@@ -126,14 +169,18 @@ func lockAgent(ctx context.Context, tx pgx.Tx, workspaceID, agentID string) erro
 	return err
 }
 
-// CreateAgent creates an agent account in workspaceID, with no balance.
-func (s *DualTokenStore) CreateAgent(ctx context.Context, workspaceID, name string) (Agent, error) {
+// CreateAgent creates an agent account in workspaceID, with no balance, owned by ownerUserID — the person
+// creating it (B19.11).
+func (s *DualTokenStore) CreateAgent(ctx context.Context, workspaceID, name, ownerUserID string) (Agent, error) {
 	if workspaceID == "" || name == "" {
 		return Agent{}, errors.New("economy: an agent needs a workspace and a name")
 	}
-	a := Agent{ID: "agt_" + uuid.NewString(), Name: name, Keys: []string{}}
-	err := s.pool.QueryRow(ctx, `INSERT INTO agent_accounts (id, workspace_id, name) VALUES ($1, $2, $3) RETURNING created_at`,
-		a.ID, workspaceID, name).Scan(&a.CreatedAt)
+	if ownerUserID == "" {
+		return Agent{}, ErrAgentOwnerless
+	}
+	a := Agent{ID: "agt_" + uuid.NewString(), Name: name, Keys: []string{}, OwnerUserID: ownerUserID}
+	err := s.pool.QueryRow(ctx, `INSERT INTO agent_accounts (id, workspace_id, name, owner_user_id) VALUES ($1, $2, $3, $4) RETURNING created_at`,
+		a.ID, workspaceID, name, ownerUserID).Scan(&a.CreatedAt)
 	if err != nil {
 		return Agent{}, fmt.Errorf("economy: create agent: %w", err)
 	}
@@ -184,6 +231,9 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 		return 0, err
 	}
 	if kind == "fund" {
+		if err := requireOwner(ctx, tx, agentID); err != nil {
+			return 0, err
+		}
 		wsBal, _, _, err := readLXCBalance(ctx, tx, workspaceID)
 		if err != nil {
 			return 0, err
@@ -274,8 +324,14 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 		workspaceID).Scan(&book.AllPausedAt, &book.AllPausedReason); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return book, fmt.Errorf("economy: workspace pause: %w", err)
 	}
+	wsVerified := false
+	if s.ownerVerifier != nil {
+		if wsVerified, err = s.ownerVerifier.MayEarn(ctx, tx, workspaceID); err != nil {
+			return book, fmt.Errorf("economy: owner verification: %w", err)
+		}
+	}
 	rows, err := tx.Query(ctx, `
-		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason,
+		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
 		                   AND p.kind IN ('spend', 'hold', 'settle', 'release')), 0)::bigint,
@@ -288,10 +344,11 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 	for rows.Next() {
 		var a Agent
 		var spendLegs int64
-		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.BalanceULXC, &spendLegs, &a.Keys); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.BalanceULXC, &spendLegs, &a.Keys); err != nil {
 			return book, err
 		}
 		a.SpentULXC = -spendLegs
+		a.Verified = wsVerified && a.OwnerUserID != ""
 		book.AllocatedULXC += a.BalanceULXC
 		book.SpentULXC += a.SpentULXC
 		book.Agents = append(book.Agents, a)

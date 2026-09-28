@@ -38,7 +38,7 @@ func TestAgentRoutes_OneSwitchPausesEveryAgent(t *testing.T) {
 	base := "/v1/workspaces/" + ws + "/agents"
 	var ids []string
 	for _, name := range []string{"payer", "payee"} {
-		a, err := store.CreateAgent(ctx, ws, name)
+		a, err := store.CreateAgent(ctx, ws, name, "user-owner")
 		if err != nil {
 			t.Fatal(err)
 		}

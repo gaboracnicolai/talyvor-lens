@@ -169,7 +169,7 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 		r.ServeHTTP(w, req)
 		return w.Code, w.Body.String()
 	}
-	agent, err := store.CreateAgent(ctx, ws, "researcher")
+	agent, err := store.CreateAgent(ctx, ws, "researcher", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestAgentRoutes_AnAgentPaysAnotherInOnePairOfLedgerRows(t *testing.T) {
 	}
 	newAgent := func(name, key string, fund int64) string {
 		t.Helper()
-		a, err := store.CreateAgent(ctx, ws, name)
+		a, err := store.CreateAgent(ctx, ws, name, "user-owner")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -389,7 +389,7 @@ func TestAgentRoutes_AStatementForAnyPeriodReDerivesTheAuditLog(t *testing.T) {
 	}
 	newAgent := func(name, key string) string {
 		t.Helper()
-		a, err := store.CreateAgent(ctx, ws, name)
+		a, err := store.CreateAgent(ctx, ws, name, "user-owner")
 		must(err)
 		must(store.AttachAgentKey(ctx, ws, a.ID, key))
 		return a.ID

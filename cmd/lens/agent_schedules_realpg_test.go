@@ -39,11 +39,11 @@ func TestAgentRoutes_AWeeklyPaymentRunsOnceAWeekAndATopUpFiresOnce(t *testing.T)
 		return w.Code, w.Body.String()
 	}
 	base := "/v1/workspaces/" + ws + "/agents"
-	payer, err := store.CreateAgent(ctx, ws, "payer")
+	payer, err := store.CreateAgent(ctx, ws, "payer", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := store.CreateAgent(ctx, ws, "payee")
+	payee, err := store.CreateAgent(ctx, ws, "payee", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}

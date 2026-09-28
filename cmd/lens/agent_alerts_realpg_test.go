@@ -40,7 +40,7 @@ func TestAgentRoutes_TheMonthEndForecastAndPausingAnAgent(t *testing.T) {
 	}
 	base := "/v1/workspaces/" + ws + "/agents"
 	newAgent := func(workspace, name string) string {
-		a, err := store.CreateAgent(ctx, workspace, name)
+		a, err := store.CreateAgent(ctx, workspace, name, "user-owner")
 		if err != nil {
 			t.Fatal(err)
 		}

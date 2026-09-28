@@ -326,6 +326,8 @@ type DualTokenStore struct {
 	// B19.16: the relying party approvals' passkeys are checked for, and the push sent for each approval filed.
 	approvalRP     *passkey.RelyingParty
 	approvalPusher ApprovalPusher
+	// B19.11: what the verified-agent badge follows.
+	ownerVerifier OwnerVerifier
 }
 
 // NewDualTokenStore wraps a real pool.

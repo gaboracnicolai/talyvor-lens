@@ -86,11 +86,18 @@ import (
 //	POST   /v1/workspaces/{wsID}/agents/push/subscriptions  {endpoint, keys: {p256dh, auth}}   a device to tell
 //	DELETE /v1/workspaces/{wsID}/agents/push/subscriptions  {endpoint}
 //
+// B19.11 — every agent is owned by the person who created it (its record's owner_user_id; an admin names
+// one). An agent with no owner — made before owners were recorded — cannot be funded, topped up or paid
+// until a person claims it; each agent's "verified" follows its owner's workspace's verification.
+//
+//	POST /v1/workspaces/{wsID}/agents/{id}/claim             the signed-in person becomes its owner
+//
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
 
 type agentBank interface {
-	CreateAgent(ctx context.Context, workspaceID, name string) (economy.Agent, error)
+	CreateAgent(ctx context.Context, workspaceID, name, ownerUserID string) (economy.Agent, error)
+	ClaimAgent(ctx context.Context, workspaceID, agentID, userID string) error
 	AttachAgentKey(ctx context.Context, workspaceID, agentID, scopedKeyID string) error
 	FundAgent(ctx context.Context, workspaceID, agentID string, amount int64) (int64, error)
 	WithdrawAgent(ctx context.Context, workspaceID, agentID string, amount int64) (int64, error)
@@ -145,13 +152,25 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 	})
 	r.Post("/v1/workspaces/{wsID}/agents", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
 		var in struct {
-			Name string `json:"name"`
+			Name  string `json:"name"`
+			Owner string `json:"owner_user_id"` // an admin credential names the person; anyone else owns what they create
 		}
 		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || in.Name == "" {
 			writeJSONErr(w, http.StatusBadRequest, `body must be {"name": "<agent name>"}`)
 			return
 		}
-		a, err := bank.CreateAgent(req.Context(), chi.URLParam(req, "wsID"), in.Name)
+		owner := ""
+		if actx := auth.GetAuthContext(req.Context()); actx != nil {
+			owner = actx.UserID
+			if actx.IsAdmin && in.Owner != "" {
+				owner = in.Owner
+			}
+		}
+		a, err := bank.CreateAgent(req.Context(), chi.URLParam(req, "wsID"), in.Name, owner)
+		if errors.Is(err, economy.ErrAgentOwnerless) {
+			writeJSONErr(w, http.StatusBadRequest, "an agent needs an owner: create it signed in as the person who will own it")
+			return
+		}
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -209,7 +228,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			switch {
 			case errors.Is(err, economy.ErrAgentNotFound):
 				writeJSONErr(w, http.StatusNotFound, err.Error())
-			case errors.Is(err, economy.ErrAgentFunds):
+			case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless):
 				writeJSONErr(w, http.StatusConflict, err.Error())
 			case err != nil:
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -582,6 +601,24 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{"endpoint": in.Endpoint, "deleted": true})
 	}))
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/claim", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		user := ""
+		if actx := auth.GetAuthContext(req.Context()); actx != nil {
+			user = actx.UserID
+		}
+		agentID := chi.URLParam(req, "agentID")
+		err := bank.ClaimAgent(req.Context(), chi.URLParam(req, "wsID"), agentID, user)
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrAgentOwnerless):
+			writeJSONErr(w, http.StatusBadRequest, "claim an agent signed in as the person who will own it")
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, map[string]any{"agent_id": agentID, "owner_user_id": user})
+		}
+	}))
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/pay", func(w http.ResponseWriter, req *http.Request) {
 		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
 		if _, owner := storedanswers.OwnerOrAdmin(req.Context()); !owner {
@@ -609,7 +646,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, economy.ErrSameAgent):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, economy.ErrAgentFunds):
+		case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless):
 			writeJSONErr(w, http.StatusConflict, err.Error())
 		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired):
 			writeJSONErr(w, http.StatusForbidden, err.Error())
