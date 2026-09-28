@@ -166,6 +166,14 @@ func main() {
 		}
 		return
 	}
+	// `lens wallet-clearances` (B22.1): clear an AMBER or RED wallet capability for real money, or revoke it.
+	if len(os.Args) > 1 && os.Args[1] == "wallet-clearances" {
+		if err := runWalletClearances(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "poolcheck" {
 		if err := runPoolCheck(); err != nil {
 			slog.Error("poolcheck failed", slog.String("err", err.Error()))
@@ -1639,6 +1647,8 @@ func run() error {
 	// (startup fails if billing is enabled without them) and never logged.
 	liveStripe := billing.NewLiveStripe(cfg.StripeSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL)
 	billingSvc := billing.New(pool, dualToken, liveStripe, cfg.StripeWebhookSecret)
+	// B22.1: with a live Stripe key a bill is real money, which an uncleared AMBER or RED capability refuses.
+	dualToken.SetLiveStripe(billing.LiveKey(cfg.StripeSecretKey))
 	// MODEL 2 (W4.6.1 step 1). Subscriptions are a SECOND gate on top of billing: a
 	// deployment selling one-off top-ups does not start selling a subscription because
 	// it has a Stripe key. With no price configured the routes below are not registered
@@ -4123,6 +4133,7 @@ func run() error {
 		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.
 		mountAgentAccountRoutes(authed, dualToken, tenantStore)
 		mountAgentCardRoutes(authed, dualToken, agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)) // B19.12
+		mountWalletCapabilityRoutes(authed, dualToken)                                                               // B22.1
 		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5

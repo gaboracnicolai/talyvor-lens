@@ -660,7 +660,8 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless):
 			writeJSONErr(w, http.StatusConflict, err.Error())
-		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired), errors.Is(err, economy.ErrWashTrade):
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired), errors.Is(err, economy.ErrWashTrade),
+			errors.Is(err, economy.ErrCapabilityNotCleared):
 			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case err != nil:
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())

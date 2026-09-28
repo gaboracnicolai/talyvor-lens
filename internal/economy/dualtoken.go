@@ -332,6 +332,8 @@ type DualTokenStore struct {
 	listings ListingCharger
 	// B19.15: the marketplace a payment to another company's agent goes through.
 	companyPayments CompanyPayments
+	// B22.1: whether Lens's Stripe key is live, which makes a Stripe bill real money.
+	liveStripe bool
 }
 
 // NewDualTokenStore wraps a real pool.
@@ -408,7 +410,7 @@ func (s *DualTokenStore) ConvertLENStoLXC(ctx context.Context, workspaceID strin
 		return ConvertResult{}, err
 	}
 	newLXC := lxcBal + lxcAmount // exact integer µLXC
-	lxcMeta := map[string]interface{}{"lens_spent": lensCost, "rate": rate}
+	lxcMeta := map[string]interface{}{"lens_spent": lensCost, "rate": rate, "funding": FundingSynthetic}
 	if err := insertLXCLedger(ctx, tx, workspaceID, lxcAmount, newLXC,
 		LXCTypeConvertFromLENS, "converted from LENS", lxcMeta); err != nil {
 		return ConvertResult{}, err
@@ -513,11 +515,15 @@ func (s *DualTokenStore) creditLXCTxTyped(ctx context.Context, tx pgx.Tx, worksp
 		return 0, err
 	}
 	newBal := bal + lxcAmount // exact integer µLXC
+	metadata, testFunded := lotFunding(ledgerType, lxcAmount, metadata)
 	if err := insertLXCLedger(ctx, tx, workspaceID, lxcAmount, newBal,
 		ledgerType, reason, metadata); err != nil {
 		return 0, err
 	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted+lxcAmount, spent); err != nil {
+		return 0, err
+	}
+	if err := addTestFunded(ctx, tx, workspaceID, testFunded); err != nil {
 		return 0, err
 	}
 	// ⚠ ONLY A REAL PURCHASE ADDS BACKING. creditLXCTxTyped serves BOTH purchase and admin_grant —
@@ -698,10 +704,15 @@ func readLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string) (bal, mi
 	return
 }
 
+// writeLXCBalance also keeps the test-funded part (B22.1) within the balance plus the workspace's open holds:
+// a spend takes the credits that are not test-funded first, and a hold, which is not a spend, takes none. The
+// caller has resolved its own reservation (status no longer 'held') before writing a settle or a release.
 func writeLXCBalance(ctx context.Context, tx pgx.Tx, workspaceID string, bal, minted, spent int64) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE lxc_balances
-		SET balance = $2, lifetime_minted = $3, lifetime_spent = $4, updated_at = NOW()
+		SET balance = $2, lifetime_minted = $3, lifetime_spent = $4, updated_at = NOW(),
+		    test_funded_ulxc = CASE WHEN test_funded_ulxc <= $2::bigint THEN test_funded_ulxc ELSE LEAST(test_funded_ulxc, GREATEST(
+		        $2::bigint + (SELECT COALESCE(sum(held_ulxc), 0) FROM lxc_reservations WHERE workspace_id = $1 AND status = 'held'), 0)) END
 		WHERE workspace_id = $1`, workspaceID, bal, minted, spent)
 	if err != nil {
 		return fmt.Errorf("economy: update lxc balance: %w", err)

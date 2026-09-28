@@ -195,7 +195,7 @@ func rewardLoopSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
 			balance         BIGINT NOT NULL DEFAULT 0,
 			-- migration 0115: this fixture hand-rolls the schema, so a column added by a
 			-- migration has to be added here too or the real code cannot write it.
-			cash_backed_ulxc BIGINT NOT NULL DEFAULT 0,
+			cash_backed_ulxc BIGINT NOT NULL DEFAULT 0, test_funded_ulxc BIGINT NOT NULL DEFAULT 0, -- 0158
 			lifetime_minted BIGINT NOT NULL DEFAULT 0,
 			lifetime_spent  BIGINT NOT NULL DEFAULT 0,
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -210,6 +210,11 @@ func rewardLoopSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
 			metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
 			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		// 0158: the LXC balance writer reads the workspace's open holds.
+		`CREATE TABLE IF NOT EXISTS lxc_reservations (reservation_id TEXT PRIMARY KEY, scoped_key_id TEXT NOT NULL,
+			workspace_id TEXT NOT NULL, held_ulxc BIGINT NOT NULL, settled_ulxc BIGINT,
+			status TEXT NOT NULL DEFAULT 'held' CHECK (status IN ('held','settled','released')),
+			requested_model TEXT, request_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_at TIMESTAMPTZ)`,
 		`CREATE TABLE conversion_rate_history (
 			id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			rate          DOUBLE PRECISION NOT NULL,

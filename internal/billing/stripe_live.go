@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	stripe "github.com/stripe/stripe-go/v81"
@@ -28,6 +29,14 @@ func NewLiveStripe(secretKey, successURL, cancelURL string) *LiveStripe {
 	stripe.Key = secretKey
 	return &LiveStripe{successURL: successURL, cancelURL: cancelURL}
 }
+
+// LiveKey reports whether key is a live-mode Stripe key, which moves real money.
+func LiveKey(key string) bool {
+	return strings.HasPrefix(key, "sk_live_") || strings.HasPrefix(key, "rk_live_")
+}
+
+// Livemode reports whether the configured key is live (B22.1: a live key pays out only live earnings).
+func (l *LiveStripe) Livemode() bool { return LiveKey(stripe.Key) }
 
 // CreateCustomer creates a Stripe customer tagged with the workspace id.
 func (l *LiveStripe) CreateCustomer(ctx context.Context, workspaceID string) (string, error) {

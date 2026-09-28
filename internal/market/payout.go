@@ -125,6 +125,33 @@ func sellerBalance(ctx context.Context, q queryRower, workspaceID string, now ti
 	return released, inHoldback, paid, err
 }
 
+// sellerFunds splits what a seller has available by what paid for it (B22.1): earnings are test or live as
+// the invoice that paid them was, and each Stripe payout as the key that made it was. Earnings taken as credits
+// draw on test earnings first. Test earnings never reach a live payout: a live key pays at most liveLeft.
+func sellerFunds(ctx context.Context, q queryRower, workspaceID string, now time.Time) (testLeft, liveLeft int64, err error) {
+	var testReleased, liveReleased, testPaid, livePaid, credits int64
+	err = q.QueryRow(ctx, `SELECT
+		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2
+			AND NOT e.livemode AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
+		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2
+			AND e.livemode AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
+		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND NOT livemode), 0)::bigint,
+		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND livemode), 0)::bigint,
+		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1 AND method = 'credits'), 0)::bigint`,
+		workspaceID, now).Scan(&testReleased, &liveReleased, &testPaid, &livePaid, &credits)
+	if err != nil {
+		return 0, 0, fmt.Errorf("market: seller funds: %w", err)
+	}
+	fromTest := min(credits, max(testReleased-testPaid, 0))
+	return max(testReleased-testPaid-fromTest, 0), max(liveReleased-livePaid-(credits-fromTest), 0), nil
+}
+
+// liveKey reports whether api pays out with a live Stripe key.
+func liveKey(api ConnectStripe) bool {
+	l, ok := api.(interface{ Livemode() bool })
+	return ok && l.Livemode()
+}
+
 func lockSeller(ctx context.Context, tx pgx.Tx, workspaceID string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('market_seller:' || $1, 0))`, workspaceID)
 	return err
@@ -258,6 +285,10 @@ func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceI
 			return ErrNothingAvailable
 		}
 		gross := released - paid
+		testLeft, _, err := sellerFunds(ctx, tx, workspaceID, now)
+		if err != nil {
+			return err
+		}
 		p = Payout{ID: "mpo_" + uuid.NewString(), Method: PayoutCredits, Month: monthOf(now), GrossUSDMicros: gross, NetUSDMicros: gross,
 			CreditsULXC: gross * ulxcPerUSDMicro}
 		if err := tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, gross_usd_micros, net_usd_micros, credits_ulxc, paid_at, created_at)
@@ -265,8 +296,17 @@ func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceI
 			p.ID, workspaceID, p.Month, gross, p.CreditsULXC, now).Scan(&p.PaidAt, &p.CreatedAt); err != nil {
 			return err
 		}
+		// B22.1: credits taken from test earnings are test-funded credits.
+		testULXC := min(testLeft, gross) * ulxcPerUSDMicro
+		funding := "test and live"
+		switch testULXC {
+		case 0:
+			funding = "live"
+		case p.CreditsULXC:
+			funding = "test"
+		}
 		_, err = crediter.CreditLXCTx(ctx, tx, workspaceID, p.CreditsULXC, "marketplace earnings taken as credits",
-			map[string]interface{}{"market_payout_id": p.ID, "usd_micros": gross})
+			map[string]interface{}{"market_payout_id": p.ID, "usd_micros": gross, "funding": funding, "test_funded_ulxc": testULXC})
 		return err
 	})
 	if err != nil && !errors.Is(err, ErrNothingAvailable) {
@@ -295,12 +335,22 @@ func (s *Store) PayOut(ctx context.Context, api ConnectStripe, now time.Time) (i
 		return 0, fmt.Errorf("market: sellers to pay: %w", err)
 	}
 	var askErr error
+	live := liveKey(api)
+	// payable is what the seller may be paid now: with a live key, only what live earnings paid for (B22.1).
+	payable := func(q queryRower, ws string) (int64, error) {
+		released, _, paid, err := sellerBalance(ctx, q, ws, now)
+		if err != nil || !live {
+			return released - paid, err
+		}
+		_, liveLeft, err := sellerFunds(ctx, q, ws, now)
+		return min(released-paid, liveLeft), err
+	}
 	for _, x := range sellers {
-		released, _, paid, err := sellerBalance(ctx, s.pool, x.ws, now)
+		due, err := payable(s.pool, x.ws)
 		if err != nil {
 			return 0, fmt.Errorf("market: payout for %s: %w", x.ws, err)
 		}
-		if released-paid < PayoutMinimumUSDMicros {
+		if due < PayoutMinimumUSDMicros {
 			continue
 		}
 		account, err := api.ConnectedAccount(ctx, x.account)
@@ -320,20 +370,20 @@ func (s *Store) PayOut(ctx context.Context, api ConnectStripe, now time.Time) (i
 			if err := lockSeller(ctx, tx, x.ws); err != nil {
 				return err
 			}
-			released, _, paid, err := sellerBalance(ctx, tx, x.ws, now)
+			due, err := payable(tx, x.ws)
 			if err != nil {
 				return err
 			}
-			if released-paid < PayoutMinimumUSDMicros {
+			if due < PayoutMinimumUSDMicros {
 				return nil
 			}
-			gross := (released - paid) / usdMicrosPerCent
+			gross := due / usdMicrosPerCent
 			accountFee, payoutFee, net := PayoutFees(gross)
 			_, err = tx.Exec(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, gross_usd_micros, account_fee_usd_micros, payout_fee_usd_micros,
-				net_usd_micros, stripe_account_id, created_at)
-				VALUES ($1, $2, 'stripe', $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (workspace_id, month) WHERE method = 'stripe' DO NOTHING`,
+				net_usd_micros, stripe_account_id, created_at, livemode)
+				VALUES ($1, $2, 'stripe', $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (workspace_id, month) WHERE method = 'stripe' DO NOTHING`,
 				"mpo_"+uuid.NewString(), x.ws, monthOf(now), gross*usdMicrosPerCent, accountFee*usdMicrosPerCent, payoutFee*usdMicrosPerCent,
-				net*usdMicrosPerCent, x.account, now)
+				net*usdMicrosPerCent, x.account, now, live)
 			return err
 		})
 		if err != nil {
@@ -349,8 +399,10 @@ func (s *Store) PayOut(ctx context.Context, api ConnectStripe, now time.Time) (i
 
 // transferUnpaid asks Stripe for the transfer of every payout it has not yet accepted.
 func (s *Store) transferUnpaid(ctx context.Context, api ConnectStripe) (int, error) {
+	// A payout is transferred only with a key of its own mode (B22.1): a test payout left unpaid when the key
+	// went live is never sent as real money.
 	rows, err := s.pool.Query(ctx, `SELECT id, workspace_id, stripe_account_id, net_usd_micros FROM market_payouts
-		WHERE paid_at IS NULL ORDER BY created_at, id LIMIT 200`)
+		WHERE paid_at IS NULL AND livemode = $1 ORDER BY created_at, id LIMIT 200`, liveKey(api))
 	if err != nil {
 		return 0, fmt.Errorf("market: payouts to transfer: %w", err)
 	}

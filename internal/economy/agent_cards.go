@@ -124,6 +124,7 @@ type CardDecision struct {
 	AgentID     string `json:"agent_id,omitempty"`
 	WorkspaceID string `json:"-"`
 	AmountULXC  int64  `json:"amount_ulxc"`
+	testFunded  int64  // B22.1: the test-funded credits an approved purchase took
 }
 
 // ULXCPerUSDMicro is how many µLXC one µUSD buys at the peg (10 at $0.10).
@@ -180,6 +181,14 @@ func (s *DualTokenStore) approveCard(ctx context.Context, a CardAuthorization, d
 		_ = tx.Rollback(ctx)
 		return s.declineCard(ctx, a, d, fmt.Sprintf("the agent holds %s LXC and this purchase costs %s LXC", lxcString(bal), lxcString(d.AmountULXC)))
 	}
+	// B22.1: cards are RED — test-funded credits only, until the operator clears them for real money.
+	if d.testFunded, err = spendForCapability(ctx, tx, d.WorkspaceID, CapabilityAgentCard, d.AmountULXC); err != nil {
+		if !errors.Is(err, ErrCapabilityNotCleared) {
+			return d, err
+		}
+		_ = tx.Rollback(ctx)
+		return s.declineCard(ctx, a, d, err.Error())
+	}
 	if err := enforceAgentRules(ctx, tx, d.WorkspaceID, d.AgentID, d.AmountULXC, a.AuthorizationID); err != nil {
 		if !errors.Is(err, ErrAgentRule) && !errors.Is(err, ErrApprovalRequired) {
 			return d, err
@@ -227,7 +236,7 @@ func (s *DualTokenStore) approveCard(ctx context.Context, a CardAuthorization, d
 }
 
 func (s *DualTokenStore) declineCard(ctx context.Context, a CardAuthorization, d CardDecision, reason string) (CardDecision, error) {
-	d.Approved, d.Reason = false, reason
+	d.Approved, d.Reason, d.testFunded = false, reason, 0 // a declined request took nothing
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return d, err
@@ -249,11 +258,11 @@ func insertCardAuthorization(ctx context.Context, tx pgx.Tx, a CardAuthorization
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO agent_card_authorizations (id, authorization_id, card_id, workspace_id, agent_id, approved,
 		reason, approval_id, amount_minor, currency, merchant_amount_minor, merchant_currency, merchant_name, merchant_category,
-		rate_date, ecb_usd_per_eur, ecb_currency_per_eur, amount_usd_micros, amount_ulxc, livemode, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::numeric, $17::numeric, $18, $19, $20, $21)`,
+		rate_date, ecb_usd_per_eur, ecb_currency_per_eur, amount_usd_micros, amount_ulxc, livemode, created_at, test_funded_ulxc)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::numeric, $17::numeric, $18, $19, $20, $21, $22)`,
 		a.EventID, a.AuthorizationID, a.CardID, d.WorkspaceID, d.AgentID, d.Approved, d.Reason, d.ApprovalID, a.AmountMinor,
 		a.Currency, a.MerchantAmountMinor, a.MerchantCurrency, a.MerchantName, a.MerchantCategory, a.RateDate,
-		nullIfEmpty(a.ECBUSDPerEUR), nullIfEmpty(a.ECBCurrencyPerEUR), usdMicros, ulxc, a.Livemode, a.At)
+		nullIfEmpty(a.ECBUSDPerEUR), nullIfEmpty(a.ECBCurrencyPerEUR), usdMicros, ulxc, a.Livemode, a.At, d.testFunded)
 	if err != nil {
 		return fmt.Errorf("economy: record card authorisation: %w", err)
 	}
