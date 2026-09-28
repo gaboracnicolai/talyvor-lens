@@ -60,6 +60,13 @@ var perReplica = map[string]string{
 		"refund is impossible.",
 	"localRouterMulti.CheckHealth": "PER-REQUEST. Started inside an HTTP handler.",
 	"audit export POST":            "PER-REQUEST. Started inside an HTTP handler.",
+	"agent schedule run": "IDEMPOTENT BY ROW LOCK, and it MOVES MONEY (B19.8). Each schedule tick is paid " +
+		"in one transaction that holds the schedule's row FOR UPDATE SKIP LOCKED, writes the run row " +
+		"(PRIMARY KEY schedule_id, tick_at) and advances next_run_at, so a second replica skips the locked " +
+		"row or finds the tick already advanced; a duplicate run row would abort the payment with it. A " +
+		"top-up locks the agent's row and re-reads its balance, so the second replica finds it above the " +
+		"threshold. Measured by TestAgentRoutes_AWeeklyPaymentRunsOnceAWeekAndATopUpFiresOnce, which runs " +
+		"two stores at once on one tick and pays once.",
 }
 
 // perReplicaMatch maps a classification key to the CALL that identifies its goroutine: either the
@@ -83,6 +90,7 @@ var perReplicaMatch = map[string]string{
 	"detector staleness":         "patternDetectorHealth.PublishAge",
 	"stranded reservation sweep": "dualToken.ReleaseStrandedReservations",
 	"audit export POST":          "auditExporter.ExportWebhook",
+	"agent schedule run":         "dualToken.RunAgentSchedules",
 }
 
 // ⚠ THE GUARD. A goroutine that is neither leader-gated nor classified is one nobody has decided
