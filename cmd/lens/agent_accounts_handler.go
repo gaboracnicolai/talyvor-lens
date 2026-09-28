@@ -22,6 +22,14 @@ import (
 //	POST /v1/workspaces/{wsID}/agents/{id}/fund     {"amount_ulxc"}   move the workspace's LXC to the agent
 //	POST /v1/workspaces/{wsID}/agents/{id}/withdraw {"amount_ulxc"}   take it back
 //
+// B19.2 — each agent's spending rules, and the approvals its rules ask a person for:
+//
+//	GET  /v1/workspaces/{wsID}/agents/{id}/rules              the agent's rules
+//	PUT  /v1/workspaces/{wsID}/agents/{id}/rules   {rules}    replace them (economy.AgentRules)
+//	GET  /v1/workspaces/{wsID}/agents/approvals                requests that needed approval, newest first
+//	POST /v1/workspaces/{wsID}/agents/approvals/{id}/approve   let that request through, once
+//	POST /v1/workspaces/{wsID}/agents/approvals/{id}/deny      refuse it
+//
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
 
@@ -31,6 +39,10 @@ type agentBank interface {
 	FundAgent(ctx context.Context, workspaceID, agentID string, amount int64) (int64, error)
 	WithdrawAgent(ctx context.Context, workspaceID, agentID string, amount int64) (int64, error)
 	AgentBook(ctx context.Context, workspaceID string) (economy.AgentBook, error)
+	SetAgentRules(ctx context.Context, workspaceID, agentID string, r economy.AgentRules) (economy.AgentRules, error)
+	GetAgentRules(ctx context.Context, workspaceID, agentID string) (economy.AgentRules, error)
+	ListAgentApprovals(ctx context.Context, workspaceID string) ([]economy.AgentApproval, error)
+	DecideAgentApproval(ctx context.Context, workspaceID, approvalID string, approve bool) (economy.AgentApproval, error)
 }
 
 type agentKeyIssuer interface {
@@ -126,6 +138,57 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 	}
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/fund", move(bank.FundAgent))
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/withdraw", move(bank.WithdrawAgent))
+
+	writeRules := func(w http.ResponseWriter, rules economy.AgentRules, err error) {
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrAgentRule):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, rules)
+		}
+	}
+	r.Get("/v1/workspaces/{wsID}/agents/{agentID}/rules", func(w http.ResponseWriter, req *http.Request) {
+		rules, err := bank.GetAgentRules(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"))
+		writeRules(w, rules, err)
+	})
+	r.Put("/v1/workspaces/{wsID}/agents/{agentID}/rules", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in economy.AgentRules
+		dec := json.NewDecoder(req.Body)
+		dec.DisallowUnknownFields() // a misspelt rule must not be silently no rule
+		if err := dec.Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be the agent's rules: "+err.Error())
+			return
+		}
+		rules, err := bank.SetAgentRules(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in)
+		writeRules(w, rules, err)
+	}))
+	r.Get("/v1/workspaces/{wsID}/agents/approvals", func(w http.ResponseWriter, req *http.Request) {
+		list, err := bank.ListAgentApprovals(req.Context(), chi.URLParam(req, "wsID"))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"approvals": list})
+	})
+	decide := func(approve bool) http.HandlerFunc {
+		return ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+			a, err := bank.DecideAgentApproval(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "approvalID"), approve)
+			switch {
+			case errors.Is(err, economy.ErrApprovalNotFound):
+				writeJSONErr(w, http.StatusNotFound, err.Error())
+			case err != nil:
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			default:
+				writeJSONOK(w, http.StatusOK, a)
+			}
+		})
+	}
+	r.Post("/v1/workspaces/{wsID}/agents/approvals/{approvalID}/approve", decide(true))
+	r.Post("/v1/workspaces/{wsID}/agents/approvals/{approvalID}/deny", decide(false))
 }
 
 // ownerOnly admits the workspace's owner or an admin — the rule stored-answer deletion uses.

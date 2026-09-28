@@ -924,15 +924,17 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// entirely and is unchanged. agentKeyID is reused below to pick the price-aware routing strategy.
 	agentKeyID := agentKeyIDFromContext(ctx)
 	if agentKeyID != "" {
+		// B19.2 — the agent's spending rules are judged in its hold or debit; they need the model,
+		// provider and prompt, and a retry repeating its Idempotency-Key is charged once.
+		ctx = withAgentCall(ctx, agentKeyID, model, cfg.ProviderName(), prompt, r.Header.Get("Idempotency-Key"))
 		if p.reservationActive() {
 			// Billing redesign: HOLD a conservative (output-aware, BOUNDED) reservation pre-serve — the
 			// ceiling stays enforced against it — and SETTLE the delivered cost post-serve (or RELEASE a
 			// cache hit, free). The hold rides ctx to the post-serve seam.
 			maxOut := boundedMaxOut(extractMaxTokens(body), p.reservationMaxOut)
-			rctx, blocked := p.agentReserveBlocks(ctx, agentKeyID, wsID, model, prompt, requestID, maxOut)
-			if blocked {
-				writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
-				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "agent_blocked").Inc()
+			rctx, err := p.agentReserve(ctx, agentKeyID, wsID, model, prompt, requestID, maxOut)
+			if err != nil {
+				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), writeAgentRefusal(w, err)).Inc()
 				return
 			}
 			ctx = rctx
@@ -942,9 +944,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// too, or the streaming settle can't find it and the hold is stranded (swept + refunded → the
 			// streaming request bills nothing). Values only; r's cancellation is unchanged.
 			r = r.WithContext(ctx)
-		} else if p.agentAllocationBlocks(ctx, agentKeyID, wsID, model, prompt, requestID) {
-			writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
-			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "agent_blocked").Inc()
+		} else if err := p.agentAllocate(ctx, agentKeyID, wsID, model, prompt, requestID); err != nil {
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), writeAgentRefusal(w, err)).Inc()
 			return
 		}
 	}

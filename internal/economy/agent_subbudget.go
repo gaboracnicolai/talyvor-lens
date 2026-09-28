@@ -194,7 +194,7 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	// the per-key ceiling binds only a key with no agent.
 	isAgent, err := agentMovement(ctx, tx, scopedKeyID, lxcAmount, "spend", requestID)
 	if err != nil {
-		return err
+		return s.refusedMovement(ctx, tx, err)
 	}
 	if !isAgent && ceiling-spent < lxcAmount {
 		return ErrSubBudgetExceeded
@@ -304,7 +304,7 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 	// B19.1: an agent's key holds against the agent's balance (posted here), not the per-key ceiling.
 	isAgent, err := agentMovement(ctx, tx, scopedKeyID, heldLXC, "hold", reservationID)
 	if err != nil {
-		return err // rollback ⇒ no orphan reservation
+		return s.refusedMovement(ctx, tx, err) // rollback ⇒ no orphan reservation
 	}
 	if !isAgent && ceiling-spent < heldLXC {
 		return ErrSubBudgetExceeded // rollback ⇒ no orphan reservation

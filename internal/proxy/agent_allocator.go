@@ -8,6 +8,8 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net/http"
+	"strings"
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
@@ -26,6 +28,11 @@ import (
 // salt + the apiKeyID + a per-request crypto/rand nonce — NEVER the client X-Talyvor-Request-ID header. So a
 // client replaying its header gets a fresh key and is charged again (cannot dodge); the claim table's
 // exactly-once still protects a server-side retry that reuses the SAME derived key.
+//
+// B19.2 — THE ONE CLIENT-CHOSEN KEY: a request carrying an Idempotency-Key derives its key from it AND
+// from the request itself (agentDebitKeyFor), so only a byte-identical retry — same credential, model and
+// prompt — finds the first hold or claim and is charged once; anything else under the same
+// Idempotency-Key derives a different key and is charged as new.
 
 // agentSpender is the minimal debit surface (economy.DualTokenStore.SpendLXCForAgent satisfies it). An
 // interface so the proxy doesn't hard-depend on economy internals.
@@ -102,8 +109,14 @@ func (p *Proxy) agentStrategy(apiKeyID string) localrouter.RoutingStrategy {
 // metadata so the money row joins to its usage row. `model` is the REQUESTED model — this debit precedes
 // routing, so it is what the charge was estimated on, not necessarily the model that served.
 func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string) bool {
+	return p.agentAllocate(ctx, apiKeyID, wsID, model, prompt, requestID) != nil
+}
+
+// agentAllocate is agentAllocationBlocks returning WHY it blocks (nil: serve), so the handler can tell an
+// agent's rules (B19.2) from its balance.
+func (p *Proxy) agentAllocate(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string) error {
 	if apiKeyID == "" || p.agentSpender == nil || p.agentAllocEnabled == nil || !p.agentAllocEnabled() {
-		return false // non-agent / inert → no debit, no block (today's behavior)
+		return nil // non-agent / inert → no debit, no block (today's behavior)
 	}
 	estLXC := lxcEstimate(model, prompt)
 	if estLXC <= 0 {
@@ -125,25 +138,64 @@ func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model
 		// blocking short prompts refuses traffic that is served today. That is a pricing/product
 		// decision. The boundary is pinned in lxc_estimate_short_prompt_test.go so it cannot widen
 		// silently, and the same free path exists in lxc_gate.go#lxcGateBlocks.
-		return false
+		return nil
 	}
-	debitKey, err := deriveAgentDebitKey(p.agentDebitSalt, apiKeyID)
+	debitKey, err := p.agentDebitKeyFor(ctx, apiKeyID, model, prompt)
 	if err != nil {
 		slog.Error("economy: agent debit key derivation failed (failing closed)", slog.String("err", err.Error()))
-		return true // fail closed — cannot mint a safe key ⇒ do not serve
+		return err // fail closed — cannot mint a safe key ⇒ do not serve
 	}
 	// The debit row carries the REQUESTED model + token_events request_id (non-content — AgentDebitMeta),
 	// so the ledger is readable and joins to token_events. NEVER prompt text/hash/embedding (0055 immutable).
 	err = p.agentSpender.SpendLXCForAgent(ctx, apiKeyID, wsID, debitKey, estLXC, "proof-of-agent-allocation: pre-serve estimate debit",
 		economy.AgentDebitMeta{RequestedModel: model, RequestID: requestID})
 	if err == nil {
-		return false // debited ⇒ allow (serve)
+		return nil // debited ⇒ allow (serve)
 	}
-	if !errors.Is(err, economy.ErrSubBudgetExceeded) && !errors.Is(err, economy.ErrInsufficientLXC) {
+	if !expectedAgentRefusal(err) {
 		// Unexpected (e.g. transient DB) error — fail CLOSED to keep the ceiling airtight.
 		slog.Warn("economy: agent debit failed (failing closed)", slog.String("agent", apiKeyID), slog.String("err", err.Error()))
 	}
-	return true // ErrSubBudgetExceeded / ErrInsufficientLXC / any error ⇒ block (402)
+	return err // ErrSubBudgetExceeded / ErrInsufficientLXC / a rule / any error ⇒ block
+}
+
+// expectedAgentRefusal: a refusal the agent's balance or rules make, as opposed to a failure.
+func expectedAgentRefusal(err error) bool {
+	return errors.Is(err, economy.ErrSubBudgetExceeded) || errors.Is(err, economy.ErrInsufficientLXC) ||
+		errors.Is(err, economy.ErrAgentRule) || errors.Is(err, economy.ErrApprovalRequired)
+}
+
+type idempotencyCtxKey struct{}
+
+// withAgentCall carries what B19.2 needs about an agent's request to its hold or debit: what the rules
+// judge besides the amount (economy.AgentRequest), and the Idempotency-Key a retry repeats.
+func withAgentCall(ctx context.Context, apiKeyID, model, provider, prompt, idempotencyKey string) context.Context {
+	fp := sha256.Sum256([]byte("approval\x00" + apiKeyID + "\x00" + model + "\x00" + prompt))
+	ctx = economy.WithAgentRequest(ctx, economy.AgentRequest{Model: model, Provider: provider, Fingerprint: hex.EncodeToString(fp[:])})
+	return context.WithValue(ctx, idempotencyCtxKey{}, idempotencyKey)
+}
+
+// agentDebitKeyFor is the reservation or claim id of an agent request: deriveAgentDebitKey's fresh key,
+// or — for a request carrying an Idempotency-Key — one derived from it, the credential, the model and the
+// prompt, with no process salt, so a retry that reaches another process after a restart still finds it.
+func (p *Proxy) agentDebitKeyFor(ctx context.Context, apiKeyID, model, prompt string) (string, error) {
+	idem, _ := ctx.Value(idempotencyCtxKey{}).(string)
+	if idem == "" {
+		return deriveAgentDebitKey(p.agentDebitSalt, apiKeyID)
+	}
+	h := sha256.Sum256([]byte("idempotency\x00" + apiKeyID + "\x00" + idem + "\x00" + model + "\x00" + prompt))
+	return hex.EncodeToString(h[:]), nil
+}
+
+// writeAgentRefusal answers a blocked agent request: its rules' refusal says which rule (403); a balance
+// or ceiling refusal, or a failure, is the 402 it always was. Returns the metrics reason.
+func writeAgentRefusal(w http.ResponseWriter, err error) string {
+	if errors.Is(err, economy.ErrAgentRule) || errors.Is(err, economy.ErrApprovalRequired) {
+		writeError(w, http.StatusForbidden, strings.TrimPrefix(err.Error(), "economy: "))
+		return "agent_rule"
+	}
+	writeError(w, http.StatusPaymentRequired, "agent LXC sub-budget exceeded or insufficient balance")
+	return "agent_blocked"
 }
 
 // ─── Reservation seam (billing redesign) ────────────────────────────────────
@@ -194,27 +246,34 @@ func (p *Proxy) reservationActive() bool {
 // read `input` is blocked on the cross-tenant pooling decision recorded in embeddings_route_test.go, and
 // pricing embeddings at this seam starts refusing traffic that is served today. Both are product decisions.
 func (p *Proxy) agentReserveBlocks(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string, maxOut int) (context.Context, bool) {
+	rctx, err := p.agentReserve(ctx, apiKeyID, wsID, model, prompt, requestID, maxOut)
+	return rctx, err != nil
+}
+
+// agentReserve is agentReserveBlocks returning WHY it blocks (nil: serve), so the handler can tell an
+// agent's rules (B19.2) from its balance.
+func (p *Proxy) agentReserve(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string, maxOut int) (context.Context, error) {
 	if apiKeyID == "" || p.agentSpender == nil {
-		return ctx, false
+		return ctx, nil
 	}
 	heldLXC := reserveEstimateLXC(model, prompt, maxOut)
 	if heldLXC <= 0 {
-		return ctx, false // ⚠ every embeddings request reaches here, at any size — see the docstring
+		return ctx, nil // ⚠ every embeddings request reaches here, at any size — see the docstring
 	}
-	reservationID, err := deriveAgentDebitKey(p.agentDebitSalt, apiKeyID)
+	reservationID, err := p.agentDebitKeyFor(ctx, apiKeyID, model, prompt)
 	if err != nil {
 		slog.Error("economy: reservation key derivation failed (failing closed)", slog.String("err", err.Error()))
-		return ctx, true
+		return ctx, err
 	}
 	err = p.agentSpender.ReserveLXCForAgent(ctx, apiKeyID, wsID, reservationID, heldLXC,
 		economy.AgentDebitMeta{RequestedModel: model, RequestID: requestID})
 	if err != nil {
-		if !errors.Is(err, economy.ErrSubBudgetExceeded) && !errors.Is(err, economy.ErrInsufficientLXC) {
+		if !expectedAgentRefusal(err) {
 			slog.Warn("economy: reservation hold failed (failing closed)", slog.String("agent", apiKeyID), slog.String("err", err.Error()))
 		}
-		return ctx, true // ceiling / insufficient / any error ⇒ block (402)
+		return ctx, err // ceiling / insufficient / a rule / any error ⇒ block
 	}
-	return withReservation(ctx, reservationHandle{reservationID: reservationID, requestID: requestID}), false
+	return withReservation(ctx, reservationHandle{reservationID: reservationID, requestID: requestID}), nil
 }
 
 // settleReservation SETTLES the held reservation (if any) to the DELIVERED cost — called at the post-serve
