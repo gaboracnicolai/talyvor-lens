@@ -58,6 +58,11 @@ import (
 //	POST /v1/workspaces/{wsID}/agents/{id}/pause  {"reason"}  refuse its every movement until resumed
 //	POST /v1/workspaces/{wsID}/agents/{id}/resume
 //
+// B19.7 — one switch pauses every agent, effective on each one's next request, buffered or streamed:
+//
+//	POST /v1/workspaces/{wsID}/agents/pause-all  {"reason"}   every agent, those created later included
+//	POST /v1/workspaces/{wsID}/agents/resume-all              lifts it; an agent paused on its own stays paused
+//
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
 
@@ -77,6 +82,8 @@ type agentBank interface {
 	AgentPeriodStatement(ctx context.Context, workspaceID, agentID string, from, to time.Time) (economy.Statement, error)
 	WorkspaceAgentStatement(ctx context.Context, workspaceID string, from, to time.Time) (economy.Statement, error)
 	PauseAgent(ctx context.Context, workspaceID, agentID, reason string) error
+	PauseAllAgents(ctx context.Context, workspaceID, reason string) error
+	ResumeAllAgents(ctx context.Context, workspaceID string) error
 	ResumeAgent(ctx context.Context, workspaceID, agentID string) error
 	ListAgentSpendAlerts(ctx context.Context, workspaceID string) ([]economy.AgentSpendAlert, error)
 	AgentSpendForecast(ctx context.Context, workspaceID string, at time.Time) (economy.SpendForecast, error)
@@ -313,6 +320,24 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/resume", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
 		agentID := chi.URLParam(req, "agentID")
 		writePaused(w, agentID, false, bank.ResumeAgent(req.Context(), chi.URLParam(req, "wsID"), agentID))
+	}))
+	r.Post("/v1/workspaces/{wsID}/agents/pause-all", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&in)
+		if err := bank.PauseAllAgents(req.Context(), chi.URLParam(req, "wsID"), in.Reason); err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"all_paused": true})
+	}))
+	r.Post("/v1/workspaces/{wsID}/agents/resume-all", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		if err := bank.ResumeAllAgents(req.Context(), chi.URLParam(req, "wsID")); err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"all_paused": false})
 	}))
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/pay", func(w http.ResponseWriter, req *http.Request) {
 		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
