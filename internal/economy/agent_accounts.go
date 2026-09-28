@@ -89,10 +89,10 @@ func accountBalance(ctx context.Context, tx pgx.Tx, workspaceID, account string)
 	return bal, err
 }
 
-// allocatedSQL is what a workspace's agents hold: Σ agent balances = −(workspace side) − spend, since
-// every entry sums to zero.
-const allocatedSQL = `SELECT COALESCE(-sum(amount_ulxc), 0)::bigint FROM agent_postings
-  WHERE workspace_id = $1 AND account IN ('workspace', 'spend')`
+// allocatedSQL is what a workspace's agents hold: Σ their balances. Read directly, not as −(workspace side)
+// − spend: a transfer between workspaces (B22.3) is an entry whose two postings are in different workspaces.
+const allocatedSQL = `SELECT COALESCE(sum(amount_ulxc), 0)::bigint FROM agent_postings
+  WHERE workspace_id = $1 AND account LIKE 'agent:%'`
 
 // requireUnallocated refuses a debit of the workspace's OWN spending — anything not made with an agent's
 // key — that would reach into the LXC its agents hold (B19.13). bal is the lxc_balances balance the

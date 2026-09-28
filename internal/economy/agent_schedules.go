@@ -158,7 +158,7 @@ func (s *DualTokenStore) CreateAgentSchedule(ctx context.Context, workspaceID, f
 	sc, err := scanAgentSchedule(s.pool.QueryRow(ctx, `
 		INSERT INTO agent_payment_schedules (id, workspace_id, from_agent_id, to_agent_id, amount_ulxc, memo, every, next_run_at)
 		SELECT $1, $2, f.id, t.id, $5, $6, $7, $8 FROM agent_accounts f, agent_accounts t
-		 WHERE f.id = $3 AND f.workspace_id = $2 AND t.id = $4 AND t.workspace_id = $2
+		 WHERE f.id = $3 AND f.workspace_id = $2 AND t.id = $4 -- B22.3: the payee may be any agent on Talyvor
 		RETURNING `+agentScheduleColumns,
 		"sch_"+uuid.NewString(), workspaceID, fromAgentID, toAgentID, amount, memo, every, firstRunAt.UTC()))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -342,9 +342,23 @@ func (s *DualTokenStore) runScheduleTick(ctx context.Context, now time.Time) (st
 	outcome, entryID, useID, detail := "paid", any(nil), any(nil), ""
 	entry := uuid.New()
 	var perr error
-	if sc.ToListingID != "" {
+	var payeeWS string
+	if sc.ToAgentID != "" {
+		if err := tx.QueryRow(ctx, `SELECT workspace_id FROM agent_accounts WHERE id = $1`, sc.ToAgentID).Scan(&payeeWS); err != nil {
+			return "", fmt.Errorf("economy: schedule payee: %w", err)
+		}
+	}
+	switch {
+	case sc.ToListingID != "":
 		useID, perr = s.payListingTx(payCtx, sp, workspaceID, sc)
-	} else {
+	case payeeWS != workspaceID: // B22.3: another workspace's agent is paid by a transfer
+		var t AgentTransfer
+		t, perr = s.transferTx(payCtx, sp, AgentTransfer{FromWorkspaceID: workspaceID, FromAgentID: sc.FromAgentID, ToWorkspaceID: payeeWS,
+			ToAgentID: sc.ToAgentID, AmountULXC: sc.AmountULXC, Memo: sc.Memo, ScheduleID: sc.ID}, true)
+		if perr == nil {
+			entry = uuid.MustParse(t.EntryID)
+		}
+	default:
 		_, perr = payAgentTx(payCtx, sp, workspaceID,
 			AgentPayment{FromAgentID: sc.FromAgentID, ToAgentID: sc.ToAgentID, AmountULXC: sc.AmountULXC, Memo: sc.Memo}, entry)
 	}
@@ -357,7 +371,8 @@ func (s *DualTokenStore) runScheduleTick(ctx context.Context, now time.Time) (st
 			entryID = entry
 		}
 	case errors.Is(perr, ErrAgentFunds), errors.Is(perr, ErrAgentRule), errors.Is(perr, ErrApprovalRequired), errors.Is(perr, ErrAgentNotFound),
-		errors.Is(perr, ErrAgentOwnerless), errors.Is(perr, ErrListingPayee):
+		errors.Is(perr, ErrAgentOwnerless), errors.Is(perr, ErrListingPayee), errors.Is(perr, ErrOwnerUnverified),
+		errors.Is(perr, ErrCapabilityNotCleared):
 		if err := sp.Rollback(ctx); err != nil {
 			return "", err
 		}
@@ -406,16 +421,11 @@ func (s *DualTokenStore) topUpAgent(ctx context.Context, workspaceID, agentID st
 	if err != nil {
 		return 0, err
 	}
-	wsSide, err := accountBalance(ctx, tx, workspaceID, "workspace")
-	if err != nil {
-		return 0, err
+	var allocated int64
+	if err := tx.QueryRow(ctx, allocatedSQL, workspaceID).Scan(&allocated); err != nil {
+		return 0, fmt.Errorf("economy: allocated LXC: %w", err)
 	}
-	spent, err := accountBalance(ctx, tx, workspaceID, "spend")
-	if err != nil {
-		return 0, err
-	}
-	// Allocated = Σ agent balances = −(workspace side) − spend, since every entry sums to zero.
-	amount := min(to-bal, wsBal-(-wsSide-spent))
+	amount := min(to-bal, wsBal-allocated)
 	if amount <= 0 {
 		return 0, nil
 	}

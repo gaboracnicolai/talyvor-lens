@@ -4134,6 +4134,7 @@ func run() error {
 		mountAgentAccountRoutes(authed, dualToken, tenantStore)
 		mountAgentCardRoutes(authed, dualToken, agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)) // B19.12
 		mountWalletCapabilityRoutes(authed, dualToken)                                                               // B22.1
+		mountAgentTransferRoutes(authed, dualToken)                                                                  // B22.3
 		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5
