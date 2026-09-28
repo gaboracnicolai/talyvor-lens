@@ -46,7 +46,9 @@ func TestMarketSafety_HeldAtReviewReportedTakenDownAndRefunded(t *testing.T) {
 	r := chi.NewRouter()
 	mountMarketRoutes(r, store)
 	mountMarketUseRoutes(r, store, lens, svc, bank)
-	mountMarketAdminRoutes(r, headerAdmin{}, store, svc)
+	r.Get("/v1/admin/marketplace/review", requireAdmin(headerAdmin{}, newMarketReviewQueueHandler(store)))
+	r.Post("/v1/admin/marketplace/listings/{listingID}/approve", requireAdmin(headerAdmin{}, newMarketApproveHandler(store)))
+	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdmin(headerAdmin{}, newMarketTakedownHandler(store, svc)))
 	r.Post("/v1/billing/webhook", svc.HandleWebhook)
 
 	call := func(ws, method, path, body string) (int, string) {

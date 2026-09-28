@@ -52,7 +52,7 @@ var stepText = []struct {
 	re   *regexp.Regexp
 }{
 	{"reach the network", regexp.MustCompile(`(?i)\b(?:https?|ftp|wss?)://`)},
-	{"run a command", regexp.MustCompile(`(?i)(?:^|[\s;&|` + "`" + `(])(?:curl|wget|bash|sh|zsh|powershell|netcat|nc|sudo|chmod)\s|\brm\s+-rf\b|\|\s*(?:ba)?sh\b|\$\(`)},
+	{"run a command", regexp.MustCompile(`(?i)(?:^|[\s;&|\x60(])(?:curl|wget|bash|sh|zsh|powershell|netcat|nc|sudo|chmod)\s|\brm\s+-rf\b|\|\s*(?:ba)?sh\b|\$\(`)},
 	{"read the host's environment", regexp.MustCompile(`\$\{[A-Za-z_]\w*\}|(?i)process\.env|os\.environ|\bgetenv\b`)},
 	{"read the host's files", regexp.MustCompile(`(?i)/etc/(?:passwd|shadow)|~/\.ssh|\.aws/credentials|\.env\b`)},
 }

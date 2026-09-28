@@ -123,7 +123,7 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 	})
 }
 
-// B20.4 — the admin's half of marketplace safety (requireAdmin):
+// B20.4 — the admin's half of marketplace safety, registered in main.go behind requireAdmin:
 //
 //	GET  /v1/admin/marketplace/review                        held listings and reported ones, most reported first
 //	POST /v1/admin/marketplace/listings/{id}/approve         keep it up: release a hold, resolve its reports as kept
@@ -131,36 +131,44 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 //
 // A takedown answers with the refunds it wrote (market_refunds rows); a buyer's credit Stripe did not
 // accept is named in credit_error and retried by refundTakenDownMarketUses.
-func mountMarketAdminRoutes(r chi.Router, am adminAuthenticator, store *market.Store, refunder market.Refunder) {
-	writeErr := func(w http.ResponseWriter, err error) {
-		switch {
-		case errors.Is(err, market.ErrInvalid):
-			writeJSONErr(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, market.ErrNotFound):
-			writeJSONErr(w, http.StatusNotFound, err.Error())
-		case errors.Is(err, market.ErrTakenDown):
-			writeJSONErr(w, http.StatusConflict, err.Error())
-		default:
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-		}
+
+func writeMarketAdminErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, market.ErrInvalid):
+		writeJSONErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, market.ErrNotFound):
+		writeJSONErr(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, market.ErrTakenDown):
+		writeJSONErr(w, http.StatusConflict, err.Error())
+	default:
+		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 	}
-	r.Get("/v1/admin/marketplace/review", requireAdmin(am, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+}
+
+func newMarketReviewQueueHandler(store *market.Store) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		q, err := store.ReviewQueue(req.Context())
 		if err != nil {
-			writeErr(w, err)
+			writeMarketAdminErr(w, err)
 			return
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{"listings": q})
-	})))
-	r.Post("/v1/admin/marketplace/listings/{listingID}/approve", requireAdmin(am, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	})
+}
+
+func newMarketApproveHandler(store *market.Store) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		l, err := store.Approve(req.Context(), chi.URLParam(req, "listingID"))
 		if err != nil {
-			writeErr(w, err)
+			writeMarketAdminErr(w, err)
 			return
 		}
 		writeJSONOK(w, http.StatusOK, l)
-	})))
-	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdmin(am, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	})
+}
+
+func newMarketTakedownHandler(store *market.Store, refunder market.Refunder) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		var in struct {
 			Reason string `json:"reason"`
 		}
@@ -170,11 +178,11 @@ func mountMarketAdminRoutes(r chi.Router, am adminAuthenticator, store *market.S
 		}
 		t, err := store.TakeDown(req.Context(), refunder, chi.URLParam(req, "listingID"), in.Reason)
 		if err != nil {
-			writeErr(w, err)
+			writeMarketAdminErr(w, err)
 			return
 		}
 		writeJSONOK(w, http.StatusOK, t)
-	})))
+	})
 }
 
 // marketOwnerOnly admits the workspace's owner or an admin — the rule the agent routes use.

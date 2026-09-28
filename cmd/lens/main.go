@@ -2037,7 +2037,11 @@ func run() error {
 
 	r.Handle("/v1/admin/keel/findings", requireAdminOrOperatorRead(authManager,
 		newKeelFindingsHandler(keelFindingsReader)))
-	mountMarketAdminRoutes(r, authManager, marketStore, marketRefunder) // B20.4: review queue, approve, takedown
+	// B20.4 — marketplace safety: the admin's queue of held and reported listings, keeping one up, and
+	// taking one down (which refunds its uses inside the holdback). market_handler.go.
+	r.Get("/v1/admin/marketplace/review", requireAdmin(authManager, newMarketReviewQueueHandler(marketStore)))
+	r.Post("/v1/admin/marketplace/listings/{listingID}/approve", requireAdmin(authManager, newMarketApproveHandler(marketStore)))
+	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdmin(authManager, newMarketTakedownHandler(marketStore, marketRefunder)))
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
 	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
 	// unchanged).
