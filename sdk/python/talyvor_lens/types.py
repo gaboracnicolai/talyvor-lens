@@ -9,7 +9,7 @@ X-Talyvor-* header, mirror it here so SDK users can set it via kwargs.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TypedDict
 
 HEADER_AUTHORIZATION = "Authorization"
 HEADER_WORKSPACE = "X-Talyvor-Workspace"
@@ -58,3 +58,73 @@ class AttributionContext:
                 )
             )
         )
+
+
+# The agent bank (B19.9/B19.18): the JSON Lens's agent tools answer with. Amounts are µLXC.
+
+
+class AgentAccount(TypedDict, total=False):
+    id: str
+    name: str
+    balance_ulxc: int
+    spent_ulxc: int
+    keys: list[str]
+    created_at: str
+    paused_at: str
+    paused_reason: str
+    owner_user_id: str
+    verified: bool
+
+
+class AgentRules(TypedDict, total=False):
+    max_per_request_ulxc: int
+    daily_limit_ulxc: int
+    monthly_limit_ulxc: int
+    approval_above_ulxc: int
+    allowed_models: list[str]
+    allowed_providers: list[str]
+    active_from: str
+    active_until: str
+    timezone: str
+    pause_on_unusual_spend: bool
+
+
+class AgentBalance(TypedDict):
+    agent: AgentAccount
+    rules: AgentRules
+    workspace_paused: bool
+
+
+class AgentApproval(TypedDict, total=False):
+    id: str
+    agent_id: str
+    amount_ulxc: int
+    model: str
+    reason: str
+    status: str  # pending | approved | denied | used
+    created_at: str
+    decided_at: str
+
+
+class AgentPayment(TypedDict, total=False):
+    entry_id: str
+    from_agent_id: str
+    to_agent_id: str
+    amount_ulxc: int
+    from_balance_ulxc: int
+    to_balance_ulxc: int
+    memo: str
+
+
+class ReceiptPosting(TypedDict):
+    posting_id: int
+    account: str  # workspace | spend | agent:<id>
+    amount_ulxc: int
+
+
+class AgentReceipt(TypedDict, total=False):
+    entry_id: str
+    kind: str
+    ref: str
+    at: str
+    postings: list[ReceiptPosting]

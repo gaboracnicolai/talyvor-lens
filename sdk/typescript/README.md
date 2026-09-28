@@ -70,6 +70,33 @@ await fetch("http://lens:8080/v1/proxy/openai/chat/completions", {
 });
 ```
 
+## The agent bank
+
+With a key attached to an agent (`POST /v1/workspaces/{ws}/agents/{agent}/keys`), the agent
+uses its own account. Amounts are µLXC (1 LXC = 1,000,000 µLXC); every call is
+logged by Lens, and the agent's spending rules judge every payment.
+
+```ts
+import { LensClient, PaymentRefused } from "talyvor-lens";
+
+const bank = new LensClient({ lensUrl: "https://lens.talyvor.com", apiKey: "tlv_ws_..." }).bank;
+
+(await bank.balance()).agent.balance_ulxc; // 10000000
+await bank.requestApproval("agt_seller", 2_000_000, "October hosting");
+// ...a person approves it on the Agent Bank screen, then:
+const payment = await bank.pay("agt_seller", 2_000_000);
+(await bank.receipt(payment.entry_id)).postings; // every posting, summing to zero
+
+try {
+  await bank.pay("agt_seller", 6_000_000);
+} catch (err) {
+  if (err instanceof PaymentRefused) console.log(err.message); // "...the agent's limit per request is 5 LXC"
+}
+```
+
+A refusal by the bank is `PaymentRefused`; Lens not answering (network, a
+rejected key) is its parent, `AgentBankError`.
+
 ## Headers set by the SDK
 
 | Header | Source | Purpose |

@@ -57,6 +57,32 @@ headers = inject_lens_headers(
 response = httpx.post("http://lens:8080/v1/proxy/openai/chat/completions", headers=headers, json=body)
 ```
 
+## The agent bank
+
+With a key attached to an agent (`POST /v1/workspaces/{ws}/agents/{agent}/keys`), the agent
+uses its own account. Amounts are µLXC (1 LXC = 1,000,000 µLXC); every call is
+logged by Lens, and the agent's spending rules judge every payment.
+
+```python
+from talyvor_lens import LensClient, PaymentRefused
+
+bank = LensClient(lens_url="https://lens.talyvor.com", api_key="tlv_ws_...").bank
+
+bank.balance()["agent"]["balance_ulxc"]        # 10000000
+approval = bank.request_approval("agt_seller", 2_000_000, reason="October hosting")
+# ...a person approves it on the Agent Bank screen, then:
+payment = bank.pay("agt_seller", 2_000_000)
+bank.receipt(payment["entry_id"])["postings"]  # every posting, summing to zero
+
+try:
+    bank.pay("agt_seller", 6_000_000)
+except PaymentRefused as refusal:
+    print(refusal)  # "...the agent's limit per request is 5 LXC"
+```
+
+A refusal by the bank is `PaymentRefused`; Lens not answering (network, a
+rejected key) is its parent, `AgentBankError`.
+
 ## Headers set by the SDK
 
 | Header | Source | Purpose |
