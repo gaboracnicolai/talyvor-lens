@@ -150,8 +150,8 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 	if len(stripeFake.events) != 1 || stripeFake.events[0] != want || len(stripeFake.subs) != 1 {
 		t.Fatalf("Stripe got events %+v and subscriptions %v, want one event %+v on one subscription", stripeFake.events, stripeFake.subs, want)
 	}
-	if e := earnings(); e.PayableUSDMicros != 0 {
-		t.Fatalf("the seller has earned %d µUSD before the buyer paid", e.PayableUSDMicros)
+	if e := earnings(); e.PayableUSDMicros != 0 || e.PendingUses != 1 || e.PendingUSDMicros != 5_000 {
+		t.Fatalf("before the buyer paid, the seller's earnings = %+v; want nothing payable and one use of 5,000 µUSD pending", e)
 	}
 
 	// A second use, after the period the first invoice covers (Stripe's periods are whole seconds); and Stripe
@@ -232,8 +232,8 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 	if !row(first.ID).cleared || row(second.ID).cleared {
 		t.Errorf("cleared: first %v, second %v; want only the use the paid invoice carried", row(first.ID).cleared, row(second.ID).cleared)
 	}
-	if e := earnings(); e.PayableUSDMicros != 5_000 || e.InHoldbackUSDMicros != 5_000 || e.AvailableUSDMicros != 0 {
-		t.Errorf("the seller's earnings = %+v, want 5,000 µUSD payable and all of it in the holdback", e)
+	if e := earnings(); e.PayableUSDMicros != 5_000 || e.InHoldbackUSDMicros != 5_000 || e.AvailableUSDMicros != 0 || e.PendingUses != 1 {
+		t.Errorf("the seller's earnings = %+v, want 5,000 µUSD payable, all of it in the holdback, and the second use still pending", e)
 	}
 
 	// A buyer's agent: its rules judge the use, and its charge goes on its company's bill.

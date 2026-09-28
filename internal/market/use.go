@@ -416,6 +416,10 @@ func SellerShare(lifetime, gross int64) int64 {
 
 // Earnings is a seller's marketplace earnings, in µUSD.
 type Earnings struct {
+	// Pending: uses of the seller's listings billed to buyers who have not yet paid that bill — how many,
+	// and what the seller's share of them would be today. They become earnings when the invoice is paid.
+	PendingUses         int64     `json:"pending_uses"`
+	PendingUSDMicros    int64     `json:"pending_usd_micros"`
 	PayableUSDMicros    int64     `json:"payable_usd_micros"`     // every share earned (and not yet paid out, B20.5)
 	InHoldbackUSDMicros int64     `json:"in_holdback_usd_micros"` // of which still inside the 14-day holdback
 	AvailableUSDMicros  int64     `json:"available_usd_micros"`   // of which past it
@@ -445,6 +449,13 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 		return e, fmt.Errorf("market: earnings: %w", err)
 	}
 	e.AvailableUSDMicros = e.PayableUSDMicros - e.InHoldbackUSDMicros
+	var pendingULXC int64
+	if err := s.pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(price_ulxc), 0)::bigint FROM market_uses
+		WHERE seller_workspace_id = $1 AND charge = 'billed' AND ran_at IS NOT NULL AND cleared_at IS NULL`,
+		sellerWorkspaceID).Scan(&e.PendingUses, &pendingULXC); err != nil {
+		return e, fmt.Errorf("market: pending earnings: %w", err)
+	}
+	e.PendingUSDMicros = SellerShare(e.LifetimeGrossMicros, pendingULXC/ulxcPerUSDMicro)
 	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.invoice_id, e.cleared_at, e.payable_at
 		FROM market_earnings e LEFT JOIN market_uses u ON u.id = e.use_id
 		WHERE e.seller_workspace_id = $1 ORDER BY e.cleared_at DESC, e.use_id LIMIT 100`, sellerWorkspaceID)
