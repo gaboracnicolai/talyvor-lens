@@ -49,6 +49,9 @@ type AgentBook struct {
 	UnallocatedULXC      int64   `json:"unallocated_ulxc"`
 	SpentULXC            int64   `json:"spent_ulxc"`
 	Agents               []Agent `json:"agents"`
+	// AllPausedAt is set while every agent in the workspace is paused (B19.7).
+	AllPausedAt     *time.Time `json:"all_paused_at,omitempty"`
+	AllPausedReason string     `json:"all_paused_reason,omitempty"`
 }
 
 func agentAccount(id string) string { return "agent:" + id }
@@ -266,6 +269,10 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT balance FROM lxc_balances WHERE workspace_id = $1), 0)::bigint`,
 		workspaceID).Scan(&book.WorkspaceBalanceULXC); err != nil {
 		return book, fmt.Errorf("economy: workspace balance: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT paused_at, reason FROM agent_workspace_pauses WHERE workspace_id = $1`,
+		workspaceID).Scan(&book.AllPausedAt, &book.AllPausedReason); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return book, fmt.Errorf("economy: workspace pause: %w", err)
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason,

@@ -197,6 +197,7 @@ var Manifest = map[string]Entry{
 	"agent_rules":              {Delete, ""},
 	"agent_approvals":          {Delete, ""},
 	"agent_lxc_subbudgets":     {Delete, ""},
+	"agent_workspace_pauses":   {Delete, ""},
 	"annotator_stakes":         {Delete, ""},
 	"api_keys":                 {Delete, ""},
 	"batch_jobs":               {Delete, ""},

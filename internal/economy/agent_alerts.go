@@ -50,12 +50,21 @@ type AgentSpendAlert struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
-// refuseIfPaused refuses any movement of a paused agent.
+// refuseIfPaused refuses any movement of an agent that is paused, on its own or with every agent in its
+// workspace (B19.7).
 func refuseIfPaused(ctx context.Context, tx pgx.Tx, agentID string) error {
-	var pausedAt *time.Time
-	var reason string
-	if err := tx.QueryRow(ctx, `SELECT paused_at, paused_reason FROM agent_accounts WHERE id = $1`, agentID).Scan(&pausedAt, &reason); err != nil {
+	var pausedAt, allPausedAt *time.Time
+	var reason, allReason string
+	if err := tx.QueryRow(ctx, `SELECT a.paused_at, a.paused_reason, w.paused_at, COALESCE(w.reason, '')
+		FROM agent_accounts a LEFT JOIN agent_workspace_pauses w ON w.workspace_id = a.workspace_id WHERE a.id = $1`,
+		agentID).Scan(&pausedAt, &reason, &allPausedAt, &allReason); err != nil {
 		return fmt.Errorf("economy: agent paused: %w", err)
+	}
+	if allPausedAt != nil {
+		if allReason == "" {
+			allReason = "paused by the workspace's owner"
+		}
+		return ruleRefusal("every agent in this workspace is paused (%s) — the workspace's owner can resume them", allReason)
 	}
 	if pausedAt == nil {
 		return nil
@@ -114,6 +123,23 @@ func (s *DualTokenStore) PauseAgent(ctx context.Context, workspaceID, agentID, r
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrAgentNotFound
+	}
+	return nil
+}
+
+// PauseAllAgents pauses every agent in a workspace, those it creates later included, until ResumeAllAgents.
+func (s *DualTokenStore) PauseAllAgents(ctx context.Context, workspaceID, reason string) error {
+	if _, err := s.pool.Exec(ctx, `INSERT INTO agent_workspace_pauses (workspace_id, reason) VALUES ($1, $2)
+		ON CONFLICT (workspace_id) DO UPDATE SET reason = EXCLUDED.reason`, workspaceID, reason); err != nil {
+		return fmt.Errorf("economy: pause every agent: %w", err)
+	}
+	return nil
+}
+
+// ResumeAllAgents lifts PauseAllAgents. An agent paused on its own stays paused.
+func (s *DualTokenStore) ResumeAllAgents(ctx context.Context, workspaceID string) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM agent_workspace_pauses WHERE workspace_id = $1`, workspaceID); err != nil {
+		return fmt.Errorf("economy: resume every agent: %w", err)
 	}
 	return nil
 }
