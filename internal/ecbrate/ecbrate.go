@@ -161,12 +161,12 @@ func (b *Book) ToUSD(ctx context.Context, amountMinor int64, currency string, at
 			return Conversion{}, fmt.Errorf("%w: the ECB's %s rate for %s is missing", ErrNoRate, ccy, date.Format("2006-01-02"))
 		}
 	}
-	c.USDMicros = usdMicros(amountMinor, c.USDPerEUR, c.CurrencyPerEUR)
+	c.USDMicros = USDMicros(amountMinor, c.USDPerEUR, c.CurrencyPerEUR)
 	return c, nil
 }
 
-// usdMicros is ceil(amountMinor ÷ 100 × 10⁶ × usdPerEUR ÷ ccyPerEUR), exactly.
-func usdMicros(amountMinor int64, usdPerEUR, ccyPerEUR string) int64 {
+// USDMicros is ceil(amountMinor ÷ 100 × 10⁶ × usdPerEUR ÷ ccyPerEUR), exactly.
+func USDMicros(amountMinor int64, usdPerEUR, ccyPerEUR string) int64 {
 	usd, _ := new(big.Rat).SetString(usdPerEUR)
 	ccy, _ := new(big.Rat).SetString(ccyPerEUR)
 	v := new(big.Rat).SetInt64(amountMinor * 10_000)

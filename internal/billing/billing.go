@@ -126,6 +126,8 @@ type Service struct {
 	// B20.5 — seller payouts (connect.go). Unset ⇒ disputes are acknowledged and ignored.
 	connectStripe connectStripeAPI
 	marketPayouts MarketPayouts
+	// B19.25 — agent card purchases settle (agent_cards.go). Unset ⇒ Issuing events are acknowledged and ignored.
+	agentCards AgentCardSettler
 
 	// D, in µLXC — the Model 2 allowance per billing period (W4.6.1 step 2).
 	// ZERO is the default and means "no allowance configured": no grant row is ever
@@ -294,6 +296,8 @@ func (s *Service) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		s.handleInvoiceCreated(w, r.Context(), &event)
 	case "invoice.paid": // B20.2 — a buyer paid their marketplace bill: its uses clear and their sellers earn
 		s.handleInvoicePaid(w, r.Context(), &event)
+	case "issuing_authorization.updated", "issuing_transaction.created": // B19.25 — an agent card purchase settles
+		s.handleAgentCardSettlement(w, r.Context(), &event)
 	default:
 		w.WriteHeader(http.StatusOK) // unhandled type → ack, no action
 	}
