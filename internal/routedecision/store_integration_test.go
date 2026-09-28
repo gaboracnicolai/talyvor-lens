@@ -20,13 +20,22 @@ func routePool(t *testing.T) *pgxpool.Pool {
 	if url == "" {
 		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG routedecision test")
 	}
-	pool, err := pgxpool.New(context.Background(), url)
+	// Its own schema: the cross-tenant readout joins workspaces (B17.7), and the shared test database has
+	// no migrated workspaces table at this point in a run.
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = "routedecision_it"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
 	if _, err := pool.Exec(context.Background(), `
-		DROP TABLE IF EXISTS routing_decisions;
+		DROP SCHEMA IF EXISTS routedecision_it CASCADE;
+		CREATE SCHEMA routedecision_it;
+		CREATE TABLE workspaces (id TEXT PRIMARY KEY, synthetic BOOLEAN NOT NULL DEFAULT false);
 		CREATE TABLE routing_decisions (
 			id BIGSERIAL PRIMARY KEY,
 			workspace_id TEXT NOT NULL,
