@@ -25,11 +25,13 @@ var ErrScheduleNotFound = errors.New("economy: no such payment schedule in this 
 // maxTicksPerRun bounds one run's catching up; the rest waits for the next run.
 const maxTicksPerRun = 1000
 
-// AgentSchedule is a recurring payment from one of a workspace's agents to another.
+// AgentSchedule is a recurring payment from one of a workspace's agents to another, or to a marketplace
+// listing (B19.17) — exactly one of ToAgentID and ToListingID is set.
 type AgentSchedule struct {
 	ID          string    `json:"id"`
 	FromAgentID string    `json:"from_agent_id"`
 	ToAgentID   string    `json:"to_agent_id"`
+	ToListingID string    `json:"to_listing_id,omitempty"`
 	AmountULXC  int64     `json:"amount_ulxc"`
 	Memo        string    `json:"memo,omitempty"`
 	Every       string    `json:"every"` // hour | day | week | month
@@ -38,11 +40,13 @@ type AgentSchedule struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// AgentScheduleRun is one tick of a schedule: paid (EntryID is the payment's entry) or refused (Detail says why).
+// AgentScheduleRun is one tick of a schedule: paid (EntryID is the payment's entry, or UseID the listing's
+// billed use) or refused (Detail says why).
 type AgentScheduleRun struct {
 	TickAt    time.Time `json:"tick_at"`
 	Outcome   string    `json:"outcome"` // paid | refused
 	EntryID   string    `json:"entry_id,omitempty"`
+	UseID     string    `json:"use_id,omitempty"`
 	Detail    string    `json:"detail,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -72,12 +76,71 @@ func nextTick(t time.Time, every string) time.Time {
 	}
 }
 
-const agentScheduleColumns = `id, from_agent_id, to_agent_id, amount_ulxc, memo, every, next_run_at, active, created_at`
+const agentScheduleColumns = `id, from_agent_id, COALESCE(to_agent_id, ''), COALESCE(to_listing_id, ''), amount_ulxc, memo, every,
+	next_run_at, active, created_at`
 
 func scanAgentSchedule(row pgx.Row) (AgentSchedule, error) {
 	var sc AgentSchedule
-	err := row.Scan(&sc.ID, &sc.FromAgentID, &sc.ToAgentID, &sc.AmountULXC, &sc.Memo, &sc.Every, &sc.NextRunAt, &sc.Active, &sc.CreatedAt)
+	err := row.Scan(&sc.ID, &sc.FromAgentID, &sc.ToAgentID, &sc.ToListingID, &sc.AmountULXC, &sc.Memo, &sc.Every, &sc.NextRunAt, &sc.Active, &sc.CreatedAt)
 	return sc, err
+}
+
+// ListingCharger is what a schedule paying a marketplace listing needs of the marketplace (B19.17).
+// *market.Store satisfies it.
+type ListingCharger interface {
+	// ListingPrice is what one use of listingID costs buyerWorkspaceID, in µLXC, or a refusal saying why
+	// the workspace cannot pay it (its own listing, a free one, one it cannot see).
+	ListingPrice(ctx context.Context, buyerWorkspaceID, listingID string) (price int64, refusal string, err error)
+	// ChargeScheduledListing records, in tx, one billed use of listingID by agentID at the tick at, once
+	// judge lets its price through: never more than maxULXC. refusal is non-empty (and nothing recorded)
+	// when the listing cannot be paid; judge's error is returned as it is.
+	ChargeScheduledListing(ctx context.Context, tx pgx.Tx, buyerWorkspaceID, agentID, listingID string, maxULXC int64, at time.Time,
+		judge func(price int64) error) (useID, refusal string, err error)
+}
+
+// SetListingCharger lets schedules pay marketplace listings.
+func (s *DualTokenStore) SetListingCharger(c ListingCharger) { s.listings = c }
+
+// ErrListingPayee: a schedule to a listing that the workspace cannot pay.
+var ErrListingPayee = errors.New("economy: this schedule cannot pay that listing")
+
+// CreateAgentListingSchedule schedules fromAgentID to pay listingID every hour, day, week or month, the
+// first time at firstRunAt. Each tick is one use of the listing at its price then, on the company's monthly
+// marketplace bill; amount is the most a tick pays (0: the listing's price now), so a seller raising the
+// price is refused rather than paid.
+func (s *DualTokenStore) CreateAgentListingSchedule(ctx context.Context, workspaceID, fromAgentID, listingID string, amount int64,
+	memo, every string, firstRunAt time.Time) (AgentSchedule, error) {
+	if every != "hour" && every != "day" && every != "week" && every != "month" {
+		return AgentSchedule{}, fmt.Errorf("%w: every must be hour, day, week or month", ErrAgentRule)
+	}
+	if s.listings == nil {
+		return AgentSchedule{}, fmt.Errorf("%w: the marketplace is not configured", ErrListingPayee)
+	}
+	price, refusal, err := s.listings.ListingPrice(ctx, workspaceID, listingID)
+	if err != nil {
+		return AgentSchedule{}, err
+	}
+	if refusal != "" {
+		return AgentSchedule{}, fmt.Errorf("%w: %s", ErrListingPayee, refusal)
+	}
+	if amount == 0 {
+		amount = price
+	}
+	if amount < price {
+		return AgentSchedule{}, fmt.Errorf("%w: the listing costs %s LXC a use, more than %s LXC", ErrListingPayee, lxcString(price), lxcString(amount))
+	}
+	sc, err := scanAgentSchedule(s.pool.QueryRow(ctx, `
+		INSERT INTO agent_payment_schedules (id, workspace_id, from_agent_id, to_listing_id, amount_ulxc, memo, every, next_run_at)
+		SELECT $1, $2, f.id, $4, $5, $6, $7, $8 FROM agent_accounts f WHERE f.id = $3 AND f.workspace_id = $2
+		RETURNING `+agentScheduleColumns,
+		"sch_"+uuid.NewString(), workspaceID, fromAgentID, listingID, amount, memo, every, firstRunAt.UTC()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sc, ErrAgentNotFound
+	}
+	if err != nil {
+		return sc, fmt.Errorf("economy: create schedule: %w", err)
+	}
+	return sc, nil
 }
 
 // CreateAgentSchedule schedules fromAgentID to pay toAgentID amount µLXC every hour, day, week or month,
@@ -136,8 +199,8 @@ func (s *DualTokenStore) ListAgentScheduleRuns(ctx context.Context, workspaceID,
 	if !exists {
 		return nil, ErrScheduleNotFound
 	}
-	rows, err := s.pool.Query(ctx, `SELECT tick_at, outcome, COALESCE(entry_id::text, ''), detail, created_at FROM agent_schedule_runs
-		WHERE schedule_id = $1 ORDER BY tick_at DESC LIMIT 500`, scheduleID)
+	rows, err := s.pool.Query(ctx, `SELECT tick_at, outcome, COALESCE(entry_id::text, ''), COALESCE(use_id, ''), detail, created_at
+		FROM agent_schedule_runs WHERE schedule_id = $1 ORDER BY tick_at DESC LIMIT 500`, scheduleID)
 	if err != nil {
 		return nil, fmt.Errorf("economy: schedule runs: %w", err)
 	}
@@ -145,7 +208,7 @@ func (s *DualTokenStore) ListAgentScheduleRuns(ctx context.Context, workspaceID,
 	out := []AgentScheduleRun{}
 	for rows.Next() {
 		var r AgentScheduleRun
-		if err := rows.Scan(&r.TickAt, &r.Outcome, &r.EntryID, &r.Detail, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.TickAt, &r.Outcome, &r.EntryID, &r.UseID, &r.Detail, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -259,34 +322,42 @@ func (s *DualTokenStore) runScheduleTick(ctx context.Context, now time.Time) (st
 	defer func() { _ = tx.Rollback(ctx) }()
 	var workspaceID string
 	var sc AgentSchedule
-	err = tx.QueryRow(ctx, `SELECT workspace_id, id, from_agent_id, to_agent_id, amount_ulxc, memo, every, next_run_at
+	err = tx.QueryRow(ctx, `SELECT workspace_id, id, from_agent_id, COALESCE(to_agent_id, ''), COALESCE(to_listing_id, ''), amount_ulxc,
+		memo, every, next_run_at
 		FROM agent_payment_schedules WHERE active AND next_run_at <= $1 ORDER BY next_run_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, now).
-		Scan(&workspaceID, &sc.ID, &sc.FromAgentID, &sc.ToAgentID, &sc.AmountULXC, &sc.Memo, &sc.Every, &sc.NextRunAt)
+		Scan(&workspaceID, &sc.ID, &sc.FromAgentID, &sc.ToAgentID, &sc.ToListingID, &sc.AmountULXC, &sc.Memo, &sc.Every, &sc.NextRunAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("economy: due schedule: %w", err)
 	}
-	payCtx := WithAgentRequest(ctx, AgentRequest{Payment: true, At: now,
+	payCtx := WithAgentRequest(ctx, AgentRequest{Payment: true, At: now, Listing: sc.ToListingID,
 		Fingerprint: "schedule:" + sc.ID + ":" + sc.NextRunAt.UTC().Format(time.RFC3339)})
 	// The payment in a savepoint: a refusal is undone and recorded, and the tick still counts as run.
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
-	outcome, entryID, detail := "paid", any(nil), ""
+	outcome, entryID, useID, detail := "paid", any(nil), any(nil), ""
 	entry := uuid.New()
-	_, perr := payAgentTx(payCtx, sp, workspaceID,
-		AgentPayment{FromAgentID: sc.FromAgentID, ToAgentID: sc.ToAgentID, AmountULXC: sc.AmountULXC, Memo: sc.Memo}, entry)
+	var perr error
+	if sc.ToListingID != "" {
+		useID, perr = s.payListingTx(payCtx, sp, workspaceID, sc)
+	} else {
+		_, perr = payAgentTx(payCtx, sp, workspaceID,
+			AgentPayment{FromAgentID: sc.FromAgentID, ToAgentID: sc.ToAgentID, AmountULXC: sc.AmountULXC, Memo: sc.Memo}, entry)
+	}
 	switch {
 	case perr == nil:
 		if err := sp.Commit(ctx); err != nil {
 			return "", err
 		}
-		entryID = entry
+		if sc.ToListingID == "" {
+			entryID = entry
+		}
 	case errors.Is(perr, ErrAgentFunds), errors.Is(perr, ErrAgentRule), errors.Is(perr, ErrApprovalRequired), errors.Is(perr, ErrAgentNotFound),
-		errors.Is(perr, ErrAgentOwnerless):
+		errors.Is(perr, ErrAgentOwnerless), errors.Is(perr, ErrListingPayee):
 		if err := sp.Rollback(ctx); err != nil {
 			return "", err
 		}
@@ -294,8 +365,8 @@ func (s *DualTokenStore) runScheduleTick(ctx context.Context, now time.Time) (st
 	default:
 		return "", perr
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO agent_schedule_runs (schedule_id, tick_at, outcome, entry_id, detail) VALUES ($1, $2, $3, $4, $5)`,
-		sc.ID, sc.NextRunAt, outcome, entryID, detail); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_schedule_runs (schedule_id, tick_at, outcome, entry_id, use_id, detail) VALUES ($1, $2, $3, $4, $5, $6)`,
+		sc.ID, sc.NextRunAt, outcome, entryID, useID, detail); err != nil {
 		return "", fmt.Errorf("economy: record schedule run: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE agent_payment_schedules SET next_run_at = $2 WHERE id = $1`, sc.ID, nextTick(sc.NextRunAt.UTC(), sc.Every)); err != nil {
@@ -352,4 +423,27 @@ func (s *DualTokenStore) topUpAgent(ctx context.Context, workspaceID, agentID st
 		return 0, err
 	}
 	return amount, tx.Commit(ctx)
+}
+
+// payListingTx pays one tick of a schedule to a marketplace listing, in sp: under the paying agent's row
+// lock, the listing's price then is judged by its rules and recorded as a billed use, stamped at the tick,
+// which the marketplace meters onto the company's monthly bill. Nothing is taken from the agent's balance.
+func (s *DualTokenStore) payListingTx(ctx context.Context, sp pgx.Tx, workspaceID string, sc AgentSchedule) (any, error) {
+	if s.listings == nil {
+		return nil, fmt.Errorf("%w: the marketplace is not configured", ErrListingPayee)
+	}
+	if err := lockAgent(ctx, sp, workspaceID, sc.FromAgentID); err != nil {
+		return nil, err
+	}
+	useID, refusal, err := s.listings.ChargeScheduledListing(ctx, sp, workspaceID, sc.FromAgentID, sc.ToListingID, sc.AmountULXC, sc.NextRunAt,
+		func(price int64) error {
+			return enforceAgentRules(ctx, sp, workspaceID, sc.FromAgentID, price, "schedule:"+sc.ID)
+		})
+	if err != nil {
+		return nil, err
+	}
+	if refusal != "" {
+		return nil, fmt.Errorf("%w: %s", ErrListingPayee, refusal)
+	}
+	return useID, nil
 }

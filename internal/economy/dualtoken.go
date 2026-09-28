@@ -328,6 +328,8 @@ type DualTokenStore struct {
 	approvalPusher ApprovalPusher
 	// B19.11: what the verified-agent badge follows.
 	ownerVerifier OwnerVerifier
+	// B19.17: the marketplace a schedule pays a listing through.
+	listings ListingCharger
 }
 
 // NewDualTokenStore wraps a real pool.

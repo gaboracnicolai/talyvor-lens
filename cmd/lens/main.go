@@ -1653,6 +1653,7 @@ func run() error {
 	}
 	// B20.2 — a buyer's paid marketplace uses go on their monthly Stripe bill, and a paid invoice clears them.
 	marketStore := market.NewStore(pool)
+	dualToken.SetListingCharger(marketStore) // B19.17: a schedule may pay a marketplace listing
 	var marketMeter market.Meter
 	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {
 		billingSvc = billingSvc.WithMarketBill(liveStripe, cfg.MarketBillPriceID, cfg.MarketMeterEvent, marketStore)
