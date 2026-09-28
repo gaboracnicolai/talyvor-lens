@@ -359,7 +359,7 @@ func (s *Store) refundUses(ctx context.Context, listingID string) (int, error) {
 func (s *Store) creditRefunds(ctx context.Context, refunder Refunder, listingID string) (int, error) {
 	rows, err := s.pool.Query(ctx, `SELECT r.use_id, r.buyer_workspace_id, r.price_ulxc, COALESCE(l.title, '')
 		FROM market_refunds r JOIN market_uses u ON u.id = r.use_id LEFT JOIN market_listings l ON l.id = r.listing_id
-		WHERE r.credited_at IS NULL AND u.metered_at IS NOT NULL AND ($1 = '' OR r.listing_id = $1)
+		WHERE r.credited_at IS NULL AND r.cause = 'takedown' AND u.metered_at IS NOT NULL AND ($1 = '' OR r.listing_id = $1)
 		ORDER BY r.refunded_at, r.use_id LIMIT 200`, listingID)
 	if err != nil {
 		return 0, fmt.Errorf("market: refunds to credit: %w", err)

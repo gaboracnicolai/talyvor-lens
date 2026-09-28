@@ -954,6 +954,12 @@ type Config struct {
 	MarketBillPriceID string
 	MarketMeterEvent  string
 
+	// MarketPayoutReturnURL / MarketPayoutRefreshURL are where Stripe's seller onboarding returns to when a
+	// seller finishes it, and when its link has expired (B20.5). Env: LENS_MARKET_PAYOUT_RETURN_URL,
+	// LENS_MARKET_PAYOUT_REFRESH_URL; default the web app's selling page.
+	MarketPayoutReturnURL  string
+	MarketPayoutRefreshURL string
+
 	// SubscriptionAllowanceULXC is D — the Model 2 allowance granted per billing
 	// period, in µLXC (W4.6.1 step 2). Env: LENS_SUBSCRIPTION_ALLOWANCE_ULXC,
 	// default 0.
@@ -1269,6 +1275,8 @@ func Load() (*Config, error) {
 		BillingSubscriptionPlans:   parsePlans(os.Getenv("LENS_BILLING_SUBSCRIPTION_PLANS")),
 		MarketBillPriceID:          getEnv("LENS_MARKET_BILL_PRICE_ID", ""),
 		MarketMeterEvent:           getEnv("LENS_MARKET_METER_EVENT", "talyvor_marketplace_use"),
+		MarketPayoutReturnURL:      getEnv("LENS_MARKET_PAYOUT_RETURN_URL", "https://app.talyvor.com/marketplace/selling?payouts=connected"),
+		MarketPayoutRefreshURL:     getEnv("LENS_MARKET_PAYOUT_REFRESH_URL", "https://app.talyvor.com/marketplace/selling?payouts=expired"),
 		BillingSuccessURL:          getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
 		BillingCancelURL:           getEnv("LENS_BILLING_CANCEL_URL", "https://app.talyvor.com/billing/cancel"),
 
