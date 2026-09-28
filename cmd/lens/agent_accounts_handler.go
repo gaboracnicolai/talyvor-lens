@@ -115,6 +115,7 @@ type agentBank interface {
 	PauseAllAgents(ctx context.Context, workspaceID, reason string) error
 	ResumeAllAgents(ctx context.Context, workspaceID string) error
 	CreateAgentSchedule(ctx context.Context, workspaceID, fromAgentID, toAgentID string, amount int64, memo, every string, firstRunAt time.Time) (economy.AgentSchedule, error)
+	CreateAgentListingSchedule(ctx context.Context, workspaceID, fromAgentID, listingID string, amount int64, memo, every string, firstRunAt time.Time) (economy.AgentSchedule, error)
 	ListAgentSchedules(ctx context.Context, workspaceID string) ([]economy.AgentSchedule, error)
 	ListAgentScheduleRuns(ctx context.Context, workspaceID, scheduleID string) ([]economy.AgentScheduleRun, error)
 	CancelAgentSchedule(ctx context.Context, workspaceID, scheduleID string) error
@@ -411,26 +412,36 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		writeJSONOK(w, http.StatusOK, map[string]any{"all_paused": false})
 	}))
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/schedules", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		// B19.17: to_listing_id pays a marketplace listing instead of another agent — each tick one use, on the
+		// company's monthly marketplace bill; amount_ulxc is then the most a tick pays (0: the price now).
 		var in struct {
-			ToAgentID  string     `json:"to_agent_id"`
-			AmountULXC int64      `json:"amount_ulxc"`
-			Memo       string     `json:"memo"`
-			Every      string     `json:"every"`
-			FirstRunAt *time.Time `json:"first_run_at"`
+			ToAgentID   string     `json:"to_agent_id"`
+			ToListingID string     `json:"to_listing_id"`
+			AmountULXC  int64      `json:"amount_ulxc"`
+			Memo        string     `json:"memo"`
+			Every       string     `json:"every"`
+			FirstRunAt  *time.Time `json:"first_run_at"`
 		}
-		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || in.ToAgentID == "" {
-			writeJSONErr(w, http.StatusBadRequest, `body must be {"to_agent_id", "amount_ulxc", "memo", "every": "hour|day|week|month", "first_run_at": "<RFC 3339, default now>"}`)
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || (in.ToAgentID == "") == (in.ToListingID == "") {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"to_agent_id" or "to_listing_id", "amount_ulxc", "memo", "every": "hour|day|week|month", "first_run_at": "<RFC 3339, default now>"}`)
 			return
 		}
 		first := time.Now()
 		if in.FirstRunAt != nil {
 			first = *in.FirstRunAt
 		}
-		sc, err := bank.CreateAgentSchedule(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in.ToAgentID, in.AmountULXC, in.Memo, in.Every, first)
+		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
+		var sc economy.AgentSchedule
+		var err error
+		if in.ToListingID != "" {
+			sc, err = bank.CreateAgentListingSchedule(req.Context(), wsID, agentID, in.ToListingID, in.AmountULXC, in.Memo, in.Every, first)
+		} else {
+			sc, err = bank.CreateAgentSchedule(req.Context(), wsID, agentID, in.ToAgentID, in.AmountULXC, in.Memo, in.Every, first)
+		}
 		switch {
 		case errors.Is(err, economy.ErrAgentNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
-		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrSameAgent):
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrSameAgent), errors.Is(err, economy.ErrListingPayee):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 		case err != nil:
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
