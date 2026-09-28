@@ -65,14 +65,51 @@ type Listing struct {
 }
 
 // Version is one version of a listing. Artifact is present only for the listing's owner (B20.2 is how
-// anyone else uses it).
+// anyone else uses it); what a use of it asks for — Needs and Model — is shown to everyone who may use it.
 type Version struct {
 	Version        int             `json:"version"`
 	ArtifactSHA256 string          `json:"artifact_sha256"`
 	Changelog      string          `json:"changelog,omitempty"`
 	Scan           Scan            `json:"scan"`
 	CreatedAt      time.Time       `json:"created_at"`
+	Needs          Needs           `json:"needs"`
 	Artifact       json.RawMessage `json:"artifact,omitempty"`
+}
+
+// Needs is what a use of a version asks the buyer for (B20.3): an input (an agent or a skill), the
+// prompt's {{variables}}, and the model it runs on unless the buyer names another ("" when none).
+type Needs struct {
+	Input     bool     `json:"input"`
+	Variables []string `json:"variables"`
+	Model     string   `json:"model"`
+	Cases     int      `json:"cases,omitempty"` // an evaluation's cases
+}
+
+// needsOf reads what a use of kind's artifact asks for, without giving the artifact away.
+func needsOf(kind string, raw []byte) Needs {
+	n := Needs{Variables: []string{}}
+	var a map[string]any
+	if json.Unmarshal(raw, &a) != nil {
+		return n
+	}
+	n.Model, _ = a["model"].(string)
+	switch kind {
+	case "agent", "skill":
+		n.Input = true
+	case "prompt":
+		t, _ := a["template"].(string)
+		seen := map[string]bool{}
+		for _, m := range variable.FindAllStringSubmatch(t, -1) {
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				n.Variables = append(n.Variables, m[1])
+			}
+		}
+	case "evaluation":
+		cases, _ := a["cases"].([]any)
+		n.Cases = len(cases)
+	}
+	return n
 }
 
 // Draft is what a publish carries.
@@ -162,7 +199,7 @@ func (s *Store) Publish(ctx context.Context, workspaceID string, d Draft) (Listi
 		l.ID, workspaceID, d.Kind, d.Title, d.Description, d.PricePerUseULXC, d.Visibility).Scan(&l.CreatedAt, &l.UpdatedAt); err != nil {
 		return Listing{}, fmt.Errorf("market: publish: %w", err)
 	}
-	v := Version{Version: 1, ArtifactSHA256: sum, Changelog: d.Changelog, Scan: scan, Artifact: artifact}
+	v := Version{Version: 1, ArtifactSHA256: sum, Changelog: d.Changelog, Scan: scan, Needs: needsOf(d.Kind, artifact), Artifact: artifact}
 	if err := tx.QueryRow(ctx, `INSERT INTO market_listing_versions (listing_id, version, artifact, artifact_sha256, changelog, scan)
 		VALUES ($1, 1, $2, $3, $4, $5) RETURNING created_at`, l.ID, artifact, sum, d.Changelog, scanJSON).Scan(&v.CreatedAt); err != nil {
 		return Listing{}, fmt.Errorf("market: publish: %w", err)
@@ -193,7 +230,7 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 		return Version{}, err
 	}
 	scanJSON, _ := json.Marshal(scan)
-	v := Version{Version: latest + 1, ArtifactSHA256: sum, Changelog: changelog, Scan: scan, Artifact: canonical}
+	v := Version{Version: latest + 1, ArtifactSHA256: sum, Changelog: changelog, Scan: scan, Needs: needsOf(kind, canonical), Artifact: canonical}
 	if err := tx.QueryRow(ctx, `INSERT INTO market_listing_versions (listing_id, version, artifact, artifact_sha256, changelog, scan)
 		VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`, listingID, v.Version, canonical, sum, changelog, scanJSON).Scan(&v.CreatedAt); err != nil {
 		return Version{}, fmt.Errorf("market: version: %w", err)
@@ -266,6 +303,7 @@ func (s *Store) Get(ctx context.Context, viewerWorkspace, listingID string) (Lis
 			return Listing{}, err
 		}
 		_ = json.Unmarshal(scan, &v.Scan)
+		v.Needs = needsOf(l.Kind, artifact)
 		if owner {
 			v.Artifact = artifact
 		}
