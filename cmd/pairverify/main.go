@@ -13,6 +13,8 @@
 //	wired gate (B9.7)   — the gate as it serves: cache.PooledCandidateAt decides which pairs reach
 //	                      the verifier (entity gate at the threshold; with no entity on either side,
 //	                      similarity >= a bound), the verifier decides. Swept over candidate bounds.
+//	names and numbers (B21.1) — poolsafety.EntityRephrasePairs/EntityDangerPairs: questions on the
+//	                      entity lane, whose candidate bound is swept like the no-entity one.
 //	conversations (B16.1) — the multi-turn traps (poolsafety.ConversationDanger/Rephrase) as both
 //	                      semantic reads serve them: cache.LatestTurn splits each chat body, and
 //	                      cache.ConversationCandidate (the same history, then the rule above on the
@@ -102,7 +104,9 @@ func run() error {
 	unmeasured := 0
 	// PAIRVERIFY_CONVERSATIONS_ONLY=1 measures only the multi-turn sections (B16.1, B16.2).
 	onlyConversations := os.Getenv("PAIRVERIFY_CONVERSATIONS_ONLY") == "1"
-	for _, ln := range poolsafety.ByTraffic() {
+	lanes := append(poolsafety.ByTraffic(), poolsafety.TrafficLanes{Traffic: "NAMES AND NUMBERS (B21.1)",
+		Rephrase: poolsafety.EntityRephrasePairs(), Danger: poolsafety.EntityDangerPairs()})
+	for _, ln := range lanes {
 		if onlyConversations {
 			break
 		}
@@ -213,9 +217,9 @@ func checkWith(ctx context.Context, emb poolsafety.Embedder, threshold float64, 
 	return out, nil
 }
 
-// bounds are the no-entity candidate bounds the wired gate is measured at; cache.NoEntityLowerBound
-// is the one that serves.
-var bounds = []float64{0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90}
+// bounds are the candidate bounds the wired gate is measured at, for each lane; cache.NoEntityLowerBound
+// and cache.EntityLowerBound are the ones that serve.
+var bounds = []float64{0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95}
 
 func report(lane string, reph, dang []result, gated bool, threshold float64) (dangerServed, unmeasured int) {
 	fmt.Printf("\n═══ %s ═══  %d rephrase pairs (should serve) · %d danger pairs (must not)\n", lane, len(reph), len(dang))
@@ -278,40 +282,60 @@ func report(lane string, reph, dang []result, gated bool, threshold float64) (da
 	return len(served), unmeasured
 }
 
-// wired reports the B9.7 gate as it serves, at each candidate bound: how many pairs reach the
-// verifier (each a paid check), how many rephrasings it serves (YES in every run) and how many
-// danger pairs (YES in any run). served/checked is what the break-even hit rate is compared with.
+// wired reports the gate as it serves, at each candidate bound of one lane with the other lane at its
+// live bound: how many pairs reach the verifier (each a paid check), how many rephrasings it serves
+// (YES in every run) and how many danger pairs (YES in any run). served/checked is what the
+// break-even hit rate is compared with.
 func wired(reph, dang []result, threshold float64) {
-	fmt.Printf("  wired gate (B9.7): entity lane at %.2f, no-entity lane at the bound, verifier decides\n", threshold)
-	fmt.Printf("    %-7s %-18s %-18s %-14s %s\n", "bound", "rephrase served", "danger served", "checks", "served/checks")
-	for _, b := range bounds {
-		rc, rs, dc, ds := 0, 0, 0, 0
-		for _, r := range reph {
-			if cache.PooledCandidateAt(r.pair.A, r.pair.B, r.sim, threshold, b) {
-				rc++
-				if r.measured == runs && r.yes == runs {
-					rs++
-				}
-			}
-		}
-		for _, r := range dang {
-			if cache.PooledCandidateAt(r.pair.A, r.pair.B, r.sim, threshold, b) {
-				dc++
-				if r.yes > 0 {
-					ds++
-				}
-			}
-		}
-		live := ""
-		if b == cache.NoEntityLowerBound {
-			live = "  ← live"
-		}
-		share := "n/a"
-		if rc+dc > 0 {
-			share = fmt.Sprintf("%.0f%%", 100*float64(rs)/float64(rc+dc))
-		}
-		fmt.Printf("    %-7.2f %-18s %-18s %-14d %s%s\n", b, frac(rs, len(reph)), frac(ds, len(dang)), rc+dc, share, live)
+	liveEntity := cache.EntityLowerBound
+	if threshold < liveEntity {
+		liveEntity = threshold
 	}
+	sweep := func(title string, at func(b float64) (entity, noEntity float64), live float64) {
+		fmt.Printf("  wired gate — %s, verifier decides\n", title)
+		fmt.Printf("    %-7s %-18s %-18s %-14s %s\n", "bound", "rephrase served", "danger served", "checks", "served/checks")
+		for _, b := range bounds {
+			e, n := at(b)
+			rc, rs, dc, ds := 0, 0, 0, 0
+			for _, r := range reph {
+				if cache.PooledCandidateAt(r.pair.A, r.pair.B, r.sim, e, n) {
+					rc++
+					if r.measured == runs && r.yes == runs {
+						rs++
+					}
+				}
+			}
+			for _, r := range dang {
+				if cache.PooledCandidateAt(r.pair.A, r.pair.B, r.sim, e, n) {
+					dc++
+					if r.yes > 0 {
+						ds++
+					}
+				}
+			}
+			mark := ""
+			if b == live {
+				mark = "  ← live"
+			}
+			share := "n/a"
+			if rc+dc > 0 {
+				share = fmt.Sprintf("%.0f%%", 100*float64(rs)/float64(rc+dc))
+			}
+			fmt.Printf("    %-7.2f %-18s %-18s %-14d %s%s\n", b, frac(rs, len(reph)), frac(ds, len(dang)), rc+dc, share, mark)
+		}
+	}
+	sweep(fmt.Sprintf("no-entity lane at the bound, entity lane at %.2f (B9.7)", liveEntity),
+		func(b float64) (float64, float64) { return liveEntity, b }, cache.NoEntityLowerBound)
+	sweep(fmt.Sprintf("entity lane at the bound, no-entity lane at %.2f (B21.1)", cache.NoEntityLowerBound),
+		func(b float64) (float64, float64) { return b, cache.NoEntityLowerBound }, cache.EntityLowerBound)
+	var entity []string
+	for _, r := range reph {
+		if discriminator.Canon(r.pair.A).Verifiable() {
+			entity = append(entity, fmt.Sprintf("%s %.4f", r.pair.Name, r.sim))
+		}
+	}
+	sort.Strings(entity)
+	fmt.Printf("    rephrasings that name something, and their similarity: %s\n", strings.Join(entity, ", "))
 	var near []string
 	for _, r := range reph {
 		if !discriminator.Canon(r.pair.B).Verifiable() && !discriminator.Canon(r.pair.A).Verifiable() {
@@ -348,7 +372,7 @@ func conversations(ctx context.Context, v pairverify.Verifier, emb poolsafety.Em
 	}
 	fmt.Printf("\n═══ CONVERSATIONS (B16.1) ═══  %d rephrase pairs (should serve) · %d danger pairs (must not)\n", len(reph), len(dang))
 	fmt.Printf("  private and pooled reads: same history (prefix hash), then entity lane at %.2f / no-entity lane at %.2f, verifier decides\n",
-		threshold, cache.NoEntityLowerBound)
+		min(threshold, cache.EntityLowerBound), cache.NoEntityLowerBound)
 	fmt.Printf("    %-34s %-8s %-7s %-9s %-8s %s\n", "pair", "history", "sim", "candidate", "YES", "served")
 	row := func(r result, t [2]cache.Turn, danger bool) bool {
 		if r.measured < runs {

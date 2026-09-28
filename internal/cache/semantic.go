@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -77,6 +78,15 @@ type SemanticCache struct {
 // net of checks: 36% of checks end in a serve against a 22% break-even. 0.85 would serve 3.
 const NoEntityLowerBound = 0.60
 
+// EntityLowerBound is the same candidate bound for a question that DOES name something or carry a
+// number (B21.1). Such a question used to need the 0.98 threshold to become a candidate at all, so
+// "which city is the France's capital?" after "what is the capital of France?" never reached the
+// verifier, and nearly every real question names something. It is a candidate bound, not a serve
+// threshold: the candidate must still have the identical history and EXACTLY the same entities and
+// numbers on the two latest questions, and is served only on the verifier's YES. Measured in
+// docs/b211-entity-rephrasings-measured.md; without a verifier the entity lane stays at the threshold.
+const EntityLowerBound = 0.60
+
 // maxVerifiedChars refuses a pair either of whose questions is longer than this, instead of paying
 // to send two documents to the verifier. The measured cost per check ($0.000149) is for questions.
 const maxVerifiedChars = 4000
@@ -96,20 +106,29 @@ func (c *SemanticCache) VerifiesPairs() bool { return c != nil && c.verifier != 
 // PooledCandidate is the rule the pooled SQL applies, in Go, with the verifier wired: may the stored
 // question be offered to the verifier for the asked one at this similarity? cmd/pairverify measures
 // the corpora through it, so the measured gate and the served gate are the same rule.
-//   - the asked question names an entity: the entity gate (equal discriminators) at the threshold;
+//   - the asked question names an entity: the entity gate (equal discriminators) at EntityLowerBound;
 //   - it names none: the stored question names none either, at NoEntityLowerBound.
 func PooledCandidate(stored, asked string, similarity, threshold float64) bool {
-	return PooledCandidateAt(stored, asked, similarity, threshold, NoEntityLowerBound)
+	return PooledCandidateAt(stored, asked, similarity, entityFloor(threshold, true), NoEntityLowerBound)
 }
 
-// PooledCandidateAt is PooledCandidate at another no-entity bound — what cmd/pairverify sweeps to
-// measure where the bound belongs.
-func PooledCandidateAt(stored, asked string, similarity, threshold, bound float64) bool {
+// PooledCandidateAt is PooledCandidate at other bounds, the entity lane's first — what cmd/pairverify
+// sweeps to measure where each bound belongs.
+func PooledCandidateAt(stored, asked string, similarity, entityBound, bound float64) bool {
 	ca, cs := discriminator.Canon(asked), discriminator.Canon(stored)
 	if ca.Verifiable() {
-		return ca == cs && similarity >= threshold
+		return ca == cs && similarity >= entityBound
 	}
 	return !cs.Verifiable() && similarity >= bound
+}
+
+// entityFloor is the similarity an entity-lane candidate must reach: the threshold without a
+// verifier, and with one EntityLowerBound — or the threshold, if an operator set it lower.
+func entityFloor(threshold float64, verified bool) float64 {
+	if !verified {
+		return threshold
+	}
+	return math.Min(threshold, EntityLowerBound)
 }
 
 // ConversationCandidate is the rule both semantic reads, private and pooled, apply in SQL since
@@ -338,8 +357,9 @@ func (c *SemanticCache) freshnessCutoff() time.Time {
 //
 // ⚠ B16.1: IT IS GATED EXACTLY AS THE POOLED READ IS. It used to serve the nearest row above the
 // threshold with no entity gate and no verifier — those protected pooled rows only — and served
-// Nicolai "It's still 5" for "how much is 2+2?". Now: the entity gate on the latest question at the
-// threshold, and the pair verifier after it or, for a question naming no entity, instead of it.
+// Nicolai "It's still 5" for "how much is 2+2?". Now: the entity gate on the latest question (at the
+// threshold, or EntityLowerBound with a verifier — B21.1), and the pair verifier after it or, for a
+// question naming no entity, instead of it.
 // Without a verifier that question is refused, as on the pooled read.
 func (c *SemanticCache) Get(ctx context.Context, provider, model string, turn Turn, fp, workspaceID string) ([]byte, error) {
 	if !turn.Comparable() {
@@ -384,7 +404,7 @@ func (c *SemanticCache) privateCandidate(ctx context.Context, vec, provider, mod
 	var (
 		similarity float64
 		stored     string
-		floor      = c.threshold
+		floor      = entityFloor(c.threshold, c.verifier != nil)
 	)
 	if canon.Verifiable() {
 		err = c.pool.QueryRow(ctx, semanticSelectSQL, vec, provider, model, c.freshnessCutoff(), workspaceID, c.embeddingModel, fp,
@@ -585,7 +605,7 @@ func (c *SemanticCache) pooledCandidate(ctx context.Context, vec, provider, mode
 	prefix, fp string, gate func(stored string) bool) (id, response, contributor string, similarity float64, err error) {
 	var (
 		stored string
-		floor  = c.threshold
+		floor  = entityFloor(c.threshold, c.verifier != nil)
 	)
 	if canon.Verifiable() {
 		err = c.pool.QueryRow(ctx, semanticSelectPooledSQL, vec, provider, model, c.freshnessCutoff(), c.embeddingModel,
