@@ -46,11 +46,14 @@ import (
 // A fail-open admit is still booked post-serve by the shadow debit — bounded
 // slack, not a free call.
 
-// lxcBalanceReader is the minimal read surface the gate needs — one method,
-// a no-lock balance read. *economy.DualTokenStore.GetLXCBalance satisfies it.
-// Deliberately separate from lxcSpendSink so the shadow path stays untouched.
+// lxcBalanceReader is the minimal read surface the gates need — no-lock balance
+// reads. *economy.DualTokenStore satisfies it. Deliberately separate from
+// lxcSpendSink so the shadow path stays untouched. GetUnallocatedLXC is the
+// balance less what the workspace's agents hold (B19.13): what a request not
+// made with an agent's key may spend.
 type lxcBalanceReader interface {
 	GetLXCBalance(ctx context.Context, workspaceID string) (int64, error)
+	GetUnallocatedLXC(ctx context.Context, workspaceID string) (int64, error)
 }
 
 // SetLXCGate wires the LXC gating reader + its enable flag (read per-call). The
@@ -159,7 +162,11 @@ func (p *Proxy) lxcGateBlocks(ctx context.Context, workspaceID, model, prompt st
 		// return is ABOVE the balance read, so no balance can ever refuse them. Both pinned.
 		return false
 	}
-	balance, err := p.lxcGate.GetLXCBalance(ctx, workspaceID)
+	read := p.lxcGate.GetUnallocatedLXC // B19.13: the workspace's own request cannot use its agents' LXC
+	if agentKeyIDFromContext(ctx) != "" {
+		read = p.lxcGate.GetLXCBalance
+	}
+	balance, err := read(ctx, workspaceID)
 	if err != nil {
 		// FAIL-OPEN — allow and log, mirroring the spend cap. The post-serve
 		// shadow debit still books the real cost (bounded slack, not free).

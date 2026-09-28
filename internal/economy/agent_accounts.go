@@ -75,6 +75,40 @@ func accountBalance(ctx context.Context, tx pgx.Tx, workspaceID, account string)
 	return bal, err
 }
 
+// allocatedSQL is what a workspace's agents hold: Σ agent balances = −(workspace side) − spend, since
+// every entry sums to zero.
+const allocatedSQL = `SELECT COALESCE(-sum(amount_ulxc), 0)::bigint FROM agent_postings
+  WHERE workspace_id = $1 AND account IN ('workspace', 'spend')`
+
+// requireUnallocated refuses a debit of the workspace's OWN spending — anything not made with an agent's
+// key — that would reach into the LXC its agents hold (B19.13). bal is the lxc_balances balance the
+// caller has locked, so a concurrent funding waits on the same row.
+func requireUnallocated(ctx context.Context, tx pgx.Tx, workspaceID string, bal, amount int64) error {
+	var allocated int64
+	if err := tx.QueryRow(ctx, allocatedSQL, workspaceID).Scan(&allocated); err != nil {
+		return fmt.Errorf("economy: allocated LXC: %w", err)
+	}
+	if bal-allocated < amount {
+		return fmt.Errorf("%w: %d µLXC is not held by the workspace's agents", ErrInsufficientLXC, bal-allocated)
+	}
+	return nil
+}
+
+// GetUnallocatedLXC is what the workspace can spend itself: its LXC balance less what its agents hold.
+// The pre-serve gates read it for any request not made with an agent's key.
+func (s *DualTokenStore) GetUnallocatedLXC(ctx context.Context, workspaceID string) (int64, error) {
+	if s.pool == nil {
+		return 0, nil
+	}
+	var unallocated int64
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT balance FROM lxc_balances WHERE workspace_id = $1), 0)::bigint - (`+
+		allocatedSQL+`)`, workspaceID).Scan(&unallocated)
+	if err != nil {
+		return 0, fmt.Errorf("economy: unallocated LXC: %w", err)
+	}
+	return unallocated, nil
+}
+
 // lockAgent locks the agent's row — every movement of its balance serialises on it — and checks it
 // belongs to workspaceID.
 func lockAgent(ctx context.Context, tx pgx.Tx, workspaceID, agentID string) error {

@@ -25,6 +25,11 @@ func (f *fakeLXCReader) GetLXCBalance(_ context.Context, _ string) (int64, error
 	return f.balance, f.err
 }
 
+// A workspace with no agents: its unallocated LXC is its balance.
+func (f *fakeLXCReader) GetUnallocatedLXC(ctx context.Context, ws string) (int64, error) {
+	return f.GetLXCBalance(ctx, ws)
+}
+
 // lp is the default non-None logging policy for the live-path tests (the gate
 // is inert for LoggingNone — exercised separately).
 const lp = workspace.LoggingMetadata
