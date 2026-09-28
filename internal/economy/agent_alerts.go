@@ -37,7 +37,7 @@ const UnusualSpendRule = "An alert is raised when an agent's spend in the last h
 const (
 	usualSpendHours = 7 * 24
 	// What the spending rules count as an agent's spend (agent_rules.go spentSince).
-	agentSpendPostings = `(kind IN ('spend', 'hold', 'settle', 'release') OR (kind = 'pay' AND amount_ulxc < 0))`
+	agentSpendPostings = `(kind IN ('spend', 'hold', 'settle', 'release', 'card') OR (kind = 'pay' AND amount_ulxc < 0))`
 )
 
 // AgentSpendAlert is one alert raised by an agent's unusual spend.

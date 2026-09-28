@@ -31,6 +31,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
 	"github.com/talyvor/lens/internal/ab"
+	"github.com/talyvor/lens/internal/agentcard"
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/anomaly"
 	"github.com/talyvor/lens/internal/api"
@@ -63,6 +64,7 @@ import (
 	"github.com/talyvor/lens/internal/distillpreview"
 	"github.com/talyvor/lens/internal/earnings"
 	"github.com/talyvor/lens/internal/earnverify"
+	"github.com/talyvor/lens/internal/ecbrate"
 	"github.com/talyvor/lens/internal/econflags"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/embedder"
@@ -1747,6 +1749,25 @@ func run() error {
 			}
 		}
 	}()
+	// B19.12: agent card purchases are priced at the day's ECB reference rate. With the real-time endpoint
+	// configured, the rates are fetched at start and every three hours (the ECB publishes once a working day).
+	ecbRates := ecbrate.New(pool, ecbrate.DailyURL)
+	if cfg.StripeIssuingWebhookSecret != "" {
+		go func() {
+			t := time.NewTicker(3 * time.Hour)
+			defer t.Stop()
+			for {
+				if err := ecbRates.Refresh(ctx); err != nil {
+					slog.Warn("agent cards: ECB reference rates not refreshed", slog.String("err", err.Error()))
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+			}
+		}()
+	}
 	// Phase-3 routing-pattern capture — post-serve, void, mint-free producer
 	// for the routing Advisor. Default off; persists observations for opted-in
 	// workspaces only (SQL gate). NEVER reaches ledger.Credit (earning is a
@@ -2218,6 +2239,12 @@ func run() error {
 	// auth/rate-limit middleware; the handler reads the RAW body itself (Stripe
 	// signs raw bytes) before any JSON.
 	bill.post(r, "/v1/billing/webhook", billingSvc.HandleWebhook)
+
+	// B19.12 — Stripe's real-time authorisation of every agent card purchase — PUBLIC (Stripe-signed with
+	// its own secret, no auth), on the bare router like the billing webhook. Unset secret ⇒ unregistered.
+	if cfg.StripeIssuingWebhookSecret != "" {
+		r.Post("/v1/agent-cards/authorizations", agentcard.NewHandler(cfg.StripeIssuingWebhookSecret, dualToken, ecbRates).ServeHTTP)
+	}
 
 	// U-signup provisioning — turns an authenticated identity into a tenant. Mounted on the BARE
 	// router, OUTSIDE the authed group, because it carries its own credential
@@ -4090,9 +4117,10 @@ func run() error {
 
 		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.
 		mountAgentAccountRoutes(authed, dualToken, tenantStore)
-		mountMarketRoutes(authed, marketStore)                                 // B20.1
-		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)   // B20.2
-		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken, // B20.5
+		mountAgentCardRoutes(authed, dualToken, agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)) // B19.12
+		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
+		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
+		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5
 			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
