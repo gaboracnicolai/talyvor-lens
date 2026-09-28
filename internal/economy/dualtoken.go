@@ -26,6 +26,7 @@ import (
 	"github.com/talyvor/lens/internal/dbjson"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/mining"
+	"github.com/talyvor/lens/internal/passkey"
 )
 
 // ─── constants ───────────────────────────────────
@@ -322,6 +323,9 @@ type DualTokenStore struct {
 	lens   *mining.LedgerStore
 	pool   pgxDB
 	engine *RateEngine
+	// B19.16: the relying party approvals' passkeys are checked for, and the push sent for each approval filed.
+	approvalRP     *passkey.RelyingParty
+	approvalPusher ApprovalPusher
 }
 
 // NewDualTokenStore wraps a real pool.

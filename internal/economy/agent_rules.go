@@ -310,11 +310,15 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 // fileApproval records the approval a refused request needs — or finds the one already open for it — once
 // the refused transaction has rolled back, and returns the refusal naming it.
 func (s *DualTokenStore) fileApproval(ctx context.Context, need *ApprovalNeededError) error {
-	if _, err := s.pool.Exec(ctx, `
+	var filed string
+	if err := s.pool.QueryRow(ctx, `
 		INSERT INTO agent_approvals (id, workspace_id, agent_id, fingerprint, amount_ulxc, model) VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (agent_id, fingerprint) WHERE status IN ('pending', 'approved') DO NOTHING`,
-		"apr_"+uuid.NewString(), need.workspaceID, need.agentID, need.req.Fingerprint, need.AmountULXC, need.req.Model); err != nil {
+		ON CONFLICT (agent_id, fingerprint) WHERE status IN ('pending', 'approved') DO NOTHING RETURNING id`,
+		"apr_"+uuid.NewString(), need.workspaceID, need.agentID, need.req.Fingerprint, need.AmountULXC, need.req.Model).Scan(&filed); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("economy: file approval: %w", err)
+	}
+	if filed != "" {
+		s.notifyApproval(need.workspaceID, filed) // B19.16: a retry finds the open one and tells nobody again
 	}
 	if err := s.pool.QueryRow(ctx, `SELECT id FROM agent_approvals WHERE agent_id = $1 AND fingerprint = $2
 		AND status IN ('pending', 'approved')`, need.agentID, need.req.Fingerprint).Scan(&need.ApprovalID); err != nil {
