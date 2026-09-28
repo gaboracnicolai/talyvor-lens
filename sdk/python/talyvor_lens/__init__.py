@@ -5,7 +5,7 @@ through Talyvor Lens, automatically setting the workspace, session,
 team, feature, and Git attribution headers the proxy needs.
 """
 
-from .agent_bank import AgentBank, AgentBankError, PaymentRefused
+from .agent_wallet import AgentWallet, AgentWalletError, PaymentRefused
 from .client import LensClient
 from .middleware import inject_lens_headers
 from .types import AttributionContext
@@ -15,7 +15,7 @@ __all__ = [
     "LensClient",
     "inject_lens_headers",
     "AttributionContext",
-    "AgentBank",
-    "AgentBankError",
+    "AgentWallet",
+    "AgentWalletError",
     "PaymentRefused",
 ]

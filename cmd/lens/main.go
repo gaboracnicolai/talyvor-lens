@@ -2105,7 +2105,7 @@ func run() error {
 	// financials by naming it. Gate it with the same AuthMiddleware as the authed group; the tools
 	// additionally force the acted-on workspace to the verified caller (effectiveWorkspace).
 	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, lensVersion)
-	mcpServer.SetAgentBank(dualToken) // B19.9: agents use the bank with their own keys
+	mcpServer.SetAgentBank(dualToken) // B19.9: agents use their wallets with their own keys
 	// B19.16: approvals signed with the owner's passkey; a web push per approval filed when a VAPID key is set.
 	var approvalPusher economy.ApprovalPusher
 	if cfg.VAPIDPrivateKey != "" {

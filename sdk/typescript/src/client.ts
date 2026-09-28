@@ -7,7 +7,7 @@
  * dependency into the build graph when the consumer hasn't installed it.
  */
 
-import { AgentBank } from "./agentBank";
+import { AgentWallet } from "./agentWallet";
 import { injectLensHeaders } from "./middleware";
 import { HEADER_BRANCH, HEADER_PR } from "./types";
 
@@ -69,12 +69,12 @@ export class LensClient {
   }
 
   /**
-   * The agent bank: balance, requestApproval, pay and receipt. For a key
+   * The agent's wallet: balance, requestApproval, pay and receipt. For a key
    * attached to an agent — the calls act on that agent's own account,
    * within its spending rules, and Lens logs every one.
    */
-  get bank(): AgentBank {
-    return new AgentBank(this.lensUrl, this.headers);
+  get wallet(): AgentWallet {
+    return new AgentWallet(this.lensUrl, this.headers);
   }
 
   /** Return a copy of the headers Lens will add to every request. */

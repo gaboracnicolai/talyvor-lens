@@ -46,7 +46,7 @@ import (
 // [from, to), as JSON or CSV:
 //
 //	GET  /v1/workspaces/{wsID}/agents/{id}/statement?from=&to=&format=json|csv   one agent's account
-//	GET  /v1/workspaces/{wsID}/agents/statement?from=&to=&format=json|csv        every account in the workspace's agent bank
+//	GET  /v1/workspaces/{wsID}/agents/statement?from=&to=&format=json|csv        every agent wallet in the workspace
 //
 // from and to are RFC 3339 times or YYYY-MM-DD dates (midnight UTC); from defaults to the start of the
 // current month and to to now, so September is from=2026-09-01&to=2026-10-01. On an agent's route any of

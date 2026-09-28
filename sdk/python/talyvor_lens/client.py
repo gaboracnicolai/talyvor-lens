@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .agent_bank import AgentBank
+from .agent_wallet import AgentWallet
 from .middleware import inject_lens_headers
 from .types import HEADER_BRANCH, HEADER_PR
 
@@ -99,13 +99,13 @@ class LensClient:
         return self._anthropic_client
 
     @property
-    def bank(self) -> AgentBank:
-        """The agent bank: balance, request_approval, pay and receipt.
+    def wallet(self) -> AgentWallet:
+        """The agent's wallet: balance, request_approval, pay and receipt.
 
         For a key attached to an agent — the calls act on that agent's own
         account, within its spending rules, and Lens logs every one.
         """
-        return AgentBank(self.lens_url, self._headers)
+        return AgentWallet(self.lens_url, self._headers)
 
     def get_headers(self) -> Dict[str, str]:
         """Return a copy of the headers Lens will add to every request.

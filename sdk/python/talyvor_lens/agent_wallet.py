@@ -1,4 +1,4 @@
-"""AgentBank — an agent's own account at Talyvor Lens.
+"""AgentWallet — an agent's own wallet at Talyvor Lens.
 
 An agent calls these with ITS OWN key (a key attached to the agent): its
 balance and spending rules, an approval asked for with a reason, a payment
@@ -22,32 +22,32 @@ import httpx
 from .types import AgentApproval, AgentBalance, AgentPayment, AgentReceipt
 
 
-class AgentBankError(Exception):
+class AgentWalletError(Exception):
     """Lens could not answer the call (network, credential, protocol)."""
 
 
-class PaymentRefused(AgentBankError):
-    """The bank refused what the agent asked, and says why.
+class PaymentRefused(AgentWalletError):
+    """Lens refused what the agent asked, and says why.
 
     For example: the payment needs an approval that is still pending, it
     is beyond the agent's limit per request, or the agent is paused.
     """
 
 
-class AgentBank:
-    """The agent bank tools, called with the client's key.
+class AgentWallet:
+    """The agent wallet tools, called with the client's key.
 
-    Reach it as ``LensClient(...).bank``; the key must be attached to an
+    Reach it as ``LensClient(...).wallet``; the key must be attached to an
     agent. Amounts are in µLXC (1 LXC = 1,000,000 µLXC).
 
     Example:
-        >>> bank = LensClient(lens_url="https://lens.talyvor.com", api_key="tlv_agent_key").bank
-        >>> bank.balance()["agent"]["balance_ulxc"]
+        >>> wallet = LensClient(lens_url="https://lens.talyvor.com", api_key="tlv_agent_key").wallet
+        >>> wallet.balance()["agent"]["balance_ulxc"]
         10000000
-        >>> approval = bank.request_approval("agt_seller", 2_000_000, reason="October hosting")
-        >>> # ...once a person approves it on the Agent Bank screen:
-        >>> payment = bank.pay("agt_seller", 2_000_000)
-        >>> bank.receipt(payment["entry_id"])["postings"]
+        >>> approval = wallet.request_approval("agt_seller", 2_000_000, reason="October hosting")
+        >>> # ...once a person approves it on the Agent Wallets screen:
+        >>> payment = wallet.pay("agt_seller", 2_000_000)
+        >>> wallet.receipt(payment["entry_id"])["postings"]
     """
 
     def __init__(self, lens_url: str, headers: dict[str, str], timeout: float = 30.0) -> None:
@@ -93,15 +93,15 @@ class AgentBank:
         try:
             resp = httpx.post(self._url, json=body, headers=self._headers, timeout=self._timeout)
         except httpx.HTTPError as exc:
-            raise AgentBankError(f"{tool}: {exc}") from exc
+            raise AgentWalletError(f"{tool}: {exc}") from exc
         if resp.status_code != 200:
-            raise AgentBankError(f"{tool}: Lens answered {resp.status_code}: {resp.text.strip()}")
+            raise AgentWalletError(f"{tool}: Lens answered {resp.status_code}: {resp.text.strip()}")
         try:
             envelope = resp.json()
         except ValueError as exc:
-            raise AgentBankError(f"{tool}: Lens answered something other than JSON-RPC") from exc
+            raise AgentWalletError(f"{tool}: Lens answered something other than JSON-RPC") from exc
         if envelope.get("error"):
-            raise AgentBankError(f"{tool}: {envelope['error'].get('message', envelope['error'])}")
+            raise AgentWalletError(f"{tool}: {envelope['error'].get('message', envelope['error'])}")
         result = envelope.get("result") or {}
         content = result.get("content") or [{}]
         text = content[0].get("text", "")
@@ -110,4 +110,4 @@ class AgentBank:
         try:
             return json.loads(text)
         except ValueError as exc:
-            raise AgentBankError(f"{tool}: unreadable result: {text!r}") from exc
+            raise AgentWalletError(f"{tool}: unreadable result: {text!r}") from exc
