@@ -32,6 +32,7 @@ var ErrNoMarketBill = errors.New("billing: no marketplace bill is configured (LE
 type marketStripeAPI interface {
 	CreateMarketSubscription(ctx context.Context, customerID, priceID, workspaceID string) (subscriptionID string, err error)
 	SendMeterEvent(ctx context.Context, eventName, customerID, identifier string, value int64, at time.Time) error
+	CreditMarketUse(ctx context.Context, customerID, subscriptionID string, cents float64, description, idempotencyKey string) (creditID string, err error)
 }
 
 // MarketClearer clears the uses a paid marketplace invoice carried. *market.Store satisfies it.
@@ -59,6 +60,21 @@ func (s *Service) MeterMarketUse(ctx context.Context, workspaceID, useID string,
 		return fmt.Errorf("billing: meter use %s: %w", useID, err)
 	}
 	return nil
+}
+
+// CreditMarketRefund gives a buyer back one refunded use of ulxc µLXC (B20.4, a taken-down listing): a
+// negative line of exactly its price on their next marketplace invoice — to the fraction of a cent, as the
+// metered line charged it — idempotent on the use, so a retried pass credits it once.
+func (s *Service) CreditMarketRefund(ctx context.Context, workspaceID, useID string, ulxc int64, description string) (string, error) {
+	if s.marketStripe == nil || s.marketPrice == "" {
+		return "", ErrNoMarketBill
+	}
+	var customerID, subscriptionID string
+	if err := s.pool.QueryRow(ctx, `SELECT stripe_customer_id, stripe_subscription_id FROM market_bills WHERE workspace_id = $1`,
+		workspaceID).Scan(&customerID, &subscriptionID); err != nil {
+		return "", fmt.Errorf("billing: marketplace bill for %s: %w", workspaceID, err)
+	}
+	return s.marketStripe.CreditMarketUse(ctx, customerID, subscriptionID, float64(ulxc)/float64(ulxcPerCent), description, "market-refund-"+useID)
 }
 
 // ensureMarketBill returns the customer whose marketplace subscription the workspace's uses are metered

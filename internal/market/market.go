@@ -61,6 +61,8 @@ type Listing struct {
 	LatestVersion   int       `json:"latest_version"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+	ReviewStatus    string    `json:"review_status"`           // approved | held | taken_down (review.go)
+	ReviewReason    string    `json:"review_reason,omitempty"` // why it is held or was taken down
 	Versions        []Version `json:"versions,omitempty"`
 }
 
@@ -161,6 +163,9 @@ func checkArtifact(kind string, artifact json.RawMessage, words ...string) (cano
 	if scan.Refused != "" {
 		return nil, "", scan, &RefusedError{Scan: scan}
 	}
+	if kind == "pipeline" && scan.Held == "" {
+		scan.Held = reviewPipeline(obj)
+	}
 	return canonical, hex.EncodeToString(h[:]), scan, nil
 }
 
@@ -193,10 +198,13 @@ func (s *Store) Publish(ctx context.Context, workspaceID string, d Draft) (Listi
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	l := Listing{ID: "lst_" + uuid.NewString(), WorkspaceID: workspaceID, Kind: d.Kind, Title: d.Title, Description: d.Description,
-		PricePerUseULXC: d.PricePerUseULXC, Visibility: d.Visibility, LatestVersion: 1}
-	if err := tx.QueryRow(ctx, `INSERT INTO market_listings (id, workspace_id, kind, title, description, price_per_use_ulxc, visibility)
-		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING created_at, updated_at`,
-		l.ID, workspaceID, d.Kind, d.Title, d.Description, d.PricePerUseULXC, d.Visibility).Scan(&l.CreatedAt, &l.UpdatedAt); err != nil {
+		PricePerUseULXC: d.PricePerUseULXC, Visibility: d.Visibility, LatestVersion: 1, ReviewStatus: ReviewApproved}
+	if scan.Held != "" {
+		l.ReviewStatus, l.ReviewReason = ReviewHeld, scan.Held
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO market_listings (id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, review_status, review_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING created_at, updated_at`,
+		l.ID, workspaceID, d.Kind, d.Title, d.Description, d.PricePerUseULXC, d.Visibility, l.ReviewStatus, l.ReviewReason).Scan(&l.CreatedAt, &l.UpdatedAt); err != nil {
 		return Listing{}, fmt.Errorf("market: publish: %w", err)
 	}
 	v := Version{Version: 1, ArtifactSHA256: sum, Changelog: d.Changelog, Scan: scan, Needs: needsOf(d.Kind, artifact), Artifact: artifact}
@@ -208,22 +216,27 @@ func (s *Store) Publish(ctx context.Context, workspaceID string, d Draft) (Listi
 	return l, tx.Commit(ctx)
 }
 
-// PublishVersion adds a version to one of workspaceID's listings; the earlier ones stay as they were.
+// PublishVersion adds a version to one of workspaceID's listings; the earlier ones stay as they were. A
+// version the review holds holds the whole listing; a clean one never releases a hold (an admin does), and
+// a taken-down listing takes no versions.
 func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID string, artifact json.RawMessage, changelog string) (Version, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Version{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var kind, title, description string
+	var kind, title, description, review string
 	var latest int
-	err = tx.QueryRow(ctx, `SELECT kind, title, description, latest_version FROM market_listings WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
-		listingID, workspaceID).Scan(&kind, &title, &description, &latest)
+	err = tx.QueryRow(ctx, `SELECT kind, title, description, latest_version, review_status FROM market_listings WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
+		listingID, workspaceID).Scan(&kind, &title, &description, &latest, &review)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Version{}, ErrNotFound
 	}
 	if err != nil {
 		return Version{}, fmt.Errorf("market: version: %w", err)
+	}
+	if review == ReviewTakenDown {
+		return Version{}, ErrTakenDown
 	}
 	canonical, sum, scan, err := checkArtifact(kind, artifact, title, description, changelog)
 	if err != nil {
@@ -235,17 +248,24 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 		VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`, listingID, v.Version, canonical, sum, changelog, scanJSON).Scan(&v.CreatedAt); err != nil {
 		return Version{}, fmt.Errorf("market: version: %w", err)
 	}
+	if scan.Held != "" {
+		if _, err := tx.Exec(ctx, `UPDATE market_listings SET review_status = 'held', review_reason = $2 WHERE id = $1`,
+			listingID, fmt.Sprintf("version %d: %s", v.Version, scan.Held)); err != nil {
+			return Version{}, fmt.Errorf("market: version: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `UPDATE market_listings SET latest_version = $2, updated_at = now() WHERE id = $1`, listingID, v.Version); err != nil {
 		return Version{}, fmt.Errorf("market: version: %w", err)
 	}
 	return v, tx.Commit(ctx)
 }
 
-const listingColumns = `id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, latest_version, created_at, updated_at`
+const listingColumns = `id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, latest_version, created_at, updated_at, review_status, review_reason`
 
 func scanListing(row pgx.Row) (Listing, error) {
 	var l Listing
-	err := row.Scan(&l.ID, &l.WorkspaceID, &l.Kind, &l.Title, &l.Description, &l.PricePerUseULXC, &l.Visibility, &l.LatestVersion, &l.CreatedAt, &l.UpdatedAt)
+	err := row.Scan(&l.ID, &l.WorkspaceID, &l.Kind, &l.Title, &l.Description, &l.PricePerUseULXC, &l.Visibility, &l.LatestVersion, &l.CreatedAt, &l.UpdatedAt,
+		&l.ReviewStatus, &l.ReviewReason)
 	return l, err
 }
 
@@ -271,19 +291,24 @@ func (s *Store) OwnListings(ctx context.Context, workspaceID string) ([]Listing,
 	return s.list(ctx, `workspace_id = $1`, workspaceID)
 }
 
-// Catalog reads the public listings, of one kind when kind is set.
+// Catalog reads the public listings the review approved, of one kind when kind is set.
 func (s *Store) Catalog(ctx context.Context, kind string) ([]Listing, error) {
 	if kind != "" {
-		return s.list(ctx, `visibility = 'public' AND kind = $1`, kind)
+		return s.list(ctx, `visibility = 'public' AND review_status = 'approved' AND kind = $1`, kind)
 	}
-	return s.list(ctx, `visibility = 'public'`)
+	return s.list(ctx, `visibility = 'public' AND review_status = 'approved'`)
 }
 
-// Get reads a listing and its versions as viewerWorkspace sees it: a private listing only by its owner,
-// and each version's artifact only for its owner.
+// hidden says whether viewer may not see l: a private listing, or one held or taken down, is its owner's alone.
+func hidden(l Listing, viewer string) bool {
+	return l.WorkspaceID != viewer && (l.Visibility == "private" || l.ReviewStatus != ReviewApproved)
+}
+
+// Get reads a listing and its versions as viewerWorkspace sees it: a private, held or taken-down listing
+// only by its owner, and each version's artifact only for its owner.
 func (s *Store) Get(ctx context.Context, viewerWorkspace, listingID string) (Listing, error) {
 	l, err := scanListing(s.pool.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, listingID))
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && l.Visibility == "private" && l.WorkspaceID != viewerWorkspace) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, viewerWorkspace)) {
 		return Listing{}, ErrNotFound
 	}
 	if err != nil {

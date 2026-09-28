@@ -3,6 +3,7 @@ package market
 import (
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/pii"
@@ -45,6 +46,7 @@ type Scan struct {
 	InjectionRisk float64  `json:"injection_risk"`
 	Injection     []string `json:"injection,omitempty"` // the patterns that matched
 	Refused       string   `json:"refused,omitempty"`   // why it may not be published; empty when it may
+	Held          string   `json:"held,omitempty"`      // why a person must review it before anyone else may use it (B20.4)
 }
 
 var (
@@ -55,7 +57,7 @@ var (
 func scanText(kind string, texts []string) Scan {
 	var s Scan
 	secrets, personal, injected := map[string]bool{}, map[string]bool{}, map[string]bool{}
-	blocked := false
+	blocked, warned := false, false
 	for _, t := range texts {
 		for _, p := range secretPatterns {
 			if p.re.MatchString(t) {
@@ -71,6 +73,7 @@ func scanText(kind string, texts []string) Scan {
 			injected[p] = true
 		}
 		blocked = blocked || r.Action == injection.ActionBlock
+		warned = warned || r.Action == injection.ActionWarn
 	}
 	s.Secrets, s.PersonalData, s.Injection = sortedKeys(secrets), sortedKeys(personal), sortedKeys(injected)
 	switch {
@@ -80,6 +83,8 @@ func scanText(kind string, texts []string) Scan {
 		s.Refused = "it contains personal data (" + s.PersonalData[0] + ") — remove it and publish again"
 	case blocked && kind != "evaluation":
 		s.Refused = "it reads as a prompt injection — only an evaluation may carry attacks"
+	case warned && kind != "evaluation":
+		s.Held = "it may be a prompt injection (" + strings.Join(s.Injection, ", ") + ")"
 	}
 	return s
 }
