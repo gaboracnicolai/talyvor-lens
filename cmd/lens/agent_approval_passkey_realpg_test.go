@@ -132,11 +132,11 @@ func TestAgentRoutes_ApprovalsAreSignedWithAPasskeyAndPushedToTheOwner(t *testin
 	}
 
 	// An agent asks for two approvals. Each is pushed to both devices, once.
-	agent, err := store.CreateAgent(ctx, ws, "researcher")
+	agent, err := store.CreateAgent(ctx, ws, "researcher", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := store.CreateAgent(ctx, ws, "vendor")
+	payee, err := store.CreateAgent(ctx, ws, "vendor", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}

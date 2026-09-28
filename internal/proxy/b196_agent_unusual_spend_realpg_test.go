@@ -46,7 +46,7 @@ func TestB196_AnAgentSpendingFiveTimesItsUsualRateIsFlaggedAndPaused(t *testing.
 	seamFund(t, pool, ws, 1_000_000_000)
 	newAgent := func(name, key string) string {
 		t.Helper()
-		a, err := store.CreateAgent(ctx, ws, name)
+		a, err := store.CreateAgent(ctx, ws, name, "user-owner")
 		if err != nil {
 			t.Fatal(err)
 		}

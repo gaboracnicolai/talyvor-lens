@@ -22,11 +22,11 @@ func TestAgentTools_AnAgentUsesTheBankThroughMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := economy.NewDualTokenStore(nil, pool, nil)
-	buyer, err := store.CreateAgent(ctx, ws, "buyer")
+	buyer, err := store.CreateAgent(ctx, ws, "buyer", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	seller, err := store.CreateAgent(ctx, ws, "seller")
+	seller, err := store.CreateAgent(ctx, ws, "seller", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}

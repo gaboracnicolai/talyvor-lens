@@ -285,7 +285,8 @@ func (s *DualTokenStore) runScheduleTick(ctx context.Context, now time.Time) (st
 			return "", err
 		}
 		entryID = entry
-	case errors.Is(perr, ErrAgentFunds), errors.Is(perr, ErrAgentRule), errors.Is(perr, ErrApprovalRequired), errors.Is(perr, ErrAgentNotFound):
+	case errors.Is(perr, ErrAgentFunds), errors.Is(perr, ErrAgentRule), errors.Is(perr, ErrApprovalRequired), errors.Is(perr, ErrAgentNotFound),
+		errors.Is(perr, ErrAgentOwnerless):
 		if err := sp.Rollback(ctx); err != nil {
 			return "", err
 		}
@@ -322,6 +323,9 @@ func (s *DualTokenStore) topUpAgent(ctx context.Context, workspaceID, agentID st
 	}
 	if err != nil {
 		return 0, fmt.Errorf("economy: top-up: %w", err)
+	}
+	if requireOwner(ctx, tx, agentID) != nil { // B19.11: an agent with no owner is not given a balance
+		return 0, nil
 	}
 	bal, err := accountBalance(ctx, tx, workspaceID, agentAccount(agentID))
 	if err != nil || bal >= below {

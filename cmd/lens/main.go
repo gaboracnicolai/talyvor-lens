@@ -2098,6 +2098,8 @@ func run() error {
 		approvalPusher = sender
 	}
 	dualToken.SetApprovalAuth(passkey.RelyingParty{ID: cfg.WebAuthnRPID, Origins: cfg.WebAuthnOrigins}, approvalPusher)
+	// B19.11: an agent's verified badge follows its owner's workspace's verification (the U6 predicate).
+	dualToken.SetOwnerVerifier(earnverify.New(cfg.EarnRequireLivePurchase))
 	mcpAuth := auth.AuthMiddleware(keyStore, authManager)
 	r.With(mcpAuth).Post("/mcp", mcpServer.HandleRPC)
 	r.With(mcpAuth).Get("/mcp/sse", mcpServer.HandleSSE)

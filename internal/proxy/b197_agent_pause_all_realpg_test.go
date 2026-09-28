@@ -38,7 +38,7 @@ func TestB197_PauseAllRefusesEveryAgentBeforeTheProvider_AndResumeRestoresThem(t
 	seamFund(t, pool, ws, 100_000_000)
 	agents := map[string]string{}
 	for _, key := range []string{"key-a", "key-b"} {
-		a, err := store.CreateAgent(ctx, ws, key)
+		a, err := store.CreateAgent(ctx, ws, key, "user-owner")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -80,7 +80,7 @@ func TestB191_EachAgentSpendsItsOwnBalance_AndWorkspaceAgentsAndLedgerReconcile(
 
 	newAgent := func(name, key string, fund int64) string {
 		t.Helper()
-		a, err := store.CreateAgent(ctx, ws, name)
+		a, err := store.CreateAgent(ctx, ws, name, "user-owner")
 		if err != nil {
 			t.Fatal(err)
 		}

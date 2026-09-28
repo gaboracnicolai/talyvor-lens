@@ -41,7 +41,7 @@ func TestB192_EachAgentRuleRefusesBeforeTheProvider_AndARetryIsChargedOnce(t *te
 
 	const ws = "ws-log"
 	seamFund(t, pool, ws, 100_000_000)
-	agent, err := store.CreateAgent(ctx, ws, "researcher")
+	agent, err := store.CreateAgent(ctx, ws, "researcher", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}

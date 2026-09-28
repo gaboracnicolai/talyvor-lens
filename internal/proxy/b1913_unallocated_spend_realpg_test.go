@@ -33,7 +33,7 @@ func TestB1913_TheWorkspacesOwnSpendIsHeldToItsUnallocatedLXC(t *testing.T) {
 
 	const ws = "ws-log"
 	seamFund(t, pool, ws, 10_000_000) // 10 LXC
-	agent, err := store.CreateAgent(ctx, ws, "researcher")
+	agent, err := store.CreateAgent(ctx, ws, "researcher", "user-owner")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -87,6 +87,9 @@ func payAgentTx(ctx context.Context, tx pgx.Tx, workspaceID string, pay AgentPay
 			return pay, err
 		}
 	}
+	if err := requireOwner(ctx, tx, toAgentID); err != nil { // B19.11: a payment would give it a balance
+		return pay, err
+	}
 	bal, err := accountBalance(ctx, tx, workspaceID, agentAccount(fromAgentID))
 	if err != nil {
 		return pay, err
