@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -96,4 +97,48 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 	}
 	pay.FromBalanceULXC = bal - amount
 	return pay, tx.Commit(ctx)
+}
+
+// AgentStatementLine is one posting on an agent's account, with what it moved against and the balance
+// it left.
+type AgentStatementLine struct {
+	EntryID          string    `json:"entry_id"`
+	Kind             string    `json:"kind"` // fund | withdraw | spend | hold | settle | release | pay
+	AmountULXC       int64     `json:"amount_ulxc"`
+	Counterparty     string    `json:"counterparty"`  // workspace | spend | agent:<id>
+	Ref              string    `json:"ref,omitempty"` // a payment's memo, or the request it paid for
+	BalanceAfterULXC int64     `json:"balance_after_ulxc"`
+	At               time.Time `json:"at"`
+}
+
+// AgentStatement reads an agent's account, newest first, at most limit lines.
+func (s *DualTokenStore) AgentStatement(ctx context.Context, workspaceID, agentID string, limit int) ([]AgentStatementLine, error) {
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_accounts WHERE id = $1 AND workspace_id = $2)`,
+		agentID, workspaceID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("economy: agent statement: %w", err)
+	}
+	if !exists {
+		return nil, ErrAgentNotFound
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT entry_id::text, kind, amount_ulxc, counterparty, ref, balance_after, created_at FROM (
+		  SELECT p.id, p.entry_id, p.kind, p.amount_ulxc, p.ref, p.created_at,
+		         COALESCE((SELECT o.account FROM agent_postings o WHERE o.entry_id = p.entry_id AND o.id <> p.id LIMIT 1), '') AS counterparty,
+		         sum(p.amount_ulxc) OVER (ORDER BY p.id)::bigint AS balance_after
+		    FROM agent_postings p WHERE p.workspace_id = $1 AND p.account = $2) lines
+		ORDER BY id DESC LIMIT $3`, workspaceID, agentAccount(agentID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("economy: agent statement: %w", err)
+	}
+	defer rows.Close()
+	out := []AgentStatementLine{}
+	for rows.Next() {
+		var l AgentStatementLine
+		if err := rows.Scan(&l.EntryID, &l.Kind, &l.AmountULXC, &l.Counterparty, &l.Ref, &l.BalanceAfterULXC, &l.At); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }

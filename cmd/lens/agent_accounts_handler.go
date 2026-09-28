@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -34,6 +35,7 @@ import (
 // B19.3 — one company's agents pay each other, inside the closed loop:
 //
 //	POST /v1/workspaces/{wsID}/agents/{id}/pay  {"to_agent_id", "amount_ulxc", "memo"}   by the paying agent's own key, or the owner
+//	GET  /v1/workspaces/{wsID}/agents/{id}/statement?limit=   the agent's account, newest first (default 100, at most 1000)
 //
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
@@ -50,6 +52,7 @@ type agentBank interface {
 	DecideAgentApproval(ctx context.Context, workspaceID, approvalID string, approve bool) (economy.AgentApproval, error)
 	PayAgent(ctx context.Context, workspaceID, fromAgentID, toAgentID string, amount int64, memo string) (economy.AgentPayment, error)
 	AgentOfKey(ctx context.Context, scopedKeyID string) (agentID, workspaceID string, err error)
+	AgentStatement(ctx context.Context, workspaceID, agentID string, limit int) ([]economy.AgentStatementLine, error)
 }
 
 type agentKeyIssuer interface {
@@ -197,6 +200,26 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 	r.Post("/v1/workspaces/{wsID}/agents/approvals/{approvalID}/approve", decide(true))
 	r.Post("/v1/workspaces/{wsID}/agents/approvals/{approvalID}/deny", decide(false))
 
+	r.Get("/v1/workspaces/{wsID}/agents/{agentID}/statement", func(w http.ResponseWriter, req *http.Request) {
+		limit := 100
+		if q := req.URL.Query().Get("limit"); q != "" {
+			n, err := strconv.Atoi(q)
+			if err != nil || n < 1 || n > 1000 {
+				writeJSONErr(w, http.StatusBadRequest, "limit must be between 1 and 1000")
+				return
+			}
+			limit = n
+		}
+		lines, err := bank.AgentStatement(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), limit)
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, map[string]any{"agent_id": chi.URLParam(req, "agentID"), "lines": lines})
+		}
+	})
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/pay", func(w http.ResponseWriter, req *http.Request) {
 		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
 		if _, owner := storedanswers.OwnerOrAdmin(req.Context()); !owner {

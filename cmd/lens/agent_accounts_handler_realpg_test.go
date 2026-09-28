@@ -322,4 +322,26 @@ func TestAgentRoutes_AnAgentPaysAnotherInOnePairOfLedgerRows(t *testing.T) {
 	if code, body := pay(keyOf("key-buyer"), buyer, `{"to_agent_id":"`+seller+`","amount_ulxc":400000}`); code != http.StatusOK {
 		t.Errorf("paying within the daily limit, with a model rule set = %d %s, want 200 — a payment has no model", code, body)
 	}
+
+	// The seller's statement: newest first, each line against its counterparty with the balance it left.
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+ws+"/agents/"+seller+"/statement", nil)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), keyOf("key-seller")))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var st struct {
+		Lines []economy.AgentStatementLine `json:"lines"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); w.Code != http.StatusOK || err != nil || len(st.Lines) != 3 {
+		t.Fatalf("statement = %d %s", w.Code, w.Body.String())
+	}
+	for i, want := range []struct {
+		amount, after int64
+		memo          string
+	}{{400_000, 2_400_000, ""}, {-1_000_000, 2_000_000, ""}, {3_000_000, 3_000_000, "invoice 17"}} {
+		l := st.Lines[i]
+		if l.Kind != "pay" || l.AmountULXC != want.amount || l.BalanceAfterULXC != want.after || l.Ref != want.memo ||
+			l.Counterparty != "agent:"+buyer {
+			t.Errorf("statement line %d = %+v, want pay %d against the buyer leaving %d", i, l, want.amount, want.after)
+		}
+	}
 }
