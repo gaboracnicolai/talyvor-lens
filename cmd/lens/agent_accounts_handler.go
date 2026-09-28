@@ -63,6 +63,16 @@ import (
 //	POST /v1/workspaces/{wsID}/agents/pause-all  {"reason"}   every agent, those created later included
 //	POST /v1/workspaces/{wsID}/agents/resume-all              lifts it; an agent paused on its own stays paused
 //
+// B19.8 — scheduled payments and automatic top-ups (internal/economy/agent_schedules.go), run every minute:
+//
+//	POST   /v1/workspaces/{wsID}/agents/{id}/schedules  {"to_agent_id", "amount_ulxc", "memo", "every", "first_run_at"}
+//	GET    /v1/workspaces/{wsID}/agents/schedules                  the workspace's schedules
+//	GET    /v1/workspaces/{wsID}/agents/schedules/{sid}/runs       each tick, paid or refused, newest first
+//	DELETE /v1/workspaces/{wsID}/agents/schedules/{sid}            stop it
+//	PUT    /v1/workspaces/{wsID}/agents/{id}/topup  {"below_ulxc", "to_ulxc"}   below one, back up to the other
+//	GET    /v1/workspaces/{wsID}/agents/{id}/topup
+//	DELETE /v1/workspaces/{wsID}/agents/{id}/topup
+//
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
 
@@ -84,6 +94,13 @@ type agentBank interface {
 	PauseAgent(ctx context.Context, workspaceID, agentID, reason string) error
 	PauseAllAgents(ctx context.Context, workspaceID, reason string) error
 	ResumeAllAgents(ctx context.Context, workspaceID string) error
+	CreateAgentSchedule(ctx context.Context, workspaceID, fromAgentID, toAgentID string, amount int64, memo, every string, firstRunAt time.Time) (economy.AgentSchedule, error)
+	ListAgentSchedules(ctx context.Context, workspaceID string) ([]economy.AgentSchedule, error)
+	ListAgentScheduleRuns(ctx context.Context, workspaceID, scheduleID string) ([]economy.AgentScheduleRun, error)
+	CancelAgentSchedule(ctx context.Context, workspaceID, scheduleID string) error
+	SetAgentTopUp(ctx context.Context, workspaceID, agentID string, belowULXC, toULXC int64) (economy.AgentTopUp, error)
+	GetAgentTopUp(ctx context.Context, workspaceID, agentID string) (economy.AgentTopUp, bool, error)
+	RemoveAgentTopUp(ctx context.Context, workspaceID, agentID string) error
 	ResumeAgent(ctx context.Context, workspaceID, agentID string) error
 	ListAgentSpendAlerts(ctx context.Context, workspaceID string) ([]economy.AgentSpendAlert, error)
 	AgentSpendForecast(ctx context.Context, workspaceID string, at time.Time) (economy.SpendForecast, error)
@@ -338,6 +355,103 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			return
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{"all_paused": false})
+	}))
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/schedules", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			ToAgentID  string     `json:"to_agent_id"`
+			AmountULXC int64      `json:"amount_ulxc"`
+			Memo       string     `json:"memo"`
+			Every      string     `json:"every"`
+			FirstRunAt *time.Time `json:"first_run_at"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || in.ToAgentID == "" {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"to_agent_id", "amount_ulxc", "memo", "every": "hour|day|week|month", "first_run_at": "<RFC 3339, default now>"}`)
+			return
+		}
+		first := time.Now()
+		if in.FirstRunAt != nil {
+			first = *in.FirstRunAt
+		}
+		sc, err := bank.CreateAgentSchedule(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in.ToAgentID, in.AmountULXC, in.Memo, in.Every, first)
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrSameAgent):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusCreated, sc)
+		}
+	}))
+	r.Get("/v1/workspaces/{wsID}/agents/schedules", func(w http.ResponseWriter, req *http.Request) {
+		list, err := bank.ListAgentSchedules(req.Context(), chi.URLParam(req, "wsID"))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"schedules": list})
+	})
+	r.Get("/v1/workspaces/{wsID}/agents/schedules/{scheduleID}/runs", func(w http.ResponseWriter, req *http.Request) {
+		runs, err := bank.ListAgentScheduleRuns(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "scheduleID"))
+		switch {
+		case errors.Is(err, economy.ErrScheduleNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, map[string]any{"schedule_id": chi.URLParam(req, "scheduleID"), "runs": runs})
+		}
+	})
+	r.Delete("/v1/workspaces/{wsID}/agents/schedules/{scheduleID}", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		err := bank.CancelAgentSchedule(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "scheduleID"))
+		switch {
+		case errors.Is(err, economy.ErrScheduleNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, map[string]any{"schedule_id": chi.URLParam(req, "scheduleID"), "active": false})
+		}
+	}))
+	r.Put("/v1/workspaces/{wsID}/agents/{agentID}/topup", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			BelowULXC int64 `json:"below_ulxc"`
+			ToULXC    int64 `json:"to_ulxc"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"below_ulxc": <µLXC>, "to_ulxc": <µLXC above it>}`)
+			return
+		}
+		t, err := bank.SetAgentTopUp(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in.BelowULXC, in.ToULXC)
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrAgentRule):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, t)
+		}
+	}))
+	r.Get("/v1/workspaces/{wsID}/agents/{agentID}/topup", func(w http.ResponseWriter, req *http.Request) {
+		t, ok, err := bank.GetAgentTopUp(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"))
+		switch {
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		case !ok:
+			writeJSONErr(w, http.StatusNotFound, "the agent has no automatic top-up")
+		default:
+			writeJSONOK(w, http.StatusOK, t)
+		}
+	})
+	r.Delete("/v1/workspaces/{wsID}/agents/{agentID}/topup", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		if err := bank.RemoveAgentTopUp(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")); err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"agent_id": chi.URLParam(req, "agentID"), "topup": nil})
 	}))
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/pay", func(w http.ResponseWriter, req *http.Request) {
 		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
