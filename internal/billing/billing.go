@@ -118,6 +118,12 @@ type Service struct {
 	billLens     lensDebiter
 	billInvoices invoiceCrediter
 
+	// B20.2 — the buyers' monthly marketplace bills (market_bill.go). Unset ⇒ paid uses cannot be metered.
+	marketStripe  marketStripeAPI
+	marketPrice   string
+	marketEvent   string
+	marketClearer MarketClearer
+
 	// D, in µLXC — the Model 2 allowance per billing period (W4.6.1 step 2).
 	// ZERO is the default and means "no allowance configured": no grant row is ever
 	// written and Consume covers nothing. See allowance.go.
@@ -279,6 +285,8 @@ func (s *Service) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		s.handleInvoicePaymentFailed(w, r.Context(), &event)
 	case "invoice.created": // B13.2 — a renewal's draft: the moment earnings can come off it
 		s.handleInvoiceCreated(w, r.Context(), &event)
+	case "invoice.paid": // B20.2 — a buyer paid their marketplace bill: its uses clear and their sellers earn
+		s.handleInvoicePaid(w, r.Context(), &event)
 	default:
 		w.WriteHeader(http.StatusOK) // unhandled type → ack, no action
 	}

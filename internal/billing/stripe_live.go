@@ -3,8 +3,10 @@ package billing
 import (
 	"context"
 	"strconv"
+	"time"
 
 	stripe "github.com/stripe/stripe-go/v81"
+	"github.com/stripe/stripe-go/v81/billing/meterevent"
 	"github.com/stripe/stripe-go/v81/checkout/session"
 	"github.com/stripe/stripe-go/v81/customer"
 	"github.com/stripe/stripe-go/v81/invoiceitem"
@@ -145,5 +147,37 @@ func (l *LiveStripe) CreditInvoice(ctx context.Context, customerID, invoiceID st
 	params.Context = ctx
 	params.SetIdempotencyKey(idempotencyKey)
 	_, err := invoiceitem.New(params)
+	return err
+}
+
+// CreateMarketSubscription subscribes customerID to the metered marketplace price (B20.2). The workspace is
+// named as market_workspace_id — never workspace_id, which would make it the workspace's plan — and the
+// idempotency key makes two first uses at once one subscription.
+func (l *LiveStripe) CreateMarketSubscription(ctx context.Context, customerID, priceID, workspaceID string) (string, error) {
+	params := &stripe.SubscriptionParams{
+		Customer: stripe.String(customerID),
+		Items:    []*stripe.SubscriptionItemsParams{{Price: stripe.String(priceID)}},
+	}
+	params.Context = ctx
+	params.AddMetadata("market_workspace_id", workspaceID)
+	params.SetIdempotencyKey("market-bill-" + workspaceID)
+	sub, err := subscription.New(params)
+	if err != nil {
+		return "", err
+	}
+	return sub.ID, nil
+}
+
+// SendMeterEvent records one marketplace use of value µLXC for customerID (B20.2). Stripe keeps one event
+// per identifier, so a retried use is billed once.
+func (l *LiveStripe) SendMeterEvent(ctx context.Context, eventName, customerID, identifier string, value int64, at time.Time) error {
+	params := &stripe.BillingMeterEventParams{
+		EventName:  stripe.String(eventName),
+		Identifier: stripe.String(identifier),
+		Payload:    map[string]string{"stripe_customer_id": customerID, "value": strconv.FormatInt(value, 10)},
+		Timestamp:  stripe.Int64(at.Unix()),
+	}
+	params.Context = ctx
+	_, err := meterevent.New(params)
 	return err
 }

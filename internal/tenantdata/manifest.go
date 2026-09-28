@@ -121,6 +121,7 @@ var Manifest = map[string]Entry{
 	"stored_answer_deletions": {Retain, "B21.3: the audit log of each deletion of stored answers"},
 	"agent_postings":          {Retain, "B19.1: audit-guarded (0140, append-only): the agents' double-entry LXC ledger; financial-record retention"},
 	"agent_tool_calls":        {Retain, "B19.9: audit-guarded (0145, append-only): every call an agent made to the bank's tools; the record of what it asked and was refused"},
+	"market_earnings":         {Retain, "B20.2: audit-guarded (0149, append-only): a seller's share of each cleared use — money owed to them, paid out by B20.5"},
 
 	// token_events is audit-guarded TOO, but migration 0055's trigger carries a sanctioned
 	// exception: DELETE is permitted while the retention-bypass session flag is set — the flag the
@@ -200,6 +201,8 @@ var Manifest = map[string]Entry{
 	"agent_lxc_subbudgets":         {Delete, ""},
 	"agent_workspace_pauses":       {Delete, ""},
 	"market_listings":              {Delete, "B20.1: the listings a workspace published; their versions cascade"},
+	"market_uses":                  {Delete, "B20.2: keys `seller_workspace_id`+`buyer_workspace_id`: each use of a listing, what it was billed and when it cleared"},
+	"market_bills":                 {Delete, "B20.2: the Stripe subscription a buyer's marketplace uses are metered onto"},
 	"workspace_passkeys":           {Delete, "B19.16: the owner's passkeys' public keys"},
 	"webauthn_challenges":          {Delete, ""},
 	"workspace_push_subscriptions": {Delete, "B19.16: the owner's devices' push endpoints and keys"},

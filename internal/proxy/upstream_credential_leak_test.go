@@ -635,9 +635,10 @@ func TestRunUpstreamCallSites_CarryNoRawInboundHeaders(t *testing.T) {
 // A new entry here is not automatically a defect. It is a question: does this loop put an INBOUND
 // request's headers onto an OUTBOUND one? If yes it must range over auth.StripCredentialHeaders.
 var headerCopyLoops = map[string]string{
-	"internal/inference/runupstream.go: extraHeaders":                 "the round-trip seam. It copies whatever it is GIVEN; sanitising is the caller's job and TestRunUpstreamCallSites_CarryNoRawInboundHeaders pins every caller.",
-	"internal/proxy/stream.go: auth.StripCredentialHeaders(r.Header)": "the streaming seam — inbound → upstream, sanitised at the range.",
-	"internal/compat/helicone.go: propertyKeys":                       "rewrites the INBOUND request in place (r.Header.Set on r itself). It builds no upstream request, so it cannot leak to a provider.",
+	"internal/inference/runupstream.go: extraHeaders":                                         "the round-trip seam. It copies whatever it is GIVEN; sanitising is the caller's job and TestRunUpstreamCallSites_CarryNoRawInboundHeaders pins every caller.",
+	"internal/proxy/stream.go: auth.StripCredentialHeaders(r.Header)":                         "the streaming seam — inbound → upstream, sanitised at the range.",
+	"internal/compat/helicone.go: propertyKeys":                                               "rewrites the INBOUND request in place (r.Header.Set on r itself). It builds no upstream request, so it cannot leak to a provider.",
+	`cmd/lens/market_use_handler.go: []string{"Authorization", "X-Talyvor-Key", "X-Api-Key"}`: "B20.2: copies the caller's credential onto an IN-PROCESS request to Lens's own router (lens.ServeHTTP), so a listing's model calls pass the same authentication and are billed to the same buyer. It never leaves the process; the proxy handler it reaches builds the upstream request and strips credentials there like any other.",
 }
 
 func TestHeaderCopyLoops_AllClassified(t *testing.T) {

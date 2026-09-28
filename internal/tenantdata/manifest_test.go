@@ -322,7 +322,9 @@ func TestDeleteOrderEndsWithTheMapping(t *testing.T) {
 var w626PopulationDelta = []string{
 	"annotation_tasks", "benchmark_eval_items", "confidential_compute_mints",
 	"distill_royalty_basis", "distill_royalty_mints", "distill_serve_attribution",
-	"eval_contribution_mints", "eval_correctness_attestations", "node_latency_mints",
+	"eval_contribution_mints", "eval_correctness_attestations",
+	"market_earnings", "market_uses", // B20.2: keyed seller_workspace_id / buyer_workspace_id, classified in the manifest
+	"node_latency_mints",
 	"pool_royalty_mints", "routing_prediction_mints", "royalty_detector_findings",
 	"workspace_configs", "workspaces",
 }
