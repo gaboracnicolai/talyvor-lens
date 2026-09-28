@@ -240,6 +240,10 @@ func agentMovement(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta int
 		if bal < delta {
 			return true, fmt.Errorf("%w: agent %s holds %d µLXC, this needs %d", ErrSubBudgetExceeded, agentID, bal, delta)
 		}
+		// B19.2: the agent's spending rules, under the same lock, before anything is held or debited.
+		if err := enforceAgentRules(ctx, tx, workspaceID, agentID, delta, ref); err != nil {
+			return true, err
+		}
 	}
 	return true, postEntry(ctx, tx, workspaceID, kind, ref, leg{agentAccount(agentID), -delta}, leg{"spend", delta})
 }

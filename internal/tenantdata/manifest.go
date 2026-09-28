@@ -194,6 +194,8 @@ var Manifest = map[string]Entry{
 
 	// ─── DELETE: everything else. The bulk of what is actually sensitive. ─────────────────────
 	"agent_accounts":           {Delete, ""},
+	"agent_rules":              {Delete, ""},
+	"agent_approvals":          {Delete, ""},
 	"agent_lxc_subbudgets":     {Delete, ""},
 	"annotator_stakes":         {Delete, ""},
 	"api_keys":                 {Delete, ""},
