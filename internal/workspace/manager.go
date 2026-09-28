@@ -103,7 +103,9 @@ type Workspace struct {
 	CachePoolable       bool       `json:"cache_poolable"`
 	CostOptimizeRouting bool       `json:"cost_optimize_routing"`
 	DistillPoolable     bool       `json:"distill_poolable"`
-	CreatedAt           time.Time  `json:"created_at"`
+	// Synthetic marks a B17.1 test workspace (synthetic.go). Set only by CreateSynthetic, never cleared.
+	Synthetic bool      `json:"synthetic"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type WorkspacePolicy struct {
@@ -256,6 +258,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 		stored.CostOptimizeRouting = existing.CostOptimizeRouting
 		stored.DistillPolicy = existing.DistillPolicy
 		stored.TarePolicy = existing.TarePolicy
+		stored.Synthetic = existing.Synthetic
 	} else if o.cachePoolable != nil {
 		stored.CachePoolable = *o.cachePoolable
 	} else {
@@ -511,7 +514,7 @@ func (m *Manager) ScopedCacheKey(wsID, baseKey string) string {
 
 const loadAllSQL = `SELECT id, name, cache_prefix, spend_limit_usd,
   allowed_models, allowed_providers, max_tokens_per_request,
-  max_output_tokens, max_input_tokens, active, logging_policy, distill_policy, cache_poolable, distill_poolable, cost_optimize_routing, compression_policy, tare_policy, created_at
+  max_output_tokens, max_input_tokens, active, logging_policy, distill_policy, cache_poolable, distill_poolable, cost_optimize_routing, compression_policy, tare_policy, synthetic, created_at
 FROM workspaces
 WHERE active = true`
 
@@ -543,7 +546,7 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 		if err := rows.Scan(
 			&ws.ID, &ws.Name, &ws.CachePrefix, &ws.SpendLimitUSD,
 			&ws.AllowedModels, &ws.AllowedProviders, &ws.MaxTokensPerRequest,
-			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &dpolicy, &ws.CachePoolable, &ws.DistillPoolable, &ws.CostOptimizeRouting, &cpolicy, &tpolicy, &ws.CreatedAt,
+			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &dpolicy, &ws.CachePoolable, &ws.DistillPoolable, &ws.CostOptimizeRouting, &cpolicy, &tpolicy, &ws.Synthetic, &ws.CreatedAt,
 		); err != nil {
 			return fmt.Errorf("workspace: scan: %w", err) // old map intact — no swap
 		}

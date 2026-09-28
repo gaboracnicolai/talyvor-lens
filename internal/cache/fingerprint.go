@@ -62,6 +62,19 @@ const requestFingerprintMarker = "\x00req\x00"
 // for one prompt under different settings sit side by side instead of overwriting each other.
 func FingerprintedKey(prompt, fp string) string { return prompt + requestFingerprintMarker + fp }
 
+// SyntheticPartition names B17.1's partition: the synthetic workspaces' cache entries.
+const SyntheticPartition = "synthetic"
+
+// PartitionedFingerprint moves fp into partition: every entry keyed or filtered by it — exact and
+// semantic, private and pooled — is then found only by requests in the same partition. The empty
+// partition is the real one and leaves fp unchanged, so nothing already stored moves.
+func PartitionedFingerprint(fp, partition string) string {
+	if partition == "" {
+		return fp
+	}
+	return hexSHA256([]byte("\x00partition\x00" + partition + "\x00" + fp))
+}
+
 func hexSHA256(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

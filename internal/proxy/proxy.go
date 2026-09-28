@@ -168,6 +168,9 @@ type Proxy struct {
 	royaltyMinter     royaltySink
 	poolDiscount      float64 // r — consumer discount on CROSS-TENANT pooled hits; 0 = charge list
 
+	// synthetic reports a B17.1 synthetic workspace (workspace.Manager.GetSynthetic); nil = none are.
+	synthetic func(wsID string) bool
+
 	// limits enforces the spending cap and rate limits a workspace set through PUT .../config
 	// (B18.3). nil = none enforced.
 	limits *workspaceLimits
@@ -410,6 +413,12 @@ func (p *Proxy) SetBudgetService(s *budgets.Service) {
 func (p *Proxy) setAlertSink(sink alertSink) {
 	p.alertManager = sink
 }
+
+// SetSyntheticLookup wires B17.1: a synthetic workspace's cache entries live in their own partition,
+// and it earns no royalty.
+func (p *Proxy) SetSyntheticLookup(isSynthetic func(wsID string) bool) { p.synthetic = isSynthetic }
+
+func (p *Proxy) isSynthetic(wsID string) bool { return p.synthetic != nil && p.synthetic(wsID) }
 
 // SetPoolGate enables the Phase-2 Stage 2.0 shared-cache governance gate. Wired
 // as a setter so proxy.New's signature stays put. When unset (nil), the pooled
@@ -1075,6 +1084,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// B16.1 — what the semantic layers compare: the latest question, and a hash of the history before
 	// it. Read from the same body as reqFP; every semantic read and write below carries it.
 	turn := cache.LatestTurn(body)
+	// B17.1 — a synthetic workspace's entries live in a partition of their own: both fingerprints move,
+	// so no cache layer, own or pooled, buffered or streamed, can match across the line either way.
+	if p.isSynthetic(wsID) {
+		reqFP = cache.PartitionedFingerprint(reqFP, cache.SyntheticPartition)
+		if turn.AloneFP != "" {
+			turn.AloneFP = cache.PartitionedFingerprint(turn.AloneFP, cache.SyntheticPartition)
+		}
+	}
 
 	// B15.2: X-Talyvor-Cache: bypass asks for a fresh answer — no cache layer is read, own or
 	// pooled, on either path. The answer it gets is stored as usual, so the next asker is served the
@@ -2480,6 +2497,12 @@ func (p *Proxy) recordNodeServe(ctx context.Context, wsID, team, sprint, feature
 
 func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHit, prompt string, served []byte, fundedUSD float64, loggingPolicy workspace.LoggingPolicy) {
 	if p.royaltyMinter == nil || hit == nil {
+		return
+	}
+	// B17.1: synthetic workspaces earn nothing and fund nothing — their pool is a test partition.
+	if p.isSynthetic(hit.RequesterWorkspace) || p.isSynthetic(hit.ContributorWorkspace) {
+		slog.Info("poolroyalty: mint skipped — synthetic workspace",
+			slog.String("request_id", hit.RequestID), slog.String("contributor", hit.ContributorWorkspace))
 		return
 	}
 	// THE FUNDING INVARIANT: a cross-tenant royalty is funded by the consumer's ACTUAL charge for this

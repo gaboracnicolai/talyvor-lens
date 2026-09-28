@@ -48,6 +48,7 @@ func restartTestPool(t *testing.T) *pgxpool.Pool {
 			cache_poolable BOOLEAN NOT NULL DEFAULT false,
 			distill_poolable BOOLEAN NOT NULL DEFAULT false,
 			cost_optimize_routing BOOLEAN NOT NULL DEFAULT false,
+			synthetic BOOLEAN NOT NULL DEFAULT false,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	} {
