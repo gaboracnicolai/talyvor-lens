@@ -1687,6 +1687,24 @@ func run() error {
 			}
 		}()
 	}
+	// B19.8: scheduled agent payments and automatic top-ups. Every tick runs once however many Lens
+	// processes run it (the schedule's row is held while its tick is paid and advanced).
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-t.C:
+				if res, err := dualToken.RunAgentSchedules(ctx, now); err != nil {
+					slog.Warn("agents: schedule run failed", slog.String("err", err.Error()))
+				} else if res != (economy.ScheduleRunResult{}) {
+					slog.Info("agents: schedules run", slog.Int("paid", res.Paid), slog.Int("refused", res.Refused), slog.Int("topped_up", res.ToppedUp))
+				}
+			}
+		}
+	}()
 	// Phase-3 routing-pattern capture — post-serve, void, mint-free producer
 	// for the routing Advisor. Default off; persists observations for opted-in
 	// workspaces only (SQL gate). NEVER reaches ledger.Credit (earning is a

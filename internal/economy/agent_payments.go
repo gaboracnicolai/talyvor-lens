@@ -63,6 +63,16 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 		return pay, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if pay, err = payAgentTx(ctx, tx, workspaceID, pay, uuid.New()); err != nil {
+		return pay, s.refusedMovement(ctx, tx, err)
+	}
+	return pay, tx.Commit(ctx)
+}
+
+// payAgentTx posts pay as entry inside tx, judged by the payer's rules. Its refusals are returned as
+// they are; PayAgent files the approval one needs.
+func payAgentTx(ctx context.Context, tx pgx.Tx, workspaceID string, pay AgentPayment, entry uuid.UUID) (AgentPayment, error) {
+	fromAgentID, toAgentID, amount, memo := pay.FromAgentID, pay.ToAgentID, pay.AmountULXC, pay.Memo
 	// Both agents' rows, in id order, so two opposite payments cannot deadlock.
 	first, second := fromAgentID, toAgentID
 	if second < first {
@@ -80,10 +90,9 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 	if bal < amount {
 		return pay, fmt.Errorf("%w: the agent holds %d µLXC", ErrAgentFunds, bal)
 	}
-	entry := uuid.New()
 	pay.EntryID = entry.String()
 	if err := enforceAgentRules(ctx, tx, workspaceID, fromAgentID, amount, pay.EntryID); err != nil {
-		return pay, s.refusedMovement(ctx, tx, err)
+		return pay, err
 	}
 	for _, l := range []leg{{agentAccount(fromAgentID), -amount}, {agentAccount(toAgentID), amount}} {
 		if _, err := tx.Exec(ctx,
@@ -96,7 +105,7 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 		return pay, err
 	}
 	pay.FromBalanceULXC = bal - amount
-	return pay, tx.Commit(ctx)
+	return pay, nil
 }
 
 // AgentStatementLine is one posting on an agent's account, with what it moved against and the balance
