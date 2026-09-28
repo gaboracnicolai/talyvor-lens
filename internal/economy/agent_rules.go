@@ -40,9 +40,10 @@ type AgentRules struct {
 	ApprovalAboveULXC int64    `json:"approval_above_ulxc"`
 	AllowedModels     []string `json:"allowed_models"`
 	AllowedProviders  []string `json:"allowed_providers"`
-	ActiveFrom        string   `json:"active_from"`  // "HH:MM" in Timezone; with ActiveUntil, the hours it may spend
-	ActiveUntil       string   `json:"active_until"` // exclusive; earlier than ActiveFrom means the window crosses midnight
-	Timezone          string   `json:"timezone"`     // IANA name; UTC when empty. Days and months are counted in it too
+	AllowedListings   []string `json:"allowed_listings"` // marketplace listings it may use (B19.14); empty allows any
+	ActiveFrom        string   `json:"active_from"`      // "HH:MM" in Timezone; with ActiveUntil, the hours it may spend
+	ActiveUntil       string   `json:"active_until"`     // exclusive; earlier than ActiveFrom means the window crosses midnight
+	Timezone          string   `json:"timezone"`         // IANA name; UTC when empty. Days and months are counted in it too
 	// PauseOnUnusualSpend pauses the agent when its spend raises an unusual-spend alert (B19.6).
 	PauseOnUnusualSpend bool `json:"pause_on_unusual_spend"`
 }
@@ -54,6 +55,7 @@ type AgentRequest struct {
 	Fingerprint string    // the key, model and prompt, hashed: what an approval is for
 	At          time.Time // zero means now
 	Payment     bool      // a payment to another agent (B19.3): no model or provider to judge
+	Listing     string    // the marketplace listing a use is of (B19.14)
 }
 
 type agentRequestKey struct{}
@@ -146,16 +148,18 @@ func nullIfZero(v int64) any {
 
 const agentRulesColumns = `COALESCE(max_per_request_ulxc, 0), COALESCE(daily_limit_ulxc, 0), COALESCE(monthly_limit_ulxc, 0),
 	COALESCE(approval_above_ulxc, 0), allowed_models, allowed_providers, COALESCE(active_from, ''), COALESCE(active_until, ''), timezone,
-	pause_on_unusual_spend`
+	pause_on_unusual_spend, allowed_listings`
 
 func scanAgentRules(row pgx.Row) (AgentRules, error) {
 	var r AgentRules
 	err := row.Scan(&r.MaxPerRequestULXC, &r.DailyLimitULXC, &r.MonthlyLimitULXC, &r.ApprovalAboveULXC,
-		&r.AllowedModels, &r.AllowedProviders, &r.ActiveFrom, &r.ActiveUntil, &r.Timezone, &r.PauseOnUnusualSpend)
+		&r.AllowedModels, &r.AllowedProviders, &r.ActiveFrom, &r.ActiveUntil, &r.Timezone, &r.PauseOnUnusualSpend, &r.AllowedListings)
 	return r, err
 }
 
-// SetAgentRules replaces an agent's rules.
+// SetAgentRules replaces an agent's rules — all but AllowedListings when it is nil (absent from the JSON):
+// a client that predates it (B19.14) must not clear an agent's listings by saving its other rules. An
+// empty list clears them.
 func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID string, r AgentRules) (AgentRules, error) {
 	if err := r.validate(); err != nil {
 		return r, fmt.Errorf("%w: %s", ErrAgentRule, err)
@@ -175,16 +179,18 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 	}
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO agent_rules (agent_id, workspace_id, max_per_request_ulxc, daily_limit_ulxc, monthly_limit_ulxc,
-		       approval_above_ulxc, allowed_models, allowed_providers, active_from, active_until, timezone, pause_on_unusual_spend)
-		SELECT id, workspace_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12 FROM agent_accounts WHERE id = $1 AND workspace_id = $2
+		       approval_above_ulxc, allowed_models, allowed_providers, active_from, active_until, timezone, pause_on_unusual_spend,
+		       allowed_listings)
+		SELECT id, workspace_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13::text[], '{}') FROM agent_accounts WHERE id = $1 AND workspace_id = $2
 		ON CONFLICT (agent_id) DO UPDATE SET max_per_request_ulxc = EXCLUDED.max_per_request_ulxc,
 		       daily_limit_ulxc = EXCLUDED.daily_limit_ulxc, monthly_limit_ulxc = EXCLUDED.monthly_limit_ulxc,
 		       approval_above_ulxc = EXCLUDED.approval_above_ulxc, allowed_models = EXCLUDED.allowed_models,
 		       allowed_providers = EXCLUDED.allowed_providers, active_from = EXCLUDED.active_from,
 		       active_until = EXCLUDED.active_until, timezone = EXCLUDED.timezone,
-		       pause_on_unusual_spend = EXCLUDED.pause_on_unusual_spend, updated_at = now()`,
+		       pause_on_unusual_spend = EXCLUDED.pause_on_unusual_spend, allowed_listings = COALESCE($13::text[], agent_rules.allowed_listings), updated_at = now()`,
 		agentID, workspaceID, nullIfZero(r.MaxPerRequestULXC), nullIfZero(r.DailyLimitULXC), nullIfZero(r.MonthlyLimitULXC),
-		nullIfZero(r.ApprovalAboveULXC), r.AllowedModels, r.AllowedProviders, from, until, r.Timezone, r.PauseOnUnusualSpend)
+		nullIfZero(r.ApprovalAboveULXC), r.AllowedModels, r.AllowedProviders, from, until, r.Timezone, r.PauseOnUnusualSpend,
+		r.AllowedListings)
 	if err != nil {
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
@@ -206,7 +212,7 @@ func (s *DualTokenStore) GetAgentRules(ctx context.Context, workspaceID, agentID
 	}
 	r, err := scanAgentRules(s.pool.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return AgentRules{AllowedModels: []string{}, AllowedProviders: []string{}, Timezone: "UTC"}, nil
+		return AgentRules{AllowedModels: []string{}, AllowedProviders: []string{}, AllowedListings: []string{}, Timezone: "UTC"}, nil
 	}
 	if err != nil {
 		return r, fmt.Errorf("economy: agent rules: %w", err)
@@ -255,6 +261,9 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 	}
 	if len(r.AllowedProviders) > 0 && !req.Payment && !slices.Contains(r.AllowedProviders, req.Provider) {
 		return ruleRefusal("the agent may not use the provider %q", req.Provider)
+	}
+	if len(r.AllowedListings) > 0 && req.Listing != "" && !slices.Contains(r.AllowedListings, req.Listing) {
+		return ruleRefusal("the agent may not use the marketplace listing %q", req.Listing)
 	}
 	if r.MaxPerRequestULXC > 0 && amount > r.MaxPerRequestULXC {
 		return ruleRefusal("this %s would cost up to %s LXC; the agent's limit per request is %s LXC",
