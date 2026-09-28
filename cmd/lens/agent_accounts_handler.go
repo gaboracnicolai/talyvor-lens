@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/storedanswers"
 	"github.com/talyvor/lens/internal/tenant"
@@ -30,6 +31,10 @@ import (
 //	POST /v1/workspaces/{wsID}/agents/approvals/{id}/approve   let that request through, once
 //	POST /v1/workspaces/{wsID}/agents/approvals/{id}/deny      refuse it
 //
+// B19.3 — one company's agents pay each other, inside the closed loop:
+//
+//	POST /v1/workspaces/{wsID}/agents/{id}/pay  {"to_agent_id", "amount_ulxc", "memo"}   by the paying agent's own key, or the owner
+//
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
 
@@ -43,6 +48,8 @@ type agentBank interface {
 	GetAgentRules(ctx context.Context, workspaceID, agentID string) (economy.AgentRules, error)
 	ListAgentApprovals(ctx context.Context, workspaceID string) ([]economy.AgentApproval, error)
 	DecideAgentApproval(ctx context.Context, workspaceID, approvalID string, approve bool) (economy.AgentApproval, error)
+	PayAgent(ctx context.Context, workspaceID, fromAgentID, toAgentID string, amount int64, memo string) (economy.AgentPayment, error)
+	AgentOfKey(ctx context.Context, scopedKeyID string) (agentID, workspaceID string, err error)
 }
 
 type agentKeyIssuer interface {
@@ -189,6 +196,44 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 	}
 	r.Post("/v1/workspaces/{wsID}/agents/approvals/{approvalID}/approve", decide(true))
 	r.Post("/v1/workspaces/{wsID}/agents/approvals/{approvalID}/deny", decide(false))
+
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/pay", func(w http.ResponseWriter, req *http.Request) {
+		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
+		if _, owner := storedanswers.OwnerOrAdmin(req.Context()); !owner {
+			keyAgent := ""
+			if actx := auth.GetAuthContext(req.Context()); actx != nil && actx.APIKeyID != "" {
+				keyAgent, _, _ = bank.AgentOfKey(req.Context(), actx.APIKeyID)
+			}
+			if keyAgent != agentID {
+				writeJSONErr(w, http.StatusForbidden, "only the paying agent's own key, the workspace's owner or an admin may pay from an agent")
+				return
+			}
+		}
+		var in struct {
+			ToAgentID  string `json:"to_agent_id"`
+			AmountULXC int64  `json:"amount_ulxc"`
+			Memo       string `json:"memo"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || in.ToAgentID == "" || in.AmountULXC <= 0 {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"to_agent_id": "<agent>", "amount_ulxc": <positive µLXC>, "memo": "<optional>"}`)
+			return
+		}
+		pay, err := bank.PayAgent(req.Context(), wsID, agentID, in.ToAgentID, in.AmountULXC, in.Memo)
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrSameAgent):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, economy.ErrAgentFunds):
+			writeJSONErr(w, http.StatusConflict, err.Error())
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired):
+			writeJSONErr(w, http.StatusForbidden, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, pay)
+		}
+	})
 }
 
 // ownerOnly admits the workspace's owner or an admin — the rule stored-answer deletion uses.

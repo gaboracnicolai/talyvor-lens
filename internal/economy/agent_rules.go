@@ -51,6 +51,7 @@ type AgentRequest struct {
 	Provider    string
 	Fingerprint string    // the key, model and prompt, hashed: what an approval is for
 	At          time.Time // zero means now
+	Payment     bool      // a payment to another agent (B19.3): no model or provider to judge
 }
 
 type agentRequestKey struct{}
@@ -220,6 +221,10 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 		return fmt.Errorf("economy: agent rules: %w", err)
 	}
 	req := agentRequestFrom(ctx)
+	what := "request"
+	if req.Payment {
+		what = "payment"
+	}
 	loc, err := r.location()
 	if err != nil {
 		return ruleRefusal("the agent's timezone %q cannot be read", r.Timezone)
@@ -237,20 +242,22 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 			return ruleRefusal("the agent may spend only between %s and %s (%s)", r.ActiveFrom, r.ActiveUntil, r.Timezone)
 		}
 	}
-	if len(r.AllowedModels) > 0 && !slices.Contains(r.AllowedModels, req.Model) {
+	if len(r.AllowedModels) > 0 && !req.Payment && !slices.Contains(r.AllowedModels, req.Model) {
 		return ruleRefusal("the agent may not use the model %q", req.Model)
 	}
-	if len(r.AllowedProviders) > 0 && !slices.Contains(r.AllowedProviders, req.Provider) {
+	if len(r.AllowedProviders) > 0 && !req.Payment && !slices.Contains(r.AllowedProviders, req.Provider) {
 		return ruleRefusal("the agent may not use the provider %q", req.Provider)
 	}
 	if r.MaxPerRequestULXC > 0 && amount > r.MaxPerRequestULXC {
-		return ruleRefusal("this request would cost up to %s LXC; the agent's limit per request is %s LXC",
-			lxcString(amount), lxcString(r.MaxPerRequestULXC))
+		return ruleRefusal("this %s would cost up to %s LXC; the agent's limit per request is %s LXC",
+			what, lxcString(amount), lxcString(r.MaxPerRequestULXC))
 	}
 	spentSince := func(since time.Time) (int64, error) {
 		var spent int64
+		// What it paid other agents counts (B19.3); what they paid it does not raise its limit.
 		err := tx.QueryRow(ctx, `SELECT COALESCE(-sum(amount_ulxc), 0)::bigint FROM agent_postings
-			WHERE workspace_id = $1 AND account = $2 AND kind IN ('spend', 'hold', 'settle', 'release') AND created_at >= $3`,
+			WHERE workspace_id = $1 AND account = $2 AND created_at >= $3
+			  AND (kind IN ('spend', 'hold', 'settle', 'release') OR (kind = 'pay' AND amount_ulxc < 0))`,
 			workspaceID, agentAccount(agentID), since).Scan(&spent)
 		return spent, err
 	}
@@ -270,13 +277,13 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 			return fmt.Errorf("economy: agent spend so far: %w", err)
 		}
 		if spent+amount > limit.ulxc {
-			return ruleRefusal("the agent has spent %s LXC of its %s limit of %s LXC, and this request would cost up to %s LXC",
-				lxcString(spent), limit.name, lxcString(limit.ulxc), lxcString(amount))
+			return ruleRefusal("the agent has spent %s LXC of its %s limit of %s LXC, and this %s would cost up to %s LXC",
+				lxcString(spent), limit.name, lxcString(limit.ulxc), what, lxcString(amount))
 		}
 	}
 	if r.ApprovalAboveULXC > 0 && amount > r.ApprovalAboveULXC {
 		if req.Fingerprint == "" {
-			return ruleRefusal("this request needs approval and carries nothing to approve it by")
+			return ruleRefusal("this %s needs approval and carries nothing to approve it by", what)
 		}
 		// An approved request goes through once: the approval is used up in this transaction, so a
 		// refusal later in it (the workspace's balance, say) leaves it approved.
