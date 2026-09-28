@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// agent_self_service.go — B19.9: AGENTS USE THE BANK THEMSELVES.
+// agent_self_service.go — B19.9: AGENTS USE THEIR WALLETS THEMSELVES.
 //
 // What an agent's own key may do with its own account, for the MCP tools (internal/mcp/agent_tools.go):
 // ask for a payment's approval with a reason, before making it; read the receipt of an entry it is party
@@ -101,7 +101,7 @@ func (s *DualTokenStore) AgentReceipt(ctx context.Context, workspaceID, agentID,
 	return r, nil
 }
 
-// RecordAgentToolCall logs one call to the bank's tools: outcome is ok, refused or error.
+// RecordAgentToolCall logs one call to the wallet tools: outcome is ok, refused or error.
 func (s *DualTokenStore) RecordAgentToolCall(ctx context.Context, workspaceID, agentID, scopedKeyID, tool string, args json.RawMessage, outcome, detail string) error {
 	if len(args) == 0 || !json.Valid(args) {
 		args = json.RawMessage(`{}`)

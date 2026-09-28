@@ -30,7 +30,7 @@ export interface AttributionContext {
   repository?: string;
 }
 
-// The agent bank (B19.9/B19.18): the JSON Lens's agent tools answer with. Amounts are µLXC.
+// The agent wallet (B19.9/B19.18): the JSON Lens's agent tools answer with. Amounts are µLXC.
 
 export interface AgentAccount {
   id: string;

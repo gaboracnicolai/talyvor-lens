@@ -10,7 +10,7 @@ import (
 	"github.com/talyvor/lens/internal/economy"
 )
 
-// agent_tools.go — B19.9: AGENTS USE THE BANK THEMSELVES.
+// agent_tools.go — B19.9: AGENTS USE THEIR WALLETS THEMSELVES.
 //
 // Four tools an agent calls with its OWN key (a key attached to it, B19.1): its balance and rules, a
 // payment's approval asked for with a reason, a payment to another of its workspace's agents, and the
@@ -32,7 +32,7 @@ type AgentBank interface {
 // SetAgentBank enables the agent tools.
 func (s *Server) SetAgentBank(b AgentBank) { s.agentBank = b }
 
-// toolRefusal is a tool's answer that the bank refused what the agent asked: the agent reads why, as a
+// toolRefusal is a tool's answer that Lens refused what the agent asked: the agent reads why, as a
 // tool result marked isError, rather than as a protocol failure.
 type toolRefusal struct{ msg string }
 
@@ -51,7 +51,7 @@ func agentToolDefinitions() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "agent_balance",
-			"description": "Your own agent account: balance, what you have spent, whether you are paused, and your spending rules.",
+			"description": "Your own wallet: balance, what you have spent, whether you are paused, and your spending rules.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
@@ -66,7 +66,7 @@ func agentToolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "agent_receipt",
-			"description": "The receipt of a payment or other entry on your account: every posting of it.",
+			"description": "The receipt of a payment or other entry in your wallet: every posting of it.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{"entry_id": map[string]any{"type": "string"}}, "required": []string{"entry_id"}},
 		},
 	}
@@ -79,7 +79,7 @@ func (s *Server) callAgentTool(ctx context.Context, name string, args json.RawMe
 		keyID = actx.APIKeyID
 	}
 	if s.agentBank == nil {
-		return nil, fmt.Errorf("the agent bank is not configured")
+		return nil, fmt.Errorf("agent wallets are not configured")
 	}
 	agentID, workspaceID := "", ""
 	var result any

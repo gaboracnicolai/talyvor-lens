@@ -1,5 +1,5 @@
 /**
- * AgentBank — an agent's own account at Talyvor Lens.
+ * AgentWallet — an agent's own wallet at Talyvor Lens.
  *
  * An agent calls these with ITS OWN key (a key attached to the agent): its
  * balance and spending rules, an approval asked for with a reason, a payment
@@ -20,19 +20,19 @@ import type {
 } from "./types";
 
 /** Lens could not answer the call (network, credential, protocol). */
-export class AgentBankError extends Error {
+export class AgentWalletError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "AgentBankError";
+    this.name = "AgentWalletError";
   }
 }
 
 /**
- * The bank refused what the agent asked, and says why — for example the
+ * Lens refused what the agent asked, and says why — for example the
  * payment needs an approval that is still pending, it is beyond the agent's
  * limit per request, or the agent is paused.
  */
-export class PaymentRefused extends AgentBankError {
+export class PaymentRefused extends AgentWalletError {
   constructor(message: string) {
     super(message);
     this.name = "PaymentRefused";
@@ -40,18 +40,18 @@ export class PaymentRefused extends AgentBankError {
 }
 
 /**
- * The agent bank tools, called with the client's key. Reach it as
- * ``new LensClient({...}).bank``; the key must be attached to an agent.
+ * The agent wallet tools, called with the client's key. Reach it as
+ * ``new LensClient({...}).wallet``; the key must be attached to an agent.
  * Amounts are in µLXC (1 LXC = 1,000,000 µLXC).
  *
  * Usage:
- *   const bank = new LensClient({ lensUrl, apiKey: agentKey }).bank;
- *   await bank.requestApproval("agt_seller", 2_000_000, "October hosting");
- *   // ...once a person approves it on the Agent Bank screen:
- *   const payment = await bank.pay("agt_seller", 2_000_000);
- *   const receipt = await bank.receipt(payment.entry_id);
+ *   const wallet = new LensClient({ lensUrl, apiKey: agentKey }).wallet;
+ *   await wallet.requestApproval("agt_seller", 2_000_000, "October hosting");
+ *   // ...once a person approves it on the Agent Wallets screen:
+ *   const payment = await wallet.pay("agt_seller", 2_000_000);
+ *   const receipt = await wallet.receipt(payment.entry_id);
  */
-export class AgentBank {
+export class AgentWallet {
   private readonly url: string;
   private readonly headers: Record<string, string>;
   private nextId = 1;
@@ -114,11 +114,11 @@ export class AgentBank {
     try {
       resp = await fetch(this.url, { method: "POST", headers: this.headers, body });
     } catch (err) {
-      throw new AgentBankError(`${tool}: ${(err as Error).message}`);
+      throw new AgentWalletError(`${tool}: ${(err as Error).message}`);
     }
     const text = await resp.text();
     if (resp.status !== 200) {
-      throw new AgentBankError(`${tool}: Lens answered ${resp.status}: ${text.trim()}`);
+      throw new AgentWalletError(`${tool}: Lens answered ${resp.status}: ${text.trim()}`);
     }
     let envelope: {
       error?: { message?: string };
@@ -127,10 +127,10 @@ export class AgentBank {
     try {
       envelope = JSON.parse(text);
     } catch {
-      throw new AgentBankError(`${tool}: Lens answered something other than JSON-RPC`);
+      throw new AgentWalletError(`${tool}: Lens answered something other than JSON-RPC`);
     }
     if (envelope.error) {
-      throw new AgentBankError(`${tool}: ${envelope.error.message ?? JSON.stringify(envelope.error)}`);
+      throw new AgentWalletError(`${tool}: ${envelope.error.message ?? JSON.stringify(envelope.error)}`);
     }
     const out = envelope.result?.content?.[0]?.text ?? "";
     if (envelope.result?.isError) {
@@ -139,7 +139,7 @@ export class AgentBank {
     try {
       return JSON.parse(out) as T;
     } catch {
-      throw new AgentBankError(`${tool}: unreadable result: ${out}`);
+      throw new AgentWalletError(`${tool}: unreadable result: ${out}`);
     }
   }
 }

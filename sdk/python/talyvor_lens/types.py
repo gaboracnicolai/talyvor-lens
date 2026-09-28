@@ -60,7 +60,7 @@ class AttributionContext:
         )
 
 
-# The agent bank (B19.9/B19.18): the JSON Lens's agent tools answer with. Amounts are µLXC.
+# The agent wallet (B19.9/B19.18): the JSON Lens's agent tools answer with. Amounts are µLXC.
 
 
 class AgentAccount(TypedDict, total=False):

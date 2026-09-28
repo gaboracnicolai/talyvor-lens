@@ -1,4 +1,4 @@
-"""The agent bank through the SDK (B19.18).
+"""The agent wallet through the SDK (B19.18).
 
 A local HTTP server answers /mcp the way Lens does (JSON-RPC 2.0; a tool's
 answer is JSON in content[0].text; a refusal is a result marked isError),
@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from talyvor_lens import AgentBankError, LensClient, PaymentRefused
+from talyvor_lens import AgentWalletError, LensClient, PaymentRefused
 
 APPROVAL_ABOVE = 1_000_000
 MAX_PER_REQUEST = 5_000_000
@@ -100,27 +100,27 @@ def lens() -> Iterator[tuple[FakeLens, str]]:
 
 def test_an_agent_checks_its_balance_asks_for_approval_pays_once_approved_and_is_refused_beyond_its_rules(lens) -> None:
     fake, url = lens
-    bank = LensClient(lens_url=url, api_key="tlv_agent_key").bank
+    wallet = LensClient(lens_url=url, api_key="tlv_agent_key").wallet
 
-    balance = bank.balance()
+    balance = wallet.balance()
     assert balance["agent"]["balance_ulxc"] == 10_000_000
     assert balance["rules"]["approval_above_ulxc"] == APPROVAL_ABOVE
 
-    approval = bank.request_approval("agt_seller", 2_000_000, reason="October hosting", memo="invoice 7")
+    approval = wallet.request_approval("agt_seller", 2_000_000, reason="October hosting", memo="invoice 7")
     assert approval["status"] == "pending" and approval["reason"] == "October hosting"
 
     with pytest.raises(PaymentRefused, match="apr_1"):
-        bank.pay("agt_seller", 2_000_000, memo="invoice 7")
+        wallet.pay("agt_seller", 2_000_000, memo="invoice 7")
 
     fake.approvals[str(("agt_seller", 2_000_000, "invoice 7"))]["status"] = "approved"  # the owner approves
-    payment = bank.pay("agt_seller", 2_000_000, memo="invoice 7")
+    payment = wallet.pay("agt_seller", 2_000_000, memo="invoice 7")
     assert payment["from_balance_ulxc"] == 8_000_000
 
     with pytest.raises(PaymentRefused, match="limit per request"):
-        bank.pay("agt_seller", 6_000_000)
-    assert bank.balance()["agent"]["balance_ulxc"] == 8_000_000
+        wallet.pay("agt_seller", 6_000_000)
+    assert wallet.balance()["agent"]["balance_ulxc"] == 8_000_000
 
-    receipt = bank.receipt(payment["entry_id"])
+    receipt = wallet.receipt(payment["entry_id"])
     assert sum(p["amount_ulxc"] for p in receipt["postings"]) == 0
 
     # Every call went to /mcp as a tools/call carrying the agent's own key.
@@ -134,6 +134,6 @@ def test_an_agent_checks_its_balance_asks_for_approval_pays_once_approved_and_is
 
 def test_a_key_lens_rejects_is_an_error_not_a_refusal(lens) -> None:
     _, url = lens
-    with pytest.raises(AgentBankError, match="401") as caught:
-        LensClient(lens_url=url, api_key="tlv_wrong").bank.balance()
+    with pytest.raises(AgentWalletError, match="401") as caught:
+        LensClient(lens_url=url, api_key="tlv_wrong").wallet.balance()
     assert not isinstance(caught.value, PaymentRefused)

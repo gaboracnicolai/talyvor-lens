@@ -181,7 +181,7 @@ func (s *Server) HandleSSE(w http.ResponseWriter, r *http.Request) {
 
 // Tool catalogue ------------------------------------------------------------
 
-// tools lists every tool this server answers: the agent tools too when the agent bank is set.
+// tools lists every tool this server answers: the agent tools too when agent wallets are set.
 func (s *Server) tools() []map[string]any {
 	if s.agentBank == nil {
 		return toolDefinitions()

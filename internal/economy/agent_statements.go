@@ -42,7 +42,7 @@ type StatementAccount struct {
 	ClosingULXC int64  `json:"closing_ulxc"`
 }
 
-// Statement is an agent's account, or every account a workspace's agent bank has, over [From, To).
+// Statement is an agent's account, or every agent wallet a workspace has, over [From, To).
 type Statement struct {
 	WorkspaceID string             `json:"workspace_id"`
 	AgentID     string             `json:"agent_id,omitempty"`
@@ -70,7 +70,7 @@ func (s *DualTokenStore) AgentPeriodStatement(ctx context.Context, workspaceID, 
 	return st, err
 }
 
-// WorkspaceAgentStatement is the statement of every account in a workspace's agent bank — the
+// WorkspaceAgentStatement is the statement of every agent wallet in a workspace — the
 // workspace's side, each agent, and what they spent — for [from, to). Every entry sums to zero, so the
 // accounts' movements over any period do too.
 func (s *DualTokenStore) WorkspaceAgentStatement(ctx context.Context, workspaceID string, from, to time.Time) (Statement, error) {

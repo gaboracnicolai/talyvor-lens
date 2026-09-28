@@ -1,5 +1,5 @@
 /**
- * The agent bank through the SDK (B19.18).
+ * The agent wallet through the SDK (B19.18).
  *
  * A local HTTP server answers /mcp the way Lens does (JSON-RPC 2.0; a tool's
  * answer is JSON in content[0].text; a refusal is a result marked isError),
@@ -9,7 +9,7 @@
 
 import http from "http";
 import type { AddressInfo } from "net";
-import { AgentBankError, LensClient, PaymentRefused } from "../src";
+import { AgentWalletError, LensClient, PaymentRefused } from "../src";
 
 const APPROVAL_ABOVE = 1_000_000;
 const MAX_PER_REQUEST = 5_000_000;
@@ -61,7 +61,7 @@ class FakeLens {
   }
 }
 
-describe("AgentBank", () => {
+describe("AgentWallet", () => {
   let fake: FakeLens;
   let server: http.Server;
   let url: string;
@@ -94,26 +94,26 @@ describe("AgentBank", () => {
   afterEach(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
   it("an agent checks its balance, asks for approval, pays once approved and is refused beyond its rules", async () => {
-    const bank = new LensClient({ lensUrl: url, apiKey: "tlv_agent_key" }).bank;
+    const wallet = new LensClient({ lensUrl: url, apiKey: "tlv_agent_key" }).wallet;
 
-    const balance = await bank.balance();
+    const balance = await wallet.balance();
     expect(balance.agent.balance_ulxc).toBe(10_000_000);
     expect(balance.rules.approval_above_ulxc).toBe(APPROVAL_ABOVE);
 
-    const approval = await bank.requestApproval("agt_seller", 2_000_000, "October hosting", "invoice 7");
+    const approval = await wallet.requestApproval("agt_seller", 2_000_000, "October hosting", "invoice 7");
     expect(approval.status).toBe("pending");
     expect(approval.reason).toBe("October hosting");
 
-    await expect(bank.pay("agt_seller", 2_000_000, "invoice 7")).rejects.toThrow(PaymentRefused);
+    await expect(wallet.pay("agt_seller", 2_000_000, "invoice 7")).rejects.toThrow(PaymentRefused);
 
     fake.approvals.get("agt_seller|2000000|invoice 7")!.status = "approved"; // the owner approves
-    const payment = await bank.pay("agt_seller", 2_000_000, "invoice 7");
+    const payment = await wallet.pay("agt_seller", 2_000_000, "invoice 7");
     expect(payment.from_balance_ulxc).toBe(8_000_000);
 
-    await expect(bank.pay("agt_seller", 6_000_000)).rejects.toThrow(/limit per request/);
-    expect((await bank.balance()).agent.balance_ulxc).toBe(8_000_000);
+    await expect(wallet.pay("agt_seller", 6_000_000)).rejects.toThrow(/limit per request/);
+    expect((await wallet.balance()).agent.balance_ulxc).toBe(8_000_000);
 
-    const receipt = await bank.receipt(payment.entry_id);
+    const receipt = await wallet.receipt(payment.entry_id);
     expect(receipt.postings.reduce((sum, p) => sum + p.amount_ulxc, 0)).toBe(0);
 
     // Every call went to /mcp as a tools/call carrying the agent's own key.
@@ -126,8 +126,8 @@ describe("AgentBank", () => {
   });
 
   it("a key Lens rejects is an error, not a refusal", async () => {
-    const err = await new LensClient({ lensUrl: url, apiKey: "tlv_wrong" }).bank.balance().catch((e) => e);
-    expect(err).toBeInstanceOf(AgentBankError);
+    const err = await new LensClient({ lensUrl: url, apiKey: "tlv_wrong" }).wallet.balance().catch((e) => e);
+    expect(err).toBeInstanceOf(AgentWalletError);
     expect(err).not.toBeInstanceOf(PaymentRefused);
     expect(err.message).toMatch(/401/);
   });
