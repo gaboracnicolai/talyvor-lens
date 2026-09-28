@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/poolshadow"
 )
 
@@ -61,7 +62,7 @@ const poolShadowWriteTimeout = 5 * time.Second
 //
 // didPool carries whether the pooled copy was ACTUALLY written, so a reader can separate shadow
 // rows from live ones without knowing how the flag was set that day.
-func (p *Proxy) shadowPoolObservation(ctx context.Context, workspaceID, provider, model, rawPrompt string, didPool bool) {
+func (p *Proxy) shadowPoolObservation(ctx context.Context, workspaceID, provider, model, rawPrompt, reqFP string, didPool bool) {
 	if p == nil || p.poolShadowSink == nil || p.poolShadowEnabled == nil || !p.poolShadowEnabled() {
 		return
 	}
@@ -81,7 +82,7 @@ func (p *Proxy) shadowPoolObservation(ctx context.Context, workspaceID, provider
 	// storeCaches makes. Passing it in rather than re-deriving it inside poolshadow keeps one
 	// source of truth: if the key rule changes, the shadow numbers move with the pool they
 	// describe instead of silently ceasing to describe it.
-	o := poolshadow.Observe(workspaceID, provider, model, pooledPromptKey(rawPrompt), rawPrompt, didPool)
+	o := poolshadow.Observe(workspaceID, provider, model, cache.FingerprintedKey(pooledPromptKey(rawPrompt), reqFP), reqFP, rawPrompt, didPool)
 
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), poolShadowWriteTimeout)
 	defer cancel()

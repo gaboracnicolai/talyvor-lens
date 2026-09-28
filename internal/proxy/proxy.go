@@ -1742,7 +1742,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// response is neither cached nor pooled, so leaving it out of the observations is exact —
 		// and writing a metadata row for a tenant that asked for no rows would not be acceptable.
 		if shouldCache && loggingPolicy != workspace.LoggingNone {
-			p.shadowPoolObservation(ctx, wsID, cfg.ProviderName(), model, prompt,
+			p.shadowPoolObservation(ctx, wsID, cfg.ProviderName(), model, prompt, reqFP,
 				p.sharesAnswers(ctx, wsID))
 		}
 		eventPrompt := prompt

@@ -46,10 +46,10 @@ type Observation struct {
 
 // fingerprint hashes key material under a namespace so two different kinds of fingerprint can
 // never be equal by accident, and so provider/model are inside the hash rather than beside it.
-func fingerprint(kind, provider, model, material string) []byte {
+func fingerprint(kind, provider, model string, material ...string) []byte {
 	h := sha256.New()
 	// Length-prefixed rather than delimiter-joined: "a"+"bc" and "ab"+"c" must not collide.
-	for _, part := range []string{kind, provider, model, material} {
+	for _, part := range append([]string{kind, provider, model}, material...) {
 		_, _ = fmt.Fprintf(h, "%d:", len(part))
 		_, _ = h.Write([]byte(part))
 	}
@@ -61,7 +61,12 @@ func fingerprint(kind, provider, model, material string) []byte {
 // ⚠ pooledKey IS PASSED IN, NOT DERIVED HERE, ON PURPOSE. The proxy owns the pooled key rule
 // (cache.PooledPromptKey). If this package re-implemented it, a change on one side would silently
 // stop the shadow numbers corresponding to the pool they describe, and nothing would go red.
-func Observe(workspaceID, provider, model, pooledKey, rawPrompt string, didPool bool) Observation {
+//
+// reqFP is the B15.1 request fingerprint every pooled read and write is keyed or filtered by: two
+// requests with the same prompt but different parameters are never served each other's answer, so
+// they must not count as a repeat here either. The caller folds it into pooledKey with the same
+// rule the pool uses (cache.FingerprintedKey); it is folded into the canonical fingerprint here.
+func Observe(workspaceID, provider, model, pooledKey, reqFP, rawPrompt string, didPool bool) Observation {
 	o := Observation{
 		WorkspaceID: workspaceID,
 		Provider:    provider,
@@ -70,7 +75,7 @@ func Observe(workspaceID, provider, model, pooledKey, rawPrompt string, didPool 
 		DidPool:     didPool,
 	}
 	if canon := discriminator.Canon(rawPrompt); canon.Verifiable() {
-		o.CanonFP = fingerprint("canon", provider, model, string(canon))
+		o.CanonFP = fingerprint("canon", provider, model, string(canon), reqFP)
 	}
 	return o
 }

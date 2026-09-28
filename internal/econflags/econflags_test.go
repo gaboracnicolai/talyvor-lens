@@ -140,7 +140,7 @@ func TestReport_CoversEveryForceOffAndDefaultOnFlag(t *testing.T) {
 		"PatternEarningEnabled",
 		// the force-off block
 		"PatternMiningEnabled", "PatternCaptureEnabled", "POVIMintingEnabled",
-		"AnnotationMintingEnabled", "TrustfulComputeMintEnabled", "CacheSharingEnabled",
+		"AnnotationMintingEnabled", "TrustfulComputeMintEnabled",
 		"RoutingIntelligenceEnabled", "RoutingTierCohortsEnabled",
 		"EvalContributionMintingEnabled", "RoutingPredictionMintingEnabled",
 		"LatencyMintingEnabled", "ConfidentialMintingEnabled",

@@ -30,7 +30,7 @@ func setRequiredEnv(t *testing.T) {
 var economyGateEnv = []string{
 	"LENS_PATTERN_MINING_ENABLED", "LENS_PATTERN_CAPTURE_ENABLED", "LENS_PATTERN_EARNING_ENABLED",
 	"LENS_POOL_ROYALTY_MINTING_ENABLED", "LENS_POVI_MINTING_ENABLED", "LENS_TRUSTFUL_COMPUTE_MINT_ENABLED",
-	"LENS_CACHE_SHARING_ENABLED", "LENS_CACHE_POOLABLE_ENABLED", "LENS_DISTILL_POOLABLE_ENABLED",
+	"LENS_CACHE_POOLABLE_ENABLED", "LENS_DISTILL_POOLABLE_ENABLED",
 	"LENS_LXC_GATING_ENABLED", "LENS_LXC_SHADOW_SPEND_ENABLED", "LENS_ROUTING_INTELLIGENCE_ENABLED",
 	"LENS_EVAL_CONTRIBUTION_MINTING_ENABLED", "LENS_LATENCY_MINTING_ENABLED", "LENS_CONFIDENTIAL_MINTING_ENABLED",
 	"LENS_ANNOTATION_MINTING_ENABLED",
@@ -58,7 +58,7 @@ func TestEconomyKillSwitch_ForcesAllGatesOff(t *testing.T) {
 		"PatternMining": cfg.PatternMiningEnabled, "PatternCapture": cfg.PatternCaptureEnabled,
 		"PatternEarning": cfg.PatternEarningEnabled, "PoolRoyaltyMinting": cfg.PoolRoyaltyMintingEnabled,
 		"POVIMinting": cfg.POVIMintingEnabled, "TrustfulComputeMint": cfg.TrustfulComputeMintEnabled,
-		"CacheSharing": cfg.CacheSharingEnabled, "CachePoolable": cfg.CachePoolableEnabled,
+		"CachePoolable":   cfg.CachePoolableEnabled,
 		"DistillPoolable": cfg.DistillPoolableEnabled, "RoutingIntelligence": cfg.RoutingIntelligenceEnabled,
 		"RoutingTierCohorts": cfg.RoutingTierCohortsEnabled,
 		// P-o-I instance 1: the proof-of-eval-contribution EARNING gate (mints LENS) — force-off with the economy.
@@ -72,8 +72,8 @@ func TestEconomyKillSwitch_ForcesAllGatesOff(t *testing.T) {
 		// The annotation mint (spendable-immediate LENS) — force-off with the economy master switch.
 		"AnnotationMinting": cfg.AnnotationMintingEnabled,
 	}
-	if len(checks) != 16 {
-		t.Fatalf("expected 16 economy gates, got %d", len(checks))
+	if len(checks) != 15 {
+		t.Fatalf("expected 15 economy gates, got %d", len(checks))
 	}
 	// U18 INVERSE: LXC is FIAT — its gates survive the master kill (env-true → on),
 	// so a fiat-SaaS deployment can still meter/gate paid LXC credit economy-off.
