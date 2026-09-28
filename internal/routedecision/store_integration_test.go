@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // Real-PG round-trip: Record writes rows, Summarize aggregates the override rate + estimated delta over a
@@ -63,7 +65,7 @@ func TestRecordAndSummarize_Integration(t *testing.T) {
 
 	// Cross-tenant, explicitly: this test's 3 rows span wsA and wsB. The per-tenant view is proven in
 	// scope_integration_test.go.
-	s, err := NewReader(pool).SummarizeAllTenants(ctx, time.Now().Add(-time.Hour))
+	s, err := NewReader(pool).SummarizeAllTenants(ctx, workspace.AudienceReal, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("summarize: %v", err)
 	}
@@ -89,7 +91,7 @@ func TestSummarize_WindowFilter_Integration(t *testing.T) {
 		VALUES ('wsOld','big','small',true,10,10,1,2,'cache_aware', now() - interval '2 hours')`); err != nil {
 		t.Fatal(err)
 	}
-	s, err := NewReader(pool).SummarizeAllTenants(ctx, time.Now().Add(-time.Hour))
+	s, err := NewReader(pool).SummarizeAllTenants(ctx, workspace.AudienceReal, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

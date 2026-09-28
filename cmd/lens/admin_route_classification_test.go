@@ -39,6 +39,7 @@ var operatorReadable = map[string]string{
 	"/v1/admin/output-verdicts":           "forensic verdict read across workspaces.",
 	"/v1/admin/workspaces":                "the tenant roster — the first column of the operator table. In-memory workspace.Manager, no DB write path.",
 	"/v1/admin/routing-decisions/summary": "override rate + estimated cost delta. The estimate is descriptive, not money.",
+	"/v1/admin/usage/summary":             "B17.7: requests, tokens, provider cost and serves by source across workspaces, synthetic apart. opsusage.Reader is Query-only.",
 	"/v1/admin/distill/attribution":       "distill attribution rows. distillattrib.Reader is Query-only by construction.",
 	"/v1/admin/billing/purchases":         "the purchases column of the operator table.",
 	"/v1/admin/pool-royalty/detect":       "self-dealing detection read. Query-only reader, explicitly NOT economy-gated so forensics survive the kill switch.",

@@ -24,6 +24,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // Cost-basis labels. A row says which pricing basis produced its two cost figures, so a reader can never
@@ -151,7 +153,7 @@ FROM routing_decisions WHERE workspace_id = $1 AND created_at >= $2`
     COALESCE(SUM(actual_cost_u) FILTER (WHERE cost_basis = 'cache_aware'), 0),
     COALESCE(SUM(counterfactual_cost_estimate_u) FILTER (WHERE cost_basis = 'cache_aware'), 0),
     COUNT(*) FILTER (WHERE cost_basis <> 'cache_aware')
-FROM routing_decisions WHERE created_at >= $1`
+FROM routing_decisions WHERE created_at >= $1 AND `
 )
 
 // Summarize computes ONE WORKSPACE'S window readout — the scoped read, and the one anything customer-facing
@@ -171,9 +173,10 @@ func (r *Reader) Summarize(ctx context.Context, workspaceID string, since time.T
 
 // SummarizeAllTenants is the CROSS-TENANT forensic read, for the admin endpoint only. It is named this way
 // so it cannot be reached by accident: any caller aggregating every tenant's spend has to say so out loud.
-// Never serve its result to a customer.
-func (r *Reader) SummarizeAllTenants(ctx context.Context, since time.Time) (Summary, error) {
-	return r.summarize(ctx, summaryAllTenantsSQL, since)
+// Never serve its result to a customer. audience picks real or synthetic workspaces (B17.7): a synthetic
+// workspace's traffic is never in the real readout.
+func (r *Reader) SummarizeAllTenants(ctx context.Context, audience workspace.Audience, since time.Time) (Summary, error) {
+	return r.summarize(ctx, summaryAllTenantsSQL+audience.SQL("workspace_id"), since)
 }
 
 func (r *Reader) summarize(ctx context.Context, query string, args ...any) (Summary, error) {

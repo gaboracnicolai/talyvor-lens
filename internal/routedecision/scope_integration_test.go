@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // THE WORKSPACE-FILTER GAP. summarySQL aggregated `WHERE created_at >= $1` and nothing else — every tenant's
@@ -96,7 +98,7 @@ func TestSummarize_EmptyWorkspaceIsNotAWildcard_Integration(t *testing.T) {
 func TestSummarizeAllTenants_StillCrossTenant_Integration(t *testing.T) {
 	pool := routePool(t)
 	seedTwoTenants(t, NewWriter(pool))
-	s, err := NewReader(pool).SummarizeAllTenants(context.Background(), time.Now().Add(-time.Hour))
+	s, err := NewReader(pool).SummarizeAllTenants(context.Background(), workspace.AudienceReal, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

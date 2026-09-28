@@ -35,11 +35,19 @@ func newListMyWorkspacesHandler(authn verdictAuthenticator, roster workspaceRost
 
 // newAdminListWorkspacesHandler serves GET /v1/admin/workspaces — the full tenant roster. Wrapped by
 // requireAdmin at the mount site (a non-admin must never enumerate other tenants). Returns a JSON array.
+// Synthetic workspaces are left out; ?synthetic=only lists them alone (B17.7).
 func newAdminListWorkspacesHandler(roster workspaceRoster) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		out := roster.ListWorkspaces()
-		if out == nil {
-			out = []*workspace.Workspace{}
+	return func(w http.ResponseWriter, req *http.Request) {
+		audience, err := workspace.ParseAudience(req.URL.Query().Get(workspace.AudienceQueryParam))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out := []*workspace.Workspace{}
+		for _, ws := range roster.ListWorkspaces() {
+			if audience.Includes(ws) {
+				out = append(out, ws)
+			}
 		}
 		writeJSONOK(w, http.StatusOK, out)
 	}

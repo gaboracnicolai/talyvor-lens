@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/talyvor/lens/internal/distillattrib"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // distill_attribution_handler.go — the ADMIN-ONLY read surface over
@@ -24,16 +25,22 @@ const (
 
 // distillAttribReader is the slice of *distillattrib.Reader the handler needs.
 type distillAttribReader interface {
-	RawRows(ctx context.Context, limit int) ([]distillattrib.ServeRow, error)
-	PairTotals(ctx context.Context, limit int) ([]distillattrib.PairTotal, error)
+	RawRows(ctx context.Context, audience workspace.Audience, limit int) ([]distillattrib.ServeRow, error)
+	PairTotals(ctx context.Context, audience workspace.Audience, limit int) ([]distillattrib.PairTotal, error)
 }
 
 // newDistillAttributionAdminHandler — GET /v1/admin/distill/attribution. Default
 // returns raw rows (most-recent first); ?view=pairs returns the condition-(b)
 // materiality aggregate (serve_count per owner/requester pair). ?limit= is
-// capped at distillAttribLimitMax.
+// capped at distillAttribLimitMax. Pairs involving a synthetic workspace are left out; ?synthetic=only
+// reads them alone (B17.7).
 func newDistillAttributionAdminHandler(reader distillAttribReader) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		audience, err := workspace.ParseAudience(req.URL.Query().Get(workspace.AudienceQueryParam))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		limit := distillAttribLimitDefault
 		if v := req.URL.Query().Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= distillAttribLimitMax {
@@ -41,7 +48,7 @@ func newDistillAttributionAdminHandler(reader distillAttribReader) http.HandlerF
 			}
 		}
 		if req.URL.Query().Get("view") == "pairs" {
-			pairs, err := reader.PairTotals(req.Context(), limit)
+			pairs, err := reader.PairTotals(req.Context(), audience, limit)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -49,7 +56,7 @@ func newDistillAttributionAdminHandler(reader distillAttribReader) http.HandlerF
 			writeJSONOK(w, http.StatusOK, pairs)
 			return
 		}
-		rows, err := reader.RawRows(req.Context(), limit)
+		rows, err := reader.RawRows(req.Context(), audience, limit)
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return

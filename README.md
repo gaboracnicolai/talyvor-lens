@@ -82,6 +82,11 @@ It returns request volume, how often routing overrode your model choice, and the
 delta. **It is an estimate, not money** — the counterfactual call never happened, so its price is
 modelled, not billed. Treat it as the shape of the effect on your traffic, not as an invoice.
 
+`GET /v1/admin/usage/summary` gives the fleet's requests, tokens, provider cost, serves by source
+(model, own cache, shared pool) and workspace counts over `?window=` (default 24h). Every admin
+total leaves synthetic test workspaces out; add `?synthetic=only` to any of them to read the test
+harness's traffic alone.
+
 A measured, published figure — against an already-optimised baseline, on real customer workloads
 — is intended. It is not in this README because it does not exist yet, and the point of this
 section is that a number nobody computed should not be the first thing you read.
