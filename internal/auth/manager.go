@@ -21,6 +21,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/talyvor/lens/internal/moderatorkey"
 	"github.com/talyvor/lens/internal/sessionkey"
 	"github.com/talyvor/lens/internal/tenant"
 )
@@ -91,6 +92,11 @@ const (
 	// scope a tenant can name for itself is a scope a tenant can grant itself, and this one reads
 	// across every workspace. operator_read_scope_is_not_tenant_grantable is the guard.
 	ScopeOperatorRead = "operator_read"
+
+	// ScopeMarketModeration is B20.13's moderator key (internal/moderatorkey): the marketplace review
+	// queue — read it, approve a listing, take one down — and nothing else. Like operator_read it is
+	// NOT in tenant.ValidScopes: only the operator command `lens moderator-keys` creates one.
+	ScopeMarketModeration = "market_moderation"
 )
 
 // AuthMethod values shipped on AuthContext.AuthMethod.
@@ -114,6 +120,9 @@ const (
 	// THE MINT ROUTE REFUSES ON — a session key must not be able to mint another session key.
 	MethodSessionKey   = "session_key"
 	MethodLegacyHeader = "legacy_header"
+	// MethodModeratorKey is the marketplace moderator credential (B20.13). Every admin gate and the
+	// tenant middleware refuse it 403 by this method; only requireAdminOrModerator admits it.
+	MethodModeratorKey = "moderator_key"
 )
 
 // ─── errors ──────────────────────────────────────
@@ -161,6 +170,9 @@ type AuthContext struct {
 	// SessionKeyID is the browser-chat session key's ID; EMPTY for every other method. It keys the
 	// per-session spend bound (B9.8) — never the agent allocator, which reads APIKeyID only.
 	SessionKeyID string `json:"session_key_id,omitempty"`
+	// ModeratorKeyID is the moderator key's ID (B20.13); ZERO for every other method. Every use of
+	// the key is recorded against it.
+	ModeratorKeyID int64 `json:"moderator_key_id,omitempty"`
 }
 
 // HasScope reports whether the resolved identity carries `scope`.
@@ -258,6 +270,7 @@ type Manager struct {
 	keyStore        *KeyStore
 	tenantStore     *tenant.Store
 	sessionKeys     sessionKeyValidator
+	moderatorKeys   moderatorKeyValidator
 
 	mu       sync.RWMutex
 	jwtCache map[string]*jwtCacheEntry
@@ -289,6 +302,15 @@ type sessionKeyValidator interface {
 // unset ⇒ the credential shape does not exist, every tlv_sk_ bearer is refused, and a deployment
 // that never calls this is byte-for-byte unchanged by the feature.
 func (m *Manager) WithSessionKeys(v sessionKeyValidator) *Manager { m.sessionKeys = v; return m }
+
+// moderatorKeyValidator is the slice of *moderatorkey.Store this package needs.
+type moderatorKeyValidator interface {
+	Validate(ctx context.Context, raw string) (*moderatorkey.Key, error)
+}
+
+// WithModeratorKeys attaches the marketplace moderator key store (B20.13). Unset ⇒ every tlv_mod_
+// bearer is refused.
+func (m *Manager) WithModeratorKeys(v moderatorKeyValidator) *Manager { m.moderatorKeys = v; return m }
 
 func NewManager(globalKey string, privateKey *ecdsa.PrivateKey, keyStore *KeyStore, tenantStore *tenant.Store) *Manager {
 	var pub *ecdsa.PublicKey
@@ -394,6 +416,23 @@ func (m *Manager) Authenticate(r *http.Request) (*AuthContext, error) {
 			IsAdmin:      false,
 			ExpiresAt:    sk.ExpiresAt,
 			SessionKeyID: sk.ID,
+		}, nil
+	}
+
+	// Moderator key (B20.13). The scope set is this literal: market_moderation and nothing else.
+	// IsAdmin is FALSE, so HasScope(ScopeAdmin) is false and no admin gate is satisfied by it; the
+	// gates additionally answer it 403 by AuthMethod. Validated against the DB every time, so a
+	// revoked key is refused (401) on the next request. The prefix is disjoint from tlv_ws_/tlv_sk_.
+	if m.moderatorKeys != nil && strings.HasPrefix(raw, moderatorkey.KeyPrefix) {
+		k, err := m.moderatorKeys.Validate(r.Context(), raw)
+		if err != nil {
+			return nil, ErrInvalidAuth
+		}
+		return &AuthContext{
+			Scopes:         []string{ScopeMarketModeration},
+			AuthMethod:     MethodModeratorKey,
+			IsAdmin:        false,
+			ModeratorKeyID: k.ID,
 		}, nil
 	}
 

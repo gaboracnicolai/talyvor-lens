@@ -59,6 +59,11 @@ func AuthMiddleware(ks *KeyStore, m *Manager) func(http.Handler) http.Handler {
 			// all four credential shapes.
 			if m != nil {
 				actx, err := m.Authenticate(r)
+				if err == nil && actx.AuthMethod == MethodModeratorKey {
+					// B20.13: a moderator key reaches the marketplace review queue and nothing else.
+					writeAuthError(w, http.StatusForbidden, "a moderator key may only use the marketplace review queue")
+					return
+				}
 				if err == nil {
 					// Synthesise a minimal APIKey so the rate-limiter and any
 					// other GetAPIKey consumer gets a non-nil value.

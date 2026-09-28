@@ -70,7 +70,7 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/held-mints/node_latency_mints/adjudicate":         "REVOKES A PAYOUT (loop-generated).",
 	"/v1/admin/held-mints/confidential_compute_mints/adjudicate": "REVOKES A PAYOUT (loop-generated).",
 	"/v1/admin/catalog/models/{id}/price":                        "SETS A PRICE (B10.5: puts a discovered model in the catalog at the rate a person confirmed).",
-	"/v1/admin/marketplace/review":                               "B20.4: the marketplace's held and reported listings, with what reporters wrote about them. requireAdmin only.",
+	"/v1/admin/marketplace/review":                               "B20.4: the marketplace's held and reported listings, with what reporters wrote about them. requireAdminOrModerator: the global key or a B20.13 moderator key, never the operator read key.",
 	"/v1/admin/marketplace/listings/{listingID}/approve":         "B20.4: releases a held listing to every buyer.",
 	"/v1/admin/marketplace/listings/{listingID}/takedown":        "B20.4: TAKES A LISTING DOWN AND REFUNDS ITS BUYERS. Moves money.",
 
