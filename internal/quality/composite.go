@@ -407,10 +407,9 @@ func splitSentences(r string) []string {
 
 // ─── auto-retry helper ─────────────────────────────
 
-// AutoRetryThreshold is the score below which the proxy retries
-// the request once (when LENS_QUALITY_AUTO_RETRY is set). The
-// proxy bumps temperature on retry so it doesn't repeat the
-// exact same bad reply.
+// AutoRetryThreshold is the score below which a response counts as
+// low quality. Nothing retries on it: LENS_QUALITY_AUTO_RETRY was
+// parsed and never read, and B18.10 removed it.
 const AutoRetryThreshold = 0.4
 
 // ShouldAutoRetry returns true when the score is below the

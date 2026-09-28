@@ -80,7 +80,7 @@ func swapDBName(t *testing.T, dsn, name string) string {
 // obs is a shorthand for one write-side observation at a chosen instant.
 func obs(t *testing.T, r *poolshadow.Recorder, at time.Time, wsID, provider, model, prompt string) {
 	t.Helper()
-	o := poolshadow.Observe(wsID, provider, model, cache.PooledPromptKey(prompt), prompt, false)
+	o := poolshadow.Observe(wsID, provider, model, cache.PooledPromptKey(prompt), "", prompt, false)
 	o.At = at
 	if err := r.Record(context.Background(), o); err != nil {
 		t.Fatalf("record: %v", err)

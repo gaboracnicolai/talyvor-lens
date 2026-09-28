@@ -510,7 +510,7 @@ func (s *StreamHandler) serve(
 	// cache write above (an uncacheable response could never have been pooled) and on the logging
 	// policy, exactly as the buffered seam is. Void, post-serve, default-off.
 	if shouldCache && s.proxy.loggingPolicyFor(sc.wsID) != workspace.LoggingNone {
-		s.proxy.shadowPoolObservation(storeCtx, sc.wsID, provider, model, prompt,
+		s.proxy.shadowPoolObservation(storeCtx, sc.wsID, provider, model, prompt, sc.reqFP,
 			s.proxy.sharesAnswers(storeCtx, sc.wsID))
 	}
 	eventPrompt := prompt

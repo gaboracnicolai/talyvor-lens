@@ -164,11 +164,6 @@ type Config struct {
 	VLLMBaseURL   string
 	VLLMAPIKey    string
 
-	// QualityAutoRetry enables a one-shot retry when a response
-	// scores below quality.AutoRetryThreshold. Off by default;
-	// the operator opts in via LENS_QUALITY_AUTO_RETRY=true.
-	QualityAutoRetry bool
-
 	// LocalEndpoints holds the LENS_LOCAL_ENDPOINTS env value,
 	// in the format consumed by localrouter.ParseEndpointsConfig:
 	//   provider:url:model1,model2;provider:url:model3
@@ -236,12 +231,6 @@ type Config struct {
 	RetryMaxDelay     time.Duration
 	CBThreshold       int
 	CBResetTimeout    time.Duration
-
-	// Cache contribution mining (Batch 2 Item 1). Opt-in —
-	// when false, cross-workspace cache hits earn only the
-	// same-workspace tiny reward (effectively "no sharing
-	// economy", but mining still runs for own-cache hits).
-	CacheSharingEnabled bool
 
 	// CachePoolableEnabled is the GLOBAL switch for the Phase-2 Stage 2.0
 	// shared-cache governance gate (exact cache). DEFAULT TRUE (it is in the default-on
@@ -1213,9 +1202,6 @@ func Load() (*Config, error) {
 		VLLMBaseURL:   os.Getenv("LENS_VLLM_BASE_URL"),
 		VLLMAPIKey:    os.Getenv("LENS_VLLM_API_KEY"),
 
-		QualityAutoRetry: parseBoolEnv("LENS_QUALITY_AUTO_RETRY"),
-
-		CacheSharingEnabled:    parseBoolEnv("LENS_CACHE_SHARING_ENABLED"),
 		CachePoolableEnabled:   parseBoolEnv("LENS_CACHE_POOLABLE_ENABLED"),
 		DistillPoolableEnabled: parseBoolEnv("LENS_DISTILL_POOLABLE_ENABLED"),
 		PatternMiningEnabled:   parseBoolEnv("LENS_PATTERN_MINING_ENABLED"),
@@ -2144,7 +2130,6 @@ func Load() (*Config, error) {
 		c.POVIMintingEnabled = false
 		c.AnnotationMintingEnabled = false   // the annotation mint credits LENS — force-off with the economy master switch
 		c.TrustfulComputeMintEnabled = false // U6: now defaults false; still force-off'd if an operator opted in
-		c.CacheSharingEnabled = false
 		c.CachePoolableEnabled = false
 		c.DistillPoolableEnabled = false
 		c.RoutingIntelligenceEnabled = false

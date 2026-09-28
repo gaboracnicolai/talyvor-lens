@@ -32,9 +32,9 @@
 
 ## The master kill-switch (read this first)
 
-`LENS_ECONOMY_ENABLED` — **default TRUE** (`config.go` sets `c.EconomyEnabled = true`, overridden only if the env var is explicitly set). When **false**, the force-off block force-sets **16** flags false regardless of their own env:
+`LENS_ECONOMY_ENABLED` — **default TRUE** (`config.go` sets `c.EconomyEnabled = true`, overridden only if the env var is explicitly set). When **false**, the force-off block force-sets **15** flags false regardless of their own env:
 
-`PatternMiningEnabled · PatternCaptureEnabled · PatternEarningEnabled · PoolRoyaltyMintingEnabled · POVIMintingEnabled · AnnotationMintingEnabled · TrustfulComputeMintEnabled · CacheSharingEnabled · CachePoolableEnabled · DistillPoolableEnabled · RoutingIntelligenceEnabled · RoutingTierCohortsEnabled · EvalContributionMintingEnabled · RoutingPredictionMintingEnabled · LatencyMintingEnabled · ConfidentialMintingEnabled`
+`PatternMiningEnabled · PatternCaptureEnabled · PatternEarningEnabled · PoolRoyaltyMintingEnabled · POVIMintingEnabled · AnnotationMintingEnabled · TrustfulComputeMintEnabled · CachePoolableEnabled · DistillPoolableEnabled · RoutingIntelligenceEnabled · RoutingTierCohortsEnabled · EvalContributionMintingEnabled · RoutingPredictionMintingEnabled · LatencyMintingEnabled · ConfidentialMintingEnabled`
 
 > ⚠ **THIS COUNT WAS 14 AND THE LIST WAS TWO SHORT, AND BOTH WERE RIGHT WHEN WRITTEN.** At `7f2ebd2` — the SHA
 > this file declares — the force-off block held EXACTLY these 14 and the sentence was true. `#269` added
@@ -257,7 +257,6 @@ All booleans are `parseBoolEnv` (**false** when unset) unless noted; **force-fal
 | `LENS_PATTERN_CAPTURE_ENABLED` | false | `PatternCaptureEnabled` | **yes** | Post-serve mint-free pattern capture. |
 | `LENS_PATTERN_EARNING_ENABLED` | false | `PatternEarningEnabled` | **yes** | The pattern earn path (mints). |
 | `LENS_TRUSTFUL_COMPUTE_MINT_ENABLED` | false | `TrustfulComputeMintEnabled` | **yes** | Legacy trust-mint — dead (`NotifyServed` has no caller). |
-| `LENS_CACHE_SHARING_ENABLED` | false | `CacheSharingEnabled` | **yes** | Cross-tenant cache sharing. |
 | `LENS_CACHE_POOLABLE_ENABLED` | false | `CachePoolableEnabled` | **yes** | Cross-tenant cache pooling (cache-royalty substrate). |
 | `LENS_DISTILL_POOLABLE_ENABLED` | false | `DistillPoolableEnabled` | **yes** | Cross-tenant OCR pooling (distill-royalty substrate). |
 | `LENS_ROUTING_INTELLIGENCE_ENABLED` | false | `RoutingIntelligenceEnabled` | **yes** | Pattern-aggregate auto-route model selection. |
@@ -274,7 +273,6 @@ All booleans are `parseBoolEnv` (**false** when unset) unless noted; **force-fal
 | `LENS_ROUTING_PREDICTION_SCORING_ENABLED` | false | `RoutingPredictionScoringEnabled` | **no** | Capability/measurement gating the routing-prediction SCORER sweep (§A21). Produces a score, mints nothing. The real provider-backed Inferer is now wired (#259), but the scorer stays inert until this flag flips (capability built, not armed). |
 | `LENS_WORKTIER_ENABLED` | false | `WorkTierEnabled` | **(exempt)** | Descriptive work-tier capture (mint-free). |
 | `LENS_GUARDRAILS_ENABLED` | false | `GuardrailsEnabled` | **(exempt)** | Output-stage guardrails (input always runs). |
-| `LENS_QUALITY_AUTO_RETRY` | false | `QualityAutoRetry` | **(exempt)** | One-shot re-call on low quality (provider COGS). |
 | `LENS_BILLING_ENABLED` | false | `BillingEnabled` | **(exempt)** | Stripe checkout/webhook/refund (requires both Stripe keys). |
 | `LENS_LXC_GATING_ENABLED` | false | `LXCGatingEnabled` | **(exempt)** | Pre-serve 402 when LXC exhausted. |
 | `LENS_LXC_SHADOW_SPEND_ENABLED` | false | `LXCShadowSpendEnabled` | **(exempt)** | Post-serve observational LXC debit. |

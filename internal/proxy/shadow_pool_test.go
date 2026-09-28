@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/poolshadow"
 )
 
@@ -42,21 +43,21 @@ func TestShadowPool_InertByDefault(t *testing.T) {
 	p := &Proxy{}
 
 	// (1) Nothing wired at all.
-	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", "hello", false)
+	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", "hello", "", false)
 	if n := sink.count(); n != 0 {
 		t.Fatalf("unwired proxy recorded %d observations, want 0", n)
 	}
 
 	// (2) Sink wired, flag OFF.
 	p.SetPoolShadowLog(sink, func() bool { return false })
-	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", "hello", false)
+	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", "hello", "", false)
 	if n := sink.count(); n != 0 {
 		t.Fatalf("flag off recorded %d observations, want 0", n)
 	}
 
 	// (3) THE CONTROL: flag ON must record, or (1) and (2) prove only that this harness is inert.
 	p.SetPoolShadowLog(sink, func() bool { return true })
-	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", "hello", false)
+	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", "hello", "", false)
 	if n := sink.count(); n != 1 {
 		t.Fatalf("CONTROL FAILED: flag on recorded %d observations, want 1 — the two zeros above "+
 			"were this test being unable to observe anything, not the feature being inert", n)
@@ -73,7 +74,7 @@ func TestShadowPool_RecordsTheProductionPooledKeyAndCarriesNoPromptText(t *testi
 	p.SetPoolShadowLog(sink, func() bool { return true })
 
 	const raw = "how do I fix ImportError in python 3.12"
-	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", raw, false)
+	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", raw, "fp1", false)
 	if sink.count() != 1 {
 		t.Fatalf("recorded %d, want 1", sink.count())
 	}
@@ -82,7 +83,7 @@ func TestShadowPool_RecordsTheProductionPooledKeyAndCarriesNoPromptText(t *testi
 	// The fingerprint must equal one built from the PRODUCTION pooled key rule. If the proxy ever
 	// stops feeding pooledPromptKey (or the rule changes on one side only), the shadow numbers
 	// silently stop describing the pool — and nothing else in the tree would notice.
-	want := poolshadow.Observe("wsA", "openai", "gpt-4o", pooledPromptKey(raw), raw, false)
+	want := poolshadow.Observe("wsA", "openai", "gpt-4o", cache.FingerprintedKey(pooledPromptKey(raw), "fp1"), "fp1", raw, false)
 	if string(got.PooledKeyFP) != string(want.PooledKeyFP) {
 		t.Fatal("the recorded fingerprint is not the one built from pooledPromptKey — the shadow log " +
 			"is measuring a keyspace the pool does not use")
@@ -113,7 +114,7 @@ func TestShadowPool_SinkErrorsCannotAffectTheServePath(t *testing.T) {
 	sink := &fakePoolShadowSink{fail: context.DeadlineExceeded}
 	p := &Proxy{}
 	p.SetPoolShadowLog(sink, func() bool { return true })
-	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", "hello", false)
+	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", "hello", "", false)
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "shadow_pool.go", nil, 0)
@@ -421,5 +422,34 @@ func TestShadowPool_CoveragePopulationIsExplicit(t *testing.T) {
 			t.Fatalf("%s has no shadow observation — it is a paid-provider serve lane, so its "+
 				"traffic belongs in the denominator", want)
 		}
+	}
+}
+
+// TestShadowPool_DifferentRequestFingerprintsAreNotARepeat — B18.10. The pool keys every read and
+// write by the B15.1 request fingerprint, so the same prompt sent with different parameters is never
+// served the other's answer. The shadow log must not count it as a would-be hit either, or the
+// measured pooled hit rate overstates what pooling could deliver.
+func TestShadowPool_DifferentRequestFingerprintsAreNotARepeat(t *testing.T) {
+	sink := &fakePoolShadowSink{}
+	p := &Proxy{}
+	p.SetPoolShadowLog(sink, func() bool { return true })
+
+	const raw = "what is the capital of France?"
+	p.shadowPoolObservation(context.Background(), "wsA", "openai", "gpt-4o", raw, "fp-temp-0", false)
+	p.shadowPoolObservation(context.Background(), "wsB", "openai", "gpt-4o", raw, "fp-temp-1", false)
+	p.shadowPoolObservation(context.Background(), "wsC", "openai", "gpt-4o", raw, "fp-temp-0", false)
+	if sink.count() != 3 {
+		t.Fatalf("recorded %d, want 3", sink.count())
+	}
+	a, b, c := sink.got[0], sink.got[1], sink.got[2]
+	if string(a.PooledKeyFP) == string(b.PooledKeyFP) {
+		t.Error("two request fingerprints share a pooled-key fingerprint — the shadow log counts a repeat the pool could never serve")
+	}
+	if a.CanonFP != nil && string(a.CanonFP) == string(b.CanonFP) {
+		t.Error("two request fingerprints share a canonical fingerprint — the semantic lane is overstated the same way")
+	}
+	// The control: the same fingerprint IS a repeat, or the two checks above pass on any hash.
+	if string(a.PooledKeyFP) != string(c.PooledKeyFP) {
+		t.Fatal("CONTROL FAILED: the same prompt and request fingerprint did not match")
 	}
 }

@@ -417,6 +417,9 @@ func run() error {
 	// Anthropic key the pooled read stays exactly as before: entity lane only.
 	if cfg.AnthropicAPIKey != "" {
 		semanticCache.SetPairVerifier(pairverify.NewAnthropicVerifier(cfg.AnthropicAPIKey, ""))
+		slog.Info("B9.7 pair verifier: ACTIVE — every pooled semantic serve is verified (LENS_ANTHROPIC_API_KEY is set)")
+	} else {
+		slog.Warn("B9.7 pair verifier: INACTIVE — LENS_ANTHROPIC_API_KEY is not set, so pooled semantic reads use the entity lane only")
 	}
 	promptCompressor := compressor.New()
 	modelRouter := router.New()
@@ -577,8 +580,8 @@ func run() error {
 	// DISTILL request-path integration (stage 3, PR #2). The isolated
 	// distill-worker subprocess converts an opted-in request's document to
 	// Markdown before the model call; a Redis-backed conversion cache avoids
-	// re-converting the same document. Inert until a workspace's DistillPolicy
-	// is enabled (default disabled).
+	// re-converting the same document. ON by default: new workspaces get DistillPolicy
+	// `always` (workspace.DefaultDistillPolicy, migration 0134); `disabled` turns it off.
 	p.SetDistiller(
 		&distill.ProcessIsolator{WorkerBin: cfg.DistillWorkerBin},
 		cache.NewDistillCache(redisClient, cfg.MaxCacheTTL),
@@ -3922,100 +3925,6 @@ func run() error {
 			})
 		})
 
-		// ─── A/B experiments ────────────────────────────────
-		// New experiment system (engine.go). Coexists with the
-		// legacy /v1/ab/tests shadow endpoints.
-		authed.Post("/v1/workspaces/{wsID}/experiments", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			var in ab.Experiment
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			in.WorkspaceID = wsID
-			if err := abEngine.CreateExperiment(req.Context(), &in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusCreated, in)
-		})
-
-		authed.Get("/v1/workspaces/{wsID}/experiments", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			writeJSONOK(w, http.StatusOK, abEngine.ListExperiments(wsID))
-		})
-
-		authed.Get("/v1/workspaces/{wsID}/experiments/{id}", func(w http.ResponseWriter, req *http.Request) {
-			id := chi.URLParam(req, "id")
-			exp, ok := abEngine.GetExperiment(id)
-			// B-Lens: experiments are keyed by bare id — verify the caller owns the experiment's
-			// workspace (mirrors the eval-run / session callerOwns checks), else a member of another
-			// workspace could read/control another tenant's live routing experiment. 404, no oracle.
-			if !ok || !callerOwns(req, exp.WorkspaceID) {
-				writeJSONErr(w, http.StatusNotFound, "experiment not found")
-				return
-			}
-			writeJSONOK(w, http.StatusOK, exp)
-		})
-
-		authed.Post("/v1/workspaces/{wsID}/experiments/{id}/start", func(w http.ResponseWriter, req *http.Request) {
-			id := chi.URLParam(req, "id")
-			if exp, ok := abEngine.GetExperiment(id); !ok || !callerOwns(req, exp.WorkspaceID) {
-				writeJSONErr(w, http.StatusNotFound, "experiment not found")
-				return
-			}
-			if err := abEngine.StartExperiment(req.Context(), id); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, map[string]string{"status": "running"})
-		})
-
-		authed.Post("/v1/workspaces/{wsID}/experiments/{id}/stop", func(w http.ResponseWriter, req *http.Request) {
-			id := chi.URLParam(req, "id")
-			if exp, ok := abEngine.GetExperiment(id); !ok || !callerOwns(req, exp.WorkspaceID) {
-				writeJSONErr(w, http.StatusNotFound, "experiment not found")
-				return
-			}
-			if err := abEngine.StopExperiment(req.Context(), id); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, map[string]string{"status": "completed"})
-		})
-
-		authed.Get("/v1/workspaces/{wsID}/experiments/{id}/analysis", func(w http.ResponseWriter, req *http.Request) {
-			id := chi.URLParam(req, "id")
-			if exp, ok := abEngine.GetExperiment(id); !ok || !callerOwns(req, exp.WorkspaceID) {
-				writeJSONErr(w, http.StatusNotFound, "experiment not found")
-				return
-			}
-			analysis, err := abEngine.AnalyzeExperiment(req.Context(), id)
-			if err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, analysis)
-		})
-
-		authed.Get("/v1/workspaces/{wsID}/experiments/{id}/results", func(w http.ResponseWriter, req *http.Request) {
-			// Results live in Postgres directly; the dashboard
-			// typically wants `analysis`. We expose the raw stream
-			// for ad-hoc debugging — same analysis aggregation but
-			// returned per variant.
-			id := chi.URLParam(req, "id")
-			if exp, ok := abEngine.GetExperiment(id); !ok || !callerOwns(req, exp.WorkspaceID) {
-				writeJSONErr(w, http.StatusNotFound, "experiment not found")
-				return
-			}
-			analysis, err := abEngine.AnalyzeExperiment(req.Context(), id)
-			if err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, analysis.Variants)
-		})
-
 		// ─── Git attribution ────────────────────────────────
 		// Per-request rollups served from request_attribution
 		// (migration 0017) — now the SOLE attribution source (the
@@ -4119,8 +4028,8 @@ func run() error {
 
 		// Per-workspace DISTILL policy toggle (stage 3, PR #2). Applies
 		// immediately — proxy.serve() reads via GetDistillPolicy on every
-		// request. Default is disabled, so the request path stays inert until an
-		// admin enables a workspace here.
+		// request. New workspaces get `always` (workspace.DefaultDistillPolicy,
+		// migration 0134); this is where a workspace turns it off or back on.
 		authed.Put("/v1/workspaces/{wsID}/distill", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
@@ -4145,8 +4054,8 @@ func run() error {
 		// accepts "disabled", which is every workspace's policy. See compression_handler.go.
 		authed.Put("/v1/workspaces/{wsID}/compression", newCompressionPolicyHandler(wsManager))
 
-		// B6.5 — per-workspace TARE policy (migration 0126): disabled | opt_in | always. DISABLED by
-		// default; opt_in reduces only requests that also carry X-Talyvor-Tare: true. Applies on the
+		// B6.5 — per-workspace TARE policy (migration 0126): disabled | opt_in | always. ALWAYS by
+		// default (migration 0134); opt_in reduces only requests that also carry X-Talyvor-Tare: true. Applies on the
 		// next request, streaming and buffered alike. See internal/workspace/tare_policy.go.
 		authed.Put("/v1/workspaces/{wsID}/tare", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
@@ -4537,18 +4446,6 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, runs)
-		})
-
-		// A/B significance verdict — honest p-value + sample size + plain
-		// verdict ("inconclusive" when the data doesn't support a winner).
-		authed.Get("/v1/workspaces/{wsID}/eval/ab/{experiment}", func(w http.ResponseWriter, req *http.Request) {
-			expID := chi.URLParam(req, "experiment")
-			rep, err := abEngine.Significance(req.Context(), expID)
-			if err != nil {
-				writeJSONErr(w, http.StatusNotFound, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, rep)
 		})
 
 		authed.Post("/v1/workspaces/{wsID}/eval/schedules", func(w http.ResponseWriter, req *http.Request) {

@@ -62,7 +62,6 @@ services:
       # Routing intelligence + tier-cohorts: descriptive/selection only, NEVER a reward multiplier; off = byte-identical routing, no money path.
       - LENS_ROUTING_INTELLIGENCE_ENABLED=true    # default false, config.go:652
       - LENS_ROUTING_TIER_COHORTS_ENABLED=true    # default false, config.go:653 (effective only with routing-intelligence on)
-      - LENS_CACHE_SHARING_ENABLED=true           # default false, config.go:635. Cross-workspace cache economy (fake-money royalties on the internal ledger).
       - LENS_NODE_AUTOROUTE_ENABLED=true          # default false, config.go. Gateway auto-routes normal /v1/proxy traffic to a registered node (token-authed via the existing challenge key); the node serves + auto-submits its receipt. ROUTING flag, NOT in the kill-switch force-off block. Off → byte-identical direct path.
       # Fixed challenge key so the gateway's PoVI challenge keypair is STABLE across restarts —
       # otherwise an ephemeral key invalidates the node's pinned pubkey (blocker 7). base64 ed25519
@@ -85,7 +84,6 @@ services:
       #    against internal/config/config.go (lines 605/619/621/622).
       - LENS_WORKTIER_ENABLED=true               # descriptive work-tier classifier (size/complexity/cost); doctrine: never a reward multiplier — off-is-safe
       - LENS_GUARDRAILS_ENABLED=true             # output PII+injection guardrails in OBSERVE/flag mode (blocks nothing without per-workspace opt-in)
-      - LENS_QUALITY_AUTO_RETRY=true             # one-shot re-call on a low-quality response — NOTE: up to ~2x upstream provider COGS on low-quality serves (real provider $, NOT LENS economy)
       - LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN=true # per-engineer (named author) cost breakdown in ROI reports — fine on TEST data; a real named-employee deployment carries a UK data-protection consideration (see docs/recommended-production-config.md)
     depends_on:
       mockvllm:

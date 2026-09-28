@@ -52,7 +52,7 @@ const (
 // 38 §B rows, 16 force-off assignments.
 const (
 	floorManifestRows = 30
-	floorForceOff     = 16
+	floorForceOff     = 15 // 16 until B18.10 deleted the never-read CacheSharingEnabled
 )
 
 var manifestRowRE = regexp.MustCompile(`^\|\s*` + "`" + `(LENS_[A-Z0-9_]+)` + "`" + `\s*\|([^|]*)\|([^|]*)\|([^|]*)\|`)

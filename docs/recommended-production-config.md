@@ -7,7 +7,7 @@ endpoints, a deployed frontend). Document now; set them when Andrew's cluster la
 
 The **safe, no-infra operational flags are already turned on in staging** —
 `docker-compose.trial.yaml` (`LENS_WORKTIER_ENABLED`, `LENS_GUARDRAILS_ENABLED`,
-`LENS_QUALITY_AUTO_RETRY`, `LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN`). This doc covers
+`LENS_ROI_INCLUDE_ENGINEER_BREAKDOWN`). This doc covers
 only the deployment-dependent ones + the explicit do-not-touch list.
 
 All names verified against `internal/config/config.go` at main `2cc7cbb`.
@@ -80,7 +80,7 @@ author)** cost breakdown to ROI reports — a cost *attribution*, not a performa
   and are a **separate go-live** (external audit, legal, etc.). Not operational:
   `LENS_POOL_ROYALTY_MINTING_ENABLED`, `LENS_POVI_MINTING_ENABLED`,
   `LENS_TRUSTFUL_COMPUTE_MINT_ENABLED`, `LENS_PATTERN_{MINING,CAPTURE,EARNING}_ENABLED`,
-  `LENS_CACHE_SHARING_ENABLED`, `LENS_CACHE_POOLABLE_ENABLED`, `LENS_DISTILL_POOLABLE_ENABLED`,
+  `LENS_CACHE_POOLABLE_ENABLED`, `LENS_DISTILL_POOLABLE_ENABLED`,
   `LENS_ROUTING_INTELLIGENCE_ENABLED` (this one is in the economy kill-switch block — *not*
   an operational flag despite the name), `LENS_LXC_GATING_ENABLED`,
   `LENS_LXC_SHADOW_SPEND_ENABLED`, `LENS_BILLING_ENABLED` + the Stripe keys. (Staging turn-on

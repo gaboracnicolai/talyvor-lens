@@ -52,7 +52,7 @@ const configPath = "../config/config.go"
 // Mint-or-LXC named. Set below today's numbers so an ordinary addition does not red
 // them, but far enough above zero that a parse returning nothing does.
 const (
-	floorForceOffFlags = 16
+	floorForceOffFlags = 15 // 16 until B18.10 deleted the never-read CacheSharingEnabled
 	floorConfigBools   = 50
 	floorMoneyNamed    = 12
 )
@@ -275,7 +275,6 @@ func TestReportedFlagSetIsPinned(t *testing.T) {
 		"BatchEnabled",
 		"BillingEnabled",
 		"CachePoolableEnabled",
-		"CacheSharingEnabled",
 		"ConfidentialMintingEnabled",
 		"DistillPoolableEnabled",
 		"EconomyEnabled",
