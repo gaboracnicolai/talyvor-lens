@@ -23,7 +23,12 @@ import (
 // ErrSameAgent: an agent cannot pay itself.
 var ErrSameAgent = errors.New("economy: an agent cannot pay itself")
 
-// AgentPayment is one payment between two of a workspace's agents.
+// ErrWashTrade: a payment to another company's agent that the single-party detector refused.
+var ErrWashTrade = errors.New("economy: refused as a wash trade")
+
+// AgentPayment is one payment between two of a workspace's agents — or, through the marketplace, to
+// another company's agent (B19.15): then EntryID is the use on the company's marketplace bill, ToWorkspaceID
+// the company paid, and neither agent's balance moves (the company's bill carries it).
 type AgentPayment struct {
 	EntryID         string `json:"entry_id"`
 	FromAgentID     string `json:"from_agent_id"`
@@ -32,7 +37,23 @@ type AgentPayment struct {
 	FromBalanceULXC int64  `json:"from_balance_ulxc"`
 	ToBalanceULXC   int64  `json:"to_balance_ulxc"`
 	Memo            string `json:"memo,omitempty"`
+	ToWorkspaceID   string `json:"to_workspace_id,omitempty"`
+	Via             string `json:"via,omitempty"` // "marketplace": on the company's monthly marketplace bill
 }
+
+// CompanyPayments is what a payment to another company's agent needs of the marketplace (B19.15).
+// *market.Store satisfies it.
+type CompanyPayments interface {
+	// CompanyPayeeRefusal says why payerWorkspaceID may not pay payeeWorkspaceID's agents, or "".
+	CompanyPayeeRefusal(ctx context.Context, payerWorkspaceID, payeeWorkspaceID string) (string, error)
+	// ChargeAgentPayment records the payment, in tx, on the paying company's marketplace bill.
+	ChargeAgentPayment(ctx context.Context, tx pgx.Tx, payerWorkspaceID, fromAgentID, payeeWorkspaceID, toAgentID string,
+		amount int64, memo string, at time.Time) (useID string, err error)
+}
+
+// SetCompanyPayments lets agents pay other companies' agents through the marketplace. Unset, an agent of
+// another company is one this workspace does not have.
+func (s *DualTokenStore) SetCompanyPayments(c CompanyPayments) { s.companyPayments = c }
 
 // AgentOfKey returns the agent a key is attached to, and its workspace; ErrAgentNotFound for a key
 // attached to none.
@@ -55,6 +76,16 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 		return pay, ErrSameAgent
 	}
 	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(fromAgentID, toAgentID, amount, memo)})
+	if s.companyPayments != nil {
+		var payeeWorkspace string
+		err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM agent_accounts WHERE id = $1`, toAgentID).Scan(&payeeWorkspace)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return pay, fmt.Errorf("economy: payee agent: %w", err)
+		}
+		if err == nil && payeeWorkspace != workspaceID {
+			return s.payCompanyAgent(ctx, workspaceID, payeeWorkspace, pay)
+		}
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -63,6 +94,39 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 	defer func() { _ = tx.Rollback(ctx) }()
 	if pay, err = payAgentTx(ctx, tx, workspaceID, pay, uuid.New()); err != nil {
 		return pay, s.refusedMovement(ctx, tx, err)
+	}
+	return pay, tx.Commit(ctx)
+}
+
+// payCompanyAgent pays another company's agent through the marketplace (B19.15): the single-party detector
+// first, then the paying agent's rules exactly as for a payment inside the company, then one billed use on
+// the company's monthly marketplace bill — in the rules' transaction, so the next payment's limits count it.
+func (s *DualTokenStore) payCompanyAgent(ctx context.Context, workspaceID, payeeWorkspace string, pay AgentPayment) (AgentPayment, error) {
+	pay.ToWorkspaceID, pay.Via = payeeWorkspace, "marketplace"
+	refusal, err := s.companyPayments.CompanyPayeeRefusal(ctx, workspaceID, payeeWorkspace)
+	if err != nil {
+		return pay, err
+	}
+	if refusal != "" {
+		return pay, fmt.Errorf("%w: %s", ErrWashTrade, refusal)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return pay, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgent(ctx, tx, workspaceID, pay.FromAgentID); err != nil {
+		return pay, err
+	}
+	if err := enforceAgentRules(ctx, tx, workspaceID, pay.FromAgentID, pay.AmountULXC, "company:"+payeeWorkspace); err != nil {
+		return pay, s.refusedMovement(ctx, tx, err)
+	}
+	if pay.EntryID, err = s.companyPayments.ChargeAgentPayment(ctx, tx, workspaceID, pay.FromAgentID, payeeWorkspace, pay.ToAgentID,
+		pay.AmountULXC, pay.Memo, agentRequestFrom(ctx).At); err != nil {
+		return pay, err
+	}
+	if pay.FromBalanceULXC, err = accountBalance(ctx, tx, workspaceID, agentAccount(pay.FromAgentID)); err != nil {
+		return pay, err
 	}
 	return pay, tx.Commit(ctx)
 }

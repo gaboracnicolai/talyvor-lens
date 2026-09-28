@@ -39,6 +39,7 @@ import (
 // B19.3 — one company's agents pay each other, inside the closed loop:
 //
 //	POST /v1/workspaces/{wsID}/agents/{id}/pay  {"to_agent_id", "amount_ulxc", "memo"}   by the paying agent's own key, or the owner
+//	                                            (to another company's agent: through the marketplace, on the monthly bill — B19.15)
 //	GET  /v1/workspaces/{wsID}/agents/{id}/statement?limit=   the agent's account, newest first (default 100, at most 1000)
 //
 // B19.5 — statements an enterprise can audit (internal/economy/agent_statements.go), for the period
@@ -659,7 +660,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless):
 			writeJSONErr(w, http.StatusConflict, err.Error())
-		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired):
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired), errors.Is(err, economy.ErrWashTrade):
 			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case err != nil:
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
