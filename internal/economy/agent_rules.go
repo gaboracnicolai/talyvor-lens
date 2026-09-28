@@ -340,16 +340,17 @@ type AgentApproval struct {
 	AgentID    string     `json:"agent_id"`
 	AmountULXC int64      `json:"amount_ulxc"`
 	Model      string     `json:"model"`
-	Status     string     `json:"status"` // pending | approved | denied | used
+	Reason     string     `json:"reason,omitempty"` // why the agent asked (B19.9)
+	Status     string     `json:"status"`           // pending | approved | denied | used
 	CreatedAt  time.Time  `json:"created_at"`
 	DecidedAt  *time.Time `json:"decided_at,omitempty"`
 }
 
-const agentApprovalColumns = `id, agent_id, amount_ulxc, model, status, created_at, decided_at`
+const agentApprovalColumns = `id, agent_id, amount_ulxc, model, reason, status, created_at, decided_at`
 
 func scanAgentApproval(row pgx.Row) (AgentApproval, error) {
 	var a AgentApproval
-	err := row.Scan(&a.ID, &a.AgentID, &a.AmountULXC, &a.Model, &a.Status, &a.CreatedAt, &a.DecidedAt)
+	err := row.Scan(&a.ID, &a.AgentID, &a.AmountULXC, &a.Model, &a.Reason, &a.Status, &a.CreatedAt, &a.DecidedAt)
 	return a, err
 }
 

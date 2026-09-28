@@ -120,6 +120,7 @@ var Manifest = map[string]Entry{
 	"deletion_requests":       {Retain, "B21.3: the record that erasure was requested and completed"},
 	"stored_answer_deletions": {Retain, "B21.3: the audit log of each deletion of stored answers"},
 	"agent_postings":          {Retain, "B19.1: audit-guarded (0140, append-only): the agents' double-entry LXC ledger; financial-record retention"},
+	"agent_tool_calls":        {Retain, "B19.9: audit-guarded (0145, append-only): every call an agent made to the bank's tools; the record of what it asked and was refused"},
 
 	// token_events is audit-guarded TOO, but migration 0055's trigger carries a sanctioned
 	// exception: DELETE is permitted while the retention-bypass session flag is set — the flag the
