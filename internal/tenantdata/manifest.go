@@ -199,6 +199,7 @@ var Manifest = map[string]Entry{
 	"agent_approvals":              {Delete, ""},
 	"agent_lxc_subbudgets":         {Delete, ""},
 	"agent_workspace_pauses":       {Delete, ""},
+	"market_listings":              {Delete, "B20.1: the listings a workspace published; their versions cascade"},
 	"workspace_passkeys":           {Delete, "B19.16: the owner's passkeys' public keys"},
 	"webauthn_challenges":          {Delete, ""},
 	"workspace_push_subscriptions": {Delete, "B19.16: the owner's devices' push endpoints and keys"},
