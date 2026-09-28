@@ -29,3 +29,73 @@ export interface AttributionContext {
   commit?: string;
   repository?: string;
 }
+
+// The agent bank (B19.9/B19.18): the JSON Lens's agent tools answer with. Amounts are µLXC.
+
+export interface AgentAccount {
+  id: string;
+  name: string;
+  balance_ulxc: number;
+  spent_ulxc: number;
+  keys: string[];
+  created_at: string;
+  paused_at?: string;
+  paused_reason?: string;
+  owner_user_id: string;
+  verified: boolean;
+}
+
+export interface AgentRules {
+  max_per_request_ulxc: number;
+  daily_limit_ulxc: number;
+  monthly_limit_ulxc: number;
+  approval_above_ulxc: number;
+  allowed_models: string[];
+  allowed_providers: string[];
+  active_from: string;
+  active_until: string;
+  timezone: string;
+  pause_on_unusual_spend: boolean;
+}
+
+export interface AgentBalance {
+  agent: AgentAccount;
+  rules: AgentRules;
+  workspace_paused: boolean;
+}
+
+export interface AgentApproval {
+  id: string;
+  agent_id: string;
+  amount_ulxc: number;
+  model: string;
+  reason?: string;
+  status: "pending" | "approved" | "denied" | "used";
+  created_at: string;
+  decided_at?: string;
+}
+
+export interface AgentPayment {
+  entry_id: string;
+  from_agent_id: string;
+  to_agent_id: string;
+  amount_ulxc: number;
+  from_balance_ulxc: number;
+  to_balance_ulxc: number;
+  memo?: string;
+}
+
+export interface ReceiptPosting {
+  posting_id: number;
+  /** workspace | spend | agent:<id> */
+  account: string;
+  amount_ulxc: number;
+}
+
+export interface AgentReceipt {
+  entry_id: string;
+  kind: string;
+  ref?: string;
+  at: string;
+  postings: ReceiptPosting[];
+}
