@@ -17,7 +17,10 @@ key Lens issues no card, and it declines any purchase made in live mode.
    `LENS_STRIPE_ISSUING_WEBHOOK_SECRET` in `/etc/talyvor/lens.env`. This endpoint is separate from the
    billing webhook and has its own secret.
 4. `LENS_STRIPE_ISSUING_CURRENCY` defaults to `gbp`, which is right for a UK platform.
-5. Restart Lens. It fetches the ECB reference rates at start and every three hours after that.
+5. Developers → Webhooks → the **billing** endpoint (`https://<lens host>/v1/billing/webhook`): add the
+   events `issuing_authorization.updated` and `issuing_transaction.created`. They settle each purchase
+   after it is approved (see below). Billing must be enabled for that endpoint to exist.
+6. Restart Lens. It fetches the ECB reference rates at start and every three hours after that.
 
 ## Using it
 
@@ -61,6 +64,25 @@ Stripe sends `issuing_authorization.request` and waits up to 2 seconds. Lens the
 - **Failures.** Anything that goes wrong after the signature is verified is answered as a decline,
   never an error. On an error, Stripe would fall back to its timeout setting, which may approve.
 
-Not built yet: captures that differ from the authorised amount, and reversals or expiries that should
-give an agent its money back. Stripe reports those as `issuing_transaction.*` and
-`issuing_authorization.updated` events, which this endpoint only acknowledges.
+## What happens after a purchase (B19.25)
+
+The approved amount debited from the agent is the purchase's **hold**. Stripe reports what becomes of it
+on the billing webhook, and each event settles the hold as new rows (nothing is ever edited):
+
+- **Capture** (`issuing_transaction.created`, type `capture`). The merchant takes the money. A capture at
+  the held amount moves nothing. A capture above it debits the agent the difference (tips, fuel).
+- **Close, reversal or expiry** (`issuing_authorization.updated`). What is still held goes back to the
+  agent. A hold released in full is credited exactly what it debited, so a capture below the hold gets
+  its difference back here. A partial reversal while the purchase is still pending gives back the part
+  reversed.
+- **Refund** (`issuing_transaction.created`, type `refund`). The agent is credited.
+
+Every event that settles anything is one row of `agent_card_settlements` (append-only). When the balance
+moves, the same transaction also writes an `lxc_ledger` row of type `agent_card` (+ credit, − debit) and
+an `agent_postings` entry of kind `card`. Amounts are converted at the ECB rate on the purchase's row.
+Captures and closes can arrive in either order and end on the same balance. A replayed event moves
+nothing, and so does a live-mode one.
+
+To try it, use the Stripe CLI's test helpers on an approved authorisation:
+`stripe test_helpers issuing authorizations capture iauth_… --capture-amount 2300`, `… reverse iauth_…`,
+or `stripe test_helpers issuing transactions refund ipi_… --refund-amount 500`.

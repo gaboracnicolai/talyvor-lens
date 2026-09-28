@@ -1682,6 +1682,11 @@ func run() error {
 			payMarketSellers(lctx, marketStore, liveStripe)
 		})
 	}
+	// B19.25 — an agent card purchase's capture, reversal or refund settles the agent's balance, from the
+	// Issuing events on the regular webhook. Cards exist only with the real-time endpoint configured.
+	if cfg.StripeIssuingWebhookSecret != "" {
+		billingSvc = billingSvc.WithAgentCards(dualToken)
+	}
 	// B1.6 — D, the allowance each paid period grants. Zero (the default) grants
 	// nothing, and then there is nothing for a served request to draw down either.
 	billingSvc = billingSvc.WithAllowance(cfg.SubscriptionAllowanceULXC)

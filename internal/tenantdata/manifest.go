@@ -121,6 +121,7 @@ var Manifest = map[string]Entry{
 	"stored_answer_deletions":   {Retain, "B21.3: the audit log of each deletion of stored answers"},
 	"agent_postings":            {Retain, "B19.1: audit-guarded (0140, append-only): the agents' double-entry LXC ledger; financial-record retention"},
 	"agent_card_authorizations": {Retain, "B19.12: audit-guarded (0156, append-only): every agent card authorisation, approved or declined, and the LXC it debited; financial-record retention"},
+	"agent_card_settlements":    {Retain, "B19.25: audit-guarded (0157, append-only): each capture, release and refund that settled an agent card authorisation, and the LXC it moved; financial-record retention"},
 	"agent_tool_calls":          {Retain, "B19.9: audit-guarded (0145, append-only): every call an agent made to its wallet tools; the record of what it asked and was refused"},
 	"market_earnings":           {Retain, "B20.2: audit-guarded (0149, append-only): a seller's share of each cleared use — money owed to them, paid out by B20.5"},
 	"market_refunds":            {Retain, "B20.4: audit-guarded (0152, append-only but for its Stripe credit): each refunded use of a taken-down listing — money given back to its buyer and taken from its seller"},
