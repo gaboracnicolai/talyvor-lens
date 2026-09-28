@@ -304,15 +304,11 @@ func openAPIPaths() map[string]any {
 			},
 			"delete": map[string]any{
 				"summary":     "Delete this workspace's stored answers — irreversible, owner or admin only",
-				"description": `Body {"scope":"shared"|"all","confirm":"<workspace>"}. "shared" deletes every answer and document conversion this workspace shared; "all" also deletes its private ones. Earnings already final are kept.`,
+				"description": `Body {"scope":"shared"|"all","confirm":"<workspace>"}. "shared" deletes every answer and document conversion this workspace shared; "all" also deletes its private ones. Earnings already final are kept. A confirm that does not match the workspace is refused (400); a caller that is not the owner or an admin is refused (403).`,
 				"parameters": []map[string]any{
 					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 				},
-				"responses": map[string]any{
-					"200": map[string]any{"description": "what was deleted, as counts"},
-					"400": map[string]any{"description": "unknown scope, or confirm does not match the workspace"},
-					"403": map[string]any{"description": "not the owner or an admin"},
-				},
+				"responses": map[string]any{"200": map[string]any{"description": "what was deleted, as counts"}},
 			},
 		},
 		"/v1/workspaces/{wsID}/deletion-requests": map[string]any{
