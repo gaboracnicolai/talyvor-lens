@@ -203,6 +203,10 @@ var credentialExemptions = map[string]string{
 		"operator sets it (lens.env.example documents it). An environment: entry `${NAME:-}` would arrive " +
 		"as \"\" and override the lens.env value (lens_env_shadow_test.go), so forwarding it would disable it.",
 
+	"LENS_VAPID_PRIVATE_KEY": "B19.16's web-push signing key reaches the process through env_file: lens.env, " +
+		"like LENS_SYNTHETIC_KEY and for the same reason: an environment: entry would arrive as \"\" and " +
+		"override the lens.env value, turning the approval pushes off.",
+
 	// ⚠ FOUR MORE EXEMPTIONS WERE WRITTEN HERE AND REMOVED, because
 	// TestCredentialExemptionsAreStillRead refused them: LENS_TEST_NVIDIA_EAT{,_NONCE},
 	// LENS_POVI_KEY_VALUE and LENS_POVI_KEY_CRASHER are read ONLY from _test.go files, which the
