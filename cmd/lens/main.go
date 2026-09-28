@@ -1651,6 +1651,16 @@ func run() error {
 	if sellsSubscriptions {
 		billingSvc = billingSvc.WithBillCredits(tokenLedger, liveStripe)
 	}
+	// B20.2 — a buyer's paid marketplace uses go on their monthly Stripe bill, and a paid invoice clears them.
+	marketStore := market.NewStore(pool)
+	var marketMeter market.Meter
+	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {
+		billingSvc = billingSvc.WithMarketBill(liveStripe, cfg.MarketBillPriceID, cfg.MarketMeterEvent, marketStore)
+		marketMeter = billingSvc
+		go haComps.leader.Run(ctx, "market-meter-pending", 30*time.Second, func(lctx context.Context) {
+			meterPendingMarketUses(lctx, marketStore, billingSvc)
+		})
+	}
 	// B1.6 — D, the allowance each paid period grants. Zero (the default) grants
 	// nothing, and then there is nothing for a served request to draw down either.
 	billingSvc = billingSvc.WithAllowance(cfg.SubscriptionAllowanceULXC)
@@ -4150,7 +4160,8 @@ func run() error {
 
 		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.
 		mountAgentAccountRoutes(authed, dualToken, tenantStore)
-		mountMarketRoutes(authed, market.NewStore(pool)) // B20.1
+		mountMarketRoutes(authed, marketStore)                               // B20.1
+		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken) // B20.2
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
 		// See internal/storedanswers.

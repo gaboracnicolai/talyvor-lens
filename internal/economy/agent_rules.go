@@ -262,11 +262,15 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 	}
 	spentSince := func(since time.Time) (int64, error) {
 		var spent int64
-		// What it paid other agents counts (B19.3); what they paid it does not raise its limit.
-		err := tx.QueryRow(ctx, `SELECT COALESCE(-sum(amount_ulxc), 0)::bigint FROM agent_postings
-			WHERE workspace_id = $1 AND account = $2 AND created_at >= $3
-			  AND (kind IN ('spend', 'hold', 'settle', 'release') OR (kind = 'pay' AND amount_ulxc < 0))`,
-			workspaceID, agentAccount(agentID), since).Scan(&spent)
+		// What it paid other agents counts (B19.3); what they paid it does not raise its limit. What it
+		// used of paid marketplace listings counts too (B20.2), though it is billed to its company.
+		err := tx.QueryRow(ctx, `SELECT (
+			(SELECT COALESCE(-sum(amount_ulxc), 0) FROM agent_postings
+			 WHERE workspace_id = $1 AND account = $2 AND created_at >= $3
+			   AND (kind IN ('spend', 'hold', 'settle', 'release') OR (kind = 'pay' AND amount_ulxc < 0)))
+			+ (SELECT COALESCE(sum(price_ulxc), 0) FROM market_uses
+			   WHERE buyer_workspace_id = $1 AND agent_id = $4 AND charge = 'billed' AND used_at >= $3))::bigint`,
+			workspaceID, agentAccount(agentID), since, agentID).Scan(&spent)
 		return spent, err
 	}
 	for _, limit := range []struct {

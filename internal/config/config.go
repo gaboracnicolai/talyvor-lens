@@ -947,6 +947,13 @@ type Config struct {
 	// its price (internal/billing/included_usage.go), not configured.
 	BillingSubscriptionPlans map[string]string
 
+	// MarketBillPriceID is the Stripe metered Price a buyer's paid marketplace uses are billed on, monthly
+	// (B20.2): one µLXC per unit of the meter MarketMeterEvent names, at the LXC peg. Env:
+	// LENS_MARKET_BILL_PRICE_ID, default EMPTY — then a paid listing can be used by no one but its seller.
+	// MarketMeterEvent is that meter's event name. Env: LENS_MARKET_METER_EVENT.
+	MarketBillPriceID string
+	MarketMeterEvent  string
+
 	// SubscriptionAllowanceULXC is D — the Model 2 allowance granted per billing
 	// period, in µLXC (W4.6.1 step 2). Env: LENS_SUBSCRIPTION_ALLOWANCE_ULXC,
 	// default 0.
@@ -1260,6 +1267,8 @@ func Load() (*Config, error) {
 		TrackWebhookSecret:         os.Getenv("LENS_TRACK_WEBHOOK_SECRET"),
 		BillingSubscriptionPriceID: getEnv("LENS_BILLING_SUBSCRIPTION_PRICE_ID", ""),
 		BillingSubscriptionPlans:   parsePlans(os.Getenv("LENS_BILLING_SUBSCRIPTION_PLANS")),
+		MarketBillPriceID:          getEnv("LENS_MARKET_BILL_PRICE_ID", ""),
+		MarketMeterEvent:           getEnv("LENS_MARKET_METER_EVENT", "talyvor_marketplace_use"),
 		BillingSuccessURL:          getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
 		BillingCancelURL:           getEnv("LENS_BILLING_CANCEL_URL", "https://app.talyvor.com/billing/cancel"),
 
