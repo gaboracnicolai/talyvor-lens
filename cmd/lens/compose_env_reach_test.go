@@ -199,6 +199,10 @@ var credentialExemptions = map[string]string{
 		"is set (Lens moved to ES256), so forwarding it would convert a boot guard into a boot " +
 		"failure. It must stay unforwarded.",
 
+	"LENS_SYNTHETIC_KEY": "B17.1's operator key reaches the process through env_file: lens.env, where an " +
+		"operator sets it (lens.env.example documents it). An environment: entry `${NAME:-}` would arrive " +
+		"as \"\" and override the lens.env value (lens_env_shadow_test.go), so forwarding it would disable it.",
+
 	// ⚠ FOUR MORE EXEMPTIONS WERE WRITTEN HERE AND REMOVED, because
 	// TestCredentialExemptionsAreStillRead refused them: LENS_TEST_NVIDIA_EAT{,_NONCE},
 	// LENS_POVI_KEY_VALUE and LENS_POVI_KEY_CRASHER are read ONLY from _test.go files, which the

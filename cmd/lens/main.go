@@ -583,7 +583,8 @@ func run() error {
 		// cache_poolable — distill artifacts are document-derived.
 		cache_pooling.New(
 			func() bool { return cfg.DistillPoolableEnabled },
-			wsManager.GetDistillPoolable,
+			// B17.1: a synthetic workspace never shares a conversion nor is served one.
+			func(wsID string) bool { return wsManager.GetDistillPoolable(wsID) && !wsManager.GetSynthetic(wsID) },
 		),
 		// S1 distill attribution sink (MINT-FREE): records consented cross-tenant
 		// pooled-distill serves into distill_serve_attribution (migration 0052).
@@ -614,6 +615,8 @@ func run() error {
 		func() bool { return cfg.CachePoolableEnabled && poolGate.Attested() },
 		wsManager.GetCachePoolable,
 	))
+	// B17.1: synthetic workspaces pool among themselves only, and earn nothing.
+	p.SetSyntheticLookup(wsManager.GetSynthetic)
 	// Per-team / per-sprint budget governance (Upgrade 19). Seed the
 	// in-memory snapshot from token_events, refresh it periodically, then
 	// wire the gate into the proxy hot path. Load is best-effort — a cold
@@ -2157,6 +2160,16 @@ func run() error {
 			slog.String("effect", "any gateway that provisions per-user workspaces will get 404 on every login"),
 			slog.String("remedy", "set LENS_PROVISION_SECRET here and to the SAME value on the gateway; leave unset if this deployment has no such gateway"))
 	}
+	// B17.1 — synthetic test workspaces, only when LENS_SYNTHETIC_KEY is set.
+	mountSyntheticRoutes(r, cfg.SyntheticKey, syntheticDeps{
+		workspaces: wsManager,
+		credits:    dualToken,
+		answers:    storedanswers.New(pool, redisClient),
+		audit:      pool,
+		mint: func(workspaceID, userID string, scopes []string, ttl time.Duration) (string, error) {
+			return auth.GenerateToken(workspaceID, userID, scopes, authManager.PrivateKey(), ttl)
+		},
+	})
 	mountProvisionRoute(r, cfg.ProvisionSecret, wsManager,
 		func(workspaceID, userID string, scopes []string, ttl time.Duration) (string, error) {
 			return auth.GenerateToken(workspaceID, userID, scopes, authManager.PrivateKey(), ttl)
@@ -3112,6 +3125,9 @@ func run() error {
 		// binds {wsID} to the caller's credential (admin bypasses), like its siblings.
 		bill.post(authed, "/v1/workspaces/{wsID}/billing/checkout", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
+			if refuseSynthetic(w, wsManager.GetSynthetic, wsID) {
+				return
+			}
 			var in struct {
 				USDCents int64 `json:"usd_cents"`
 			}
@@ -3136,6 +3152,9 @@ func run() error {
 		// bypasses. Registered only when a Stripe Price is configured.
 		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscribe", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
+			if refuseSynthetic(w, wsManager.GetSynthetic, wsID) {
+				return
+			}
 			// B13.1 — {"plan":"plus"|"pro"|"max"}; an empty body is the single configured price.
 			var body struct {
 				Plan string `json:"plan"`
@@ -3224,6 +3243,9 @@ func run() error {
 
 		econ.post(authed, "/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
+			if refuseSynthetic(w, wsManager.GetSynthetic, wsID) {
+				return
+			}
 			var in struct {
 				LXCAmount int64 `json:"lxc_amount_ulxc"` // µLXC (SEC-2)
 			}

@@ -203,6 +203,10 @@ type Config struct {
 	// surface rather than an unauthenticated one. Env: LENS_PROVISION_SECRET.
 	ProvisionSecret string
 
+	// SyntheticKey (LENS_SYNTHETIC_KEY) is the operator key for B17.1's synthetic-workspace routes,
+	// POST /v1/synthetic/workspaces[/reset]. Unset (the default), they are not registered: 404.
+	SyntheticKey string
+
 	// Global rate limits (Item 8). Zero = no global cap.
 	//
 	// ⚠ THIS USED TO ADD "the per-workspace tier in MultiTierLimiter still applies",
@@ -1267,6 +1271,7 @@ func Load() (*Config, error) {
 		JWTPrivateKey:   os.Getenv("LENS_JWT_PRIVATE_KEY"),
 		TokenTTL:        24 * time.Hour,
 		ProvisionSecret: os.Getenv("LENS_PROVISION_SECRET"),
+		SyntheticKey:    os.Getenv("LENS_SYNTHETIC_KEY"),
 
 		HAEnabled: parseBoolEnv("LENS_HA_ENABLED"),
 
