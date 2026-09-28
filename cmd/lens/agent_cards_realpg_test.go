@@ -36,7 +36,8 @@ func TestAgentCards_ApprovedWithinRulesDeclinedOutsideEveryAuthorisationALedgerR
 	ctx := context.Background()
 	const ws = "ws-cards"
 	for _, q := range []string{
-		`INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ('ws-cards', 1000000000, 1000000000)`,
+		// Bought in Stripe test mode: test-funded, which a card (class RED, B22.1) may spend without a clearance.
+		`INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc, test_funded_ulxc) VALUES ('ws-cards', 1000000000, 1000000000, 1000000000)`,
 		`INSERT INTO workspaces (id, name, cache_prefix) VALUES ('ws-cards', 'ws-cards', 'ws-cards')`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {

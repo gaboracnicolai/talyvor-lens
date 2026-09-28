@@ -456,10 +456,15 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 		return
 	}
 
+	funding := economy.FundingLive // B22.1: credits bought in Stripe test mode are test money forever
+	if !event.Livemode {
+		funding = economy.FundingTest
+	}
 	if _, err := s.credits.CreditLXCTx(ctx, tx, wsID, recomp, "stripe top-up", map[string]interface{}{
 		"usd_cents":         usdCents,
 		"stripe_event_id":   event.ID,
 		"stripe_session_id": sess.ID,
+		"funding":           funding,
 	}); err != nil {
 		s.fail(w, "credit", event.ID, err) // rollback → claim not durable → Stripe retries
 		return

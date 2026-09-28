@@ -5,7 +5,9 @@ purchase made with it **in real time**, by the agent's spending rules (B19.2) an
 purchase request, approved or declined, is written to the ledger.
 
 Cards are **class RED** (B22): test money only until a licensed partner issues them. With a live Stripe
-key Lens issues no card, and it declines any purchase made in live mode.
+key Lens issues no card, and it declines any purchase made in live mode. A purchase is also paid only from
+the workspace's **test-funded** credits (bought in Stripe test mode) until the operator clears cards for
+real money; past them it is declined as class RED. See docs/wallet-capabilities.md.
 
 ## Turning it on (Stripe test mode)
 

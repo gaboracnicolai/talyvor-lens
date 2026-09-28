@@ -419,8 +419,9 @@ func run(ctx context.Context, r Runner, calls []call, model string, u *Use) erro
 }
 
 // ClearInvoice clears the billed uses the buyer's paid marketplace invoice carried — those used within
-// [periodStart, periodEnd) — and credits each seller their share. A replay clears nothing more.
-func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time) (int, error) {
+// [periodStart, periodEnd) — and credits each seller their share. A replay clears nothing more. Each earning
+// is live or test as the invoice was (B22.1): only live earnings reach a live payout.
+func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time, livemode bool) (int, error) {
 	n := 0
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, seller_workspace_id, price_ulxc FROM market_uses
@@ -469,8 +470,8 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 			}
 			gross := c.ulxc / ulxcPerUSDMicro
 			share := SellerShare(lifetime, gross)
-			if _, err := tx.Exec(ctx, `INSERT INTO market_earnings (use_id, seller_workspace_id, gross_usd_micros, share_usd_micros, invoice_id, cleared_at, payable_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)`, c.id, c.seller, gross, share, invoiceID, paidAt, paidAt.Add(Holdback)); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO market_earnings (use_id, seller_workspace_id, gross_usd_micros, share_usd_micros, invoice_id, cleared_at, payable_at,
+				livemode) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, c.id, c.seller, gross, share, invoiceID, paidAt, paidAt.Add(Holdback), livemode); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE market_uses SET cleared_invoice_id = $2, cleared_at = $3 WHERE id = $1`, c.id, invoiceID, paidAt); err != nil {

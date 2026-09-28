@@ -419,6 +419,13 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 			return 0, 0, err
 		}
 	}
+	// Resolved BEFORE the balance write, which keeps test-funded credits (B22.1) within the balance and the
+	// holds still open — this one is not.
+	if _, err := tx.Exec(ctx,
+		`UPDATE lxc_reservations SET status = 'settled', settled_ulxc = $2, resolved_at = now() WHERE reservation_id = $1`,
+		reservationID, finalLXC); err != nil {
+		return 0, 0, fmt.Errorf("economy: mark settled: %w", err)
+	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, afterSpend, minted, wsSpent-refund); err != nil {
 		return 0, 0, err
 	}
@@ -443,11 +450,6 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 	// B19.1: the part of the hold not charged goes back to the agent.
 	if _, err := agentMovement(ctx, tx, scopedKeyID, -refund, "settle", reservationID); err != nil {
 		return 0, 0, err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE lxc_reservations SET status = 'settled', settled_ulxc = $2, resolved_at = now() WHERE reservation_id = $1`,
-		reservationID, finalLXC); err != nil {
-		return 0, 0, fmt.Errorf("economy: mark settled: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, 0, fmt.Errorf("economy: commit settle: %w", err)
@@ -504,6 +506,12 @@ func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationI
 		AgentDebitMeta{RequestedModel: reqModel, RequestID: reqID}.toMap()); err != nil {
 		return err
 	}
+	// Resolved before the balance write, as in SettleLXCReservation (B22.1).
+	if _, err := tx.Exec(ctx,
+		`UPDATE lxc_reservations SET status = 'released', settled_ulxc = 0, resolved_at = now() WHERE reservation_id = $1`,
+		reservationID); err != nil {
+		return fmt.Errorf("economy: mark released: %w", err)
+	}
 	if err := writeLXCBalance(ctx, tx, workspaceID, afterRelease, minted, wsSpent-heldLXC); err != nil {
 		return err
 	}
@@ -515,11 +523,6 @@ func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationI
 	// B19.1: a released hold goes back to the agent in full.
 	if _, err := agentMovement(ctx, tx, scopedKeyID, -heldLXC, "release", reservationID); err != nil {
 		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE lxc_reservations SET status = 'released', settled_ulxc = 0, resolved_at = now() WHERE reservation_id = $1`,
-		reservationID); err != nil {
-		return fmt.Errorf("economy: mark released: %w", err)
 	}
 	return tx.Commit(ctx)
 }

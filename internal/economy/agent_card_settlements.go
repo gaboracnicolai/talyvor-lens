@@ -175,6 +175,12 @@ func (s *DualTokenStore) SettleAgentCard(ctx context.Context, st CardSettlement)
 		return out, nil
 	}
 
+	var testMoved int64 // B22.1: a debit takes test-funded credits before the balance write, a credit gives them after it
+	if out.AmountULXC < 0 {
+		if testMoved, err = cardTestFunded(ctx, tx, ws, agentID, st.AuthorizationID, out.AmountULXC); err != nil {
+			return out, err
+		}
+	}
 	if out.AmountULXC != 0 {
 		wsBal, minted, wsSpent, err := readLXCBalance(ctx, tx, ws)
 		if err != nil {
@@ -200,12 +206,18 @@ func (s *DualTokenStore) SettleAgentCard(ctx context.Context, st CardSettlement)
 			return out, err
 		}
 	}
+	if out.AmountULXC > 0 {
+		if testMoved, err = cardTestFunded(ctx, tx, ws, agentID, st.AuthorizationID, out.AmountULXC); err != nil {
+			return out, err
+		}
+	}
 	out.Recorded, out.Reason = true, why
 	if _, err := tx.Exec(ctx, `INSERT INTO agent_card_settlements (id, kind, authorization_id, transaction_id, card_id, workspace_id,
-		agent_id, status, amount_minor, currency, hold_minor, hold_ulxc, amount_ulxc, rate_date, ecb_usd_per_eur, ecb_currency_per_eur, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::numeric, $16::numeric, $17)`,
+		agent_id, status, amount_minor, currency, hold_minor, hold_ulxc, amount_ulxc, rate_date, ecb_usd_per_eur, ecb_currency_per_eur, created_at,
+		test_funded_ulxc)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::numeric, $16::numeric, $17, $18)`,
 		st.EventID, st.Kind, st.AuthorizationID, st.TransactionID, st.CardID, ws, agentID, st.Status, st.AmountMinor,
-		strings.ToLower(st.Currency), holdMinor, holdULXC, out.AmountULXC, rate.date, rate.usd, rate.ccy, st.At); err != nil {
+		strings.ToLower(st.Currency), holdMinor, holdULXC, out.AmountULXC, rate.date, rate.usd, rate.ccy, st.At, testMoved); err != nil {
 		return out, fmt.Errorf("economy: record card settlement: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -250,6 +262,42 @@ func cardHold(ctx context.Context, tx pgx.Tx, agentID, authorizationID, cardID s
 		return 0, 0, r, fmt.Errorf("economy: card rate: %w", err)
 	}
 	return max(heldMinor, 0), max(heldULXC, 0), r, nil
+}
+
+// cardTestFunded moves the test-funded credits one settlement of a card purchase gives back or takes
+// (B22.1), and returns them (+ given back, − taken). Only a purchase that took test-funded credits (an
+// uncleared RED spend) moves any: what comes back to it is test-funded again, up to what it has taken so far,
+// and a capture above its hold takes test-funded credits first.
+func cardTestFunded(ctx context.Context, tx pgx.Tx, ws, agentID, authorizationID string, amountULXC int64) (int64, error) {
+	if authorizationID == "" || amountULXC == 0 {
+		return 0, nil
+	}
+	var took, net int64
+	if err := tx.QueryRow(ctx, `SELECT
+		(SELECT COALESCE(sum(test_funded_ulxc), 0) FROM agent_card_authorizations WHERE authorization_id = $1 AND agent_id = $2 AND approved),
+		(SELECT COALESCE(sum(test_funded_ulxc), 0) FROM agent_card_settlements WHERE authorization_id = $1 AND agent_id = $2)`,
+		authorizationID, agentID).Scan(&took, &net); err != nil {
+		return 0, fmt.Errorf("economy: card's test-funded credits: %w", err)
+	}
+	if took == 0 {
+		return 0, nil
+	}
+	if amountULXC > 0 {
+		back := min(amountULXC, took-net)
+		if back <= 0 {
+			return 0, nil
+		}
+		return back, addTestFunded(ctx, tx, ws, back)
+	}
+	have, err := testFundedULXC(ctx, tx, ws)
+	if err != nil {
+		return 0, err
+	}
+	take := min(-amountULXC, have)
+	if _, err := tx.Exec(ctx, `UPDATE lxc_balances SET test_funded_ulxc = $2 WHERE workspace_id = $1`, ws, have-take); err != nil {
+		return 0, fmt.Errorf("economy: take test-funded credits: %w", err)
+	}
+	return -take, nil
 }
 
 func recordedCardSettlement(ctx context.Context, q pgxDB, eventID string) (CardSettled, bool, error) {

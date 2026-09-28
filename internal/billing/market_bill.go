@@ -37,7 +37,8 @@ type marketStripeAPI interface {
 
 // MarketClearer clears the uses a paid marketplace invoice carried. *market.Store satisfies it.
 type MarketClearer interface {
-	ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time) (int, error)
+	// livemode is the paid invoice's: its sellers' earnings are real money only when it is (B22.1).
+	ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time, livemode bool) (int, error)
 }
 
 // WithMarketBill turns the marketplace bill on: uses are metered as eventName onto a subscription to
@@ -198,7 +199,8 @@ func (s *Service) handleInvoicePaid(w http.ResponseWriter, ctx context.Context, 
 	if inv.StatusTransitions.PaidAt > 0 {
 		paidAt = time.Unix(inv.StatusTransitions.PaidAt, 0).UTC()
 	}
-	n, err := s.marketClearer.ClearInvoice(ctx, workspaceID, inv.ID, time.Unix(start, 0).UTC(), time.Unix(end, 0).UTC(), paidAt)
+	n, err := s.marketClearer.ClearInvoice(ctx, workspaceID, inv.ID, time.Unix(start, 0).UTC(), time.Unix(end, 0).UTC(), paidAt,
+		event.Livemode)
 	if err != nil {
 		s.fail(w, "market clear", event.ID, err)
 		return

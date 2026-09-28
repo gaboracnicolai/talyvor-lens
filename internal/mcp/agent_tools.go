@@ -127,7 +127,8 @@ func (s *Server) runAgentTool(ctx context.Context, name, workspaceID, agentID st
 	}
 	refused := func(err error) error {
 		for _, e := range []error{economy.ErrAgentRule, economy.ErrApprovalRequired, economy.ErrAgentFunds, economy.ErrAgentNotFound,
-			economy.ErrSameAgent, economy.ErrApprovalNotNeeded, economy.ErrReceiptNotFound, economy.ErrAgentOwnerless} {
+			economy.ErrSameAgent, economy.ErrApprovalNotNeeded, economy.ErrReceiptNotFound, economy.ErrAgentOwnerless,
+			economy.ErrCapabilityNotCleared} {
 			if errors.Is(err, e) {
 				return &toolRefusal{err.Error()}
 			}
