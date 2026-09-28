@@ -38,10 +38,11 @@ type lineSource interface {
 }
 
 // clientTranslator is an optional streamOps capability: what the client receives for one upstream
-// line, and after the last one. The default forwards each line as it came.
+// line, and after the last one — given the usage the stream reported, which is what it is billed on.
+// The default forwards each line as it came.
 type clientTranslator interface {
 	toClient(line []byte) [][]byte
-	clientTail() [][]byte
+	clientTail(u streamUsage) [][]byte
 }
 
 type scannerSource struct{ s *bufio.Scanner }
@@ -89,6 +90,26 @@ func openAIChunk(model, content, finish string) [][]byte {
 }
 
 var openAIDoneLines = [][]byte{[]byte("data: " + openAIDoneMarker), {}}
+
+// openAIUsageTail ends a translated stream the way an OpenAI stream with include_usage ends: a
+// usage-only chunk, then [DONE] (B18.59). The counts are the ones Lens read from the provider and
+// bills; prompt_tokens is the whole input, cache reads and writes included, as OpenAI counts it.
+// A stream that reported no usage ends with [DONE] alone rather than with invented zeros.
+func openAIUsageTail(model string, u streamUsage) [][]byte {
+	if !u.present {
+		return openAIDoneLines
+	}
+	prompt := u.uncachedInputTokens + u.cachedInputTokens + u.cacheWriteInputTokens
+	if prompt == 0 {
+		prompt = u.inputTokens
+	}
+	usage := map[string]any{"prompt_tokens": prompt, "completion_tokens": u.outputTokens, "total_tokens": prompt + u.outputTokens}
+	if u.cachedInputTokens > 0 {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": u.cachedInputTokens}
+	}
+	b, _ := json.Marshal(map[string]any{"object": "chat.completion.chunk", "model": model, "choices": []any{}, "usage": usage})
+	return append([][]byte{append([]byte("data: "), b...), {}}, openAIDoneLines...)
+}
 
 // ─── Google: Gemini's streamGenerateContent, SSE ─────────────────────────────
 
@@ -200,7 +221,7 @@ func (g geminiStreamOps) toClient(line []byte) [][]byte {
 	return out
 }
 
-func (geminiStreamOps) clientTail() [][]byte { return openAIDoneLines }
+func (g geminiStreamOps) clientTail(u streamUsage) [][]byte { return openAIUsageTail(g.model, u) }
 
 func (geminiStreamOps) synthesizeCachePayload(accumulated string) []byte {
 	return openAIStreamOps{}.synthesizeCachePayload(accumulated)
@@ -274,7 +295,7 @@ func (b bedrockStreamOps) toClient(line []byte) [][]byte {
 	return nil
 }
 
-func (bedrockStreamOps) clientTail() [][]byte { return openAIDoneLines }
+func (b bedrockStreamOps) clientTail(u streamUsage) [][]byte { return openAIUsageTail(b.model, u) }
 
 func (bedrockStreamOps) synthesizeCachePayload(accumulated string) []byte {
 	return openAIStreamOps{}.synthesizeCachePayload(accumulated)

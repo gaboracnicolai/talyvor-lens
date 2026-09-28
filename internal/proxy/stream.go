@@ -465,7 +465,7 @@ func (s *StreamHandler) serve(
 		return err
 	}
 	if translates {
-		send(translator.clientTail())
+		send(translator.clientTail(usage))
 	}
 
 	// Post-serve seam (cache write, learner, streamed spend + reservation SETTLE). Detach from the
