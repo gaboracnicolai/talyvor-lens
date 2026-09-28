@@ -104,9 +104,20 @@ func TestMarketRoutes_PublishOfEachKindVersionsAndTheScan(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE market_listing_versions SET artifact = '{"template":"x"}' WHERE listing_id = $1 AND version = 1`, ids["prompt"]); err == nil {
 		t.Error("a published version was rewritten in place")
 	}
-	// Another workspace sees the versions but not the artifacts, which B20.2's use hands out.
-	if _, body := call(buyer, http.MethodGet, "/v1/marketplace/listings/"+ids["prompt"], ""); strings.Contains(body, "bullet points") {
+	// Another workspace sees the versions but not the artifacts, which B20.2's use hands out — only what a
+	// use of each asks for (B20.3): the prompt's variables.
+	_, body = call(buyer, http.MethodGet, "/v1/marketplace/listings/"+ids["prompt"], "")
+	if strings.Contains(body, "bullet points") {
 		t.Errorf("another workspace read the artifact: %s", body)
+	}
+	var seen market.Listing
+	if err := json.Unmarshal([]byte(body), &seen); err != nil || len(seen.Versions) != 2 ||
+		strings.Join(seen.Versions[1].Needs.Variables, ",") != "text" || seen.Versions[1].Needs.Input {
+		t.Errorf("another workspace sees the prompt needs %+v, want its one variable", seen.Versions)
+	}
+	_, body = call(buyer, http.MethodGet, "/v1/marketplace/listings/"+ids["agent"], "")
+	if err := json.Unmarshal([]byte(body), &seen); err != nil || !seen.Versions[0].Needs.Input || seen.Versions[0].Needs.Model != "claude-sonnet-5" {
+		t.Errorf("another workspace sees the agent needs %+v, want an input on claude-sonnet-5", seen.Versions)
 	}
 
 	// Refused at publish, and nothing stored: a secret, personal data, a prompt injection outside an
