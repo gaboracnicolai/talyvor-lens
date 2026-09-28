@@ -15,6 +15,7 @@ import (
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
+	"github.com/talyvor/lens/internal/passkey"
 	"github.com/talyvor/lens/internal/storedanswers"
 	"github.com/talyvor/lens/internal/tenant"
 )
@@ -73,6 +74,18 @@ import (
 //	GET    /v1/workspaces/{wsID}/agents/{id}/topup
 //	DELETE /v1/workspaces/{wsID}/agents/{id}/topup
 //
+// B19.16 — approvals signed with a passkey, and a web push when one is filed (economy/agent_approval_auth.go).
+// Once a workspace has a passkey, approve and deny take {"assertion": {credential_id, client_data_json,
+// authenticator_data, signature}} over the approval's challenge; all four are base64url.
+//
+//	POST   /v1/workspaces/{wsID}/agents/passkeys/challenge           a registration challenge and the RP ID
+//	POST   /v1/workspaces/{wsID}/agents/passkeys   {credential_id, name, public_key (SPKI), client_data_json, authenticator_data}
+//	GET    /v1/workspaces/{wsID}/agents/passkeys
+//	POST   /v1/workspaces/{wsID}/agents/approvals/{id}/challenge     the challenge an approval's decision is signed over
+//	GET    /v1/workspaces/{wsID}/agents/push/public-key              the VAPID key a browser subscribes with
+//	POST   /v1/workspaces/{wsID}/agents/push/subscriptions  {endpoint, keys: {p256dh, auth}}   a device to tell
+//	DELETE /v1/workspaces/{wsID}/agents/push/subscriptions  {endpoint}
+//
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
 
@@ -101,6 +114,14 @@ type agentBank interface {
 	SetAgentTopUp(ctx context.Context, workspaceID, agentID string, belowULXC, toULXC int64) (economy.AgentTopUp, error)
 	GetAgentTopUp(ctx context.Context, workspaceID, agentID string) (economy.AgentTopUp, bool, error)
 	RemoveAgentTopUp(ctx context.Context, workspaceID, agentID string) error
+	AuthorizeApprovalDecision(ctx context.Context, workspaceID, approvalID string, a *passkey.Assertion) error
+	PasskeyRegistrationChallenge(ctx context.Context, workspaceID string) (challenge, rpID string, err error)
+	RegisterPasskey(ctx context.Context, workspaceID, name string, r passkey.Registration) (economy.Passkey, error)
+	ListPasskeys(ctx context.Context, workspaceID string) ([]economy.Passkey, error)
+	ApprovalChallenge(ctx context.Context, workspaceID, approvalID string) (challenge string, credentialIDs []string, err error)
+	PushPublicKey() (string, bool)
+	SavePushSubscription(ctx context.Context, workspaceID, endpoint, p256dh, auth string) error
+	DeletePushSubscription(ctx context.Context, workspaceID, endpoint string) error
 	ResumeAgent(ctx context.Context, workspaceID, agentID string) error
 	ListAgentSpendAlerts(ctx context.Context, workspaceID string) ([]economy.AgentSpendAlert, error)
 	AgentSpendForecast(ctx context.Context, workspaceID string, at time.Time) (economy.SpendForecast, error)
@@ -237,7 +258,21 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 	})
 	decide := func(approve bool) http.HandlerFunc {
 		return ownerOnly(func(w http.ResponseWriter, req *http.Request) {
-			a, err := bank.DecideAgentApproval(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "approvalID"), approve)
+			wsID, approvalID := chi.URLParam(req, "wsID"), chi.URLParam(req, "approvalID")
+			// B19.16: once the workspace has a passkey, the decision carries an assertion over this approval's challenge.
+			var in struct {
+				Assertion *passkey.Assertion `json:"assertion"`
+			}
+			_ = json.NewDecoder(req.Body).Decode(&in)
+			if err := bank.AuthorizeApprovalDecision(req.Context(), wsID, approvalID, in.Assertion); err != nil {
+				if errors.Is(err, economy.ErrPasskeyRequired) || errors.Is(err, passkey.ErrInvalid) {
+					writeJSONErr(w, http.StatusForbidden, err.Error())
+				} else {
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				}
+				return
+			}
+			a, err := bank.DecideAgentApproval(req.Context(), wsID, approvalID, approve)
 			switch {
 			case errors.Is(err, economy.ErrApprovalNotFound):
 				writeJSONErr(w, http.StatusNotFound, err.Error())
@@ -452,6 +487,100 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			return
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{"agent_id": chi.URLParam(req, "agentID"), "topup": nil})
+	}))
+	r.Post("/v1/workspaces/{wsID}/agents/passkeys/challenge", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		c, rpID, err := bank.PasskeyRegistrationChallenge(req.Context(), chi.URLParam(req, "wsID"))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"challenge": c, "rp_id": rpID, "alg": -7, "attestation": "none"})
+	}))
+	r.Post("/v1/workspaces/{wsID}/agents/passkeys", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			CredentialID      string `json:"credential_id"`
+			Name              string `json:"name"`
+			PublicKey         string `json:"public_key"`
+			ClientDataJSON    string `json:"client_data_json"`
+			AuthenticatorData string `json:"authenticator_data"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&in)
+		pk, err1 := passkey.Decode64(in.PublicKey)
+		cdj, err2 := passkey.Decode64(in.ClientDataJSON)
+		ad, err3 := passkey.Decode64(in.AuthenticatorData)
+		if in.CredentialID == "" || err1 != nil || err2 != nil || err3 != nil {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"credential_id", "name", "public_key", "client_data_json", "authenticator_data"}, base64url`)
+			return
+		}
+		p, err := bank.RegisterPasskey(req.Context(), chi.URLParam(req, "wsID"), in.Name,
+			passkey.Registration{CredentialID: in.CredentialID, PublicKey: pk, ClientDataJSON: cdj, AuthenticatorData: ad})
+		switch {
+		case errors.Is(err, passkey.ErrInvalid):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusCreated, p)
+		}
+	}))
+	r.Get("/v1/workspaces/{wsID}/agents/passkeys", func(w http.ResponseWriter, req *http.Request) {
+		list, err := bank.ListPasskeys(req.Context(), chi.URLParam(req, "wsID"))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"passkeys": list})
+	})
+	r.Post("/v1/workspaces/{wsID}/agents/approvals/{approvalID}/challenge", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		c, creds, err := bank.ApprovalChallenge(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "approvalID"))
+		switch {
+		case errors.Is(err, economy.ErrApprovalNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, map[string]any{"challenge": c, "allow_credentials": creds, "user_verification": "required"})
+		}
+	}))
+	r.Get("/v1/workspaces/{wsID}/agents/push/public-key", func(w http.ResponseWriter, req *http.Request) {
+		key, ok := bank.PushPublicKey()
+		if !ok {
+			writeJSONErr(w, http.StatusNotFound, economy.ErrPushNotConfigured.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"public_key": key})
+	})
+	r.Post("/v1/workspaces/{wsID}/agents/push/subscriptions", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Endpoint string `json:"endpoint"`
+			Keys     struct {
+				P256dh string `json:"p256dh"`
+				Auth   string `json:"auth"`
+			} `json:"keys"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&in)
+		err := bank.SavePushSubscription(req.Context(), chi.URLParam(req, "wsID"), in.Endpoint, in.Keys.P256dh, in.Keys.Auth)
+		switch {
+		case errors.Is(err, economy.ErrPushNotConfigured):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrAgentRule):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusCreated, map[string]any{"endpoint": in.Endpoint})
+		}
+	}))
+	r.Delete("/v1/workspaces/{wsID}/agents/push/subscriptions", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Endpoint string `json:"endpoint"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&in)
+		if err := bank.DeletePushSubscription(req.Context(), chi.URLParam(req, "wsID"), in.Endpoint); err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"endpoint": in.Endpoint, "deleted": true})
 	}))
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/pay", func(w http.ResponseWriter, req *http.Request) {
 		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")

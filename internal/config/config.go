@@ -207,6 +207,17 @@ type Config struct {
 	// POST /v1/synthetic/workspaces[/reset]. Unset (the default), they are not registered: 404.
 	SyntheticKey string
 
+	// B19.16 — agent approvals signed with a passkey, and a web push when one is filed.
+	// WebAuthnRPID (LENS_WEBAUTHN_RP_ID, default app.talyvor.com) is the relying party the owners' passkeys
+	// are created for; WebAuthnOrigins (LENS_WEBAUTHN_ORIGINS, comma-separated, default
+	// https://app.talyvor.com) the pages a ceremony may come from. VAPIDPrivateKey (LENS_VAPID_PRIVATE_KEY,
+	// base64url P-256 scalar; `lens vapid-key` makes one) signs the pushes; unset, no push is sent.
+	// VAPIDSubject (LENS_VAPID_SUBJECT) is the contact the push services are given.
+	WebAuthnRPID    string
+	WebAuthnOrigins []string
+	VAPIDPrivateKey string
+	VAPIDSubject    string
+
 	// Global rate limits (Item 8). Zero = no global cap.
 	//
 	// ⚠ THIS USED TO ADD "the per-workspace tier in MultiTierLimiter still applies",
@@ -1272,6 +1283,11 @@ func Load() (*Config, error) {
 		TokenTTL:        24 * time.Hour,
 		ProvisionSecret: os.Getenv("LENS_PROVISION_SECRET"),
 		SyntheticKey:    os.Getenv("LENS_SYNTHETIC_KEY"),
+
+		WebAuthnRPID:    getEnv("LENS_WEBAUTHN_RP_ID", "app.talyvor.com"),
+		WebAuthnOrigins: strings.Split(getEnv("LENS_WEBAUTHN_ORIGINS", "https://app.talyvor.com"), ","),
+		VAPIDPrivateKey: os.Getenv("LENS_VAPID_PRIVATE_KEY"),
+		VAPIDSubject:    getEnv("LENS_VAPID_SUBJECT", "mailto:support@talyvor.com"),
 
 		HAEnabled: parseBoolEnv("LENS_HA_ENABLED"),
 

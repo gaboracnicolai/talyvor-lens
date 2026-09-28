@@ -88,6 +88,7 @@ import (
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/outputverify"
 	"github.com/talyvor/lens/internal/pairverify"
+	"github.com/talyvor/lens/internal/passkey"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/poolshadow"
@@ -115,6 +116,7 @@ import (
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/warmer"
+	"github.com/talyvor/lens/internal/webpush"
 	"github.com/talyvor/lens/internal/workspace"
 	"github.com/talyvor/lens/internal/worktier"
 	"github.com/talyvor/lens/migrations"
@@ -208,6 +210,16 @@ func main() {
 			slog.Error("realdist failed", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
+		return
+	}
+	// `lens vapid-key` prints a new VAPID key pair for LENS_VAPID_PRIVATE_KEY (B19.16's approval pushes).
+	if len(os.Args) > 1 && os.Args[1] == "vapid-key" {
+		private, public, err := webpush.GenerateKey()
+		if err != nil {
+			slog.Error("vapid-key failed", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		fmt.Printf("LENS_VAPID_PRIVATE_KEY=%s\n# public key (browsers subscribe with it; Lens serves it too): %s\n", private, public)
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
@@ -2076,6 +2088,16 @@ func run() error {
 	// additionally force the acted-on workspace to the verified caller (effectiveWorkspace).
 	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, lensVersion)
 	mcpServer.SetAgentBank(dualToken) // B19.9: agents use the bank with their own keys
+	// B19.16: approvals signed with the owner's passkey; a web push per approval filed when a VAPID key is set.
+	var approvalPusher economy.ApprovalPusher
+	if cfg.VAPIDPrivateKey != "" {
+		sender, err := webpush.NewSender(cfg.VAPIDPrivateKey, cfg.VAPIDSubject)
+		if err != nil {
+			return fmt.Errorf("LENS_VAPID_PRIVATE_KEY: %w", err)
+		}
+		approvalPusher = sender
+	}
+	dualToken.SetApprovalAuth(passkey.RelyingParty{ID: cfg.WebAuthnRPID, Origins: cfg.WebAuthnOrigins}, approvalPusher)
 	mcpAuth := auth.AuthMiddleware(keyStore, authManager)
 	r.With(mcpAuth).Post("/mcp", mcpServer.HandleRPC)
 	r.With(mcpAuth).Get("/mcp/sse", mcpServer.HandleSSE)
