@@ -142,3 +142,16 @@ func TestExtract_SentenceInitialWordsAreNotProperNouns(t *testing.T) {
 		t.Error("sentence-initial 'Command' registered as a proper noun")
 	}
 }
+
+// B21.1: a possessive names the same thing as the bare name — "France's" is France, "UK's" is the UK —
+// so a rephrasing with one is an entity-lane candidate for the question without it.
+func TestCanon_APossessiveNamesTheSameEntity(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"what is the capital of France?", "which city is the France's capital?"},
+		{"what is the capital of the UK?", "which city is the UK's capital?"},
+	} {
+		if a, b := Canon(pair[0]), Canon(pair[1]); !a.Verifiable() || a != b {
+			t.Errorf("Canon(%q) = %q, Canon(%q) = %q — want the same entity", pair[0], a, pair[1], b)
+		}
+	}
+}
