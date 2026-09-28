@@ -40,6 +40,11 @@ func agentAllocHarness(t *testing.T) (*Proxy, *economy.DualTokenStore, *pgxpool.
 		`CREATE TABLE IF NOT EXISTS agent_lxc_subbudgets (scoped_key_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
 			ceiling_lxc BIGINT NOT NULL DEFAULT 50000000, spent_lxc BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`, // BIGINT µLXC + default 50 LXC = 50_000_000 µLXC (prod 0083:34-37)
+		// B19.1: the spend path asks whether the key belongs to an agent account (migration 0140).
+		`CREATE TABLE IF NOT EXISTS agent_accounts (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+		`CREATE TABLE IF NOT EXISTS agent_account_keys (scoped_key_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE TABLE IF NOT EXISTS lxc_spend_claims (request_id TEXT PRIMARY KEY, scoped_key_id TEXT NOT NULL,
 			lxc_amount BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`, // BIGINT µLXC (prod 0083)
 		`TRUNCATE lxc_balances, lxc_ledger, agent_lxc_subbudgets, lxc_spend_claims`,

@@ -1,0 +1,256 @@
+package economy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+// agent_accounts.go — B19.1: AGENT ACCOUNTS, EVERY AGENT WITH ITS OWN BALANCE, ON A DOUBLE-ENTRY LEDGER.
+//
+// It EXTENDS agent_subbudget.go rather than beside it. An agent key already spends through
+// SpendLXCForAgent and the reservation (hold → settle | release), which debit the workspace's
+// lxc_balances and move the key's spent_lxc. A key attached to an agent account additionally posts
+// every one of those movements against its agent in the SAME transaction (agentMovement), and is bound
+// by the agent's balance instead of the per-key ceiling. Funding and withdrawing post between the
+// workspace and the agent. Balances are sums of postings (migration 0140), never stored; every entry
+// sums to zero, enforced at commit; postings are append-only.
+
+// ErrAgentNotFound: no such agent in this workspace.
+var ErrAgentNotFound = errors.New("economy: no such agent in this workspace")
+
+// ErrAgentFunds: the workspace's unallocated LXC (its balance less what its agents hold), or for a
+// withdrawal the agent's balance, does not cover the amount.
+var ErrAgentFunds = errors.New("economy: not enough funds for this movement")
+
+// Agent is one agent account, its balance derived from its postings.
+type Agent struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	BalanceULXC int64     `json:"balance_ulxc"`
+	SpentULXC   int64     `json:"spent_ulxc"`
+	Keys        []string  `json:"keys"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// AgentBook reconciles a workspace with its agents: WorkspaceBalanceULXC (lxc_balances) =
+// UnallocatedULXC + AllocatedULXC, AllocatedULXC = Σ agent balances, and SpentULXC is the 'spend'
+// account — what the agents spent.
+type AgentBook struct {
+	WorkspaceBalanceULXC int64   `json:"workspace_balance_ulxc"`
+	AllocatedULXC        int64   `json:"allocated_ulxc"`
+	UnallocatedULXC      int64   `json:"unallocated_ulxc"`
+	SpentULXC            int64   `json:"spent_ulxc"`
+	Agents               []Agent `json:"agents"`
+}
+
+func agentAccount(id string) string { return "agent:" + id }
+
+type leg struct {
+	account string
+	amount  int64
+}
+
+// postEntry writes one balanced entry. The deferred trigger refuses the commit if it does not balance.
+func postEntry(ctx context.Context, tx pgx.Tx, workspaceID, kind, ref string, legs ...leg) error {
+	entry := uuid.New()
+	for _, l := range legs {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO agent_postings (entry_id, workspace_id, account, amount_ulxc, kind, ref) VALUES ($1, $2, $3, $4, $5, $6)`,
+			entry, workspaceID, l.account, l.amount, kind, ref); err != nil {
+			return fmt.Errorf("economy: post %s: %w", kind, err)
+		}
+	}
+	return nil
+}
+
+func accountBalance(ctx context.Context, tx pgx.Tx, workspaceID, account string) (int64, error) {
+	var bal int64
+	err := tx.QueryRow(ctx, `SELECT COALESCE(sum(amount_ulxc), 0)::bigint FROM agent_postings WHERE workspace_id = $1 AND account = $2`,
+		workspaceID, account).Scan(&bal)
+	return bal, err
+}
+
+// lockAgent locks the agent's row — every movement of its balance serialises on it — and checks it
+// belongs to workspaceID.
+func lockAgent(ctx context.Context, tx pgx.Tx, workspaceID, agentID string) error {
+	var ws string
+	err := tx.QueryRow(ctx, `SELECT workspace_id FROM agent_accounts WHERE id = $1 FOR UPDATE`, agentID).Scan(&ws)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && ws != workspaceID) {
+		return ErrAgentNotFound
+	}
+	return err
+}
+
+// CreateAgent creates an agent account in workspaceID, with no balance.
+func (s *DualTokenStore) CreateAgent(ctx context.Context, workspaceID, name string) (Agent, error) {
+	if workspaceID == "" || name == "" {
+		return Agent{}, errors.New("economy: an agent needs a workspace and a name")
+	}
+	a := Agent{ID: "agt_" + uuid.NewString(), Name: name, Keys: []string{}}
+	err := s.pool.QueryRow(ctx, `INSERT INTO agent_accounts (id, workspace_id, name) VALUES ($1, $2, $3) RETURNING created_at`,
+		a.ID, workspaceID, name).Scan(&a.CreatedAt)
+	if err != nil {
+		return Agent{}, fmt.Errorf("economy: create agent: %w", err)
+	}
+	return a, nil
+}
+
+// AttachAgentKey makes scopedKeyID one of agentID's keys: from then on its spending is the agent's.
+func (s *DualTokenStore) AttachAgentKey(ctx context.Context, workspaceID, agentID, scopedKeyID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgent(ctx, tx, workspaceID, agentID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_account_keys (scoped_key_id, agent_id) VALUES ($1, $2)`, scopedKeyID, agentID); err != nil {
+		return fmt.Errorf("economy: attach key: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// FundAgent moves amount of the workspace's unallocated LXC to the agent. Returns the agent's balance.
+func (s *DualTokenStore) FundAgent(ctx context.Context, workspaceID, agentID string, amount int64) (int64, error) {
+	return s.moveAgentFunds(ctx, workspaceID, agentID, amount, "fund")
+}
+
+// WithdrawAgent moves amount of the agent's balance back to the workspace. Returns the agent's balance.
+func (s *DualTokenStore) WithdrawAgent(ctx context.Context, workspaceID, agentID string, amount int64) (int64, error) {
+	return s.moveAgentFunds(ctx, workspaceID, agentID, amount, "withdraw")
+}
+
+func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentID string, amount int64, kind string) (int64, error) {
+	if amount <= 0 {
+		return 0, errors.New("economy: the amount must be positive")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Lock order everywhere: the agent, then the workspace balance (readLXCBalance is FOR UPDATE).
+	if err := lockAgent(ctx, tx, workspaceID, agentID); err != nil {
+		return 0, err
+	}
+	bal, err := accountBalance(ctx, tx, workspaceID, agentAccount(agentID))
+	if err != nil {
+		return 0, err
+	}
+	if kind == "fund" {
+		wsBal, _, _, err := readLXCBalance(ctx, tx, workspaceID)
+		if err != nil {
+			return 0, err
+		}
+		wsSide, err := accountBalance(ctx, tx, workspaceID, "workspace")
+		if err != nil {
+			return 0, err
+		}
+		spent, err := accountBalance(ctx, tx, workspaceID, "spend")
+		if err != nil {
+			return 0, err
+		}
+		// Allocated = Σ agent balances = −(workspace side) − spend, since every entry sums to zero.
+		if unallocated := wsBal - (-wsSide - spent); unallocated < amount {
+			return 0, fmt.Errorf("%w: the workspace has %d µLXC not held by its agents", ErrAgentFunds, unallocated)
+		}
+		err = postEntry(ctx, tx, workspaceID, kind, "", leg{"workspace", -amount}, leg{agentAccount(agentID), amount})
+		if err != nil {
+			return 0, err
+		}
+		bal += amount
+	} else {
+		if bal < amount {
+			return 0, fmt.Errorf("%w: the agent holds %d µLXC", ErrAgentFunds, bal)
+		}
+		if err := postEntry(ctx, tx, workspaceID, kind, "", leg{agentAccount(agentID), -amount}, leg{"workspace", amount}); err != nil {
+			return 0, err
+		}
+		bal -= amount
+	}
+	return bal, tx.Commit(ctx)
+}
+
+// agentMovement posts delta µLXC of an agent key's spending against its agent, inside the caller's
+// spend transaction: delta > 0 (a spend or a hold) moves agent → spend and is refused, as a sub-budget
+// refusal, beyond the agent's balance; delta < 0 (a settle's refund or a release) moves it back.
+// isAgent is false for a key attached to no agent, which keeps its per-key ceiling and posts nothing.
+func agentMovement(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta int64, kind, ref string) (isAgent bool, err error) {
+	var agentID, workspaceID string
+	err = tx.QueryRow(ctx,
+		`SELECT a.id, a.workspace_id FROM agent_account_keys k JOIN agent_accounts a ON a.id = k.agent_id
+		  WHERE k.scoped_key_id = $1`, scopedKeyID).Scan(&agentID, &workspaceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("economy: agent of key: %w", err)
+	}
+	if delta == 0 {
+		return true, nil
+	}
+	if err := lockAgent(ctx, tx, workspaceID, agentID); err != nil {
+		return true, err
+	}
+	if delta > 0 {
+		bal, err := accountBalance(ctx, tx, workspaceID, agentAccount(agentID))
+		if err != nil {
+			return true, err
+		}
+		if bal < delta {
+			return true, fmt.Errorf("%w: agent %s holds %d µLXC, this needs %d", ErrSubBudgetExceeded, agentID, bal, delta)
+		}
+	}
+	return true, postEntry(ctx, tx, workspaceID, kind, ref, leg{agentAccount(agentID), -delta}, leg{"spend", delta})
+}
+
+// AgentBook reads a workspace's agents and reconciles them with its LXC balance.
+func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (AgentBook, error) {
+	var book AgentBook
+	// One snapshot, so the workspace balance and the postings are read at the same instant.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return book, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`); err != nil {
+		return book, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT balance FROM lxc_balances WHERE workspace_id = $1), 0)::bigint`,
+		workspaceID).Scan(&book.WorkspaceBalanceULXC); err != nil {
+		return book, fmt.Errorf("economy: workspace balance: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT a.id, a.name, a.created_at,
+		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id), 0)::bigint,
+		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
+		                   AND p.kind IN ('spend', 'hold', 'settle', 'release')), 0)::bigint,
+		       COALESCE((SELECT array_agg(k.scoped_key_id ORDER BY k.created_at) FROM agent_account_keys k WHERE k.agent_id = a.id), '{}')
+		  FROM agent_accounts a WHERE a.workspace_id = $1 ORDER BY a.created_at, a.id`, workspaceID)
+	if err != nil {
+		return book, fmt.Errorf("economy: agents: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a Agent
+		var spendLegs int64
+		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.BalanceULXC, &spendLegs, &a.Keys); err != nil {
+			return book, err
+		}
+		a.SpentULXC = -spendLegs
+		book.AllocatedULXC += a.BalanceULXC
+		book.SpentULXC += a.SpentULXC
+		book.Agents = append(book.Agents, a)
+	}
+	if err := rows.Err(); err != nil {
+		return book, err
+	}
+	book.UnallocatedULXC = book.WorkspaceBalanceULXC - book.AllocatedULXC
+	return book, nil
+}

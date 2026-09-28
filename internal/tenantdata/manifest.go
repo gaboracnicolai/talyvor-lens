@@ -119,6 +119,7 @@ var Manifest = map[string]Entry{
 	// question or answer is held in either.
 	"deletion_requests":       {Retain, "B21.3: the record that erasure was requested and completed"},
 	"stored_answer_deletions": {Retain, "B21.3: the audit log of each deletion of stored answers"},
+	"agent_postings":          {Retain, "B19.1: audit-guarded (0140, append-only): the agents' double-entry LXC ledger; financial-record retention"},
 
 	// token_events is audit-guarded TOO, but migration 0055's trigger carries a sanctioned
 	// exception: DELETE is permitted while the retention-bypass session flag is set — the flag the
@@ -192,6 +193,7 @@ var Manifest = map[string]Entry{
 		"owns exactly these two and only the other one was classified."},
 
 	// ─── DELETE: everything else. The bulk of what is actually sensitive. ─────────────────────
+	"agent_accounts":           {Delete, ""},
 	"agent_lxc_subbudgets":     {Delete, ""},
 	"annotator_stakes":         {Delete, ""},
 	"api_keys":                 {Delete, ""},

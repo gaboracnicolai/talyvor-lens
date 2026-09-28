@@ -190,7 +190,13 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	}
 
 	// (3) CEILING check — reject (rollback ⇒ no orphan claim) if this debit would exceed remaining.
-	if ceiling-spent < lxcAmount {
+	// B19.1: a key attached to an agent account spends the agent's balance, posted in this transaction;
+	// the per-key ceiling binds only a key with no agent.
+	isAgent, err := agentMovement(ctx, tx, scopedKeyID, lxcAmount, "spend", requestID)
+	if err != nil {
+		return err
+	}
+	if !isAgent && ceiling-spent < lxcAmount {
 		return ErrSubBudgetExceeded
 	}
 
@@ -290,7 +296,12 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 		scopedKeyID).Scan(&ceiling, &spent); err != nil {
 		return fmt.Errorf("economy: read sub-budget: %w", err)
 	}
-	if ceiling-spent < heldLXC {
+	// B19.1: an agent's key holds against the agent's balance (posted here), not the per-key ceiling.
+	isAgent, err := agentMovement(ctx, tx, scopedKeyID, heldLXC, "hold", reservationID)
+	if err != nil {
+		return err // rollback ⇒ no orphan reservation
+	}
+	if !isAgent && ceiling-spent < heldLXC {
 		return ErrSubBudgetExceeded // rollback ⇒ no orphan reservation
 	}
 
@@ -419,6 +430,10 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		scopedKeyID, refund); err != nil {
 		return 0, 0, fmt.Errorf("economy: reclaim spent (settle): %w", err)
 	}
+	// B19.1: the part of the hold not charged goes back to the agent.
+	if _, err := agentMovement(ctx, tx, scopedKeyID, -refund, "settle", reservationID); err != nil {
+		return 0, 0, err
+	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE lxc_reservations SET status = 'settled', settled_ulxc = $2, resolved_at = now() WHERE reservation_id = $1`,
 		reservationID, finalLXC); err != nil {
@@ -486,6 +501,10 @@ func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationI
 		`UPDATE agent_lxc_subbudgets SET spent_lxc = spent_lxc - $2, updated_at = now() WHERE scoped_key_id = $1`,
 		scopedKeyID, heldLXC); err != nil {
 		return fmt.Errorf("economy: reclaim spent (release): %w", err)
+	}
+	// B19.1: a released hold goes back to the agent in full.
+	if _, err := agentMovement(ctx, tx, scopedKeyID, -heldLXC, "release", reservationID); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE lxc_reservations SET status = 'released', settled_ulxc = 0, resolved_at = now() WHERE reservation_id = $1`,

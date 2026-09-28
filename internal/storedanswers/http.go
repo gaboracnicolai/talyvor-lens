@@ -26,7 +26,7 @@ import (
 //
 // workspaceIsolationMiddleware has already bound {wsID} to the caller's credential; the two admin
 // routes are mounted behind requireAdmin. The DELETE and the request are further limited to the
-// workspace's owner or admin (ownerOrAdmin).
+// workspace's owner or admin (OwnerOrAdmin).
 
 // Deleter is what the routes and `lens deletion-requests` need; *Store satisfies it.
 type Deleter interface {
@@ -43,12 +43,12 @@ type WorkspaceLookup interface {
 	GetWorkspace(id string) (*workspace.Workspace, bool)
 }
 
-// ownerOrAdmin reports whether the caller may delete this workspace's data, and names it for the
-// audit row. Allowed: the operator (the global admin key); the workspace's owner, whose provisioned
-// session token carries auth.ScopeKeys — a scope a tenant cannot grant a key of its own
-// (tenant.ValidScopes); and a workspace key its owner created with the admin scope. Refused: the
-// browser chat's session key, and any proxy or analytics key.
-func ownerOrAdmin(ctx context.Context) (who string, ok bool) {
+// OwnerOrAdmin reports whether the caller may delete this workspace's data (or, B19.1, move its money
+// between agents), and names it for the audit row. Allowed: the operator (the global admin key); the
+// workspace's owner, whose provisioned session token carries auth.ScopeKeys — a scope a tenant cannot
+// grant a key of its own (tenant.ValidScopes); and a workspace key its owner created with the admin
+// scope. Refused: the browser chat's session key, and any proxy or analytics key.
+func OwnerOrAdmin(ctx context.Context) (who string, ok bool) {
 	actx := auth.GetAuthContext(ctx)
 	if actx == nil {
 		return "", false
@@ -87,7 +87,7 @@ func CountsHandler(store Deleter) http.HandlerFunc {
 func DeleteHandler(store Deleter, wsm WorkspaceLookup) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		wsID := chi.URLParam(r, "wsID")
-		who, ok := ownerOrAdmin(r.Context())
+		who, ok := OwnerOrAdmin(r.Context())
 		if !ok {
 			writeErr(w, http.StatusForbidden, "only the workspace's owner or an admin can delete its stored answers")
 			return
@@ -123,7 +123,7 @@ func DeleteHandler(store Deleter, wsm WorkspaceLookup) http.HandlerFunc {
 // FileRequestHandler serves POST /v1/workspaces/{wsID}/deletion-requests.
 func FileRequestHandler(store Deleter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		who, ok := ownerOrAdmin(r.Context())
+		who, ok := OwnerOrAdmin(r.Context())
 		if !ok {
 			writeErr(w, http.StatusForbidden, "only the workspace's owner or an admin can ask for its data to be deleted")
 			return
