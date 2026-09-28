@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -48,6 +49,7 @@ type Server struct {
 	sessionTracker *session.SessionTracker
 	router         *router.Router
 	version        string
+	agentBank      AgentBank // B19.9: the agent tools; nil leaves them out
 }
 
 func New(
@@ -138,7 +140,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	case "tools/list":
-		s.writeRPCResult(w, req.ID, map[string]any{"tools": toolDefinitions()})
+		s.writeRPCResult(w, req.ID, map[string]any{"tools": s.tools()})
 	case "tools/call":
 		s.handleToolsCall(w, r.Context(), req.ID, req.Params)
 	default:
@@ -178,6 +180,14 @@ func (s *Server) HandleSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 // Tool catalogue ------------------------------------------------------------
+
+// tools lists every tool this server answers: the agent tools too when the agent bank is set.
+func (s *Server) tools() []map[string]any {
+	if s.agentBank == nil {
+		return toolDefinitions()
+	}
+	return append(toolDefinitions(), agentToolDefinitions()...)
+}
 
 func toolDefinitions() []map[string]any {
 	return []map[string]any{
@@ -270,6 +280,12 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, id,
 		err    error
 	)
 	switch params.Name {
+	case "agent_balance", "agent_request_approval", "agent_pay", "agent_receipt":
+		if s.agentBank == nil {
+			s.writeRPCError(w, id, rpcErrMethodNotFnd, "unknown tool: "+params.Name)
+			return
+		}
+		result, err = s.callAgentTool(ctx, params.Name, params.Arguments)
 	case "get_spend_summary":
 		result, err = s.toolGetSpendSummary(ctx, params.Arguments)
 	case "get_cache_stats":
@@ -284,6 +300,11 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, id,
 		result, err = s.toolRouteModel(ctx, params.Arguments)
 	default:
 		s.writeRPCError(w, id, rpcErrMethodNotFnd, "unknown tool: "+params.Name)
+		return
+	}
+	var refusal *toolRefusal
+	if errors.As(err, &refusal) {
+		s.writeRPCResult(w, id, map[string]any{"content": []map[string]any{{"type": "text", "text": refusal.msg}}, "isError": true})
 		return
 	}
 	if err != nil {

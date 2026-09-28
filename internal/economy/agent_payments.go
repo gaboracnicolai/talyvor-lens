@@ -54,9 +54,7 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 	if fromAgentID == toAgentID {
 		return pay, ErrSameAgent
 	}
-	// What an approval of this payment is for: the payer, the payee, the amount and the memo.
-	fp := sha256.Sum256([]byte("payment\x00" + fromAgentID + "\x00" + toAgentID + "\x00" + strconv.FormatInt(amount, 10) + "\x00" + memo))
-	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: hex.EncodeToString(fp[:])})
+	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(fromAgentID, toAgentID, amount, memo)})
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -67,6 +65,12 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 		return pay, s.refusedMovement(ctx, tx, err)
 	}
 	return pay, tx.Commit(ctx)
+}
+
+// paymentFingerprint is what an approval of a payment is for: the payer, the payee, the amount and the memo.
+func paymentFingerprint(fromAgentID, toAgentID string, amount int64, memo string) string {
+	fp := sha256.Sum256([]byte("payment\x00" + fromAgentID + "\x00" + toAgentID + "\x00" + strconv.FormatInt(amount, 10) + "\x00" + memo))
+	return hex.EncodeToString(fp[:])
 }
 
 // payAgentTx posts pay as entry inside tx, judged by the payer's rules. Its refusals are returned as

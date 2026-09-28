@@ -2075,6 +2075,7 @@ func run() error {
 	// financials by naming it. Gate it with the same AuthMiddleware as the authed group; the tools
 	// additionally force the acted-on workspace to the verified caller (effectiveWorkspace).
 	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, lensVersion)
+	mcpServer.SetAgentBank(dualToken) // B19.9: agents use the bank with their own keys
 	mcpAuth := auth.AuthMiddleware(keyStore, authManager)
 	r.With(mcpAuth).Post("/mcp", mcpServer.HandleRPC)
 	r.With(mcpAuth).Get("/mcp/sse", mcpServer.HandleSSE)
