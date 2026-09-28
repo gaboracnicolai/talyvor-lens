@@ -150,63 +150,6 @@ func TestEveryBackgroundGoroutineIsClassified(t *testing.T) {
 	t.Logf("MEASURED: %d leader-gated singletons, %d classified per-replica.", len(gated), len(perReplica))
 }
 
-// ⚠ THE ONE THAT WAS IN THE WRONG BUCKET, PINNED BY NAME SO IT CANNOT DRIFT BACK.
-//
-// The cache warmer re-fires historical prompts at api.openai.com and api.anthropic.com on the
-// OPERATOR'S KEYS, hourly. It is the only background job in this binary that spends money at an
-// external provider, and it was the only ungated one whose state is SHARED: exactCache is
-// cache.NewExactCache(redisClient, …) — Redis, one instance for the fleet — and WarmOne reads and
-// writes nothing else. Every byte of its benefit is shared; none of its cost was.
-//
-// Its dedup is `w.mu` + the `w.warming` map: in-process, so it deduplicates nothing across
-// replicas. GetWarmCandidates is a plain `LIMIT 10` with no claim, no lock and no SKIP LOCKED, so
-// every replica selects the SAME ten. The Redis Get check saves a replica that starts late; on a
-// rolling deploy or a scale-out, replicas boot together and tick together.
-//
-// ⚠ AND IT IS LATENT, NOT LIVE, WHICH BELONGS IN THE RECORD. Production is a single docker-compose
-// instance (W5.1), so N = 1 and nothing is being double-spent today. ha.Leader.Run calls fn
-// directly when HA is disabled, so gating it changes nothing for a single replica — which is
-// exactly why it was safe to do rather than only report.
-func TestTheCacheWarmerIsLeaderGated(t *testing.T) {
-	src := []byte(readMainGo(t))
-	// ⚠ BOTH HALVES WERE strings.Contains OVER THE RAW SOURCE UNTIL #526, and a closure walked
-	// past both: `go func() { cacheWarmer.Start(ctx, …) }()` with the leader.Run line left in a
-	// COMMENT satisfied the positive half and dodged the negative one, which looked for the exact
-	// text `go cacheWarmer.Start(ctx`. The question is now (a) does the named leader job exist as
-	// a real call, and (b) is EVERY cacheWarmer.Start call lexically inside it.
-	// Arms: ~/talyvor-queue/w61-operatorkeys-controls-h2r7.py.
-	jobs, err := scanLeaderJobs("main.go", src)
-	if err != nil {
-		t.Fatalf("parse main.go: %v", err)
-	}
-	if len(jobs) < 20 {
-		t.Fatalf("scanLeaderJobs found only %d leader.Run registrations — the scan is blind", len(jobs))
-	}
-	gated := false
-	for _, j := range jobs {
-		if j.name == "cache-warmer" {
-			gated = true
-		}
-	}
-	if !gated {
-		t.Error("the cache warmer is not leader-gated.\n\n" +
-			"    It re-fires historical prompts at OpenAI and Anthropic on the operator's keys, " +
-			"hourly, and writes only to the SHARED Redis exact cache. Its dedup (w.mu + w.warming) " +
-			"is in-process, and GetWarmCandidates takes a plain LIMIT 10 with no claim — so N " +
-			"replicas pick the same ten prompts and pay for them N times.\n" +
-			"    Every other money-touching singleton in this file is wrapped in leader.Run, " +
-			"including audit-retention, which only deletes rows.")
-	}
-	loose, err := callsOutsideLeaderJob("main.go", src, "cacheWarmer", "Start", "cache-warmer")
-	if err != nil {
-		t.Fatalf("parse main.go: %v", err)
-	}
-	if len(loose) > 0 {
-		t.Errorf("cacheWarmer.Start is called at main.go line(s) %v OUTSIDE the \"cache-warmer\" "+
-			"leader job — the warmer would run on every replica AND on the leader", loose)
-	}
-}
-
 func min(a, b int) int {
 	if a < b {
 		return a

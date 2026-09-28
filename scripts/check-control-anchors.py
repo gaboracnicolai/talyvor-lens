@@ -57,7 +57,7 @@ SCRIPTS = ROOT / "scripts"
 # That is the failure this file is most likely to have, so it is the one with no slack.
 WALK_FLOOR = 20      # scripts/*.py that parse
 READABLE_FLOOR = 6   # scripts contributing at least one censusable row
-ROW_FLOOR = 48       # censusable (file, anchor) pairs
+ROW_FLOOR = 46       # censusable (file, anchor) pairs — 48 until B18.9 removed the cache warmer and its two w631 arms
 
 
 def const_env(tree):
