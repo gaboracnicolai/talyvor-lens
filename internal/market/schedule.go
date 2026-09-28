@@ -59,11 +59,14 @@ func (s *Store) payable(ctx context.Context, q interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }, buyer, listingID string) (Listing, string, error) {
 	l, err := scanListing(q.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, listingID))
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && l.Visibility == "private" && l.WorkspaceID != buyer) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, buyer)) {
 		return l, "there is no such listing", nil
 	}
 	if err != nil {
 		return l, "", fmt.Errorf("market: listing: %w", err)
+	}
+	if l.ReviewStatus == ReviewTakenDown {
+		return l, "the listing was taken down", nil
 	}
 	switch {
 	case l.WorkspaceID == buyer:

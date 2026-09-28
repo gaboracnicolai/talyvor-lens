@@ -196,6 +196,7 @@ func (s *Store) meter(ctx context.Context, m Meter, useID, buyer string, ulxc in
 func (s *Store) MeterPending(ctx context.Context, m Meter, olderThan time.Duration) (int, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, buyer_workspace_id, price_ulxc, used_at FROM market_uses
 		WHERE charge = 'billed' AND metered_at IS NULL AND ran_at IS NOT NULL AND ran_at < now() - make_interval(secs => $1)
+		  AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = market_uses.id) -- refunded before it was billed: never billed
 		ORDER BY used_at LIMIT 200`, olderThan.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("market: pending uses: %w", err)
@@ -228,14 +229,18 @@ func (s *Store) MeterPending(ctx context.Context, m Meter, olderThan time.Durati
 	return n, nil
 }
 
-// resolve reads the listing and the version the buyer may use, with its artifact.
+// resolve reads the listing and the version the buyer may use, with its artifact. A held listing is its
+// owner's alone to use; a taken-down one is nobody's.
 func (s *Store) resolve(ctx context.Context, buyer, listingID string, version int) (Listing, map[string]any, int, error) {
 	l, err := scanListing(s.pool.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, listingID))
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && l.Visibility == "private" && l.WorkspaceID != buyer) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, buyer)) {
 		return Listing{}, nil, 0, ErrNotFound
 	}
 	if err != nil {
 		return Listing{}, nil, 0, fmt.Errorf("market: listing: %w", err)
+	}
+	if l.ReviewStatus == ReviewTakenDown {
+		return Listing{}, nil, 0, ErrTakenDown
 	}
 	if version == 0 {
 		version = l.LatestVersion
@@ -380,6 +385,16 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 			return err
 		}
 		for _, c := range uses {
+			// A use refunded before its invoice was paid (its listing was taken down, B20.4) earns nothing: the
+			// buyer is credited it on their next bill. Asked under the use's lock, so a refund racing this sees
+			// the earning, or this sees the refund.
+			var refunded bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM market_refunds WHERE use_id = $1)`, c.id).Scan(&refunded); err != nil {
+				return err
+			}
+			if refunded {
+				continue
+			}
 			// One seller's lifetime is read and extended one use at a time, whoever's invoice clears.
 			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('market_seller:' || $1, 0))`, c.seller); err != nil {
 				return err
@@ -425,40 +440,46 @@ type Earnings struct {
 	InHoldbackUSDMicros int64     `json:"in_holdback_usd_micros"` // of which still inside the 14-day holdback
 	AvailableUSDMicros  int64     `json:"available_usd_micros"`   // of which past it
 	LifetimeGrossMicros int64     `json:"lifetime_gross_usd_micros"`
+	RefundedUSDMicros   int64     `json:"refunded_usd_micros"` // shares reversed by refunds (B20.4), already out of the totals above
 	Earnings            []Earning `json:"earnings"`
 }
 
 // Earning is one cleared use's share.
 type Earning struct {
-	UseID          string    `json:"use_id"`
-	ListingID      string    `json:"listing_id"`
-	GrossUSDMicros int64     `json:"gross_usd_micros"`
-	ShareUSDMicros int64     `json:"share_usd_micros"`
-	InvoiceID      string    `json:"invoice_id"`
-	ClearedAt      time.Time `json:"cleared_at"`
-	PayableAt      time.Time `json:"payable_at"`
+	UseID          string     `json:"use_id"`
+	ListingID      string     `json:"listing_id"`
+	GrossUSDMicros int64      `json:"gross_usd_micros"`
+	ShareUSDMicros int64      `json:"share_usd_micros"`
+	InvoiceID      string     `json:"invoice_id"`
+	ClearedAt      time.Time  `json:"cleared_at"`
+	PayableAt      time.Time  `json:"payable_at"`
+	RefundedAt     *time.Time `json:"refunded_at,omitempty"` // its share was reversed: the listing was taken down
 }
 
-// SellerEarnings reads a seller's earnings: the totals and the latest 100.
+// SellerEarnings reads a seller's earnings: the totals and the latest 100. An earning a refund reversed
+// (B20.4) counts in none of the totals but RefundedUSDMicros.
 func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, now time.Time) (Earnings, error) {
 	e := Earnings{Earnings: []Earning{}}
-	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(sum(share_usd_micros), 0)::bigint,
-		       COALESCE(sum(share_usd_micros) FILTER (WHERE payable_at > $2), 0)::bigint,
-		       COALESCE(sum(gross_usd_micros), 0)::bigint
-		FROM market_earnings WHERE seller_workspace_id = $1`, sellerWorkspaceID, now).
-		Scan(&e.PayableUSDMicros, &e.InHoldbackUSDMicros, &e.LifetimeGrossMicros); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(sum(e.share_usd_micros) FILTER (WHERE r.use_id IS NULL), 0)::bigint,
+		       COALESCE(sum(e.share_usd_micros) FILTER (WHERE r.use_id IS NULL AND e.payable_at > $2), 0)::bigint,
+		       COALESCE(sum(e.gross_usd_micros), 0)::bigint,
+		       COALESCE(sum(r.reversed_share_usd_micros), 0)::bigint
+		FROM market_earnings e LEFT JOIN market_refunds r ON r.use_id = e.use_id
+		WHERE e.seller_workspace_id = $1`, sellerWorkspaceID, now).
+		Scan(&e.PayableUSDMicros, &e.InHoldbackUSDMicros, &e.LifetimeGrossMicros, &e.RefundedUSDMicros); err != nil {
 		return e, fmt.Errorf("market: earnings: %w", err)
 	}
 	e.AvailableUSDMicros = e.PayableUSDMicros - e.InHoldbackUSDMicros
 	var pendingULXC int64
-	if err := s.pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(price_ulxc), 0)::bigint FROM market_uses
-		WHERE seller_workspace_id = $1 AND charge = 'billed' AND ran_at IS NOT NULL AND cleared_at IS NULL`,
+	if err := s.pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(price_ulxc), 0)::bigint FROM market_uses u
+		WHERE seller_workspace_id = $1 AND charge = 'billed' AND ran_at IS NOT NULL AND cleared_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = u.id)`,
 		sellerWorkspaceID).Scan(&e.PendingUses, &pendingULXC); err != nil {
 		return e, fmt.Errorf("market: pending earnings: %w", err)
 	}
 	e.PendingUSDMicros = SellerShare(e.LifetimeGrossMicros, pendingULXC/ulxcPerUSDMicro)
-	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.invoice_id, e.cleared_at, e.payable_at
-		FROM market_earnings e LEFT JOIN market_uses u ON u.id = e.use_id
+	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.invoice_id, e.cleared_at, e.payable_at, r.refunded_at
+		FROM market_earnings e LEFT JOIN market_uses u ON u.id = e.use_id LEFT JOIN market_refunds r ON r.use_id = e.use_id
 		WHERE e.seller_workspace_id = $1 ORDER BY e.cleared_at DESC, e.use_id LIMIT 100`, sellerWorkspaceID)
 	if err != nil {
 		return e, fmt.Errorf("market: earnings: %w", err)
@@ -466,7 +487,7 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 	defer rows.Close()
 	for rows.Next() {
 		var x Earning
-		if err := rows.Scan(&x.UseID, &x.ListingID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt); err != nil {
+		if err := rows.Scan(&x.UseID, &x.ListingID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt, &x.RefundedAt); err != nil {
 			return e, err
 		}
 		e.Earnings = append(e.Earnings, x)
@@ -483,13 +504,16 @@ type BillLine struct {
 	PriceULXC int64      `json:"price_ulxc"`
 	UsedAt    time.Time  `json:"used_at"`
 	Cleared   *time.Time `json:"cleared_at,omitempty"`
+	Refunded  *time.Time `json:"refunded_at,omitempty"` // credited back: the listing was taken down (B20.4)
 }
 
-// Bill is a buyer's marketplace uses billed in one month (UTC).
+// Bill is a buyer's marketplace uses billed in one month (UTC). The totals are what the buyer owes for
+// them: a refunded use is listed, and counts in RefundedULXC instead.
 type Bill struct {
 	Month          string     `json:"month"`
 	TotalULXC      int64      `json:"total_ulxc"`
 	TotalUSDMicros int64      `json:"total_usd_micros"`
+	RefundedULXC   int64      `json:"refunded_ulxc"`
 	Lines          []BillLine `json:"lines"`
 }
 
@@ -497,8 +521,8 @@ type Bill struct {
 func (s *Store) MonthBill(ctx context.Context, buyerWorkspaceID string, month time.Time) (Bill, error) {
 	from := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
 	b := Bill{Month: from.Format("2006-01"), Lines: []BillLine{}}
-	rows, err := s.pool.Query(ctx, `SELECT u.id, u.listing_id, COALESCE(l.title, ''), u.agent_id, u.price_ulxc, u.used_at, u.cleared_at
-		FROM market_uses u LEFT JOIN market_listings l ON l.id = u.listing_id
+	rows, err := s.pool.Query(ctx, `SELECT u.id, u.listing_id, COALESCE(l.title, ''), u.agent_id, u.price_ulxc, u.used_at, u.cleared_at, r.refunded_at
+		FROM market_uses u LEFT JOIN market_listings l ON l.id = u.listing_id LEFT JOIN market_refunds r ON r.use_id = u.id
 		WHERE u.buyer_workspace_id = $1 AND u.charge = 'billed' AND u.ran_at IS NOT NULL AND u.used_at >= $2 AND u.used_at < $3
 		ORDER BY u.used_at, u.id`, buyerWorkspaceID, from, from.AddDate(0, 1, 0))
 	if err != nil {
@@ -507,10 +531,14 @@ func (s *Store) MonthBill(ctx context.Context, buyerWorkspaceID string, month ti
 	defer rows.Close()
 	for rows.Next() {
 		var x BillLine
-		if err := rows.Scan(&x.UseID, &x.ListingID, &x.Title, &x.AgentID, &x.PriceULXC, &x.UsedAt, &x.Cleared); err != nil {
+		if err := rows.Scan(&x.UseID, &x.ListingID, &x.Title, &x.AgentID, &x.PriceULXC, &x.UsedAt, &x.Cleared, &x.Refunded); err != nil {
 			return b, err
 		}
-		b.TotalULXC += x.PriceULXC
+		if x.Refunded != nil {
+			b.RefundedULXC += x.PriceULXC
+		} else {
+			b.TotalULXC += x.PriceULXC
+		}
 		b.Lines = append(b.Lines, x)
 	}
 	b.TotalUSDMicros = b.TotalULXC / ulxcPerUSDMicro

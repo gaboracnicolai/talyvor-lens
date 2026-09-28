@@ -64,6 +64,8 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case errors.Is(err, market.ErrNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, market.ErrTakenDown):
+			writeJSONErr(w, http.StatusGone, err.Error())
 		case errors.Is(err, market.ErrInvalid), errors.Is(err, market.ErrNoModel):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, market.ErrNotRunnable):
@@ -114,6 +116,30 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 		}
 		writeJSONOK(w, http.StatusOK, b)
 	})
+}
+
+// refundTakenDownMarketUses finishes what a takedown could not (B20.4): it refunds a use that was running
+// when its listing came down, and retries a buyer's credit Stripe did not accept. refunder nil: no
+// marketplace bill, so nothing was ever metered and there is nothing to credit.
+func refundTakenDownMarketUses(ctx context.Context, store *market.Store, refunder market.Refunder) {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if refunder == nil {
+				continue
+			}
+			refunded, credited, err := store.RefundTakenDown(ctx, refunder)
+			if err != nil {
+				slog.Warn("market: refunding taken-down listings", "refunded", refunded, "credited", credited, "err", err)
+			} else if refunded+credited > 0 {
+				slog.Info("market: refunded taken-down listings", "refunded", refunded, "credited", credited)
+			}
+		}
+	}
 }
 
 // meterPendingMarketUses bills, every few minutes, the uses whose meter event did not reach Stripe when

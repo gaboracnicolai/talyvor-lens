@@ -1655,11 +1655,15 @@ func run() error {
 	marketStore := market.NewStore(pool)
 	dualToken.SetListingCharger(marketStore) // B19.17: a schedule may pay a marketplace listing
 	var marketMeter market.Meter
+	var marketRefunder market.Refunder // B20.4: a taken-down listing's buyers are credited on their bill
 	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {
 		billingSvc = billingSvc.WithMarketBill(liveStripe, cfg.MarketBillPriceID, cfg.MarketMeterEvent, marketStore)
-		marketMeter = billingSvc
+		marketMeter, marketRefunder = billingSvc, billingSvc
 		go haComps.leader.Run(ctx, "market-meter-pending", 30*time.Second, func(lctx context.Context) {
 			meterPendingMarketUses(lctx, marketStore, billingSvc)
+		})
+		go haComps.leader.Run(ctx, "market-refund-pending", 30*time.Second, func(lctx context.Context) {
+			refundTakenDownMarketUses(lctx, marketStore, billingSvc)
 		})
 	}
 	// B1.6 — D, the allowance each paid period grants. Zero (the default) grants
@@ -2033,6 +2037,7 @@ func run() error {
 
 	r.Handle("/v1/admin/keel/findings", requireAdminOrOperatorRead(authManager,
 		newKeelFindingsHandler(keelFindingsReader)))
+	mountMarketAdminRoutes(r, authManager, marketStore, marketRefunder) // B20.4: review queue, approve, takedown
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
 	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
 	// unchanged).

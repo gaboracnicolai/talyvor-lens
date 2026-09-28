@@ -24,9 +24,16 @@ import (
 
 // marketStripe is Stripe in test mode for the marketplace bill: it keeps what it was sent.
 type marketStripe struct {
-	subs      []string
-	events    []meterEvent
-	failMeter bool
+	subs       []string
+	events     []meterEvent
+	failMeter  bool
+	credits    []marketCredit // B20.4: negative lines on a buyer's marketplace bill
+	failCredit bool
+}
+
+type marketCredit struct {
+	customer, subscription, key string
+	cents                       float64
 }
 
 type meterEvent struct {
@@ -45,6 +52,18 @@ func (f *marketStripe) CreateMarketSubscription(_ context.Context, customer, pri
 	id := fmt.Sprintf("sub_market_%d", len(f.subs)+1)
 	f.subs = append(f.subs, id+" "+customer+" "+price)
 	return id, nil
+}
+func (f *marketStripe) CreditMarketUse(_ context.Context, customer, subscription string, cents float64, _, key string) (string, error) {
+	if f.failCredit {
+		return "", errors.New("stripe: 503")
+	}
+	for i, c := range f.credits {
+		if c.key == key { // Stripe answers a retried idempotency key with the first item
+			return fmt.Sprintf("ii_%d", i+1), nil
+		}
+	}
+	f.credits = append(f.credits, marketCredit{customer, subscription, key, cents})
+	return fmt.Sprintf("ii_%d", len(f.credits)), nil
 }
 func (f *marketStripe) SendMeterEvent(_ context.Context, name, customer, identifier string, value int64, _ time.Time) error {
 	if f.failMeter {

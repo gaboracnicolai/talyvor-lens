@@ -168,6 +168,26 @@ func (l *LiveStripe) CreateMarketSubscription(ctx context.Context, customerID, p
 	return sub.ID, nil
 }
 
+// CreditMarketUse puts a NEGATIVE line of cents (a decimal: a use's price may be a fraction of a cent) on
+// the customer's next invoice of the marketplace subscription (B20.4), idempotent on idempotencyKey.
+func (l *LiveStripe) CreditMarketUse(ctx context.Context, customerID, subscriptionID string, cents float64, description, idempotencyKey string) (string, error) {
+	params := &stripe.InvoiceItemParams{
+		Customer:          stripe.String(customerID),
+		Subscription:      stripe.String(subscriptionID),
+		Currency:          stripe.String(string(stripe.CurrencyUSD)),
+		UnitAmountDecimal: stripe.Float64(-cents),
+		Quantity:          stripe.Int64(1),
+		Description:       stripe.String(description),
+	}
+	params.Context = ctx
+	params.SetIdempotencyKey(idempotencyKey)
+	item, err := invoiceitem.New(params)
+	if err != nil {
+		return "", err
+	}
+	return item.ID, nil
+}
+
 // SendMeterEvent records one marketplace use of value µLXC for customerID (B20.2). Stripe keeps one event
 // per identifier, so a retried use is billed once.
 func (l *LiveStripe) SendMeterEvent(ctx context.Context, eventName, customerID, identifier string, value int64, at time.Time) error {
