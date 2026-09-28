@@ -43,6 +43,8 @@ type AgentRules struct {
 	ActiveFrom        string   `json:"active_from"`  // "HH:MM" in Timezone; with ActiveUntil, the hours it may spend
 	ActiveUntil       string   `json:"active_until"` // exclusive; earlier than ActiveFrom means the window crosses midnight
 	Timezone          string   `json:"timezone"`     // IANA name; UTC when empty. Days and months are counted in it too
+	// PauseOnUnusualSpend pauses the agent when its spend raises an unusual-spend alert (B19.6).
+	PauseOnUnusualSpend bool `json:"pause_on_unusual_spend"`
 }
 
 // AgentRequest is what the rules judge about a request besides its amount.
@@ -143,12 +145,13 @@ func nullIfZero(v int64) any {
 }
 
 const agentRulesColumns = `COALESCE(max_per_request_ulxc, 0), COALESCE(daily_limit_ulxc, 0), COALESCE(monthly_limit_ulxc, 0),
-	COALESCE(approval_above_ulxc, 0), allowed_models, allowed_providers, COALESCE(active_from, ''), COALESCE(active_until, ''), timezone`
+	COALESCE(approval_above_ulxc, 0), allowed_models, allowed_providers, COALESCE(active_from, ''), COALESCE(active_until, ''), timezone,
+	pause_on_unusual_spend`
 
 func scanAgentRules(row pgx.Row) (AgentRules, error) {
 	var r AgentRules
 	err := row.Scan(&r.MaxPerRequestULXC, &r.DailyLimitULXC, &r.MonthlyLimitULXC, &r.ApprovalAboveULXC,
-		&r.AllowedModels, &r.AllowedProviders, &r.ActiveFrom, &r.ActiveUntil, &r.Timezone)
+		&r.AllowedModels, &r.AllowedProviders, &r.ActiveFrom, &r.ActiveUntil, &r.Timezone, &r.PauseOnUnusualSpend)
 	return r, err
 }
 
@@ -172,15 +175,16 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 	}
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO agent_rules (agent_id, workspace_id, max_per_request_ulxc, daily_limit_ulxc, monthly_limit_ulxc,
-		       approval_above_ulxc, allowed_models, allowed_providers, active_from, active_until, timezone)
-		SELECT id, workspace_id, $3, $4, $5, $6, $7, $8, $9, $10, $11 FROM agent_accounts WHERE id = $1 AND workspace_id = $2
+		       approval_above_ulxc, allowed_models, allowed_providers, active_from, active_until, timezone, pause_on_unusual_spend)
+		SELECT id, workspace_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12 FROM agent_accounts WHERE id = $1 AND workspace_id = $2
 		ON CONFLICT (agent_id) DO UPDATE SET max_per_request_ulxc = EXCLUDED.max_per_request_ulxc,
 		       daily_limit_ulxc = EXCLUDED.daily_limit_ulxc, monthly_limit_ulxc = EXCLUDED.monthly_limit_ulxc,
 		       approval_above_ulxc = EXCLUDED.approval_above_ulxc, allowed_models = EXCLUDED.allowed_models,
 		       allowed_providers = EXCLUDED.allowed_providers, active_from = EXCLUDED.active_from,
-		       active_until = EXCLUDED.active_until, timezone = EXCLUDED.timezone, updated_at = now()`,
+		       active_until = EXCLUDED.active_until, timezone = EXCLUDED.timezone,
+		       pause_on_unusual_spend = EXCLUDED.pause_on_unusual_spend, updated_at = now()`,
 		agentID, workspaceID, nullIfZero(r.MaxPerRequestULXC), nullIfZero(r.DailyLimitULXC), nullIfZero(r.MonthlyLimitULXC),
-		nullIfZero(r.ApprovalAboveULXC), r.AllowedModels, r.AllowedProviders, from, until, r.Timezone)
+		nullIfZero(r.ApprovalAboveULXC), r.AllowedModels, r.AllowedProviders, from, until, r.Timezone, r.PauseOnUnusualSpend)
 	if err != nil {
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
@@ -212,10 +216,14 @@ func (s *DualTokenStore) GetAgentRules(ctx context.Context, workspaceID, agentID
 
 // enforceAgentRules judges a positive movement of amount µLXC (a hold or a debit, ref its reservation or
 // request id) against the agent's rules, inside the movement's transaction with the agent's row locked.
+// A paused agent is refused first; a movement the rules let through is then watched for unusual spend (B19.6).
 func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, amount int64, ref string) error {
+	if err := refuseIfPaused(ctx, tx, agentID); err != nil {
+		return err
+	}
 	r, err := scanAgentRules(tx.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		return watchAgentSpend(ctx, tx, workspaceID, agentID, amount, agentRequestFrom(ctx).At, false)
 	}
 	if err != nil {
 		return fmt.Errorf("economy: agent rules: %w", err)
@@ -296,7 +304,7 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 			return &ApprovalNeededError{AmountULXC: amount, workspaceID: workspaceID, agentID: agentID, req: req}
 		}
 	}
-	return nil
+	return watchAgentSpend(ctx, tx, workspaceID, agentID, amount, req.At, r.PauseOnUnusualSpend)
 }
 
 // fileApproval records the approval a refused request needs — or finds the one already open for it — once
