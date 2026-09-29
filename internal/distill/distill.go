@@ -43,6 +43,7 @@ const (
 	FormatHTML    Format = "html"
 	FormatDOCX    Format = "docx"
 	FormatXLSX    Format = "xlsx"
+	FormatPPTX    Format = "pptx" // B18.13: slide decks
 	FormatCSV     Format = "csv"
 	FormatJSON    Format = "json"
 	FormatXML     Format = "xml"
@@ -59,17 +60,18 @@ const (
 // vs the faithful-text baseline. Text-ish formats keep the raw-text baseline.
 func (f Format) IsBinaryOrigin() bool {
 	switch f {
-	case FormatPDF, FormatDOCX, FormatXLSX:
+	case FormatPDF, FormatDOCX, FormatXLSX, FormatPPTX:
 		return true
 	default:
 		return false
 	}
 }
 
-// MaxInputBytes bounds a single conversion. 10 MiB comfortably covers the
-// documents that arrive inline in API requests while putting a hard ceiling on
-// the work any one untrusted input can cause.
-const MaxInputBytes = 10 << 20
+// MaxInputBytes bounds a single conversion: 25 MiB, the size of a document the
+// upload route accepts (B18.13 — a slide deck is mostly pictures, so 10 MiB
+// refused ordinary decks), while putting a hard ceiling on the work any one
+// untrusted input can cause. Inline documents stay bounded by the request body cap.
+const MaxInputBytes = 25 << 20
 
 // Result is the outcome of a conversion.
 type Result struct {
@@ -182,6 +184,7 @@ func init() {
 	register(xmlConverter{})
 	register(docxConverter{})
 	register(xlsxConverter{})
+	register(pptxConverter{})
 	register(pdfConverter{})
 }
 

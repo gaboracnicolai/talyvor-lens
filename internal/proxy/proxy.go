@@ -670,7 +670,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds 4MB limit")
+			writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds 4MB limit — upload a large document to POST /v1/documents (up to 25 MB) and reference it by id")
 			return
 		}
 		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
@@ -773,7 +773,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// uses it to recover text via a vision model and books the cost honestly;
 		// a nil-safe failure path leaves a NeedsVision document untouched.
 		vd := p.newVisionDispatcher(r, cfg, wsID)
-		if nb, np, nm, did, vs, dfacts := p.distiller.MaybeDistill(ctx, r, body, wsID, modSet, vd); did {
+		if nb, np, nm, did, vs, dfacts, saved := p.distiller.MaybeDistillSaving(ctx, r, body, wsID, modSet, vd); did {
 			body, prompt, modSet = nb, np, nm
 			distillFacts = dfacts
 			cachePrompt = prompt
@@ -793,6 +793,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// signal, and the X-Talyvor-Distill header below tells the client we
 			// converted it.
 			w.Header().Set("X-Talyvor-Distill", "applied")
+			// B18.13 — and what it saved. Set before the streaming split, so both seams send them.
+			w.Header().Set("X-Talyvor-Distill-Tokens-Saved", strconv.Itoa(saved.tokens))
+			w.Header().Set("X-Talyvor-Distill-Bytes-Saved", strconv.Itoa(saved.bytes))
 		}
 	}
 

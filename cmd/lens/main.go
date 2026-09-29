@@ -62,6 +62,7 @@ import (
 	"github.com/talyvor/lens/internal/distill"
 	"github.com/talyvor/lens/internal/distillattrib"
 	"github.com/talyvor/lens/internal/distillpreview"
+	"github.com/talyvor/lens/internal/documents"
 	"github.com/talyvor/lens/internal/earnings"
 	"github.com/talyvor/lens/internal/earnverify"
 	"github.com/talyvor/lens/internal/ecbrate"
@@ -636,6 +637,10 @@ func run() error {
 		// actually consented cross-tenant (requires the distill_poolable flags on).
 		distillattrib.NewStore(pool),
 	)
+	// B18.13 — documents uploaded to POST /v1/documents (up to 25 MB), which a chat request references
+	// by id instead of carrying the file in its 4 MiB body; converted on the way to the model.
+	docStore := documents.NewStore(pool)
+	p.SetDocuments(docStore)
 	// Phase-2 Stage 2.0 shared-cache governance gate (exact cache). Read-only:
 	// reads the global switch + each workspace's cache_poolable opt-in, mutates
 	// nothing. Inert by default — pooling stays off until LENS_CACHE_POOLABLE_ENABLED
@@ -2381,6 +2386,7 @@ func run() error {
 		authed.With(proxyScope).Post("/v1/proxy/anthropic/*", p.HandleAnthropic)
 		authed.With(proxyScope).Post("/v1/proxy/google/*", p.HandleGoogle)
 		authed.With(proxyScope).Post("/v1/proxy/bedrock/*", p.HandleBedrock)
+		authed.With(proxyScope).Post("/v1/documents", documents.UploadHandler(docStore)) // B18.13
 		// K4 output verdicts — WORKSPACE-SCOPED read: a tenant sees ONLY its OWN verdicts (scoped to the
 		// authenticated WorkspaceID; never another's). Intra-tenant by construction.
 		authed.Get("/v1/output-verdicts", newOutputVerdictsWorkspaceHandler(authManager, outputVerdictReader))

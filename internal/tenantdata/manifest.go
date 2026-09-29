@@ -213,6 +213,7 @@ var Manifest = map[string]Entry{
 	"credit_line_draws":            {Delete, "B22.4: what the line lent an agent and the invoice it went on; the credits themselves are lxc_ledger rows of type credit_line_draw"},
 	"credit_line_invoices":         {Delete, "B22.4: each month's Stripe invoice of a line's draws, and when it was paid"},
 	"agent_cash_outs":              {Delete, "B22.9: an owner's requests to turn an agent's credits into money, and what the partner said; the credits' movements are in agent_postings and lxc_ledger"},
+	"uploaded_documents":           {Delete, "B18.13: documents a workspace uploaded for its chats to reference by id; the file itself is in content"},
 	"agent_portfolios":             {Delete, "B22.8: an agent's simulated portfolios; their orders cascade with them. Simulated cash only: no credits or money"},
 	"agent_pots":                   {Delete, "B22.7: an agent's pots — a goal, a budget or a reserve — and their locks; their money is in agent_postings"},
 	"agent_loans":                  {Delete, "B22.5: keys `lender_workspace_id`+`borrower_workspace_id`: a loan between two companies' agents, its terms and state; its money is in agent_transfers"},

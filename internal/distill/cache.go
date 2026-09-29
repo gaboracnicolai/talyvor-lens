@@ -131,6 +131,9 @@ func UnmarshalCachedOCR(b []byte) (CachedOCR, bool) {
 // here is the same unit as a token spent elsewhere.
 func estTokens(s string) int { return len(s) / 4 }
 
+// SavingsOf is the Savings for a Result served from a cache, measured exactly as a fresh conversion's.
+func SavingsOf(input []byte, res Result) Savings { return computeSavings(input, res, true) }
+
 func computeSavings(input []byte, res Result, cacheHit bool) Savings {
 	distilled := estTokens(res.Markdown)
 
