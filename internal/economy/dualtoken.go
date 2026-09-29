@@ -328,6 +328,8 @@ type DualTokenStore struct {
 	approvalPusher ApprovalPusher
 	// B19.11: what the verified-agent badge follows.
 	ownerVerifier OwnerVerifier
+	// cashOutPartner pays cash-outs out as money (B22.9); nil, cash-out is unavailable.
+	cashOutPartner CashOutPartner
 	// B19.17: the marketplace a schedule pays a listing through.
 	listings ListingCharger
 	// B19.15: the marketplace a payment to another company's agent goes through.

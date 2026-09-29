@@ -1802,6 +1802,12 @@ func run() error {
 				} else if res != (economy.SimRunResult{}) {
 					slog.Info("agents: simulated orders", slog.Int("filled", res.Filled), slog.Int("rejected", res.Rejected))
 				}
+				// B22.9: cash-outs handed to the partner, and its answers recorded.
+				if res, err := dualToken.RunCashOuts(ctx); err != nil {
+					slog.Warn("agents: cash-outs failed", slog.String("err", err.Error()))
+				} else if res != (economy.CashOutRunResult{}) {
+					slog.Info("agents: cash-outs", slog.Int("submitted", res.Submitted), slog.Int("paid", res.Paid), slog.Int("failed", res.Failed))
+				}
 			}
 		}
 	}()
@@ -2211,6 +2217,9 @@ func run() error {
 	dualToken.SetApprovalAuth(passkey.RelyingParty{ID: cfg.WebAuthnRPID, Origins: cfg.WebAuthnOrigins}, approvalPusher)
 	// B19.11: an agent's verified badge follows its owner's workspace's verification (the U6 predicate).
 	dualToken.SetOwnerVerifier(earnverify.New(cfg.EarnRequireLivePurchase))
+	// B22.9: cash-outs are paid through the partner-neutral interface; only the test partner exists, and it pays
+	// nothing — the real one waits for a licensed partner.
+	dualToken.SetCashOutPartner(economy.TestCashOutPartner{})
 	mcpAuth := auth.AuthMiddleware(keyStore, authManager)
 	r.With(mcpAuth).Post("/mcp", mcpServer.HandleRPC)
 	r.With(mcpAuth).Get("/mcp/sse", mcpServer.HandleSSE)
@@ -4180,6 +4189,7 @@ func run() error {
 		mountAgentEscrowRoutes(authed, dualToken)                                                                    // B22.6
 		mountAgentPotRoutes(authed, dualToken)                                                                       // B22.7
 		mountSimTradingRoutes(authed, dualToken)                                                                     // B22.8
+		mountCashOutRoutes(authed, dualToken)                                                                        // B22.9
 		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5
