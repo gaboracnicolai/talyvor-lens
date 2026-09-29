@@ -54,7 +54,7 @@ headers = inject_lens_headers(
     session_id="sess-1",
     team="ml-platform",
 )
-response = httpx.post("http://lens:8080/v1/proxy/openai/chat/completions", headers=headers, json=body)
+response = httpx.post("http://lens:8080/v1/proxy/openai/v1/chat/completions", headers=headers, json=body)
 ```
 
 ## The agent wallet

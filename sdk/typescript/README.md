@@ -63,7 +63,7 @@ const headers = injectLensHeaders(
     team: "ml-platform",
   },
 );
-await fetch("http://lens:8080/v1/proxy/openai/chat/completions", {
+await fetch("http://lens:8080/v1/proxy/openai/v1/chat/completions", {
   method: "POST",
   headers,
   body: JSON.stringify(body),

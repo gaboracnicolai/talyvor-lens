@@ -75,7 +75,7 @@ class LensClient:
             from openai import OpenAI  # local import — see class docstring
 
             self._openai_client = OpenAI(
-                base_url=f"{self.lens_url}/v1/proxy/openai",
+                base_url=f"{self.lens_url}/v1/proxy/openai/v1",
                 api_key=self.api_key,
                 default_headers=self._headers,
             )
