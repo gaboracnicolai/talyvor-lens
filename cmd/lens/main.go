@@ -1796,28 +1796,33 @@ func run() error {
 				} else if n > 0 {
 					slog.Info("agents: escrows released at their deadline", slog.Int("released", n))
 				}
+				// B22.8: simulated limit orders the latest ECB quotes now cross.
+				if res, err := dualToken.RunSimulatedOrders(ctx); err != nil {
+					slog.Warn("agents: simulated orders failed", slog.String("err", err.Error()))
+				} else if res != (economy.SimRunResult{}) {
+					slog.Info("agents: simulated orders", slog.Int("filled", res.Filled), slog.Int("rejected", res.Rejected))
+				}
 			}
 		}
 	}()
-	// B19.12: agent card purchases are priced at the day's ECB reference rate. With the real-time endpoint
-	// configured, the rates are fetched at start and every three hours (the ECB publishes once a working day).
+	// B19.12: agent card purchases are priced at the day's ECB reference rate, and B22.8's simulated trading
+	// quotes every instrument from it, so the rates are fetched at start and every three hours (the ECB
+	// publishes once a working day).
 	ecbRates := ecbrate.New(pool, ecbrate.DailyURL)
-	if cfg.StripeIssuingWebhookSecret != "" {
-		go func() {
-			t := time.NewTicker(3 * time.Hour)
-			defer t.Stop()
-			for {
-				if err := ecbRates.Refresh(ctx); err != nil {
-					slog.Warn("agent cards: ECB reference rates not refreshed", slog.String("err", err.Error()))
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-				}
+	go func() {
+		t := time.NewTicker(3 * time.Hour)
+		defer t.Stop()
+		for {
+			if err := ecbRates.Refresh(ctx); err != nil {
+				slog.Warn("ECB reference rates not refreshed", slog.String("err", err.Error()))
 			}
-		}()
-	}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
 	// Phase-3 routing-pattern capture — post-serve, void, mint-free producer
 	// for the routing Advisor. Default off; persists observations for opted-in
 	// workspaces only (SQL gate). NEVER reaches ledger.Credit (earning is a
@@ -4174,6 +4179,7 @@ func run() error {
 		mountCompanyLoanRoutes(authed, dualToken)                                                                    // B22.5
 		mountAgentEscrowRoutes(authed, dualToken)                                                                    // B22.6
 		mountAgentPotRoutes(authed, dualToken)                                                                       // B22.7
+		mountSimTradingRoutes(authed, dualToken)                                                                     // B22.8
 		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5
