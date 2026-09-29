@@ -1114,6 +1114,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// served hit (e.g. SSE replay failure falling through to the live
 		// LLM) therefore reports nothing and mints nothing.
 		var pooledHit *poolroyalty.ServedHit
+		// B23.1: which stored answer served this request — the rows (hitIDs) and the keys its copies
+		// are stored under (hitHashes) — remembered at the serve points so a thumbs-down removes it.
+		var hitIDs, hitHashes []string
 		// ⚠ NON-CHAT ENDPOINTS NEVER CONSULT THE CACHE. extractPrompt reads `messages`, so an
 		// embeddings body (which carries `input`) derives the EMPTY prompt — every embeddings
 		// request would share one cache key and the second would be served the first's vector,
@@ -1123,11 +1126,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			span.AddEvent("cache.skip.non_chat")
 		} else if c := p.tryExact(ctx, cfg.ProviderName(), model, cache.FingerprintedKey(cachePrompt, reqFP)); c != nil {
 			cached, layer = c, "cache_hit_exact"
+			hitHashes = answerHashes(cfg.ProviderName(), model, cachePrompt, prompt, reqFP)
 			span.AddEvent("cache.hit.exact")
 		} else {
 			span.AddEvent("cache.check.semantic")
-			if c := p.trySemantic(ctx, cfg.ProviderName(), model, turn, reqFP, wsID); c != nil {
+			if id, c := p.trySemantic(ctx, cfg.ProviderName(), model, turn, reqFP, wsID); c != nil {
 				cached, layer = c, "cache_hit_semantic"
+				hitIDs = []string{id}
 				span.AddEvent("cache.hit.semantic")
 			} else if p.poolGate.Participant(wsID) {
 				// Private miss + this workspace opted into pooling: a poolable
@@ -1140,6 +1145,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// whole branch (and its extra cache read) never runs.
 				if c, owner := p.tryExactPooled(ctx, cfg.ProviderName(), model, prompt, reqFP); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled"
+					hitHashes = answerHashes(cfg.ProviderName(), model, cachePrompt, prompt, reqFP)[1:]
 					pooledHit = &poolroyalty.ServedHit{
 						RequestID:            requestID,
 						RequesterWorkspace:   wsID,
@@ -1152,6 +1158,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					span.AddEvent("cache.hit.pooled")
 				} else if c, owner, entryID, sim := p.trySemanticPooled(ctx, cfg.ProviderName(), model, turn, reqFP); c != nil && p.poolGate.MaybeAllowPooledHit(ctx, wsID, owner) {
 					cached, layer = c, "cache_hit_pooled_semantic"
+					hitIDs = []string{entryID}
 					pooledHit = &poolroyalty.ServedHit{
 						RequestID:            requestID,
 						RequesterWorkspace:   wsID,
@@ -1208,6 +1215,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					// becomes a zero-provider-cost token_events row tagged with
 					// its layer, so hit rate is countable next to every miss.
 					p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
+					p.rememberServed(ctx, wsID, requestID, layer, hitIDs, hitHashes, hitContributor(pooledHit), cached)
 					span.SetAttributes(
 						attribute.Bool("lens.cached", true),
 						attribute.Float64("lens.cost_usd", 0),
@@ -1238,6 +1246,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
 				// Cache-serve spend visibility (0100): see recordCacheServe.
 				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
+				p.rememberServed(ctx, wsID, requestID, layer, hitIDs, hitHashes, hitContributor(pooledHit), cached)
 				span.SetAttributes(
 					attribute.Bool("lens.cached", true),
 					attribute.Float64("lens.cost_usd", 0),
@@ -1733,7 +1742,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// originally requested model so repeat callers in the same
 			// workspace get cache hits but other workspaces don't. The raw
 			// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
-			p.storeCaches(ctx, cfg.ProviderName(), model, cachePrompt, prompt, reqFP, turn, wsID, upstreamBody)
+			p.storeAnswer(ctx, cfg.ProviderName(), model, cachePrompt, prompt, reqFP, turn, wsID, requestID, upstreamBody)
 		}
 		// W4.9 SHADOW POOL LOG — void, post-serve, default-off. Records that a fresh cacheable
 		// response was produced, so the cross-tenant pooled hit rate is computable from repeats
@@ -2134,7 +2143,7 @@ func (p *Proxy) tryNodeRouting(
 	_, _ = w.Write(out) // JSON API response (application/json), mirrors tryLocalRouting
 
 	if !piiDetected {
-		p.storeCaches(ctx, provider, model, cachePrompt, prompt, reqFP, turn, wsID, out)
+		p.storeAnswer(ctx, provider, model, cachePrompt, prompt, reqFP, turn, wsID, requestID, out)
 	}
 	eventPrompt := prompt
 	if piiDetected {
@@ -2224,7 +2233,7 @@ func (p *Proxy) tryLocalRouting(
 	_, _ = w.Write(formatted)
 
 	if !piiDetected {
-		p.storeCaches(ctx, provider, model, cachePrompt, prompt, reqFP, turn, wsID, formatted)
+		p.storeAnswer(ctx, provider, model, cachePrompt, prompt, reqFP, turn, wsID, requestID, formatted)
 	}
 	eventPrompt := prompt
 	if piiDetected {
@@ -2424,15 +2433,15 @@ func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []
 	return cached
 }
 
-func (p *Proxy) trySemantic(ctx context.Context, provider, model string, turn cache.Turn, reqFP, workspaceID string) []byte {
+func (p *Proxy) trySemantic(ctx context.Context, provider, model string, turn cache.Turn, reqFP, workspaceID string) (string, []byte) {
 	if p.semantic == nil {
-		return nil
+		return "", nil
 	}
-	cached, err := p.semantic.Get(ctx, provider, model, turn, reqFP, workspaceID)
+	id, cached, err := p.semantic.GetWithID(ctx, provider, model, turn, reqFP, workspaceID)
 	if err != nil || cached == nil {
-		return nil
+		return "", nil
 	}
-	return cached
+	return id, cached
 }
 
 // trySemanticPooled is the cross-tenant SEMANTIC read surface: a similarity
@@ -2687,14 +2696,14 @@ func (p *Proxy) tryExactPooled(ctx context.Context, provider, model, rawPrompt, 
 // reqFP (B15.1) is the request's fingerprint: every entry written here answers only a request with
 // the same one. turn (B16.1) is what the semantic entries answer: its latest question, after its
 // history.
-func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, rawPrompt, reqFP string, turn cache.Turn, wsID string, response []byte) {
+func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, rawPrompt, reqFP string, turn cache.Turn, wsID string, response []byte) (stored bool) {
 	// ⚠ B18.4: logging_policy = none STORES NO CONTENT — no exact entry, no semantic entry, no pool
 	// contribution. Decided 27 Sep (docs/retention-none-and-the-semantic-cache.md): until then this
 	// wrote the answer verbatim into prompt_embeddings whatever the policy. Gated HERE, not per call
 	// site, so all four (buffered, local and node routing, streamed) are covered by construction.
 	// Such a workspace can still be served from the shared pool: reading stores nothing.
 	if p.loggingPolicyFor(wsID) == workspace.LoggingNone {
-		return
+		return false
 	}
 	if p.exact != nil {
 		// Private (workspace-scoped) entry — today's behavior, now owner-stamped.
@@ -2712,7 +2721,7 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 		// the pooled copy's too.
 		vec, err := p.embedder.Embed(ctx, turn.Latest)
 		if err != nil {
-			return
+			return true
 		}
 		_ = p.semantic.Set(ctx, provider, model, cachePrompt, turn, reqFP, response, vec, wsID)
 		// Pooled (cross-tenant) semantic copy — opt-in, inert by default. Keyed on
@@ -2742,6 +2751,7 @@ func (p *Proxy) storeCaches(ctx context.Context, provider, model, cachePrompt, r
 			_ = p.semantic.SetPooled(ctx, provider, model, pooledPromptKey(rawPrompt), turn, reqFP, wsID, response, vec)
 		}
 	}
+	return true
 }
 
 // sharesAnswers decides whether this workspace's answer may be written to the shared pool: it opted in

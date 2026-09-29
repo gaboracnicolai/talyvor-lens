@@ -119,6 +119,7 @@ var Manifest = map[string]Entry{
 	// question or answer is held in either.
 	"deletion_requests":         {Retain, "B21.3: the record that erasure was requested and completed"},
 	"stored_answer_deletions":   {Retain, "B21.3: the audit log of each deletion of stored answers"},
+	"answer_removals":           {Retain, "B23.1: who marked a served answer wrong, and what was removed; holds no question or answer"},
 	"agent_postings":            {Retain, "B19.1: audit-guarded (0140, append-only): the agents' double-entry LXC ledger; financial-record retention"},
 	"agent_card_authorizations": {Retain, "B19.12: audit-guarded (0156, append-only): every agent card authorisation, approved or declined, and the LXC it debited; financial-record retention"},
 	"agent_card_settlements":    {Retain, "B19.25: audit-guarded (0157, append-only): each capture, release and refund that settled an agent card authorisation, and the LXC it moved; financial-record retention"},

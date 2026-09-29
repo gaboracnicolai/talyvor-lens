@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"reflect"
@@ -362,16 +363,23 @@ func (c *SemanticCache) freshnessCutoff() time.Time {
 // question naming no entity, instead of it.
 // Without a verifier that question is refused, as on the pooled read.
 func (c *SemanticCache) Get(ctx context.Context, provider, model string, turn Turn, fp, workspaceID string) ([]byte, error) {
+	_, body, err := c.GetWithID(ctx, provider, model, turn, fp, workspaceID)
+	return body, err
+}
+
+// GetWithID is Get, also returning the id of the row that answered — so a thumbs-down on the answer
+// can remove that row (B23.1). A miss is ("", nil, nil).
+func (c *SemanticCache) GetWithID(ctx context.Context, provider, model string, turn Turn, fp, workspaceID string) (string, []byte, error) {
 	if !turn.Comparable() {
-		return nil, nil
+		return "", nil, nil
 	}
 	canon := discriminator.Canon(turn.Latest)
 	if !canon.Verifiable() && c.verifier == nil {
-		return nil, nil
+		return "", nil, nil
 	}
 	emb, err := c.embedder.Embed(ctx, turn.Latest)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	vec := vectorLiteral(emb)
 
@@ -384,15 +392,52 @@ func (c *SemanticCache) Get(ctx context.Context, provider, model string, turn Tu
 			func(stored string) bool { return c.standsAlone(ctx, turn, stored) })
 	}
 	if err != nil || id == "" {
-		return nil, err
+		return "", nil, err
 	}
 
 	if _, err := c.pool.Exec(ctx, semanticTouchSQL, id); err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
 	metrics.CacheHitsTotal.WithLabelValues("semantic").Inc()
-	return []byte(response), nil
+	return id, []byte(response), nil
+}
+
+// semanticDeleteServedSQL removes one served answer (B23.1): the rows it was served from ($1, by id —
+// a pooled row's variants go with it, ON DELETE CASCADE), the rows stored under its hashes ($2), and
+// the other copies of it held by the workspaces in $3 (the one marking it, and the one that
+// contributed it) — each only while it still holds that answer ($4, its sha256), so a newer answer
+// stored under the same key is kept.
+const semanticDeleteServedSQL = `DELETE FROM prompt_embeddings
+WHERE encode(sha256(convert_to(response, 'UTF8')), 'hex') = $4
+  AND (id::text = ANY($1) OR prompt_hash = ANY($2)
+       OR workspace_id = ANY($3) OR contributor_workspace_id = ANY($3))
+RETURNING prompt_hash`
+
+// DeleteServed removes the stored answer whose sha256 is digest from the rows named by ids and
+// hashes, and from the rows of the workspaces named, and returns the prompt_hash of every row it
+// removed — the keys its exact copies are stored under.
+func (c *SemanticCache) DeleteServed(ctx context.Context, ids, hashes, workspaces []string, digest string) ([]string, error) {
+	nonNil := func(v []string) []string {
+		if v == nil {
+			return []string{}
+		}
+		return v
+	}
+	rows, err := c.pool.Query(ctx, semanticDeleteServedSQL, nonNil(ids), nonNil(hashes), nonNil(workspaces), digest)
+	if err != nil {
+		return nil, fmt.Errorf("semantic: delete served answer: %w", err)
+	}
+	defer rows.Close()
+	var removed []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		removed = append(removed, h)
+	}
+	return removed, rows.Err()
 }
 
 // privateCandidate is one private lookup: the workspace's nearest row asked after the history prefix

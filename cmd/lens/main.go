@@ -5110,25 +5110,11 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, d)
 		})
 
-		authed.Post("/v1/feedback", func(w http.ResponseWriter, req *http.Request) {
-			var in struct {
-				PromptHash string                 `json:"prompt_hash"`
-				Signal     quality.FeedbackSignal `json:"signal"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			if in.PromptHash == "" || in.Signal == "" {
-				writeJSONErr(w, http.StatusBadRequest, "prompt_hash and signal are required")
-				return
-			}
-			if err := qualityScorer.RecordFeedback(req.Context(), in.PromptHash, in.Signal); err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
-		})
+		// B23.1: {"request_id", "signal": "negative"|"repeat"} removes the stored answer that request was
+		// given; the older {"prompt_hash", "signal"} form still reaches the quality scorer.
+		authed.Post("/v1/feedback", proxy.AnswerFeedbackHandler(p, pool, func(ctx context.Context, promptHash, signal string) error {
+			return qualityScorer.RecordFeedback(ctx, promptHash, quality.FeedbackSignal(signal))
+		}))
 	})
 
 	// Verify the TLS cert cache directory exists and is writable before

@@ -502,7 +502,7 @@ func (s *StreamHandler) serve(
 		// Use the workspace-scoped prompt for the cache key so streamed
 		// responses respect tenant isolation just like buffered ones. The raw
 		// prompt + wsID also feed the opt-in pooled (cross-tenant) write.
-		s.proxy.storeCaches(storeCtx, provider, model, cachePrompt, prompt, sc.reqFP, sc.turn, sc.wsID, cached)
+		s.proxy.storeAnswer(storeCtx, provider, model, cachePrompt, prompt, sc.reqFP, sc.turn, sc.wsID, sc.requestID, cached)
 	}
 	// W4.9 SHADOW POOL LOG — the streaming lane carries the SAME paid provider call as the buffered
 	// one, so leaving it out would make the measured pooled hit rate a statement about half the
