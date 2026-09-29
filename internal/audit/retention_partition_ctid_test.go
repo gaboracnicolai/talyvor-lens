@@ -2,10 +2,17 @@ package audit
 
 import (
 	"context"
+	"fmt"
+	"net/url"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/dbmigrate"
+	"github.com/talyvor/lens/migrations"
 )
 
 // THE RETENTION SWEEPER DELETED ROWS THAT WERE NOT OLD, ON AN APPEND-ONLY TABLE.
@@ -54,6 +61,61 @@ func partitionOf(t *testing.T, pool *pgxpool.Pool, ws string) (part, ctid string
 	return part, ctid
 }
 
+// ctidTestPool gives this test a database of its own, migrated from scratch and dropped afterwards.
+//
+// ⚠ THE COLLISION IS A PROPERTY OF PHYSICAL LAYOUT, SO THE TABLE MUST BE THIS TEST'S ALONE. On the
+// shared database every other package writes token_events too: a row inserted between the purge
+// and the seed, or dead tuples VACUUM cannot reclaim while another session's snapshot is open,
+// moves the seeded rows off ctid (0,1) and the premise check fails. That is how it failed once in a
+// full run. VACUUM's horizon for an ordinary table counts only backends in the same database, so a
+// separate database removes both causes; a separate schema would remove only the first.
+func ctidTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	admin := os.Getenv("LENS_TEST_DATABASE_URL")
+	if admin == "" {
+		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG retention ctid test")
+	}
+	ctx := context.Background()
+	name := fmt.Sprintf("lens_ctid_%d", time.Now().UnixNano())
+	ac, err := pgx.Connect(ctx, admin)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if _, err := ac.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		_ = ac.Close(ctx)
+		t.Fatalf("create database: %v", err)
+	}
+	_ = ac.Close(ctx)
+	u, err := url.Parse(admin)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	u.Path = "/" + name
+	t.Cleanup(func() {
+		c, err := pgx.Connect(context.Background(), admin)
+		if err != nil {
+			return
+		}
+		_, _ = c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+		_ = c.Close(context.Background())
+	})
+	mc, err := pgx.Connect(ctx, u.String())
+	if err != nil {
+		t.Fatalf("connect %s: %v", name, err)
+	}
+	if _, err := dbmigrate.Run(ctx, mc, migrations.FS); err != nil {
+		_ = mc.Close(ctx)
+		t.Fatalf("apply migrations: %v", err)
+	}
+	_ = mc.Close(ctx)
+	pool, err := pgxpool.New(ctx, u.String())
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
 // TestRetention_DoesNotSweepAcrossPartitionsOnACollidingCtid builds the exact
 // collision — an AGED row and a FRESH row in two different partitions sharing one
 // ctid — and requires the fresh row to survive a sweep that should only take the
@@ -64,7 +126,7 @@ func partitionOf(t *testing.T, pool *pgxpool.Pool, ws string) (part, ctid string
 // green result would prove nothing — so that case fails loudly as a broken
 // instrument rather than passing as a healthy product.
 func TestRetention_DoesNotSweepAcrossPartitionsOnACollidingCtid(t *testing.T) {
-	pool := auditTestPool(t)
+	pool := ctidTestPool(t)
 	ctx := context.Background()
 
 	// Chosen by measurement, not by guesswork: these two workspace ids hash to
@@ -145,8 +207,8 @@ func seedTokenEventAt(t *testing.T, pool *pgxpool.Pool, ws string, age time.Dura
 }
 
 // purgeAllTokenEvents empties the table through the ONLY sanctioned door — the
-// same transaction-local flag retention.go#deleteBatch uses. It leaves the
-// package's shared table as it found it, so this test cannot poison a sibling.
+// same transaction-local flag retention.go#deleteBatch uses, so each half of the
+// test starts from an empty table in its private database (ctidTestPool).
 func purgeAllTokenEvents(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
