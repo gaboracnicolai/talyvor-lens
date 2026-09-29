@@ -60,6 +60,44 @@ type Model struct {
 	MaxOutput        int          `json:"max_output"`
 	Deprecated       bool         `json:"deprecated,omitempty"`
 	Aliases          []string     `json:"aliases,omitempty"` // e.g. dated snapshots → this canonical id
+	// B18.12 — when the provider released the model (YYYY-MM-DD, from its release notes) and its tier,
+	// so the chat picker can list the newest first and default to the newest frontier model without
+	// guessing either from the name.
+	ReleaseDate string `json:"release_date,omitempty"`
+	Tier        string `json:"tier,omitempty"`
+}
+
+// The tiers a model is in: the most capable a provider offers, its everyday middle, its cheap and fast
+// one, and embedding models (which are not chat models at all).
+const (
+	TierFrontier  = "frontier"
+	TierBalanced  = "balanced"
+	TierFast      = "fast"
+	TierEmbedding = "embedding"
+)
+
+// TierFor infers the tier of a model the seed does not know — one discovery found — from the words
+// providers use in their ids. The seed states every tier outright; this is only for new models, and
+// the price a person confirms for one is where a wrong guess would be seen.
+func TierFor(id string) string {
+	id = strings.ToLower(id)
+	has := func(words ...string) bool {
+		for _, w := range words {
+			if strings.Contains(id, w) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("embed"):
+		return TierEmbedding
+	case has("mini", "nano", "haiku", "flash", "lite", "small", "instant", "luna"):
+		return TierFast
+	case has("opus", "fable", "mythos", "-pro", "astra"):
+		return TierFrontier
+	}
+	return TierBalanced
 }
 
 // Registry holds the models keyed by canonical id, with an alias index.
