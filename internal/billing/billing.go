@@ -128,6 +128,8 @@ type Service struct {
 	marketPayouts MarketPayouts
 	// B19.25 — agent card purchases settle (agent_cards.go). Unset ⇒ Issuing events are acknowledged and ignored.
 	agentCards AgentCardSettler
+	// B22.4 — company credit lines are invoiced monthly (credit_line.go). Unset ⇒ their draws are not invoiced.
+	creditLineStripe creditLineStripeAPI
 
 	// D, in µLXC — the Model 2 allowance per billing period (W4.6.1 step 2).
 	// ZERO is the default and means "no allowance configured": no grant row is ever

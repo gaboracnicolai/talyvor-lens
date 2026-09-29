@@ -174,6 +174,14 @@ func main() {
 		}
 		return
 	}
+	// `lens credit-lines` (B22.4): mark company workspaces and set, pause or resume their credit lines.
+	if len(os.Args) > 1 && os.Args[1] == "credit-lines" {
+		if err := runCreditLines(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "poolcheck" {
 		if err := runPoolCheck(); err != nil {
 			slog.Error("poolcheck failed", slog.String("err", err.Error()))
@@ -1690,6 +1698,13 @@ func run() error {
 		billingSvc = billingSvc.WithMarketPayouts(liveStripe, marketStore)
 		go haComps.leader.Run(ctx, "market-payouts", 30*time.Second, func(lctx context.Context) {
 			payMarketSellers(lctx, marketStore, liveStripe)
+		})
+	}
+	// B22.4 — company credit lines: each month's draws go on one Stripe invoice; paying it repays the line.
+	if cfg.BillingEnabled {
+		billingSvc = billingSvc.WithCreditLines(liveStripe)
+		go haComps.leader.Run(ctx, "credit-line-invoices", 30*time.Second, func(lctx context.Context) {
+			invoiceCreditLines(lctx, billingSvc)
 		})
 	}
 	// B19.25 — an agent card purchase's capture, reversal or refund settles the agent's balance, from the
@@ -4135,6 +4150,7 @@ func run() error {
 		mountAgentCardRoutes(authed, dualToken, agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)) // B19.12
 		mountWalletCapabilityRoutes(authed, dualToken)                                                               // B22.1
 		mountAgentTransferRoutes(authed, dualToken)                                                                  // B22.3
+		mountCreditLineRoutes(authed, dualToken)                                                                     // B22.4
 		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5

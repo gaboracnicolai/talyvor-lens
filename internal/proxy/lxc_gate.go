@@ -56,6 +56,11 @@ type lxcBalanceReader interface {
 	GetUnallocatedLXC(ctx context.Context, workspaceID string) (int64, error)
 }
 
+// creditLineReader is what a company's credit line can lend now (B22.4). *economy.DualTokenStore satisfies it.
+type creditLineReader interface {
+	CreditLineAvailableLXC(ctx context.Context, workspaceID string) (int64, error)
+}
+
 // SetLXCGate wires the LXC gating reader + its enable flag (read per-call). The
 // proxy holds both as optional, nil-safe fields. The coherence rule also reads
 // the existing lxcShadowEnabled (set by SetLXCSpendSink).
@@ -175,6 +180,12 @@ func (p *Proxy) lxcGateBlocks(ctx context.Context, workspaceID, model, prompt st
 			slog.String("err", err.Error()),
 		)
 		return false
+	}
+	// B22.4: an agent of a company with a credit line may spend past the balance, up to what the line can lend.
+	if cl, ok := p.lxcGate.(creditLineReader); ok && agentKeyIDFromContext(ctx) != "" {
+		if avail, err := cl.CreditLineAvailableLXC(ctx, workspaceID); err == nil {
+			balance += avail
+		}
 	}
 	// B1.6: allowance left counts before prepaid, so a subscriber is not refused
 	// for having no top-up. A read error counts no allowance (prepaid alone decides).

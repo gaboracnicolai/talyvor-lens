@@ -154,6 +154,9 @@ func (inv marketInvoice) subscriptionID() string {
 // handleInvoicePaid clears the uses a paid marketplace invoice carried. Any other paid invoice is
 // acknowledged and left alone.
 func (s *Service) handleInvoicePaid(w http.ResponseWriter, ctx context.Context, event *stripe.Event) {
+	if s.creditLineInvoicePaid(w, ctx, event) { // B22.4 — a company paid its credit line
+		return
+	}
 	if s.marketClearer == nil || s.marketPrice == "" {
 		w.WriteHeader(http.StatusOK)
 		return
