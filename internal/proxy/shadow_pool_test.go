@@ -368,7 +368,7 @@ func TestShadowPool_CoveragePopulationIsExplicit(t *testing.T) {
 					return true
 				}
 				switch sel.Sel.Name {
-				case "storeCaches":
+				case "storeCaches", "storeAnswer": // B23.1: storeAnswer is storeCaches plus the served-answer record
 					stores = append(stores, site{fn.Name.Name, file})
 				case "shadowPoolObservation":
 					shadows = append(shadows, site{fn.Name.Name, file})

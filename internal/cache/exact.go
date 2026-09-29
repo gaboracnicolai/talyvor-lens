@@ -29,8 +29,14 @@ func NewExactCache(client *redis.Client, ttl time.Duration) *ExactCache {
 }
 
 func (c *ExactCache) Key(provider, model, prompt string) string {
+	return exactKeyPrefix + PromptHash(provider, model, prompt)
+}
+
+// PromptHash is the digest an entry is stored under: the exact key's suffix and, for the same key
+// material, the semantic row's prompt_hash — so one hash names both copies of one stored answer.
+func PromptHash(provider, model, prompt string) string {
 	sum := sha256.Sum256([]byte(provider + ":" + model + ":" + prompt))
-	return exactKeyPrefix + hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:])
 }
 
 // Get returns the cached response bytes for the given request.
@@ -92,4 +98,47 @@ func (c *ExactCache) GetWithOwner(ctx context.Context, provider, model, prompt s
 		return body, "", nil
 	}
 	return body, owner, nil
+}
+
+// DeleteIfDigest removes the entry stored under hash (a PromptHash) and its owner stamp, but only
+// while it still holds the answer whose sha256 is digest — an answer written there since is kept.
+// B23.1: a thumbs-down removes the answer that was served, never a newer one.
+func (c *ExactCache) DeleteIfDigest(ctx context.Context, hash, digest string) (bool, error) {
+	key := exactKeyPrefix + hash
+	b, err := c.client.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if AnswerDigest(b) != digest {
+		return false, nil
+	}
+	return true, c.client.Del(ctx, key, key+":owner").Err()
+}
+
+// AnswerDigest is the hex sha256 of a stored answer's bytes.
+func AnswerDigest(answer []byte) string {
+	sum := sha256.Sum256(answer)
+	return hex.EncodeToString(sum[:])
+}
+
+const servedKeyPrefix = "lens:served:"
+
+// RememberServed records ref — which stored answer answered request requestID of workspace wsID —
+// for ttl, so a thumbs-down on that request can find it (B23.1). The key is per workspace, so a
+// workspace can only ever reach the answers it was served.
+func (c *ExactCache) RememberServed(ctx context.Context, wsID, requestID string, ref []byte, ttl time.Duration) error {
+	return c.client.Set(ctx, servedKeyPrefix+wsID+":"+requestID, ref, ttl).Err()
+}
+
+// ServedRef returns what RememberServed recorded for the request, or nil when nothing was (or it
+// has expired).
+func (c *ExactCache) ServedRef(ctx context.Context, wsID, requestID string) ([]byte, error) {
+	b, err := c.client.Get(ctx, servedKeyPrefix+wsID+":"+requestID).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	return b, err
 }
