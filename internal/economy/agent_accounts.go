@@ -89,10 +89,10 @@ func accountBalance(ctx context.Context, tx pgx.Tx, workspaceID, account string)
 	return bal, err
 }
 
-// allocatedSQL is what a workspace's agents hold: Σ agent balances = −(workspace side) − spend, since
-// every entry sums to zero.
-const allocatedSQL = `SELECT COALESCE(-sum(amount_ulxc), 0)::bigint FROM agent_postings
-  WHERE workspace_id = $1 AND account IN ('workspace', 'spend')`
+// allocatedSQL is what a workspace's agents hold: Σ their balances. Read directly, not as −(workspace side)
+// − spend: a transfer between workspaces (B22.3) is an entry whose two postings are in different workspaces.
+const allocatedSQL = `SELECT COALESCE(sum(amount_ulxc), 0)::bigint FROM agent_postings
+  WHERE workspace_id = $1 AND account LIKE 'agent:%'`
 
 // requireUnallocated refuses a debit of the workspace's OWN spending — anything not made with an agent's
 // key — that would reach into the LXC its agents hold (B19.13). bal is the lxc_balances balance the
@@ -238,16 +238,11 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 		if err != nil {
 			return 0, err
 		}
-		wsSide, err := accountBalance(ctx, tx, workspaceID, "workspace")
-		if err != nil {
-			return 0, err
+		var allocated int64
+		if err := tx.QueryRow(ctx, allocatedSQL, workspaceID).Scan(&allocated); err != nil {
+			return 0, fmt.Errorf("economy: allocated LXC: %w", err)
 		}
-		spent, err := accountBalance(ctx, tx, workspaceID, "spend")
-		if err != nil {
-			return 0, err
-		}
-		// Allocated = Σ agent balances = −(workspace side) − spend, since every entry sums to zero.
-		if unallocated := wsBal - (-wsSide - spent); unallocated < amount {
+		if unallocated := wsBal - allocated; unallocated < amount {
 			return 0, fmt.Errorf("%w: the workspace has %d µLXC not held by its agents", ErrAgentFunds, unallocated)
 		}
 		err = postEntry(ctx, tx, workspaceID, kind, "", leg{"workspace", -amount}, leg{agentAccount(agentID), amount})
