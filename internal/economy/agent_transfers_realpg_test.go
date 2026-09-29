@@ -59,6 +59,9 @@ func TestAgentTransfers_SendRequestRecurRefundAndTheClassOfEach(t *testing.T) {
 	if _, err := s.SetAgentHandle(ctx, person, bea.ID, "bea"); err != nil {
 		t.Fatal(err)
 	}
+	if b, err := s.AgentBook(ctx, person); err != nil || b.Agents[0].Handle != "bea" {
+		t.Fatalf("the book's agent handle = %+v, %v; want bea", b.Agents, err)
+	}
 	if _, err := s.SetAgentHandle(ctx, person, bea.ID+"x", "bea"); !errors.Is(err, ErrAgentNotFound) {
 		t.Fatalf("a handle for no agent = %v", err)
 	}

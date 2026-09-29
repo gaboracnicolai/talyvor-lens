@@ -58,7 +58,10 @@ type AgentTransfer struct {
 	RequestID       string    `json:"request_id,omitempty"`
 	ScheduleID      string    `json:"schedule_id,omitempty"`
 	RefundOf        string    `json:"refund_of,omitempty"`
+	LoanID          string    `json:"loan_id,omitempty"` // B22.5: the loan it paid out or repaid
 	CreatedAt       time.Time `json:"created_at"`
+
+	capability string // the wallet capability it moves as, when not a plain transfer's (B22.5: a loan's)
 }
 
 // MoneyRequest is one agent asking another for credits.
@@ -211,6 +214,9 @@ func (s *DualTokenStore) transferTx(ctx context.Context, tx pgx.Tx, t AgentTrans
 	if owners[t.FromAgentID] != owners[t.ToAgentID] {
 		capability, t.Class = CapabilityPayAnotherOwner, string(ClassAmber)
 	}
+	if c, ok := CapabilityByKey(t.capability); ok {
+		capability, t.Class = c.Key, string(c.Class)
+	}
 	bal, err := accountBalance(ctx, tx, t.FromWorkspaceID, agentAccount(t.FromAgentID))
 	if err != nil {
 		return t, err
@@ -277,10 +283,10 @@ func (s *DualTokenStore) transferTx(ctx context.Context, tx pgx.Tx, t AgentTrans
 		}
 	}
 	if err := tx.QueryRow(ctx, `INSERT INTO agent_transfers (id, entry_id, from_workspace_id, from_agent_id, to_workspace_id, to_agent_id,
-		amount_ulxc, memo, class, test_funded_ulxc, request_id, schedule_id, refund_of)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING created_at`,
+		amount_ulxc, memo, class, test_funded_ulxc, request_id, schedule_id, refund_of, loan_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING created_at`,
 		t.ID, entry, t.FromWorkspaceID, t.FromAgentID, t.ToWorkspaceID, t.ToAgentID, t.AmountULXC, t.Memo, t.Class, t.TestFundedULXC,
-		t.RequestID, t.ScheduleID, t.RefundOf).Scan(&t.CreatedAt); err != nil {
+		t.RequestID, t.ScheduleID, t.RefundOf, t.LoanID).Scan(&t.CreatedAt); err != nil {
 		if strings.Contains(err.Error(), "idx_agent_transfers_refund") {
 			return t, ErrAlreadyRefunded
 		}
@@ -375,12 +381,13 @@ func (s *DualTokenStore) ListMoneyRequests(ctx context.Context, workspaceID stri
 
 // RefundTransfer gives a transfer one of workspaceID's agents received back to its sender, once. Giving back
 // is not new spending, so the receiver's rules do not judge it; its class and funding are the transfer's own.
+// A loan's payout or instalment is not given back this way (B22.5).
 func (s *DualTokenStore) RefundTransfer(ctx context.Context, workspaceID, transferID string) (AgentTransfer, error) {
 	var orig AgentTransfer
 	var refunded bool
 	err := s.pool.QueryRow(ctx, `SELECT from_workspace_id, from_agent_id, to_agent_id, amount_ulxc, memo,
 		EXISTS (SELECT 1 FROM agent_transfers r WHERE r.refund_of = t.id) FROM agent_transfers t
-		WHERE id = $1 AND to_workspace_id = $2 AND refund_of = ''`, transferID, workspaceID).
+		WHERE id = $1 AND to_workspace_id = $2 AND refund_of = '' AND loan_id = ''`, transferID, workspaceID).
 		Scan(&orig.FromWorkspaceID, &orig.FromAgentID, &orig.ToAgentID, &orig.AmountULXC, &orig.Memo, &refunded)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return orig, ErrTransferNotFound

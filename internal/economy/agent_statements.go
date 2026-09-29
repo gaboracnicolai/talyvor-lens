@@ -50,6 +50,9 @@ type Statement struct {
 	To          time.Time          `json:"to"`
 	Accounts    []StatementAccount `json:"accounts"`
 	Lines       []StatementLine    `json:"lines"`
+	// Loans the agent or workspace lent or borrowed that were open in the period (B22.5): their terms, and the
+	// events that fell in it. Their money is in Lines, as transfers.
+	Loans []Loan `json:"loans"`
 }
 
 // AgentPeriodStatement is one agent's statement for [from, to).
@@ -67,6 +70,9 @@ func (s *DualTokenStore) AgentPeriodStatement(ctx context.Context, workspaceID, 
 	if err == nil && len(st.Accounts) == 0 { // nothing ever posted: the account still has a (zero) line
 		st.Accounts = []StatementAccount{{Account: agentAccount(agentID)}}
 	}
+	if err == nil {
+		st.Loans, err = s.statementLoans(ctx, workspaceID, agentID, from, to)
+	}
 	return st, err
 }
 
@@ -74,12 +80,40 @@ func (s *DualTokenStore) AgentPeriodStatement(ctx context.Context, workspaceID, 
 // workspace's side, each agent, and what they spent — for [from, to). Every entry sums to zero, so the
 // accounts' movements over any period do too.
 func (s *DualTokenStore) WorkspaceAgentStatement(ctx context.Context, workspaceID string, from, to time.Time) (Statement, error) {
-	return s.periodStatement(ctx, workspaceID, "", from, to)
+	st, err := s.periodStatement(ctx, workspaceID, "", from, to)
+	if err == nil {
+		st.Loans, err = s.statementLoans(ctx, workspaceID, "", from, to)
+	}
+	return st, err
+}
+
+// statementLoans is the loans workspaceID (its agent agentID, when not "") lent or borrowed that were open at
+// some time in [from, to), each with the events that fell in it.
+func (s *DualTokenStore) statementLoans(ctx context.Context, workspaceID, agentID string, from, to time.Time) ([]Loan, error) {
+	loans, err := s.loans(ctx, `WHERE ((lender_workspace_id = $1 AND ($2 = '' OR lender_agent_id = $2))
+		OR (borrower_workspace_id = $1 AND ($2 = '' OR borrower_agent_id = $2)))
+		AND offered_at < $4 AND (status IN ('offered', 'active', 'late') OR decided_at >= $3
+		  OR EXISTS (SELECT 1 FROM agent_loan_events e WHERE e.loan_id = agent_loans.id AND e.at >= $3))`, workspaceID, agentID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	out := []Loan{}
+	for _, l := range loans {
+		events := []LoanEvent{}
+		for _, e := range l.Events {
+			if !e.At.Before(from) && e.At.Before(to) {
+				events = append(events, e)
+			}
+		}
+		l.Events = events
+		out = append(out, l)
+	}
+	return out, nil
 }
 
 // periodStatement reads [from, to) for one account, or for every account when account is "".
 func (s *DualTokenStore) periodStatement(ctx context.Context, workspaceID, account string, from, to time.Time) (Statement, error) {
-	st := Statement{WorkspaceID: workspaceID, From: from, To: to, Accounts: []StatementAccount{}, Lines: []StatementLine{}}
+	st := Statement{WorkspaceID: workspaceID, From: from, To: to, Accounts: []StatementAccount{}, Lines: []StatementLine{}, Loans: []Loan{}}
 	rows, err := s.pool.Query(ctx, `
 		SELECT account,
 		       COALESCE(sum(amount_ulxc) FILTER (WHERE created_at < $3), 0)::bigint,

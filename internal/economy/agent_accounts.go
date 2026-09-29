@@ -46,6 +46,8 @@ type Agent struct {
 	// purchase, or Talyvor's vouch (internal/earnverify). An agent with no owner is never verified.
 	OwnerUserID string `json:"owner_user_id"`
 	Verified    bool   `json:"verified"`
+	// Handle is the agent's address besides its id, once its owner picks one (B22.3).
+	Handle string `json:"handle,omitempty"`
 }
 
 // AgentBook reconciles a workspace with its agents: WorkspaceBalanceULXC (lxc_balances) =
@@ -335,7 +337,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 		}
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id,
+		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id, COALESCE(a.handle, ''),
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
 		                   AND p.kind IN ('spend', 'hold', 'settle', 'release', 'card')), 0)::bigint,
@@ -348,7 +350,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 	for rows.Next() {
 		var a Agent
 		var spendLegs int64
-		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.BalanceULXC, &spendLegs, &a.Keys); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.Handle, &a.BalanceULXC, &spendLegs, &a.Keys); err != nil {
 			return book, err
 		}
 		a.SpentULXC = -spendLegs

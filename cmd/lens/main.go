@@ -1776,6 +1776,12 @@ func run() error {
 				} else if res != (economy.ScheduleRunResult{}) {
 					slog.Info("agents: schedules run", slog.Int("paid", res.Paid), slog.Int("refused", res.Refused), slog.Int("topped_up", res.ToppedUp))
 				}
+				// B22.5: loan instalments due, taken from the borrowers' agents.
+				if res, err := dualToken.RunLoanRepayments(ctx, now); err != nil {
+					slog.Warn("agents: loan instalments failed", slog.String("err", err.Error()))
+				} else if res != (economy.LoanRunResult{}) {
+					slog.Info("agents: loan instalments", slog.Int("paid", res.Paid), slog.Int("missed", res.Missed), slog.Int("defaulted", res.Defaulted))
+				}
 			}
 		}
 	}()
@@ -4151,6 +4157,7 @@ func run() error {
 		mountWalletCapabilityRoutes(authed, dualToken)                                                               // B22.1
 		mountAgentTransferRoutes(authed, dualToken)                                                                  // B22.3
 		mountCreditLineRoutes(authed, dualToken)                                                                     // B22.4
+		mountCompanyLoanRoutes(authed, dualToken)                                                                    // B22.5
 		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5
