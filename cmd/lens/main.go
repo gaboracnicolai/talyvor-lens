@@ -3386,6 +3386,38 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, sum)
 		})
 
+		// B18.14 — change plan: {"plan":"plus"|"pro"|"max"} moves the live subscription to that plan, with
+		// proration. Like cancel, it writes no row — the webhook that follows records the new price and moves
+		// this period's allowance to it.
+		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscription/plan", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			if refuseSynthetic(w, wsManager.GetSynthetic, wsID) {
+				return
+			}
+			var body struct {
+				Plan string `json:"plan"`
+			}
+			if err := json.NewDecoder(io.LimitReader(req.Body, 1<<10)).Decode(&body); err != nil || body.Plan == "" {
+				writeJSONErr(w, http.StatusBadRequest, "body must be {\"plan\": \"<name>\"}")
+				return
+			}
+			st, err := billingSvc.ChangePlan(req.Context(), wsID, body.Plan)
+			if err != nil {
+				status := http.StatusInternalServerError
+				switch {
+				case errors.Is(err, billing.ErrNoSubscriptionPrice):
+					status = http.StatusNotImplemented
+				case errors.Is(err, billing.ErrUnknownPlan):
+					status = http.StatusBadRequest
+				case errors.Is(err, billing.ErrNoLiveSubscription), errors.Is(err, billing.ErrSamePlan):
+					status = http.StatusConflict
+				}
+				writeJSONErr(w, status, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, st)
+		})
+
 		// B1.5 — cancel and resume. Cancel is AT PERIOD END: the workspace keeps what
 		// it paid for and flips to unsubscribed when Stripe's .deleted arrives. Neither
 		// route writes the subscriptions row — the webhook that follows does.

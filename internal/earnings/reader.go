@@ -100,6 +100,13 @@ type Summary struct {
 	EarningEnabled bool     `json:"earning_enabled"`
 	DisabledGates  []string `json:"disabled_gates"`
 
+	// B18.14 — what this workspace's contributions did for other people: Reuses is how many times one
+	// was reused (a royalty mint each — a cached answer or a converted document — revoked ones
+	// excepted), and HelpedWorkspaces how many different workspaces those reuses were for: the "helped
+	// N people" on /plans. A count only — never who they were.
+	Reuses           int64 `json:"reuses"`
+	HelpedWorkspaces int64 `json:"helped_workspaces"`
+
 	// ByType is every ledger type present for this workspace, classified, sorted for stable output.
 	ByType []TypeLine `json:"by_type"`
 	// UnclassifiedTypes are types present in this workspace's ledger that internal/earnings does not
@@ -121,6 +128,14 @@ const byTypeSQL = `
 	GROUP BY type`
 
 const heldSQL = `SELECT held_balance::bigint FROM lens_token_balances WHERE workspace_id = $1`
+
+const helpedSQL = `
+	SELECT COUNT(*)::bigint, COUNT(DISTINCT requester_workspace_id)::bigint FROM (
+		SELECT requester_workspace_id FROM pool_royalty_mints
+		WHERE contributor_workspace_id = $1 AND requester_workspace_id <> $1 AND status <> 'revoked'
+		UNION ALL
+		SELECT requester_workspace_id FROM distill_royalty_mints
+		WHERE contributor_workspace_id = $1 AND requester_workspace_id <> $1 AND status <> 'revoked') m`
 
 // ForWorkspace summarises what one workspace has earned.
 //
@@ -182,6 +197,10 @@ func (r *Reader) ForWorkspace(ctx context.Context, workspaceID string, gates Gat
 	// include every held mint that has since been paid out.
 	if err := r.pool.QueryRow(ctx, heldSQL, workspaceID).Scan(&s.HeldULENS); err != nil && err != pgx.ErrNoRows {
 		return Summary{}, fmt.Errorf("earnings: held balance: %w", err)
+	}
+
+	if err := r.pool.QueryRow(ctx, helpedSQL, workspaceID).Scan(&s.Reuses, &s.HelpedWorkspaces); err != nil {
+		return Summary{}, fmt.Errorf("earnings: reuses: %w", err)
 	}
 
 	sort.Slice(s.ByType, func(i, j int) bool { return s.ByType[i].Type < s.ByType[j].Type })

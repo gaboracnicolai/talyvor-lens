@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -142,6 +143,27 @@ func (l *LiveStripe) CreateSubscriptionCheckoutSession(ctx context.Context, p Su
 // customer.subscription.updated to the webhook, which is what records it.
 func (l *LiveStripe) SetCancelAtPeriodEnd(ctx context.Context, subscriptionID string, cancel bool) (*stripe.Subscription, error) {
 	params := &stripe.SubscriptionParams{CancelAtPeriodEnd: stripe.Bool(cancel)}
+	params.Context = ctx
+	return subscription.Update(subscriptionID, params)
+}
+
+// ChangeSubscriptionPrice moves a subscription's one item to priceID with proration (B18.14): Stripe credits
+// the unused time on the old price and charges the rest of the period on the new one, on the next invoice.
+// Stripe answers with the updated subscription and sends customer.subscription.updated, which records it.
+func (l *LiveStripe) ChangeSubscriptionPrice(ctx context.Context, subscriptionID, priceID string) (*stripe.Subscription, error) {
+	get := &stripe.SubscriptionParams{}
+	get.Context = ctx
+	cur, err := subscription.Get(subscriptionID, get)
+	if err != nil {
+		return nil, err
+	}
+	if cur.Items == nil || len(cur.Items.Data) == 0 || cur.Items.Data[0] == nil {
+		return nil, fmt.Errorf("subscription %s has no item to change", subscriptionID)
+	}
+	params := &stripe.SubscriptionParams{
+		Items:             []*stripe.SubscriptionItemsParams{{ID: stripe.String(cur.Items.Data[0].ID), Price: stripe.String(priceID)}},
+		ProrationBehavior: stripe.String("create_prorations"),
+	}
 	params.Context = ctx
 	return subscription.Update(subscriptionID, params)
 }

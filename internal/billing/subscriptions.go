@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -210,6 +211,120 @@ func (s *Service) SetCancelAtPeriodEnd(ctx context.Context, workspaceID string, 
 	}, nil
 }
 
+// ErrSamePlan is a plan change to the plan the workspace is already on.
+var ErrSamePlan = errors.New("billing: the workspace is already on that plan")
+
+// planChangeAPI is the Stripe call that moves a subscription to another price (B18.14). Optional, as
+// subscriptionAPI is kept apart from stripeAPI: a test double without it still builds a Service.
+type planChangeAPI interface {
+	ChangeSubscriptionPrice(ctx context.Context, subscriptionID, priceID string) (*stripe.Subscription, error)
+}
+
+// ChangePlan moves the workspace's live subscription to another named plan — Plus to Pro, or back —
+// with proration (B18.14): Stripe credits the unused time on the old price and charges the rest of the
+// period on the new one, on the next invoice.
+//
+// ⚠ LIKE CANCEL, THIS WRITES NOTHING. The customer.subscription.updated Stripe sends is what records the
+// new price, and it is what moves this period's allowance to the new plan (applyPlanChange) — one author
+// of the subscription's state, behind the same idempotency and ordering guards as every other event.
+func (s *Service) ChangePlan(ctx context.Context, workspaceID, plan string) (*SubscriptionStatus, error) {
+	api, ok := s.subStripe.(planChangeAPI)
+	if !ok || len(s.subPlans) == 0 {
+		return nil, ErrNoSubscriptionPrice
+	}
+	price := s.subPlans[plan]
+	if price == "" {
+		return nil, fmt.Errorf("%w %q", ErrUnknownPlan, plan)
+	}
+	var subID, current string
+	err := s.pool.QueryRow(ctx, `
+		SELECT stripe_subscription_id, COALESCE(price_id, '') FROM subscriptions
+		WHERE workspace_id = $1 AND status IN ('trialing','active','past_due','unpaid')`, workspaceID).Scan(&subID, &current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNoLiveSubscription
+	}
+	if err != nil {
+		return nil, fmt.Errorf("billing: live subscription lookup: %w", err)
+	}
+	if current == price {
+		return nil, fmt.Errorf("%w (%s)", ErrSamePlan, plan)
+	}
+	sub, err := api.ChangeSubscriptionPrice(ctx, subID, price)
+	if err != nil {
+		return nil, fmt.Errorf("billing: change plan of %s: %w", subID, err)
+	}
+	status := string(sub.Status)
+	return &SubscriptionStatus{
+		Subscribed:        status == "trialing" || status == "active" || status == "past_due",
+		Status:            status,
+		CurrentPeriodEnd:  periodEnd(sub),
+		CancelAtPeriodEnd: sub.CancelAtPeriodEnd,
+		SubscriptionID:    sub.ID,
+		Livemode:          sub.Livemode,
+	}, nil
+}
+
+// applyPlanChange moves an already-granted period's allowance to the plan the subscription is now on
+// (B18.14). Stripe prorates the fee — the unused time on the old price is credited, the rest of the
+// period charged at the new one — and the allowance follows the same share: it changes by the
+// difference between the two plans' included usage times the share of the period left, never below
+// what has already been used. The row it writes says what moved.
+//
+// ⚠ IDEMPOTENT ON THE FEE. A period whose recorded fee is already this one — a renewal, a redelivery,
+// any update that did not change the price — is left alone, so an event can never apply twice.
+func (s *Service) applyPlanChange(ctx context.Context, eventID, workspaceID, subscriptionID, priceID string,
+	start, end time.Time, fee int64, at time.Time) error {
+	if fee <= 0 || !end.After(start) {
+		return nil // an unknown fee sizes nothing
+	}
+	var oldFee int64
+	err := s.pool.QueryRow(ctx, `SELECT fee_usd_cents FROM subscription_allowance
+		WHERE stripe_subscription_id = $1 AND period_start = $2`, subscriptionID, start).Scan(&oldFee)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (oldFee == fee || oldFee <= 0)) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	oldIncluded, err := s.includedUsage(ctx, oldFee, start)
+	if err != nil {
+		return err
+	}
+	newIncluded, err := s.includedUsage(ctx, fee, start)
+	if err != nil {
+		return err
+	}
+	left := math.Min(1, math.Max(0, float64(end.Sub(at))/float64(end.Sub(start))))
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var granted, consumed, lockedFee int64
+	if err := tx.QueryRow(ctx, `SELECT granted_ulxc, consumed_ulxc, fee_usd_cents FROM subscription_allowance
+		WHERE stripe_subscription_id = $1 AND period_start = $2 FOR UPDATE`, subscriptionID, start).
+		Scan(&granted, &consumed, &lockedFee); err != nil {
+		return err
+	}
+	if lockedFee != oldFee {
+		return nil // another delivery moved it first
+	}
+	after := max(granted+int64(math.Round(float64(newIncluded-oldIncluded)*left)), consumed)
+	if _, err := tx.Exec(ctx, `UPDATE subscription_allowance SET granted_ulxc = $1, fee_usd_cents = $2
+		WHERE stripe_subscription_id = $3 AND period_start = $4`, after, fee, subscriptionID, start); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO subscription_plan_changes (stripe_event_id, workspace_id, stripe_subscription_id, period_start,
+			price_id, from_fee_usd_cents, to_fee_usd_cents, remaining_fraction, granted_before_ulxc, granted_after_ulxc, changed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		eventID, workspaceID, subscriptionID, start, priceID, oldFee, fee, left, granted, after, at); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // ─── the webhook half ────────────────────────────────────────────────────────────
 
 // handleSubscription applies a customer.subscription.* event.
@@ -403,12 +518,20 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 	if applied && (status == "active" || status == "trialing") {
 		if end := periodEnd(&sub); end != nil {
 			start := periodStart(&sub)
-			if _, err := s.grantPeriod(ctx, wsID, sub.ID, start, *end, feeOf(&sub)); err != nil && !errors.Is(err, ErrNoAllowanceConfigured) {
+			created, err := s.grantPeriod(ctx, wsID, sub.ID, start, *end, feeOf(&sub))
+			if err != nil && !errors.Is(err, ErrNoAllowanceConfigured) {
 				// The state is committed and correct; the allowance is repairable.
 				// Log rather than 5xx, so Stripe is not asked to redeliver a fact we
 				// already have.
 				s.log.Error("billing: allowance grant failed (subscription state IS recorded)",
 					"event", event.ID, "workspace", wsID, "subscription", sub.ID, "err", err)
+			}
+			// B18.14 — a period already granted whose price changed: a plan change moves its allowance.
+			if err == nil && !created {
+				if err := s.applyPlanChange(ctx, event.ID, wsID, sub.ID, priceOf(&sub), start, *end, feeOf(&sub), eventAt); err != nil {
+					s.log.Error("billing: plan change allowance failed (subscription state IS recorded)",
+						"event", event.ID, "workspace", wsID, "subscription", sub.ID, "err", err)
+				}
 			}
 		}
 	}

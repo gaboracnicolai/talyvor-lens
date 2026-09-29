@@ -2,6 +2,7 @@ package earnings
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -218,5 +219,37 @@ func TestR5_AnUnknownLedgerTypeIsReportedRatherThanDropped(t *testing.T) {
 	if got.ContributionSettledULENS != 3_000_000 {
 		t.Fatalf("[R5-COUNTED] contribution_settled=%d, want 3000000 — the unclassified type was "+
 			"summed into earnings, which is worse than dropping it", got.ContributionSettledULENS)
+	}
+}
+
+// B18.14 — the summary says how many times this workspace's contributions were reused and for how many
+// different workspaces ("helped N people"), counting cached-answer and converted-document royalties alike,
+// and leaving out a revoked one and the workspace's own reuse.
+func TestR9_TheSummaryCountsTheReusesAndThePeopleHelped(t *testing.T) {
+	pool := harness(t)
+	ctx := context.Background()
+	const ws = "b1814-helper"
+	clean := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM pool_royalty_mints WHERE contributor_workspace_id = $1`, ws)
+		_, _ = pool.Exec(ctx, `DELETE FROM distill_royalty_mints WHERE contributor_workspace_id = $1`, ws)
+	}
+	clean()
+	t.Cleanup(clean)
+	for i, m := range []struct{ requester, status string }{{"ws-a", "final"}, {"ws-a", "held"}, {"ws-b", "final"}, {"ws-c", "revoked"}, {ws, "final"}} {
+		if _, err := pool.Exec(ctx, `INSERT INTO pool_royalty_mints (request_id, requester_workspace_id, contributor_workspace_id, layer, status)
+			VALUES ($1, $2, $3, 'exact', $4)`, fmt.Sprintf("b1814-req-%d", i), m.requester, ws, m.status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO distill_royalty_mints (request_id, contributor_workspace_id, requester_workspace_id, content_hash, avoided_cogs_usd, minted_amount)
+		VALUES ('b1814-doc-1', $1, 'ws-d', 'h1', 0.01, 10)`, ws); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewReader(pool).ForWorkspace(ctx, ws, allGatesOn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Reuses != 4 || s.HelpedWorkspaces != 3 {
+		t.Errorf("reuses %d, helped %d; want 4 reuses for 3 workspaces (a, b, d)", s.Reuses, s.HelpedWorkspaces)
 	}
 }
