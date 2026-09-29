@@ -63,10 +63,10 @@ func newUnbackedEnv(t *testing.T, tag string) *unbackedEnv {
 	t.Helper()
 	admin := os.Getenv("LENS_TEST_DATABASE_URL")
 	if admin == "" {
-		// ⚠ FAIL, never Skip. `go test` prints ok + exits 0 on a skip, and this is a money-path
-		// verification whose whole value is that it actually ran. CI always sets this
-		// (.github/workflows/ci.yaml, the `go test` step), so failing here cannot silently pass.
-		t.Fatal("LENS_TEST_DATABASE_URL not set — this test must RUN, not skip")
+		// Skip like every other real-PG test, so a builder's `go test ./internal/proxy` without a
+		// database is not red. CI cannot silently skip it: scripts/check-realpg-dsn.sh fails the job
+		// before `go test` when the DSN is unset or unreachable.
+		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG unbacked-credit royalty test")
 	}
 	ctx := context.Background()
 
