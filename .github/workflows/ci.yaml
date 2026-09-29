@@ -121,7 +121,9 @@ jobs:
         # append-only trigger once a concurrent package has migrated it) and internal/api
         # TestSpendByRequest's token_events seed — producing false reds on unrelated PRs (this caused #276's
         # scary-but-harmless red). Serialising is the systemic fix; correctness over a little wall-clock.
-        run: go test -timeout 120s -race -count=1 -p 1 ./...
+        # -timeout is per package: cmd/lens alone takes 108–120s under -race on a normal runner, so 120s
+        # timed it out on three consecutive attempts at 29221e6 with no test at fault.
+        run: go test -timeout 300s -race -count=1 -p 1 ./...
 
   # Formal static-analysis gate: golangci-lint (errcheck, govet, ineffassign,
   # staticcheck, unused). Config in .golangci.yml. Blocking — a finding fails the
