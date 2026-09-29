@@ -122,6 +122,18 @@ func ExtractFromRequest(r *http.Request) AttributionContext {
 	}
 }
 
+// FillRequester records who made the request (B18.18) where the client did not say: userID and author
+// fill UserID and Git.Author only when they are empty, under the same length limits as the headers. A
+// client's X-Talyvor-User or X-Talyvor-Author — an end user of its own app, a commit's author — wins.
+func (c *AttributionContext) FillRequester(userID, author string) {
+	if c.UserID == "" {
+		c.UserID = truncate(userID, maxIDLen)
+	}
+	if c.Git.Author == "" {
+		c.Git.Author = truncate(author, maxNameLen)
+	}
+}
+
 // ─── Store ────────────────────────────────────────
 
 // pgxDB is the subset of *pgxpool.Pool the Store needs. Tests use pgxmock; a
