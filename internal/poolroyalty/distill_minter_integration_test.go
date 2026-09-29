@@ -336,3 +336,75 @@ func TestDistillMint_FinalizeCountsSupplyAtFinalize_Integration(t *testing.T) {
 		t.Fatalf("supply must increase by micro(10) at FINALIZE: before=%v after=%v", supplyBefore, supply)
 	}
 }
+
+// B23.3: with the owner-linkage check ON (as production wires it), a document conversion reused
+// between two UNLINKED workspaces mints the contributor's royalty, and one reused between two
+// workspaces that share a card fingerprint mints nothing. Before the fix every linkage-on mint
+// failed: the two-column sharedFingerprintSQL was scanned into one bool.
+func TestDistillMint_OwnerLinkage_UnlinkedMints_LinkedDoesNot_Integration(t *testing.T) {
+	pool, ledger := distillMintHarness(t)
+	ctx := context.Background()
+	for _, ddl := range []string{
+		`DROP TABLE IF EXISTS workspace_card_fingerprints`,
+		`CREATE TABLE workspace_card_fingerprints (workspace_id TEXT NOT NULL, fingerprint_hash TEXT NOT NULL,
+			PRIMARY KEY (workspace_id, fingerprint_hash))`,
+		`DROP TABLE IF EXISTS workspace_owner_links`,
+		`CREATE TABLE workspace_owner_links (workspace_id TEXT NOT NULL, owner_key TEXT NOT NULL,
+			PRIMARY KEY (workspace_id, owner_key))`,
+	} {
+		if _, err := pool.Exec(ctx, ddl); err != nil {
+			t.Fatalf("linkage schema: %v", err)
+		}
+	}
+	verifyWorkspace(t, pool, "wsA")
+	verifyWorkspace(t, pool, "wsC")
+	// wsA/wsB: different cards. wsC/wsD: the same card — one operator on both sides.
+	if _, err := pool.Exec(ctx, `INSERT INTO workspace_card_fingerprints (workspace_id, fingerprint_hash)
+		VALUES ('wsA','fp-a'), ('wsB','fp-b'), ('wsC','fp-shared'), ('wsD','fp-shared')`); err != nil {
+		t.Fatalf("seed fingerprints: %v", err)
+	}
+	seedBasis(t, pool, "wsA", "wsB", "doc-unlinked", 2.0)
+	seedBasis(t, pool, "wsC", "wsD", "doc-linked", 2.0)
+
+	m := NewDistillMinter(pool, ledger, 0.5, func() bool { return true })
+	m.SetOwnerLinkageCheck(true)
+	n, err := m.RunOnce(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("RunOnce: n=%d err=%v, want 1 mint (the unlinked pair) and no error", n, err)
+	}
+
+	// Unlinked contributor: one held earnings row of 0.5 × $2 × peg = 10 LENS, on the mint table and the ledger.
+	var minted int64
+	if err := pool.QueryRow(ctx, `SELECT minted_amount FROM distill_royalty_mints
+		WHERE contributor_workspace_id='wsA' AND requester_workspace_id='wsB' AND status='held'`).Scan(&minted); err != nil {
+		t.Fatalf("unlinked pair must have a held mint row: %v", err)
+	}
+	if minted != micro(10) {
+		t.Fatalf("unlinked minted_amount = %v, want %v", minted, micro(10))
+	}
+	var ledgerAmt int64
+	if err := pool.QueryRow(ctx, `SELECT amount FROM lens_token_ledger WHERE workspace_id='wsA'`).Scan(&ledgerAmt); err != nil {
+		t.Fatalf("unlinked contributor must have one ledger row: %v", err)
+	}
+	if ledgerAmt != micro(10) {
+		t.Fatalf("unlinked ledger amount = %v, want %v", ledgerAmt, micro(10))
+	}
+	if _, held := balances(t, pool, "wsA"); held != micro(10) {
+		t.Fatalf("unlinked contributor held = %v, want %v", held, micro(10))
+	}
+
+	// Linked contributor: no mint row, no ledger row, no held credit.
+	if c := mintRowCount(t, pool, "wsC"); c != 0 {
+		t.Fatalf("linked pair must mint nothing, got %d mint rows", c)
+	}
+	var ledgerRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM lens_token_ledger WHERE workspace_id='wsC'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 0 {
+		t.Fatalf("linked contributor must have no ledger row, got %d", ledgerRows)
+	}
+	if _, held := balances(t, pool, "wsC"); held != 0 {
+		t.Fatalf("linked contributor held = %v, want 0", held)
+	}
+}
