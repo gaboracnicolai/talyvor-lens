@@ -178,8 +178,8 @@ func (p pin) String() string {
 // green while four of five disappear, and the four that vanished are exactly
 // the jobs whose Go version stopped being checked.
 const (
-	wantSetupGoSteps = 5
-	wantPins         = 5
+	wantSetupGoSteps = 6
+	wantPins         = 6
 	wantVersionFiles = 0
 )
 
