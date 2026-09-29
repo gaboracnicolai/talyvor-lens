@@ -18,8 +18,8 @@ func TestModelToBedrockID_MapsClaudeSonnet46Correctly(t *testing.T) {
 	if !ok {
 		t.Fatal("claude-sonnet-4-6 should be supported")
 	}
-	if id != "anthropic.claude-sonnet-4-6-20251101-v1:0" {
-		t.Errorf("got %q, want anthropic.claude-sonnet-4-6-20251101-v1:0", id)
+	if id != "anthropic.claude-sonnet-4-6" {
+		t.Errorf("got %q, want anthropic.claude-sonnet-4-6", id)
 	}
 }
 

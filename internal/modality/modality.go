@@ -173,7 +173,7 @@ var providerPreference = map[string][]string{
 	"openai":    {"gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-5.4-mini", "gpt-5.4"},
 	"anthropic": {"claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-opus-4-6", "claude-opus-4-5"},
 	"google":    {"gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-1.5-pro"},
-	"bedrock":   {"anthropic.claude-sonnet-4-6-20251101-v1:0", "anthropic.claude-opus-4-6-20251101-v1:0"},
+	"bedrock":   {"anthropic.claude-sonnet-4-6", "anthropic.claude-opus-4-6-v1"},
 }
 
 // Get returns a model's capabilities (zero value = text-only for unknowns).

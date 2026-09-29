@@ -219,15 +219,25 @@ func seedModels() []Model {
 		// Cache rates stay DERIVED (withCacheRates treats bedrock with the anthropic multipliers).
 		// The Marketplace listing shows separate cache and batch line items which I did not
 		// transcribe, so those remain an approximation — flagged rather than guessed at.
-		{ID: "anthropic.claude-opus-4-6-20251101-v1:0", Provider: "bedrock", DisplayName: "Claude Opus 4.6 (Bedrock)", ReleaseDate: "2026-02-05", Tier: TierFrontier, InputPer1M: 5.00, OutputPer1M: 25.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
-		{ID: "anthropic.claude-sonnet-4-6-20251101-v1:0", Provider: "bedrock", DisplayName: "Claude Sonnet 4.6 (Bedrock)", ReleaseDate: "2026-02-17", Tier: TierBalanced, InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
+		//
+		// B23.7 — THE IDS ARE AWS'S OWN, from each model card's "Programmatic Access" table (fetched
+		// 2026-09-29): docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-6.html
+		// gives anthropic.claude-opus-4-6-v1 and …/model-card-anthropic-claude-sonnet-4-6.html gives
+		// anthropic.claude-sonnet-4-6. The dated -20251101-v1:0 forms these rows carried match no AWS
+		// model; they stay as aliases so a request already recorded under them still prices the same.
+		{ID: "anthropic.claude-opus-4-6-v1", Provider: "bedrock", DisplayName: "Claude Opus 4.6 (Bedrock)", ReleaseDate: "2026-02-05", Tier: TierFrontier, InputPer1M: 5.00, OutputPer1M: 25.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192, Aliases: []string{"anthropic.claude-opus-4-6-20251101-v1:0"}},
+		{ID: "anthropic.claude-sonnet-4-6", Provider: "bedrock", DisplayName: "Claude Sonnet 4.6 (Bedrock)", ReleaseDate: "2026-02-17", Tier: TierBalanced, InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192, Aliases: []string{"anthropic.claude-sonnet-4-6-20251101-v1:0"}},
 		// NOTE: no Bedrock "claude-haiku-4-6" twin either — the underlying Haiku 4.6 does not exist.
 
 		// ─── Mistral (text-only) ───
 		{ID: "mistral-large-latest", Provider: "mistral", DisplayName: "Mistral Large", ReleaseDate: "2025-12-02", Tier: TierFrontier, InputPer1M: 2.00, OutputPer1M: 6.00, ContextTokens: 128000, MaxOutput: 8192},
 		{ID: "mistral-small-latest", Provider: "mistral", DisplayName: "Mistral Small", ReleaseDate: "2026-03-16", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.30, ContextTokens: 128000, MaxOutput: 8192},
-		{ID: "mistral-nemo", Provider: "mistral", DisplayName: "Mistral NeMo", ReleaseDate: "2024-07-18", Tier: TierFast, InputPer1M: 0.015, OutputPer1M: 0.045, ContextTokens: 128000, MaxOutput: 8192},
-		{ID: "open-mistral-7b", Provider: "mistral", DisplayName: "Open Mistral 7B", ReleaseDate: "2023-12-11", Tier: TierFast, InputPer1M: 0.025, OutputPer1M: 0.025, ContextTokens: 32000, MaxOutput: 8192},
+		// B23.7 — RETIRED AT MISTRAL, so Deprecated: they leave the chat picker and keep their price, so a
+		// request already recorded under them still bills the same. docs.mistral.ai/getting-started/models
+		// (fetched 2026-09-29), legacy table: open-mistral-7b deprecated 2024-11-30, retired 2025-03-30;
+		// open-mistral-nemo-2407 (Mistral NeMo 24.07) deprecated 2026-05-22, retired 2026-07-31.
+		{ID: "mistral-nemo", Provider: "mistral", DisplayName: "Mistral NeMo", ReleaseDate: "2024-07-18", Tier: TierFast, InputPer1M: 0.015, OutputPer1M: 0.045, ContextTokens: 128000, MaxOutput: 8192, Deprecated: true},
+		{ID: "open-mistral-7b", Provider: "mistral", DisplayName: "Open Mistral 7B", ReleaseDate: "2023-12-11", Tier: TierFast, InputPer1M: 0.025, OutputPer1M: 0.025, ContextTokens: 32000, MaxOutput: 8192, Deprecated: true},
 
 		// ─── Groq (text-only, hardware-accelerated open weights) ───
 		{ID: "llama-3.3-70b-versatile", Provider: "groq", DisplayName: "Llama 3.3 70B (Groq)", ReleaseDate: "2024-12-06", Tier: TierBalanced, InputPer1M: 0.59, OutputPer1M: 0.79, ContextTokens: 128000, MaxOutput: 32768},
