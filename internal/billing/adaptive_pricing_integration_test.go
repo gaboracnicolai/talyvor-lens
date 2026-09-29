@@ -46,3 +46,50 @@ func TestWebhook_AdaptivePricing_EURAndGBPLandAsTheirUSDCredits(t *testing.T) {
 		}
 	}
 }
+
+// B23.6 — a €9.18 top-up that bought $10.00, with €2.00 of it refunded. The refund is recorded in US cents at
+// the charge's own rate (1000 × 200 / 918 = 217.86 → 218), with the 200 EUR cents beside it, on the purchase row
+// and on the refund row — in either order: after the purchase, and before it, when the purchase converts it.
+func TestWebhook_AdaptivePricing_EURRefundIsRecordedInUSDAtTheChargeRate(t *testing.T) {
+	svc, pool, _ := newBillingService(t)
+	ctx := context.Background()
+	for _, refundFirst := range []bool{false, true} {
+		sfx := strconv.FormatBool(refundFirst)
+		ws, sess, pi := "ws_eur_refund_"+sfx, "cs_eur_refund_"+sfx, "pi_eur_refund_"+sfx
+		seedWS(t, pool, ws)
+		obj := sessionObj(sess, ws, 918, "eur", "paid", pi, micro(100))
+		obj["currency_conversion"] = map[string]any{"amount_subtotal": 1000, "amount_total": 1000,
+			"fx_rate": "0.918", "source_currency": "usd"}
+		pay, paySig := signed(testWebhookSecret, "evt_pay_"+sess, "checkout.session.completed", obj)
+		refund, refundSig := signed(testWebhookSecret, "evt_refund_"+sess, "charge.refunded",
+			map[string]any{"id": "ch_" + sess, "payment_intent": pi, "refunded": false,
+				"currency": "eur", "amount": 918, "amount_refunded": 200})
+		order := [][2]any{{pay, paySig}, {refund, refundSig}}
+		if refundFirst {
+			order[0], order[1] = order[1], order[0]
+		}
+		for _, e := range order {
+			if got := post(svc, e[0].([]byte), e[1].(string)); got != http.StatusOK {
+				t.Fatalf("refundFirst=%v: webhook = %d, want 200", refundFirst, got)
+			}
+		}
+
+		assertStatus(t, pool, sess, "completed")
+		var usd, paid int64
+		var currency string
+		if err := pool.QueryRow(ctx, `SELECT refunded_cents, refunded_paid_amount, paid_currency
+			FROM lxc_purchases WHERE stripe_session_id = $1`, sess).Scan(&usd, &paid, &currency); err != nil {
+			t.Fatalf("refundFirst=%v: the purchase row: %v", refundFirst, err)
+		}
+		if usd != 218 || paid != 200 || currency != "eur" {
+			t.Errorf("refundFirst=%v: purchase row refunded %d US cents / %d %s, want 218 US cents / 200 eur", refundFirst, usd, paid, currency)
+		}
+		if err := pool.QueryRow(ctx, `SELECT amount_refunded_cents, amount_refunded_paid, paid_currency
+			FROM billing_refunds WHERE stripe_payment_intent = $1`, pi).Scan(&usd, &paid, &currency); err != nil {
+			t.Fatalf("refundFirst=%v: the refund row: %v", refundFirst, err)
+		}
+		if usd != 218 || paid != 200 || currency != "eur" {
+			t.Errorf("refundFirst=%v: refund row %d US cents / %d %s, want 218 US cents / 200 eur", refundFirst, usd, paid, currency)
+		}
+	}
+}

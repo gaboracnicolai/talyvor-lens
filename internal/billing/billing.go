@@ -386,10 +386,21 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 	// hand"; if the money has already gone back, that instruction is not merely stale,
 	// following it would refund the customer twice. A refunded row says the operator
 	// has nothing to do, which is the truth.
-	refundedCents, fullyRefunded, err := s.refundFor(ctx, tx, pi)
+	refund, err := s.refundFor(ctx, tx, pi)
 	if err != nil {
 		s.fail(w, "refund lookup", event.ID, err)
 		return
+	}
+	refundedCents, fullyRefunded := refund.cents, refund.fully
+	// B23.6 — a refund of a foreign-currency charge that arrived first had no rate to convert at, and this
+	// session carries it: the US cents it bought over what the customer paid in that currency.
+	if refund.paidCurrency != "" && refund.paidCurrency != "usd" && strings.EqualFold(refund.paidCurrency, string(sess.Currency)) {
+		refundedCents = usdAtChargeRate(usdCents, sess.AmountTotal, refund.paidAmount, fullyRefunded)
+		if _, err := tx.Exec(ctx, `UPDATE billing_refunds SET amount_refunded_cents = GREATEST(amount_refunded_cents, $2)
+			WHERE stripe_payment_intent = $1`, pi, refundedCents); err != nil {
+			s.fail(w, "refund convert", event.ID, err)
+			return
+		}
 	}
 	if fullyRefunded {
 		status, creditAmt = "refunded", recomp // amount KEPT: it records what was bought
@@ -413,11 +424,11 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 	ct, err := tx.Exec(ctx, `
 		INSERT INTO lxc_purchases
 			(stripe_event_id, stripe_session_id, stripe_payment_intent, workspace_id, usd_cents, lxc_amount, status, livemode,
-			 refunded_cents, refunded_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $10 THEN NOW() ELSE NULL END)
+			 refunded_cents, refunded_at, paid_currency, refunded_paid_amount)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $10 THEN NOW() ELSE NULL END, $11, $12)
 		ON CONFLICT (stripe_event_id) DO NOTHING`,
 		event.ID, sess.ID, pi, wsID, usdCents, creditAmt, status, event.Livemode,
-		refundedCents, fullyRefunded)
+		refundedCents, fullyRefunded, strings.ToLower(string(sess.Currency)), refund.paidAmount)
 	if err != nil {
 		// A unique violation here is NOT on the ON CONFLICT target — it is the
 		// partial index idx_lxc_purchases_session_credited: this SESSION already
@@ -593,15 +604,38 @@ func (s *Service) handleRefund(w http.ResponseWriter, ctx context.Context, event
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// B23.6 — the charge's amounts are in the currency the customer PAID, which since B22.2 need not be USD.
+	// The US cents refunded are what that share of the charge bought: the purchase's usd_cents at the charge's
+	// own rate. Before the purchase is seen there is no rate, so a foreign refund records 0 US cents here and
+	// the credit path converts it when the purchase lands; the paid-currency amount is recorded either way.
+	paidCurrency := strings.ToLower(string(ch.Currency))
+	refundedUSD := ch.AmountRefunded
+	if paidCurrency != "" && paidCurrency != "usd" {
+		var usdCents int64
+		err := tx.QueryRow(ctx, `SELECT usd_cents FROM lxc_purchases WHERE stripe_payment_intent = $1
+			ORDER BY lxc_amount DESC LIMIT 1`, pi).Scan(&usdCents)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			refundedUSD = 0
+		case err != nil:
+			s.fail(w, "refund purchase read", event.ID, err)
+			return
+		default:
+			refundedUSD = usdAtChargeRate(usdCents, ch.Amount, ch.AmountRefunded, fully)
+		}
+	}
+
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO billing_refunds
-			(stripe_payment_intent, fully_refunded, amount_refunded_cents, first_event_id)
-		VALUES ($1, $2, $3, $4)
+			(stripe_payment_intent, fully_refunded, amount_refunded_cents, first_event_id, paid_currency, amount_refunded_paid)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (stripe_payment_intent) DO UPDATE SET
 			fully_refunded        = billing_refunds.fully_refunded OR EXCLUDED.fully_refunded,
 			amount_refunded_cents = GREATEST(billing_refunds.amount_refunded_cents, EXCLUDED.amount_refunded_cents),
+			paid_currency         = COALESCE(NULLIF(EXCLUDED.paid_currency, ''), billing_refunds.paid_currency),
+			amount_refunded_paid  = GREATEST(billing_refunds.amount_refunded_paid, EXCLUDED.amount_refunded_paid),
 			updated_at            = NOW()`,
-		pi, fully, ch.AmountRefunded, event.ID); err != nil {
+		pi, fully, refundedUSD, event.ID, paidCurrency, ch.AmountRefunded); err != nil {
 		s.fail(w, "refund record", event.ID, err)
 		return
 	}
@@ -613,10 +647,12 @@ func (s *Service) handleRefund(w http.ResponseWriter, ctx context.Context, event
 	// original idempotency.
 	if _, err := tx.Exec(ctx, `
 		UPDATE lxc_purchases
-		SET refunded_cents = GREATEST(refunded_cents, $2),
-		    status         = CASE WHEN $3 THEN 'refunded' ELSE status END,
-		    refunded_at    = CASE WHEN $3 AND refunded_at IS NULL THEN NOW() ELSE refunded_at END
-		WHERE stripe_payment_intent = $1`, pi, ch.AmountRefunded, fully); err != nil {
+		SET refunded_cents       = GREATEST(refunded_cents, $2),
+		    status               = CASE WHEN $3 THEN 'refunded' ELSE status END,
+		    refunded_at          = CASE WHEN $3 AND refunded_at IS NULL THEN NOW() ELSE refunded_at END,
+		    paid_currency        = CASE WHEN paid_currency = '' THEN $4 ELSE paid_currency END,
+		    refunded_paid_amount = GREATEST(refunded_paid_amount, $5)
+		WHERE stripe_payment_intent = $1`, pi, refundedUSD, fully, paidCurrency, ch.AmountRefunded); err != nil {
 		s.fail(w, "refund mark", event.ID, err)
 		return
 	}
@@ -718,20 +754,38 @@ func (s *Service) classify(ctx context.Context, currency string, usdCents int64,
 // CALLER'S TX so the read is serialized with the claim it informs. No row is the
 // ordinary case and is not an error. An empty payment intent (a session with no
 // charge yet) cannot correlate to a refund, so it short-circuits.
-func (s *Service) refundFor(ctx context.Context, tx pgx.Tx, paymentIntentID string) (cents int64, fully bool, err error) {
+func (s *Service) refundFor(ctx context.Context, tx pgx.Tx, paymentIntentID string) (r recordedRefund, err error) {
 	if paymentIntentID == "" {
-		return 0, false, nil
+		return r, nil
 	}
 	err = tx.QueryRow(ctx,
-		`SELECT amount_refunded_cents, fully_refunded FROM billing_refunds
-		 WHERE stripe_payment_intent = $1`, paymentIntentID).Scan(&cents, &fully)
+		`SELECT amount_refunded_cents, fully_refunded, paid_currency, amount_refunded_paid FROM billing_refunds
+		 WHERE stripe_payment_intent = $1`, paymentIntentID).Scan(&r.cents, &r.fully, &r.paidCurrency, &r.paidAmount)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
+		return recordedRefund{}, nil
 	}
-	if err != nil {
-		return 0, false, err
+	return r, err
+}
+
+// recordedRefund is a billing_refunds row: US cents, and the same refund in the currency the charge was paid in.
+type recordedRefund struct {
+	cents        int64
+	fully        bool
+	paidCurrency string
+	paidAmount   int64
+}
+
+// usdAtChargeRate is the US cents a refund of paidRefunded (in the charge's currency) gives back, at that
+// charge's own rate: the usdCents the purchase bought over the paidTotal it cost. A full refund is all of
+// them; a charge with no total cannot be converted and reads 0 rather than a guess. Rounded to the cent.
+func usdAtChargeRate(usdCents, paidTotal, paidRefunded int64, fully bool) int64 {
+	switch {
+	case fully || (paidTotal > 0 && paidRefunded >= paidTotal):
+		return usdCents
+	case paidTotal <= 0:
+		return 0
 	}
-	return cents, fully, nil
+	return (usdCents*paidRefunded + paidTotal/2) / paidTotal
 }
 
 func (s *Service) fail(w http.ResponseWriter, stage, eventID string, err error) {
