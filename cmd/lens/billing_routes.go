@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -50,5 +51,34 @@ func newBillingPurchasesHandler(svc purchaseLister) http.HandlerFunc {
 			return
 		}
 		writeJSONOK(w, http.StatusOK, rows)
+	}
+}
+
+// subscriptionCanceller is the cancel/resume surface (satisfied by *billing.Service). Package level for
+// the same #153 reason: the route is provable over HTTP against a real Service (B23.4).
+type subscriptionCanceller interface {
+	SetCancelAtPeriodEnd(ctx context.Context, workspaceID string, cancel bool) (*billing.SubscriptionStatus, error)
+}
+
+// newSubscriptionCancelHandler — POST /v1/workspaces/{wsID}/billing/subscription/cancel (cancel=true)
+// and …/resume (cancel=false). B1.5. Cancel is AT PERIOD END: the workspace keeps what it paid for and
+// flips to unsubscribed when Stripe's .deleted arrives. Neither route writes the subscriptions row — the
+// webhook that follows does.
+func newSubscriptionCancelHandler(svc subscriptionCanceller, cancel bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		wsID := chi.URLParam(req, "wsID")
+		st, err := svc.SetCancelAtPeriodEnd(req.Context(), wsID, cancel)
+		if err != nil {
+			status := http.StatusInternalServerError
+			switch {
+			case errors.Is(err, billing.ErrNoSubscriptionPrice):
+				status = http.StatusNotImplemented
+			case errors.Is(err, billing.ErrNoLiveSubscription):
+				status = http.StatusConflict
+			}
+			writeJSONErr(w, status, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, st)
 	}
 }
