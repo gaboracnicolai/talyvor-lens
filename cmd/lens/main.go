@@ -4008,6 +4008,8 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, map[string]bool{"opted_in": true})
 		})
 
+		econ.get(authed, "/v1/workspaces/{wsID}/pattern-mining/opt-in", patternMiningOptInStatus(patternMiner, cfg.PatternMiningEnabled))
+
 		econ.del(authed, "/v1/workspaces/{wsID}/pattern-mining/opt-in", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			if err := patternMiner.OptOut(req.Context(), wsID); err != nil {
