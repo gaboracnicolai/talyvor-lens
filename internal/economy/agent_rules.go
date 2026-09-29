@@ -56,6 +56,32 @@ type AgentRequest struct {
 	At          time.Time // zero means now
 	Payment     bool      // a payment to another agent (B19.3) or a card purchase (B19.12): no model or provider to judge
 	Listing     string    // the marketplace listing a use is of (B19.14)
+	Payee       Payee     // who a payment goes to, and Memo why: the approval it files names both (B23.5)
+	Memo        string
+}
+
+// Payee is who a payment goes to. Name is the one it had when the approval was filed; empty until then
+// (namePayee reads it) unless the caller already knows it.
+type Payee struct {
+	Kind string `json:"kind"` // agent | listing | company | merchant
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// namePayee reads p's name when the caller did not give one; a payee that no longer exists keeps none.
+func namePayee(ctx context.Context, q pgxDB, p Payee) (Payee, error) {
+	query := map[string]string{
+		"agent":   `SELECT name FROM agent_accounts WHERE id = $1`,
+		"listing": `SELECT title FROM market_listings WHERE id = $1`,
+		"company": `SELECT name FROM workspaces WHERE id = $1`,
+	}[p.Kind]
+	if p.Name != "" || p.ID == "" || query == "" {
+		return p, nil
+	}
+	if err := q.QueryRow(ctx, query, p.ID).Scan(&p.Name); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return p, fmt.Errorf("economy: payee name: %w", err)
+	}
+	return p, nil
 }
 
 type agentRequestKey struct{}
@@ -323,11 +349,17 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 // fileApproval records the approval a refused request needs — or finds the one already open for it — once
 // the refused transaction has rolled back, and returns the refusal naming it.
 func (s *DualTokenStore) fileApproval(ctx context.Context, need *ApprovalNeededError) error {
+	payee, err := namePayee(ctx, s.pool, need.req.Payee)
+	if err != nil {
+		return err
+	}
 	var filed string
 	if err := s.pool.QueryRow(ctx, `
-		INSERT INTO agent_approvals (id, workspace_id, agent_id, fingerprint, amount_ulxc, model) VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO agent_approvals (id, workspace_id, agent_id, fingerprint, amount_ulxc, model, payee_kind, payee_id, payee_name, memo)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (agent_id, fingerprint) WHERE status IN ('pending', 'approved') DO NOTHING RETURNING id`,
-		"apr_"+uuid.NewString(), need.workspaceID, need.agentID, need.req.Fingerprint, need.AmountULXC, need.req.Model).Scan(&filed); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		"apr_"+uuid.NewString(), need.workspaceID, need.agentID, need.req.Fingerprint, need.AmountULXC, need.req.Model,
+		payee.Kind, payee.ID, payee.Name, need.req.Memo).Scan(&filed); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("economy: file approval: %w", err)
 	}
 	if filed != "" {
@@ -358,16 +390,22 @@ type AgentApproval struct {
 	AmountULXC int64      `json:"amount_ulxc"`
 	Model      string     `json:"model"`
 	Reason     string     `json:"reason,omitempty"` // why the agent asked (B19.9)
+	Payee      *Payee     `json:"payee,omitempty"`  // who a payment goes to (B23.5); none for a request to a model
+	Memo       string     `json:"memo,omitempty"`   // the payment's memo
 	Status     string     `json:"status"`           // pending | approved | denied | used
 	CreatedAt  time.Time  `json:"created_at"`
 	DecidedAt  *time.Time `json:"decided_at,omitempty"`
 }
 
-const agentApprovalColumns = `id, agent_id, amount_ulxc, model, reason, status, created_at, decided_at`
+const agentApprovalColumns = `id, agent_id, amount_ulxc, model, reason, payee_kind, payee_id, payee_name, memo, status, created_at, decided_at`
 
 func scanAgentApproval(row pgx.Row) (AgentApproval, error) {
 	var a AgentApproval
-	err := row.Scan(&a.ID, &a.AgentID, &a.AmountULXC, &a.Model, &a.Reason, &a.Status, &a.CreatedAt, &a.DecidedAt)
+	var p Payee
+	err := row.Scan(&a.ID, &a.AgentID, &a.AmountULXC, &a.Model, &a.Reason, &p.Kind, &p.ID, &p.Name, &a.Memo, &a.Status, &a.CreatedAt, &a.DecidedAt)
+	if p.Kind != "" {
+		a.Payee = &p
+	}
 	return a, err
 }
 

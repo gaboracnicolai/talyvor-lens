@@ -146,7 +146,8 @@ func (s *DualTokenStore) SendCredits(ctx context.Context, workspaceID, fromAgent
 	}
 	t := AgentTransfer{FromWorkspaceID: workspaceID, FromAgentID: fromAgentID, ToWorkspaceID: to.WorkspaceID, ToAgentID: to.WalletID,
 		AmountULXC: amount, Memo: memo}
-	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(fromAgentID, to.WalletID, amount, memo)})
+	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(fromAgentID, to.WalletID, amount, memo),
+		Payee: Payee{Kind: "agent", ID: to.WalletID, Name: to.Name}, Memo: memo})
 	return s.runTransfer(ctx, t, true)
 }
 
@@ -354,7 +355,8 @@ func (s *DualTokenStore) AnswerMoneyRequest(ctx context.Context, workspaceID, re
 	status := "declined"
 	if accept {
 		status = "accepted"
-		ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(r.ToAgentID, r.FromAgentID, r.AmountULXC, r.Memo)})
+		ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(r.ToAgentID, r.FromAgentID, r.AmountULXC, r.Memo),
+			Payee: Payee{Kind: "agent", ID: r.FromAgentID}, Memo: r.Memo})
 		t, err := s.transferTx(ctx, tx, AgentTransfer{FromWorkspaceID: r.ToWorkspaceID, FromAgentID: r.ToAgentID,
 			ToWorkspaceID: r.FromWorkspaceID, ToAgentID: r.FromAgentID, AmountULXC: r.AmountULXC, Memo: r.Memo, RequestID: r.ID}, true)
 		if err != nil {

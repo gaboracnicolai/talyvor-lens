@@ -164,7 +164,8 @@ func (s *DualTokenStore) AuthorizeAgentCard(ctx context.Context, a CardAuthoriza
 func (s *DualTokenStore) approveCard(ctx context.Context, a CardAuthorization, d CardDecision) (CardDecision, error) {
 
 	fp := sha256.Sum256([]byte("card\x00" + a.CardID + "\x00" + a.MerchantID + "\x00" + a.Currency + "\x00" + strconv.FormatInt(a.AmountMinor, 10)))
-	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: hex.EncodeToString(fp[:]), At: a.At})
+	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: hex.EncodeToString(fp[:]), At: a.At,
+		Payee: Payee{Kind: "merchant", ID: a.MerchantID, Name: a.MerchantName}})
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return d, err

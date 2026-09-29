@@ -231,7 +231,8 @@ func (s *DualTokenStore) AnswerLoan(ctx context.Context, workspaceID, loanID str
 	if err := requireCompanies(ctx, tx, l.LenderWorkspaceID, l.BorrowerWorkspaceID); err != nil {
 		return Loan{}, err
 	}
-	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: "loan:" + l.ID})
+	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: "loan:" + l.ID,
+		Payee: Payee{Kind: "company", ID: l.BorrowerWorkspaceID}, Memo: l.Memo})
 	t, err := s.transferTx(ctx, tx, AgentTransfer{FromWorkspaceID: l.LenderWorkspaceID, FromAgentID: l.LenderAgentID,
 		ToWorkspaceID: l.BorrowerWorkspaceID, ToAgentID: l.BorrowerAgentID, AmountULXC: l.PrincipalULXC,
 		Memo: "loan " + l.ID + ": payout", LoanID: l.ID, capability: CapabilityCompanyLoans}, true)

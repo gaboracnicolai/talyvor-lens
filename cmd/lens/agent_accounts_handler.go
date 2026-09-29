@@ -32,7 +32,8 @@ import (
 //
 //	GET  /v1/workspaces/{wsID}/agents/{id}/rules              the agent's rules
 //	PUT  /v1/workspaces/{wsID}/agents/{id}/rules   {rules}    replace them (economy.AgentRules)
-//	GET  /v1/workspaces/{wsID}/agents/approvals                requests that needed approval, newest first
+//	GET  /v1/workspaces/{wsID}/agents/approvals                requests that needed approval, newest first;
+//	                                                           a payment's names its payee and memo (B23.5)
 //	POST /v1/workspaces/{wsID}/agents/approvals/{id}/approve   let that request through, once
 //	POST /v1/workspaces/{wsID}/agents/approvals/{id}/deny      refuse it
 //

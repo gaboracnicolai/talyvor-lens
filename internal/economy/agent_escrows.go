@@ -101,7 +101,8 @@ func (s *DualTokenStore) PayIntoEscrow(ctx context.Context, workspaceID, payerAg
 	}
 	e := Escrow{ID: "escrow_" + uuid.NewString(), PayerWorkspaceID: workspaceID, PayerAgentID: payerAgentID,
 		PayeeWorkspaceID: to.WorkspaceID, PayeeAgentID: to.WalletID, AmountULXC: amount, Memo: memo, ReleaseAt: releaseAt}
-	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(payerAgentID, to.WalletID, amount, "escrow\x00"+memo)})
+	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(payerAgentID, to.WalletID, amount, "escrow\x00"+memo),
+		Payee: Payee{Kind: "agent", ID: to.WalletID, Name: to.Name}, Memo: memo})
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Escrow{}, err

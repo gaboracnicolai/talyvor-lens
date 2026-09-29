@@ -75,7 +75,8 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 	if fromAgentID == toAgentID {
 		return pay, ErrSameAgent
 	}
-	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(fromAgentID, toAgentID, amount, memo)})
+	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Fingerprint: paymentFingerprint(fromAgentID, toAgentID, amount, memo),
+		Payee: Payee{Kind: "agent", ID: toAgentID}, Memo: memo})
 	if s.companyPayments != nil {
 		var payeeWorkspace string
 		err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM agent_accounts WHERE id = $1`, toAgentID).Scan(&payeeWorkspace)
