@@ -51,14 +51,20 @@ func mountCompanyLoanRoutes(r chi.Router, bank companyLoanBank) {
 			}
 		}
 		var in struct {
-			To string `json:"to"`
-			economy.LoanTerms
+			To            string `json:"to"`
+			PrincipalULXC int64  `json:"principal_ulxc"`
+			InterestBPS   int    `json:"interest_bps"`
+			Instalments   int    `json:"instalments"`
+			Every         string `json:"every"`
+			LateFeeULXC   int64  `json:"late_fee_ulxc"`
+			Memo          string `json:"memo"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || in.To == "" {
 			writeJSONErr(w, http.StatusBadRequest, `body must be {"to": "<wallet id or @handle>", "principal_ulxc": …, "interest_bps": …, "instalments": …, "every": "day|week|month", "late_fee_ulxc": …, "memo": "<optional>"}`)
 			return
 		}
-		l, err := bank.OfferLoan(req.Context(), chi.URLParam(req, "wsID"), agentID, in.To, in.LoanTerms)
+		l, err := bank.OfferLoan(req.Context(), chi.URLParam(req, "wsID"), agentID, in.To, economy.LoanTerms{PrincipalULXC: in.PrincipalULXC,
+			InterestBPS: in.InterestBPS, Instalments: in.Instalments, Every: in.Every, LateFeeULXC: in.LateFeeULXC, Memo: in.Memo})
 		if err != nil {
 			writeLoanErr(w, err)
 			return
