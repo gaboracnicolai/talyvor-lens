@@ -58,11 +58,15 @@ type Discovered struct {
 	ID          string    `json:"id"`
 	FirstSeenAt time.Time `json:"first_seen_at"`
 	NeedsPrice  bool      `json:"needs_price"` // always true: the point of the list
+	// B18.12 — the date the provider's list gives it (else the day it was first seen) and its tier.
+	ReleaseDate string `json:"release_date"`
+	Tier        string `json:"tier"`
 }
 
 type confirmedPrice struct {
-	provider, id string
-	in, out      float64
+	provider, id      string
+	in, out           float64
+	releaseDate, tier string
 }
 
 // ErrNotListed refuses a price for an id no provider lists: there is nothing to offer.
@@ -71,7 +75,7 @@ var ErrNotListed = errors.New("no provider lists this model")
 // ErrAlreadyPriced refuses a price for an id the catalog already prices from the seed or an override.
 var ErrAlreadyPriced = errors.New("the catalog already prices this model")
 
-func (s *Store) recordList(ctx context.Context, provider string, ids, unknown []string, now time.Time) error {
+func (s *Store) recordList(ctx context.Context, provider string, ids, unknown []string, released map[string]string, now time.Time) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -88,6 +92,21 @@ func (s *Store) recordList(ctx context.Context, provider string, ids, unknown []
 			INSERT INTO catalog_discovered_models (provider, model_id, first_seen_at)
 			SELECT $1, id, $3 FROM unnest($2::text[]) AS id
 			ON CONFLICT (provider, model_id) DO NOTHING`, provider, unknown, now); err != nil {
+			return err
+		}
+		// B18.12 — each gets a release date and a tier once: the provider's own date for it, else the day
+		// it was first seen (which also dates the ones recorded before these columns existed).
+		dates, tiers := make([]string, len(unknown)), make([]string, len(unknown))
+		for i, id := range unknown {
+			dates[i], tiers[i] = released[id], catalog.TierFor(id)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE catalog_discovered_models d
+			SET release_date = COALESCE(d.release_date, NULLIF(u.released, '')::date, (d.first_seen_at AT TIME ZONE 'UTC')::date),
+				tier = COALESCE(d.tier, u.tier)
+			FROM unnest($2::text[], $3::text[], $4::text[]) AS u(id, released, tier)
+			WHERE d.provider = $1 AND d.model_id = u.id AND (d.release_date IS NULL OR d.tier IS NULL)`,
+			provider, unknown, dates, tiers); err != nil {
 			return err
 		}
 	}
@@ -118,8 +137,9 @@ func (s *Store) lists(ctx context.Context) (map[string]map[string]bool, error) {
 
 func (s *Store) prices(ctx context.Context) ([]confirmedPrice, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT provider, model_id, input_per_1m, output_per_1m FROM catalog_discovered_models
-		WHERE input_per_1m IS NOT NULL`)
+		SELECT provider, model_id, input_per_1m, output_per_1m,
+			COALESCE(to_char(release_date, 'YYYY-MM-DD'), ''), COALESCE(tier, '')
+		FROM catalog_discovered_models WHERE input_per_1m IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +147,7 @@ func (s *Store) prices(ctx context.Context) ([]confirmedPrice, error) {
 	var out []confirmedPrice
 	for rows.Next() {
 		var p confirmedPrice
-		if err := rows.Scan(&p.provider, &p.id, &p.in, &p.out); err != nil {
+		if err := rows.Scan(&p.provider, &p.id, &p.in, &p.out, &p.releaseDate, &p.tier); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -137,7 +157,7 @@ func (s *Store) prices(ctx context.Context) ([]confirmedPrice, error) {
 
 // recordAndApply is the poll's half: record each provider's list, then apply. A failure is logged
 // and the poll carries on — discovery must never stop the drift alert it rides on.
-func (w *Watcher) recordAndApply(ctx context.Context, lists map[string][]string) {
+func (w *Watcher) recordAndApply(ctx context.Context, lists map[string][]string, released map[string]string) {
 	if w.store == nil {
 		return
 	}
@@ -149,7 +169,7 @@ func (w *Watcher) recordAndApply(ctx context.Context, lists map[string][]string)
 				unknown = append(unknown, id)
 			}
 		}
-		if err := w.store.recordList(ctx, provider, ids, unknown, now); err != nil {
+		if err := w.store.recordList(ctx, provider, ids, unknown, released, now); err != nil {
 			slog.Warn("modelwatch: could not record a provider's model list", "provider", provider, "error", err.Error())
 		}
 	}
@@ -180,7 +200,8 @@ func (w *Watcher) Apply(ctx context.Context) error {
 		if _, known := catalog.Get(p.id); known && !w.applied[p.id] {
 			continue
 		}
-		catalog.Override(catalog.Model{ID: p.id, Provider: p.provider, DisplayName: p.id, InputPer1M: p.in, OutputPer1M: p.out})
+		catalog.Override(catalog.Model{ID: p.id, Provider: p.provider, DisplayName: p.id, InputPer1M: p.in, OutputPer1M: p.out,
+			ReleaseDate: p.releaseDate, Tier: p.tier})
 		if !w.applied[p.id] {
 			slog.Info("modelwatch: a confirmed price put a discovered model in the catalog", "provider", p.provider, "model", p.id)
 		}
@@ -250,7 +271,9 @@ func (w *Watcher) Discovered(ctx context.Context) ([]Discovered, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := w.store.pool.Query(ctx, `SELECT provider, model_id, first_seen_at FROM catalog_discovered_models WHERE input_per_1m IS NULL`)
+	rows, err := w.store.pool.Query(ctx, `SELECT provider, model_id, first_seen_at,
+		COALESCE(to_char(release_date, 'YYYY-MM-DD'), ''), COALESCE(tier, '')
+		FROM catalog_discovered_models WHERE input_per_1m IS NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +281,7 @@ func (w *Watcher) Discovered(ctx context.Context) ([]Discovered, error) {
 	out := []Discovered{}
 	for rows.Next() {
 		d := Discovered{NeedsPrice: true}
-		if err := rows.Scan(&d.Provider, &d.ID, &d.FirstSeenAt); err != nil {
+		if err := rows.Scan(&d.Provider, &d.ID, &d.FirstSeenAt, &d.ReleaseDate, &d.Tier); err != nil {
 			return nil, err
 		}
 		if !lists[d.Provider][d.ID] {

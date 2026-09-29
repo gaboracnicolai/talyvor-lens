@@ -66,9 +66,10 @@ func discoveryDB(t *testing.T) *pgxpool.Pool {
 
 // listServer serves a model list the test can change between polls, as a provider's changes overnight.
 type listServer struct {
-	mu  sync.Mutex
-	ids []string
-	srv *httptest.Server
+	mu      sync.Mutex
+	ids     []string
+	created map[string]string // id → the created_at the provider gives it, if any
+	srv     *httptest.Server
 }
 
 func newListServer(t *testing.T, ids []string) *listServer {
@@ -79,7 +80,11 @@ func newListServer(t *testing.T, ids []string) *listServer {
 		defer l.mu.Unlock()
 		data := make([]map[string]string, 0, len(l.ids))
 		for _, id := range l.ids {
-			data = append(data, map[string]string{"id": id})
+			m := map[string]string{"id": id}
+			if at, ok := l.created[id]; ok {
+				m["created_at"] = at
+			}
+			data = append(data, m)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
@@ -193,5 +198,35 @@ func TestDiscovery_APriceNeedsItsSourceAndNeverOverridesTheSeed(t *testing.T) {
 	}
 	if now, _ := catalog.Get(seeded); now.InputPer1M != was.InputPer1M || now.OutputPer1M != was.OutputPer1M {
 		t.Errorf("seeded %s repriced to %v/%v", seeded, now.InputPer1M, now.OutputPer1M)
+	}
+}
+
+// B18.12 — a discovered model carries a release date and a tier: the date the provider's list gives
+// it, else the day it was first seen, and the tier its id names; both reach the catalog with its price.
+func TestDiscovery_ANewModelCarriesItsReleaseDateAndTierIntoTheCatalog(t *testing.T) {
+	const dated, undated = "claude-haiku-b1812-9", "claude-b1812-undated-9"
+	list := newListServer(t, append(anthropicCatalogIDs(""), dated, undated))
+	list.created = map[string]string{dated: "2026-09-20T00:00:00Z"}
+	w := discoveryWatcher(t, list.srv.URL)
+	ctx := context.Background()
+	w.checkAndAlert(ctx)
+
+	today := time.Now().UTC().Format(time.DateOnly)
+	want := map[string][2]string{dated: {"2026-09-20", catalog.TierFast}, undated: {today, catalog.TierBalanced}}
+	found, err := w.Discovered(ctx)
+	if err != nil || len(found) != 2 {
+		t.Fatalf("discovered = %+v, %v; want %s and %s", found, err, dated, undated)
+	}
+	for _, d := range found {
+		if got := [2]string{d.ReleaseDate, d.Tier}; got != want[d.ID] {
+			t.Errorf("%s discovered with release date and tier %v, want %v", d.ID, got, want[d.ID])
+		}
+	}
+	m, err := w.ConfirmPrice(ctx, dated, 1, 5, "https://platform.claude.com/docs/en/about-claude/pricing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ReleaseDate != "2026-09-20" || m.Tier != catalog.TierFast {
+		t.Errorf("once priced, the catalog has %s released %q, tier %q; want 2026-09-20, fast", dated, m.ReleaseDate, m.Tier)
 	}
 }

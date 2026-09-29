@@ -253,24 +253,26 @@ func (w *Watcher) StartLoop(ctx context.Context, interval time.Duration) {
 // Check polls every configured provider and returns the models the catalog cannot price exactly.
 // Errors are per-provider and non-fatal: one unreachable provider must not suppress another's findings.
 func (w *Watcher) Check(ctx context.Context) ([]Finding, []error) {
-	lists, errs := w.poll(ctx)
+	lists, _, errs := w.poll(ctx)
 	return findingsIn(lists), errs
 }
 
 // poll lists every provider's models. A provider whose list failed is absent from the map (and its
-// error returned), so nothing downstream mistakes an unreachable provider for an empty one.
-func (w *Watcher) poll(ctx context.Context) (map[string][]string, []error) {
+// error returned), so nothing downstream mistakes an unreachable provider for an empty one. released
+// is the date (YYYY-MM-DD) each provider's list gives a model, where it gives one (B18.12).
+func (w *Watcher) poll(ctx context.Context) (map[string][]string, map[string]string, []error) {
 	lists := map[string][]string{}
+	released := map[string]string{}
 	var errs []error
 	for _, p := range w.providers {
-		ids, err := w.listModels(ctx, p)
+		ids, err := w.listModels(ctx, p, released)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", p.name, err))
 			continue
 		}
 		lists[p.name] = ids
 	}
-	return lists, errs
+	return lists, released, errs
 }
 
 // findingsIn is every listed id the money path cannot price exactly, sorted.
@@ -300,11 +302,11 @@ func findingsIn(lists map[string][]string) []Finding {
 }
 
 func (w *Watcher) checkAndAlert(ctx context.Context) {
-	lists, errs := w.poll(ctx)
+	lists, released, errs := w.poll(ctx)
 	// B10.5 — record what each provider lists, then bring the catalog in line with it (confirmed
 	// prices in, unlisted models retired) BEFORE deciding what is unpriced: a model priced since the
 	// last poll must not be reported again.
-	w.recordAndApply(ctx, lists)
+	w.recordAndApply(ctx, lists, released)
 	findings := findingsIn(lists)
 	for _, err := range errs {
 		// A provider we cannot reach is a REAL failure of this check, not a silent skip: it means the
@@ -377,7 +379,7 @@ func renderAlert(fresh []Finding) string {
 // listModels calls one provider's model-list endpoint. Both Anthropic and OpenAI return
 // {"data":[{"id":...}]}, so one decoder covers both; a provider that does not is simply not polled
 // rather than special-cased on a guess about its shape.
-func (w *Watcher) listModels(ctx context.Context, p provider) ([]string, error) {
+func (w *Watcher) listModels(ctx context.Context, p provider, released map[string]string) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url, nil)
 	if err != nil {
 		return nil, err
@@ -393,7 +395,9 @@ func (w *Watcher) listModels(ctx context.Context, p provider) ([]string, error) 
 	}
 	var payload struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			Created   int64  `json:"created"`    // OpenAI: unix seconds
+			CreatedAt string `json:"created_at"` // Anthropic: RFC 3339
 		} `json:"data"`
 		// HasMore is Anthropic's truncation flag. OpenAI's response omits it, where absent decodes to
 		// false and is correct: that list is not paginated.
@@ -406,6 +410,11 @@ func (w *Watcher) listModels(ctx context.Context, p provider) ([]string, error) 
 	for _, m := range payload.Data {
 		if m.ID != "" {
 			ids = append(ids, m.ID)
+			if t, err := time.Parse(time.RFC3339, m.CreatedAt); err == nil {
+				released[m.ID] = t.UTC().Format(time.DateOnly)
+			} else if m.Created > 0 {
+				released[m.ID] = time.Unix(m.Created, 0).UTC().Format(time.DateOnly)
+			}
 		}
 	}
 	if payload.HasMore {
