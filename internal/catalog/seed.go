@@ -136,15 +136,12 @@ func seedModels() []Model {
 		// TTL, so the existing convention prices all writes at the 5m rate — see withCacheRates.
 		{ID: "claude-opus-5", Provider: "anthropic", DisplayName: "Claude Opus 5", InputPer1M: 5.00, OutputPer1M: 25.00, CachedInputPer1M: 0.50, CacheWritePer1M: 6.25, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 8192, Aliases: []string{"claude-opus-5[1m]"}},
 		{ID: "claude-opus-4-7", Provider: "anthropic", DisplayName: "Claude Opus 4.7", InputPer1M: 5.00, OutputPer1M: 25.00, CachedInputPer1M: 0.50, CacheWritePer1M: 6.25, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 8192},
-		// ⚠⚠ SONNET 5 IS ON INTRODUCTORY PRICING AND IT ENDS. The published table lists TWO rows:
-		//   "Claude Sonnet 5 through August 31, 2026"      → $2 in / $10 out  (cache read $0.20, write $2.50)
-		//   "Claude Sonnet 5 starting September 1, 2026"    → $3 in / $15 out  (cache read $0.30, write $3.75)
-		// The entry below is the rate in force TODAY. ON 2026-09-01 IT MUST BECOME 3.00 / 15.00 / 0.30 /
-		// 3.75. Entering the higher standard rate now would over-bill every Sonnet 5 request for five
-		// weeks, which is the one direction this repo does not accept; entering the introductory rate
-		// means Lens UNDER-bills after 1 September until someone edits this line. That is the safe
-		// direction, and it is a DATED action item — nothing in the code can detect a price change on an
-		// id that already exists (see model_detection.go's stated limits).
+		// Sonnet 5 is $2 in / $10 out (cache read $0.20, 5m write $2.50), and that is its STANDARD price.
+		// It launched as introductory pricing "through August 31, 2026" with a rise to $3 / $15 scheduled for
+		// 1 September; the official table (fetched 2026-09-29) now says the $2 / $10 is standard and "the
+		// previously scheduled increase … will not occur". Do NOT raise it: 3.00 / 15.00 would over-bill
+		// every Sonnet 5 request by 1.5x. Nothing in the code can detect a price change on an id that
+		// already exists (see model_detection.go's stated limits), so re-check the table if it changes.
 		{ID: "claude-sonnet-5", Provider: "anthropic", DisplayName: "Claude Sonnet 5", InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 8192, Aliases: []string{"claude-sonnet-5[1m]"}},
 		{ID: "claude-fable-5", Provider: "anthropic", DisplayName: "Claude Fable 5", InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, CacheWritePer1M: 12.50, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 8192},
 		// B15.4 — Opus 5.5 and Fable 5.1, transcribed from https://platform.claude.com/docs/en/about-claude/pricing
