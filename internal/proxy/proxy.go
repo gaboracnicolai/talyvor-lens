@@ -947,9 +947,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// too, or the streaming settle can't find it and the hold is stranded (swept + refunded → the
 			// streaming request bills nothing). Values only; r's cancellation is unchanged.
 			r = r.WithContext(ctx)
-		} else if err := p.agentAllocate(ctx, agentKeyID, wsID, model, prompt, requestID); err != nil {
-			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), writeAgentRefusal(w, err)).Inc()
-			return
+		} else {
+			actx, err := p.agentAllocate(ctx, agentKeyID, wsID, model, prompt, requestID)
+			if err != nil {
+				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), writeAgentRefusal(w, err)).Inc()
+				return
+			}
+			// B23.2: the debit is this request's charge; the mark rides ctx and r (for the streamed seam, as
+			// the reservation handle does above) so the post-serve shadow debit does not charge it again.
+			ctx = actx
+			r = r.WithContext(ctx)
 		}
 	}
 
@@ -1829,6 +1836,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				servedPriceBasis = prov.String()
 			}
 		}
+		// Billing redesign: SETTLE the reservation to the DELIVERED cost (served model, real tokens) — the
+		// customer pays what routing/batch/compression actually produced. shadow and settle are mutually
+		// exclusive by the reservation flag, so no config ever charges twice.
+		// settledChargeUSD = what the consumer ACTUALLY paid for this request. settleReservation RETURNS
+		// the settled amount, which it CLAMPS to the hold (never bills above it) — so this is the real
+		// charge, not the (possibly larger) delivered servedCostUSD. It funds the distill royalty below.
+		// 0 when reservations are off (no settle) ⇒ the distill handoff writes a row the sweeper skips.
+		// B23.2: OUTSIDE the logging gate. The settle is the agent's bill, not a log: inside it, a
+		// LoggingNone workspace's hold was never settled and the stranded sweeper refunded it in full.
+		settledChargeUSD := 0.0
+		if p.reservationActive() {
+			settledChargeUSD = p.settleReservationBasis(ctx, servedCostUSD, upstreamModel, servedPriceBasis)
+		}
 		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
 			// spendPrompt is "" in metadata mode (no prompt text persisted)
 			// and the redacted form in full mode when PII was detected.
@@ -1856,23 +1876,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// workspace gets neither; symmetric with the streaming seam, which
 			// returns early on LoggingNone). Void, post-serve, same ctx — cannot
 			// affect the response. Inert unless the flag is on AND a sink wired.
-			// Billing redesign: SETTLE the reservation to the DELIVERED cost (served model, real tokens) — the
-			// customer pays what routing/batch/compression actually produced. shadow and settle are mutually
-			// exclusive by the reservation flag, so no config ever charges twice.
-			// settledChargeUSD = what the consumer ACTUALLY paid for this request. settleReservation RETURNS
-			// the settled amount, which it CLAMPS to the hold (never bills above it) — so this is the real
-			// charge, not the (possibly larger) delivered servedCostUSD. It funds the distill royalty below.
-			// 0 when reservations are off (no settle) ⇒ the distill handoff writes a row the sweeper skips.
-			settledChargeUSD := 0.0
 			// B1.6: a subscriber's non-agent request draws the plan allowance on EITHER arm below —
 			// the session-key chat has no reservation, so the settle alone would charge it nothing.
 			// B9.8: a chat request is charged by chargeChatUsage (allowance, then prepaid) and nothing else.
 			subscriber := p.chargeChatUsage(ctx, wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
-			if p.reservationActive() {
-				// Keep BOTH: #355's served-model arg (stamps the settle/charge row) AND our captured return
-				// (the clamped USD actually paid, which funds the distill royalty via recordDistillServes below).
-				settledChargeUSD = p.settleReservationBasis(ctx, servedCostUSD, upstreamModel, servedPriceBasis)
-			} else if !subscriber {
+			if !p.reservationActive() && !subscriber {
 				p.shadowSpendLXC(ctx, wsID, servedCostUSD)
 			}
 			// Routing-pattern capture (Phase-3) — post-serve, VOID, structurally
@@ -2332,8 +2340,16 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 		p.budgetService.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, servedCostUSD)
 	}
 	p.limits.recordSpend(ctx, sc.wsID, servedCostUSD) // B18.3: as on the buffered seam
+	// Reservation SETTLE (the customer's bill). Fires on storeCtx = WithoutCancel(r.Context()) (stream.go),
+	// which carries the reservation handle, so the streamed settle happens in-band instead of stranding the
+	// hold for the sweeper to refund. B23.2: before the logging gate, as on the buffered seam — a
+	// LoggingNone workspace's agent is billed too.
+	settled := 0.0
+	if p.reservationActive() {
+		settled = p.settleReservation(ctx, servedCostUSD, sc.model)
+	}
 	if p.alertManager == nil || sc.logging == workspace.LoggingNone {
-		return 0
+		return settled
 	}
 	source := "estimated"
 	if !estimated {
@@ -2354,17 +2370,13 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", recErr.Error()))
 	}
 	p.recordVisionOCRSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.sessionID, sc.requestID, sc.visionOCR)
-	// Reservation SETTLE (the customer's bill) or the shadow debit, mutually exclusive by the flag. Fires
-	// on storeCtx = WithoutCancel(r.Context()) (stream.go), which now carries the reservation handle, so the
-	// streamed settle happens in-band instead of stranding the hold for the sweeper to refund.
+	// The shadow debit, mutually exclusive with the settle above by the flag.
 	// B1.6: the same allowance draw as the buffered seam (see there).
 	subscriber := p.chargeChatUsage(ctx, sc.wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
-	if p.reservationActive() {
-		return p.settleReservation(ctx, servedCostUSD, sc.model)
-	} else if !subscriber {
+	if !p.reservationActive() && !subscriber {
 		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
 	}
-	return 0
+	return settled
 }
 
 // streamServedCost is the ONE cost basis for a streamed response — the reservation SETTLE (the customer's

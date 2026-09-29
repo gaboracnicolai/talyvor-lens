@@ -60,6 +60,10 @@ func (p *Proxy) shadowSpendLXC(ctx context.Context, workspaceID string, costUSD 
 	if costUSD <= 0 {
 		return
 	}
+	// B23.2: an agent's request already paid its pre-serve debit (reservations off) — that is its charge.
+	if agentDebited(ctx) {
+		return
+	}
 	// cost_usd → µLXC at the fixed peg ($0.10/LXC). SEC-2: µLXC is an integer
 	// smallest-unit (1e-6 LXC, the old roundTo(_,6) precision). This is a CHARGE
 	// (billing debit) for the served call, so it rounds UP (ceil) — the shadow
