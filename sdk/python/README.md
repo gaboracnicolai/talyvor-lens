@@ -83,6 +83,30 @@ except PaymentRefused as refusal:
 A refusal by Lens is `PaymentRefused`; Lens not answering (network, a
 rejected key) is its parent, `AgentWalletError`.
 
+### Everything else the wallet does
+
+The same key reaches every capability of the wallet (Lens's `wallet_*` MCP tools). Each is
+judged by the agent's rules and by its capability's class: a refusal says which.
+
+```python
+wallet.send("@seller", 1_000_000, memo="hosting")          # to any agent on Talyvor
+wallet.request("@buyer", 2_000_000)                         # it accepts or declines
+wallet.answer_request("mreq_…", accept=True)                # pay a request made of the agent
+wallet.refund("xfer_…")                                     # give a received transfer back
+wallet.credit_line()                                        # the company's line: limit, used, available
+wallet.offer_loan("@other-co", 30_000_000, 3, "week", interest_bps=500)
+wallet.answer_loan("loan_…", accept=True)                   # take a loan offered to the agent
+wallet.escrow_pay("@seller", 5_000_000, "2026-10-06T12:00:00Z", memo="logo")
+wallet.escrow_confirm("escrow_…")                           # or escrow_dispute(id, reason)
+pot = wallet.pot_create("rainy day", "reserve", locked_until="2026-12-01T00:00:00Z")
+wallet.pot_move(pot["id"], 1_000_000, "in")
+pf = wallet.portfolio_open("fx", 1_000_000_000)             # simulated USD: no money moves
+wallet.order(pf["id"], "EUR", "buy", "limit", 100_000_000, limit_price_usd="1.15")
+```
+
+Each has a reader too: `requests()`, `loans()`, `escrows()`, `pots()`, `quotes()` and
+`portfolios()`.
+
 ## Headers set by the SDK
 
 | Header | Source | Purpose |
