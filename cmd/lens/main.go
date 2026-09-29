@@ -2165,6 +2165,14 @@ func run() error {
 	// Reads the PRIMARY pool (non-money read; keeps the U8/U9 ExactlySix replica-reader invariant unchanged).
 	r.Handle("/v1/admin/usage/summary", requireAdminOrOperatorRead(authManager,
 		newAdminUsageSummaryHandler(opsusage.NewReader(pool), time.Now)))
+	// B18.17 — the operator screen's per-workspace columns: spend, LENS held, last activity. Same pool and gate.
+	opsReader := opsusage.NewReader(pool)
+	r.Handle("/v1/admin/workspaces/spend", requireAdminOrOperatorRead(authManager,
+		newOperatorWorkspaceReadHandler(opsReader.SpendByWorkspace)))
+	r.Handle("/v1/admin/workspaces/held", requireAdminOrOperatorRead(authManager,
+		newOperatorWorkspaceReadHandler(opsReader.HeldByWorkspace)))
+	r.Handle("/v1/admin/workspaces/last-activity", requireAdminOrOperatorRead(authManager,
+		newOperatorWorkspaceReadHandler(opsReader.ActivityByWorkspace)))
 
 	// H5.β — settle a provenance bond (slash-or-release; deadline-guarded + CAS-safe + idempotent).
 	// requireAdmin as defense-in-depth; registered ONLY when the flag is on.
