@@ -73,6 +73,12 @@ func harness(t *testing.T) *pgxpool.Pool {
 			CONSTRAINT chk_token_locked_balance_gte_zero CHECK (locked_balance >= 0),
 			CONSTRAINT chk_token_held_balance_gte_zero CHECK (held_balance >= 0),
 			CONSTRAINT chk_token_lifetime_earned_gte_zero CHECK (lifetime_earned >= 0))`,
+		// The two claim tables helpedSQL reads (0043 + 0045–0047, 0062, 0082's BIGINT minted_amount).
+		// Created here rather than found: this package's schema is its own (schema_isolation_test.go).
+		`DROP TABLE IF EXISTS pool_royalty_mints`,
+		`DROP TABLE IF EXISTS distill_royalty_mints`,
+		`CREATE TABLE pool_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, requester_workspace_id TEXT NOT NULL, contributor_workspace_id TEXT NOT NULL, layer TEXT NOT NULL, entry_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', similarity DOUBLE PRECISION NOT NULL DEFAULT 0, avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount BIGINT NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '', prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'final', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE distill_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, contributor_workspace_id TEXT NOT NULL, requester_workspace_id TEXT NOT NULL, content_hash TEXT NOT NULL, avoided_cogs_usd DOUBLE PRECISION NOT NULL, minted_amount BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'held', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	} {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			t.Fatalf("fixture DDL failed (%.60s…): %v", ddl, err)

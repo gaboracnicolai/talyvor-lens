@@ -20,7 +20,7 @@ func TestMain(m *testing.M) {
 		ctx := context.Background()
 		if admin, err := pgxpool.New(ctx, base); err == nil {
 			if tx, terr := admin.Begin(ctx); terr == nil {
-				_, _ = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(727295)")
+				_, _ = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(727274)")
 				_, _ = tx.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector")
 				_, _ = tx.Exec(ctx, "DROP SCHEMA IF EXISTS lens_it_modelcapability CASCADE")
 				_, _ = tx.Exec(ctx, "CREATE SCHEMA lens_it_modelcapability")
