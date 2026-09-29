@@ -320,6 +320,7 @@ func TestDeleteOrderEndsWithTheMapping(t *testing.T) {
 // exempted it BY NAME, so it stayed classified. The category was known and only one member of it
 // was written down. workspace_configs is the member nobody wrote down.
 var w626PopulationDelta = []string{
+	"agent_loans",                             // B22.5: keyed lender_/borrower_workspace_id, classified in the manifest
 	"agent_money_requests", "agent_transfers", // B22.3: keyed from_/to_workspace_id, classified in the manifest
 	"annotation_tasks", "benchmark_eval_items", "confidential_compute_mints",
 	"distill_royalty_basis", "distill_royalty_mints", "distill_serve_attribution",
