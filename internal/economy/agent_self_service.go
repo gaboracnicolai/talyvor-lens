@@ -35,13 +35,18 @@ func (s *DualTokenStore) RequestPaymentApproval(ctx context.Context, workspaceID
 		return AgentApproval{}, ErrApprovalNotNeeded
 	}
 	fp := paymentFingerprint(agentID, toAgentID, amount, memo)
+	payee, err := namePayee(ctx, s.pool, Payee{Kind: "agent", ID: toAgentID})
+	if err != nil {
+		return AgentApproval{}, err
+	}
 	var filed string
 	var inserted bool
 	if err := s.pool.QueryRow(ctx, `
-		INSERT INTO agent_approvals (id, workspace_id, agent_id, fingerprint, amount_ulxc, reason) VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO agent_approvals (id, workspace_id, agent_id, fingerprint, amount_ulxc, reason, payee_kind, payee_id, payee_name, memo)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (agent_id, fingerprint) WHERE status IN ('pending', 'approved') DO UPDATE SET reason = EXCLUDED.reason
 		RETURNING id, xmax = 0`,
-		"apr_"+uuid.NewString(), workspaceID, agentID, fp, amount, reason).Scan(&filed, &inserted); err != nil {
+		"apr_"+uuid.NewString(), workspaceID, agentID, fp, amount, reason, payee.Kind, payee.ID, payee.Name, memo).Scan(&filed, &inserted); err != nil {
 		return AgentApproval{}, fmt.Errorf("economy: request approval: %w", err)
 	}
 	if inserted {

@@ -247,7 +247,7 @@ func (s *DualTokenStore) DeletePushSubscription(ctx context.Context, workspaceID
 }
 
 // notifyApproval sends, in the background, one push per subscription of workspaceID for a newly filed
-// approval: which agent, how much, and why.
+// approval: which agent, how much, to whom and why.
 func (s *DualTokenStore) notifyApproval(workspaceID, approvalID string) {
 	pusher := s.approvalPusher
 	if pusher == nil {
@@ -256,11 +256,11 @@ func (s *DualTokenStore) notifyApproval(workspaceID, approvalID string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		var agentID, agentName, model, reason string
+		var agentID, agentName, model, reason, payeeName, memo string
 		var amount int64
-		if err := s.pool.QueryRow(ctx, `SELECT a.agent_id, g.name, a.amount_ulxc, a.model, a.reason
+		if err := s.pool.QueryRow(ctx, `SELECT a.agent_id, g.name, a.amount_ulxc, a.model, a.reason, a.payee_name, a.memo
 			FROM agent_approvals a JOIN agent_accounts g ON g.id = a.agent_id WHERE a.id = $1`, approvalID).
-			Scan(&agentID, &agentName, &amount, &model, &reason); err != nil {
+			Scan(&agentID, &agentName, &amount, &model, &reason, &payeeName, &memo); err != nil {
 			slog.Warn("agents: approval push: read approval", slog.String("err", err.Error()))
 			return
 		}
@@ -268,7 +268,8 @@ func (s *DualTokenStore) notifyApproval(workspaceID, approvalID string) {
 			reason = "a request to " + model
 		}
 		payload, _ := json.Marshal(map[string]any{"type": "agent_approval", "approval_id": approvalID, "workspace_id": workspaceID,
-			"agent_id": agentID, "agent_name": agentName, "amount_ulxc": amount, "amount_lxc": lxcString(amount), "reason": reason})
+			"agent_id": agentID, "agent_name": agentName, "amount_ulxc": amount, "amount_lxc": lxcString(amount), "reason": reason,
+			"payee_name": payeeName, "memo": memo})
 		rows, err := s.pool.Query(ctx, `SELECT endpoint, p256dh, auth FROM workspace_push_subscriptions WHERE workspace_id = $1`, workspaceID)
 		if err != nil {
 			slog.Warn("agents: approval push: subscriptions", slog.String("err", err.Error()))

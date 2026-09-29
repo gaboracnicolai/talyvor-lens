@@ -551,3 +551,66 @@ func TestAgentRoutes_AStatementForAnyPeriodReDerivesTheAuditLog(t *testing.T) {
 		}
 	}
 }
+
+// B23.5 — a payment above the payer's approval amount files an approval that names who is being paid and
+// why: on the row, and in the approvals the owner reads.
+func TestAgentRoutes_AnApprovalSaysWhoIsBeingPaidAndWhy(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const ws = "ws-agents"
+	if _, err := pool.Exec(ctx, `INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1, 20000000, 20000000)`, ws); err != nil {
+		t.Fatal(err)
+	}
+	store := economy.NewDualTokenStore(nil, pool, nil)
+	r := chi.NewRouter()
+	mountAgentAccountRoutes(r, store, tenant.NewStore(pool))
+	owner := &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "owner", Scopes: []string{auth.ScopeKeys}}
+	call := func(method, path, body string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(auth.WithAuthContext(req.Context(), owner))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+	buyer, err := store.CreateAgent(ctx, ws, "buyer", "user-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seller, err := store.CreateAgent(ctx, ws, "Acme translator", "user-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FundAgent(ctx, ws, buyer.ID, 10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetAgentRules(ctx, ws, buyer.ID, economy.AgentRules{ApprovalAboveULXC: 1_000_000}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := call(http.MethodPost, "/v1/workspaces/"+ws+"/agents/"+buyer.ID+"/pay",
+		`{"to_agent_id":"`+seller.ID+`","amount_ulxc":3000000,"memo":"invoice 18"}`)
+	if code != http.StatusForbidden || !strings.Contains(body, "apr_") {
+		t.Fatalf("a 3 LXC payment above the 1 LXC approval amount = %d %s, want 403 naming the approval filed", code, body)
+	}
+	var row economy.Payee
+	var memo string
+	if err := pool.QueryRow(ctx, `SELECT payee_kind, payee_id, payee_name, memo FROM agent_approvals
+		WHERE agent_id = $1 AND status = 'pending' AND amount_ulxc = 3000000`, buyer.ID).Scan(&row.Kind, &row.ID, &row.Name, &memo); err != nil {
+		t.Fatalf("the approval's row: %v", err)
+	}
+	if want := (economy.Payee{Kind: "agent", ID: seller.ID, Name: "Acme translator"}); row != want || memo != "invoice 18" {
+		t.Errorf("the approval's row names %+v, memo %q — want %+v, memo %q", row, memo, want, "invoice 18")
+	}
+
+	code, body = call(http.MethodGet, "/v1/workspaces/"+ws+"/agents/approvals", "")
+	var got struct {
+		Approvals []economy.AgentApproval `json:"approvals"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); code != http.StatusOK || err != nil || len(got.Approvals) != 1 {
+		t.Fatalf("GET approvals = %d %s", code, body)
+	}
+	if a := got.Approvals[0]; a.Payee == nil || *a.Payee != row || a.Memo != memo || a.AmountULXC != 3_000_000 {
+		t.Errorf("GET approvals returned payee %+v, memo %q — the row says %+v, memo %q", a.Payee, a.Memo, row, memo)
+	}
+}

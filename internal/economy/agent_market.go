@@ -22,7 +22,8 @@ import (
 // refusal that needs an approval files it.
 func (s *DualTokenStore) JudgeAgentPurchase(ctx context.Context, workspaceID, agentID, listingID string, amount int64, what string, record func(pgx.Tx) error) error {
 	fp := sha256.Sum256([]byte("purchase\x00" + agentID + "\x00" + what))
-	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Listing: listingID, Fingerprint: hex.EncodeToString(fp[:])})
+	ctx = WithAgentRequest(ctx, AgentRequest{Payment: true, Listing: listingID, Fingerprint: hex.EncodeToString(fp[:]),
+		Payee: Payee{Kind: "listing", ID: listingID}, Memo: what})
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
