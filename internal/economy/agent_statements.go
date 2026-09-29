@@ -56,6 +56,9 @@ type Statement struct {
 	// Escrows the agent or workspace paid in or was owed that were open in the period (B22.6): each with the
 	// states it passed into in it. Their money is in Lines, on the payer's escrow:<id> account.
 	Escrows []Escrow `json:"escrows"`
+	// Pots is, on an agent's statement, each of its pots and what it held at the end of the period (B22.7).
+	// Their movements are lines: pot_in and pot_out.
+	Pots []Pot `json:"pots,omitempty"`
 }
 
 // AgentPeriodStatement is one agent's statement for [from, to).
@@ -78,6 +81,9 @@ func (s *DualTokenStore) AgentPeriodStatement(ctx context.Context, workspaceID, 
 	}
 	if err == nil {
 		st.Escrows, err = s.statementEscrows(ctx, workspaceID, agentID, from, to)
+	}
+	if err == nil {
+		st.Pots, err = s.pots(ctx, workspaceID, agentID, "", to)
 	}
 	return st, err
 }

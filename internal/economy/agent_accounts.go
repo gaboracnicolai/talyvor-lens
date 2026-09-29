@@ -48,11 +48,13 @@ type Agent struct {
 	Verified    bool   `json:"verified"`
 	// Handle is the agent's address besides its id, once its owner picks one (B22.3).
 	Handle string `json:"handle,omitempty"`
+	// PotsULXC is what the agent keeps aside in its pots (B22.7): its, but not spendable until moved back.
+	PotsULXC int64 `json:"pots_ulxc"`
 }
 
 // AgentBook reconciles a workspace with its agents: WorkspaceBalanceULXC (lxc_balances) =
-// UnallocatedULXC + AllocatedULXC, AllocatedULXC = Σ agent balances, and SpentULXC is the 'spend'
-// account — what the agents spent.
+// UnallocatedULXC + AllocatedULXC, AllocatedULXC = Σ agent balances and pots (B22.7), and SpentULXC is the
+// 'spend' account — what the agents spent.
 type AgentBook struct {
 	WorkspaceBalanceULXC int64   `json:"workspace_balance_ulxc"`
 	AllocatedULXC        int64   `json:"allocated_ulxc"`
@@ -91,10 +93,11 @@ func accountBalance(ctx context.Context, tx pgx.Tx, workspaceID, account string)
 	return bal, err
 }
 
-// allocatedSQL is what a workspace's agents hold: Σ their balances. Read directly, not as −(workspace side)
-// − spend: a transfer between workspaces (B22.3) is an entry whose two postings are in different workspaces.
+// allocatedSQL is what a workspace's agents hold: Σ their balances and their pots (B22.7). Read directly, not as
+// −(workspace side) − spend: a transfer between workspaces (B22.3) is an entry whose two postings are in
+// different workspaces.
 const allocatedSQL = `SELECT COALESCE(sum(amount_ulxc), 0)::bigint FROM agent_postings
-  WHERE workspace_id = $1 AND account LIKE 'agent:%'`
+  WHERE workspace_id = $1 AND (account LIKE 'agent:%' OR account LIKE 'pot:%')`
 
 // requireUnallocated refuses a debit of the workspace's OWN spending — anything not made with an agent's
 // key — that would reach into the LXC its agents hold (B19.13). bal is the lxc_balances balance the
@@ -341,7 +344,9 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
 		                   AND p.kind IN ('spend', 'hold', 'settle', 'release', 'card')), 0)::bigint,
-		       COALESCE((SELECT array_agg(k.scoped_key_id ORDER BY k.created_at) FROM agent_account_keys k WHERE k.agent_id = a.id), '{}')
+		       COALESCE((SELECT array_agg(k.scoped_key_id ORDER BY k.created_at) FROM agent_account_keys k WHERE k.agent_id = a.id), '{}'),
+		       COALESCE((SELECT sum(g.amount_ulxc) FROM agent_postings g JOIN agent_pots t ON g.account = 'pot:' || t.id
+		                  WHERE t.agent_id = a.id AND g.workspace_id = a.workspace_id), 0)::bigint
 		  FROM agent_accounts a WHERE a.workspace_id = $1 ORDER BY a.created_at, a.id`, workspaceID)
 	if err != nil {
 		return book, fmt.Errorf("economy: agents: %w", err)
@@ -350,12 +355,12 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 	for rows.Next() {
 		var a Agent
 		var spendLegs int64
-		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.Handle, &a.BalanceULXC, &spendLegs, &a.Keys); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.Handle, &a.BalanceULXC, &spendLegs, &a.Keys, &a.PotsULXC); err != nil {
 			return book, err
 		}
 		a.SpentULXC = -spendLegs
 		a.Verified = wsVerified && a.OwnerUserID != ""
-		book.AllocatedULXC += a.BalanceULXC
+		book.AllocatedULXC += a.BalanceULXC + a.PotsULXC
 		book.SpentULXC += a.SpentULXC
 		book.Agents = append(book.Agents, a)
 	}

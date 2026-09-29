@@ -4173,6 +4173,7 @@ func run() error {
 		mountCreditLineRoutes(authed, dualToken)                                                                     // B22.4
 		mountCompanyLoanRoutes(authed, dualToken)                                                                    // B22.5
 		mountAgentEscrowRoutes(authed, dualToken)                                                                    // B22.6
+		mountAgentPotRoutes(authed, dualToken)                                                                       // B22.7
 		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5
