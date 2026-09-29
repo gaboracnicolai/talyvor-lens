@@ -109,14 +109,24 @@ func (p *Proxy) agentStrategy(apiKeyID string) localrouter.RoutingStrategy {
 // metadata so the money row joins to its usage row. `model` is the REQUESTED model — this debit precedes
 // routing, so it is what the charge was estimated on, not necessarily the model that served.
 func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string) bool {
-	return p.agentAllocate(ctx, apiKeyID, wsID, model, prompt, requestID) != nil
+	_, err := p.agentAllocate(ctx, apiKeyID, wsID, model, prompt, requestID)
+	return err != nil
+}
+
+type agentDebitedCtxKey struct{}
+
+// agentDebited reports whether this request's charge was already booked by the pre-serve agent debit, so
+// the post-serve shadow debit does not charge it a second time (B23.2).
+func agentDebited(ctx context.Context) bool {
+	debited, _ := ctx.Value(agentDebitedCtxKey{}).(bool)
+	return debited
 }
 
 // agentAllocate is agentAllocationBlocks returning WHY it blocks (nil: serve), so the handler can tell an
-// agent's rules (B19.2) from its balance.
-func (p *Proxy) agentAllocate(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string) error {
+// agent's rules (B19.2) from its balance. On a booked debit the returned context says so (agentDebited).
+func (p *Proxy) agentAllocate(ctx context.Context, apiKeyID, wsID, model, prompt, requestID string) (context.Context, error) {
 	if apiKeyID == "" || p.agentSpender == nil || p.agentAllocEnabled == nil || !p.agentAllocEnabled() {
-		return nil // non-agent / inert → no debit, no block (today's behavior)
+		return ctx, nil // non-agent / inert → no debit, no block (today's behavior)
 	}
 	estLXC := lxcEstimate(model, prompt)
 	if estLXC <= 0 {
@@ -138,25 +148,25 @@ func (p *Proxy) agentAllocate(ctx context.Context, apiKeyID, wsID, model, prompt
 		// blocking short prompts refuses traffic that is served today. That is a pricing/product
 		// decision. The boundary is pinned in lxc_estimate_short_prompt_test.go so it cannot widen
 		// silently, and the same free path exists in lxc_gate.go#lxcGateBlocks.
-		return nil
+		return ctx, nil
 	}
 	debitKey, err := p.agentDebitKeyFor(ctx, apiKeyID, model, prompt)
 	if err != nil {
 		slog.Error("economy: agent debit key derivation failed (failing closed)", slog.String("err", err.Error()))
-		return err // fail closed — cannot mint a safe key ⇒ do not serve
+		return ctx, err // fail closed — cannot mint a safe key ⇒ do not serve
 	}
 	// The debit row carries the REQUESTED model + token_events request_id (non-content — AgentDebitMeta),
 	// so the ledger is readable and joins to token_events. NEVER prompt text/hash/embedding (0055 immutable).
 	err = p.agentSpender.SpendLXCForAgent(ctx, apiKeyID, wsID, debitKey, estLXC, "proof-of-agent-allocation: pre-serve estimate debit",
 		economy.AgentDebitMeta{RequestedModel: model, RequestID: requestID})
 	if err == nil {
-		return nil // debited ⇒ allow (serve)
+		return context.WithValue(ctx, agentDebitedCtxKey{}, true), nil // debited ⇒ allow (serve)
 	}
 	if !expectedAgentRefusal(err) {
 		// Unexpected (e.g. transient DB) error — fail CLOSED to keep the ceiling airtight.
 		slog.Warn("economy: agent debit failed (failing closed)", slog.String("agent", apiKeyID), slog.String("err", err.Error()))
 	}
-	return err // ErrSubBudgetExceeded / ErrInsufficientLXC / a rule / any error ⇒ block
+	return ctx, err // ErrSubBudgetExceeded / ErrInsufficientLXC / a rule / any error ⇒ block
 }
 
 // expectedAgentRefusal: a refusal the agent's balance or rules make, as opposed to a failure.
