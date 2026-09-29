@@ -74,9 +74,10 @@ var verifiedAnthropicModels = map[string]struct{}{
 }
 
 // bedrockAnthropicRe extracts the base anthropic family from a Bedrock model id, e.g.
-// "anthropic.claude-haiku-4-6-20251103-v1:0" -> "claude-haiku-4-6". Non-anthropic bedrock shapes
-// don't match and are not covered by this invariant.
-var bedrockAnthropicRe = regexp.MustCompile(`^anthropic\.(claude-[a-z]+-\d+-\d+)-\d{8}-v\d+:\d+$`)
+// "anthropic.claude-haiku-4-6-20251103-v1:0" -> "claude-haiku-4-6", and AWS's undated shapes
+// ("anthropic.claude-opus-4-6-v1", "anthropic.claude-sonnet-4-6") the same way. Non-anthropic bedrock
+// shapes don't match and are not covered by this invariant.
+var bedrockAnthropicRe = regexp.MustCompile(`^anthropic\.(claude-[a-z]+-\d+-\d+)(?:-\d{8})?(?:-v\d+(?::\d+)?)?$`)
 
 // TestCatalog_NoPhantomAnthropicModel fails on the current catalog because of the phantom
 // "claude-haiku-4-6" (and its Bedrock twin). It is the durable guard: a nonexistent model can never

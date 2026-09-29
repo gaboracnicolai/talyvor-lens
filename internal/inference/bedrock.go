@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/talyvor/lens/internal/catalog"
 )
 
 // BedrockConfig carries the AWS credentials and region needed to sign Bedrock requests. Moved from
@@ -24,22 +26,30 @@ type BedrockConfig struct {
 	SessionToken    string
 }
 
-// bedrockModelMap is the friendly-name → AWS Bedrock model-id table.
+// bedrockModelMap is the friendly-name → AWS Bedrock model-id table. The 4.6 ids are AWS's, from the
+// model cards' "Programmatic Access" tables (B23.7, fetched 2026-09-29).
 var bedrockModelMap = map[string]string{
-	"claude-opus-4-6":   "anthropic.claude-opus-4-6-20251101-v1:0",
-	"claude-sonnet-4-6": "anthropic.claude-sonnet-4-6-20251101-v1:0",
+	"claude-opus-4-6":   "anthropic.claude-opus-4-6-v1",
+	"claude-sonnet-4-6": "anthropic.claude-sonnet-4-6",
 	"claude-opus-4-5":   "anthropic.claude-opus-4-5-20251101-v1:0",
 	"claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-20251022-v2:0",
 	"claude-haiku-4-5":  "anthropic.claude-haiku-4-5-20241022-v1:0",
 }
 
 // ModelToBedrockID maps a friendly model name to its AWS Bedrock model id (ok=false when unsupported).
+// A catalog Bedrock id is accepted too — the canonical one, or an old id kept as its alias — and is
+// sent to AWS as the canonical id.
 func ModelToBedrockID(model string) (string, bool) {
 	if model == "" {
 		return "", false
 	}
-	id, ok := bedrockModelMap[model]
-	return id, ok
+	if id, ok := bedrockModelMap[model]; ok {
+		return id, true
+	}
+	if m, ok := catalog.Get(model); ok && m.Provider == "bedrock" {
+		return m.ID, true
+	}
+	return "", false
 }
 
 // TranslateToBedrockFormat converts an OpenAI-shaped chat request to the Bedrock Anthropic body (strips
