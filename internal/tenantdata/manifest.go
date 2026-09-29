@@ -212,6 +212,7 @@ var Manifest = map[string]Entry{
 	"company_credit_lines":         {Delete, "B22.4: a company's credit line: its limit and whether the operator paused it"},
 	"credit_line_draws":            {Delete, "B22.4: what the line lent an agent and the invoice it went on; the credits themselves are lxc_ledger rows of type credit_line_draw"},
 	"credit_line_invoices":         {Delete, "B22.4: each month's Stripe invoice of a line's draws, and when it was paid"},
+	"agent_pots":                   {Delete, "B22.7: an agent's pots — a goal, a budget or a reserve — and their locks; their money is in agent_postings"},
 	"agent_loans":                  {Delete, "B22.5: keys `lender_workspace_id`+`borrower_workspace_id`: a loan between two companies' agents, its terms and state; its money is in agent_transfers"},
 	"agent_escrows":                {Delete, "B22.6: keys `payer_workspace_id`+`payee_workspace_id`: credits one agent paid into escrow for another, and their state; its money is in agent_postings and lxc_ledger"},
 	"market_bills":                 {Delete, "B20.2: the Stripe subscription a buyer's marketplace uses are metered onto"},
