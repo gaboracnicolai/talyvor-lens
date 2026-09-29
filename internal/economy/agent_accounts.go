@@ -288,6 +288,15 @@ func agentMovement(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta int
 		if err != nil {
 			return true, err
 		}
+		if bal < delta && (kind == "spend" || kind == "hold") { // B22.4: a company's credit line lends the rest
+			drew, err := drawCreditLine(ctx, tx, workspaceID, agentID, delta-bal, ref)
+			if err != nil {
+				return true, err
+			}
+			if drew {
+				bal = delta
+			}
+		}
 		if bal < delta {
 			return true, fmt.Errorf("%w: agent %s holds %d µLXC, this needs %d", ErrSubBudgetExceeded, agentID, bal, delta)
 		}
