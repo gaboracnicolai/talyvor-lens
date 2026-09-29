@@ -1972,6 +1972,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// issue is stored and unusable (migration 0116).
 			attrCtx := attribution.ExtractFromRequest(r)
 			attrCtx.RequestID = requestID
+			p.attributeRequester(r, wsID, &attrCtx)
 			p.attrStore.RecordAsync(
 				attrCtx,
 				inT, outT, cost,
@@ -1988,6 +1989,34 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	} else {
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "upstream_error").Inc()
 		span.SetStatus(codes.Error, fmt.Sprintf("upstream status %d", statusCode))
+	}
+}
+
+// attributeRequester fills who made a request into its attribution from the credential (B18.18), so the
+// author and user_id columns — and the by-author rollup — have a producer: a signed-in person's user id,
+// with the name of the workspace the suite provisioned for them as the author, or an API key's id and
+// name. Whatever the client sent itself is kept (attribution.FillRequester).
+func (p *Proxy) attributeRequester(r *http.Request, wsID string, a *attribution.AttributionContext) {
+	ctx := r.Context()
+	actx := auth.GetAuthContext(ctx)
+	switch {
+	case actx != nil && actx.UserID != "":
+		author := actx.UserID
+		if actx.UserID == wsID && p.workspaceManager != nil {
+			if ws, ok := p.workspaceManager.GetWorkspace(wsID); ok && ws.Name != "" {
+				author = ws.Name
+			}
+		}
+		a.FillRequester(actx.UserID, author)
+	case auth.GetAPIKey(ctx) != nil:
+		k := auth.GetAPIKey(ctx)
+		author := k.Name
+		if author == "" {
+			author = "key:" + k.ID
+		}
+		a.FillRequester("key:"+k.ID, author)
+	case actx != nil && actx.APIKeyID != "":
+		a.FillRequester("key:"+actx.APIKeyID, "key:"+actx.APIKeyID)
 	}
 }
 

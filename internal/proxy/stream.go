@@ -575,6 +575,7 @@ func (p *Proxy) recordStreamPostServe(ctx context.Context, r *http.Request, sc s
 	if p.attrStore != nil && sc.logging != workspace.LoggingNone {
 		attrCtx := attribution.ExtractFromRequest(r)
 		attrCtx.RequestID = sc.requestID
+		p.attributeRequester(r, sc.wsID, &attrCtx)
 		p.attrStore.RecordAsync(attrCtx, inT, outT, servedCostUSD, sc.model, pp.provider, time.Since(pp.requestStart))
 	}
 }
