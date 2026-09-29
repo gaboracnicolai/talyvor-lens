@@ -185,8 +185,12 @@ var ErrNoLiveSubscription = errors.New("billing: workspace has no live subscript
 // it, through the same idempotency and out-of-order guards as every other event. The
 // returned status is STRIPE'S answer to the update, so the caller sees the change
 // immediately without this becoming a second writer of one state machine.
+//
+// B23.4 — it needs a Stripe client and nothing else. The subscription to cancel is already live, so it
+// does not matter which price sold it: a deployment selling only named plans (subPrice empty) must still
+// let every one of its subscribers cancel and resume.
 func (s *Service) SetCancelAtPeriodEnd(ctx context.Context, workspaceID string, cancel bool) (*SubscriptionStatus, error) {
-	if s.subPrice == "" || s.subStripe == nil {
+	if s.subStripe == nil {
 		return nil, ErrNoSubscriptionPrice
 	}
 	subID, err := s.liveSubscriptionID(ctx, workspaceID)
