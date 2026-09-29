@@ -29,6 +29,8 @@ class FakeLens:
         self.calls: list[dict[str, Any]] = []
 
     def tool(self, name: str, args: dict[str, Any]) -> Any:
+        if name.startswith("wallet_"):  # B22.11: echo what the SDK sent
+            return {"tool": name, "arguments": args}
         if name == "agent_balance":
             return {
                 "agent": {"id": "agt_buyer", "name": "buyer", "balance_ulxc": self.balance, "spent_ulxc": 0},
@@ -137,3 +139,42 @@ def test_a_key_lens_rejects_is_an_error_not_a_refusal(lens) -> None:
     with pytest.raises(AgentWalletError, match="401") as caught:
         LensClient(lens_url=url, api_key="tlv_wrong").wallet.balance()
     assert not isinstance(caught.value, PaymentRefused)
+
+
+def test_every_wallet_capability_calls_its_tool_with_the_agents_own_key(lens) -> None:
+    fake, url = lens
+    wallet = LensClient(lens_url=url, api_key="tlv_agent_key").wallet
+    cases = [
+        (lambda: wallet.send("@seller", 1_000_000, memo="hosting"), "wallet_send",
+         {"to": "@seller", "amount_ulxc": 1_000_000, "memo": "hosting"}),
+        (lambda: wallet.request("@buyer", 2_000_000), "wallet_request", {"from": "@buyer", "amount_ulxc": 2_000_000, "memo": ""}),
+        (lambda: wallet.requests(), "wallet_requests", {}),
+        (lambda: wallet.answer_request("mreq_1", accept=False), "wallet_answer_request", {"request_id": "mreq_1", "accept": False}),
+        (lambda: wallet.refund("xfer_1"), "wallet_refund", {"transfer_id": "xfer_1"}),
+        (lambda: wallet.credit_line(), "wallet_credit_line", {}),
+        (lambda: wallet.offer_loan("@co", 30_000_000, 3, "week", interest_bps=500), "wallet_offer_loan",
+         {"to": "@co", "principal_ulxc": 30_000_000, "instalments": 3, "every": "week", "interest_bps": 500,
+          "late_fee_ulxc": 0, "memo": ""}),
+        (lambda: wallet.loans(), "wallet_loans", {}),
+        (lambda: wallet.answer_loan("loan_1", accept=True), "wallet_answer_loan", {"loan_id": "loan_1", "accept": True}),
+        (lambda: wallet.escrow_pay("@seller", 5_000_000, "2026-10-06T12:00:00Z", memo="logo"), "wallet_escrow_pay",
+         {"to": "@seller", "amount_ulxc": 5_000_000, "release_at": "2026-10-06T12:00:00Z", "memo": "logo"}),
+        (lambda: wallet.escrows(), "wallet_escrows", {}),
+        (lambda: wallet.escrow_confirm("escrow_1"), "wallet_escrow_confirm", {"escrow_id": "escrow_1"}),
+        (lambda: wallet.escrow_dispute("escrow_1", "never delivered"), "wallet_escrow_dispute",
+         {"escrow_id": "escrow_1", "reason": "never delivered"}),
+        (lambda: wallet.pots(), "wallet_pots", {}),
+        (lambda: wallet.pot_create("laptop", "goal", target_ulxc=50_000_000), "wallet_pot_create",
+         {"name": "laptop", "kind": "goal", "target_ulxc": 50_000_000}),
+        (lambda: wallet.pot_move("pot_1", 1_000_000, "in"), "wallet_pot_move", {"pot_id": "pot_1", "amount_ulxc": 1_000_000, "direction": "in"}),
+        (lambda: wallet.quotes(), "wallet_quotes", {}),
+        (lambda: wallet.portfolio_open("fx", 1_000_000_000), "wallet_portfolio_open", {"name": "fx", "cash_uusd": 1_000_000_000}),
+        (lambda: wallet.portfolios(), "wallet_portfolios", {}),
+        (lambda: wallet.order("pf_1", "EUR", "buy", "limit", 100_000_000, limit_price_usd="1.15"), "wallet_order",
+         {"portfolio_id": "pf_1", "instrument": "EUR", "side": "buy", "type": "limit", "quantity_micros": 100_000_000,
+          "limit_price_usd": "1.15"}),
+        (lambda: wallet.order_cancel("pf_1", "ord_1"), "wallet_order_cancel", {"portfolio_id": "pf_1", "order_id": "ord_1"}),
+    ]
+    for method, tool, arguments in cases:
+        assert method() == {"tool": tool, "arguments": arguments}
+    assert {c["auth"] for c in fake.calls} == {"Bearer tlv_agent_key"}

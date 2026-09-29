@@ -186,7 +186,7 @@ func (s *Server) tools() []map[string]any {
 	if s.agentBank == nil {
 		return toolDefinitions()
 	}
-	return append(toolDefinitions(), agentToolDefinitions()...)
+	return append(append(toolDefinitions(), agentToolDefinitions()...), walletToolDefinitions()...)
 }
 
 func toolDefinitions() []map[string]any {
@@ -299,8 +299,11 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, id,
 	case "route_model":
 		result, err = s.toolRouteModel(ctx, params.Arguments)
 	default:
-		s.writeRPCError(w, id, rpcErrMethodNotFnd, "unknown tool: "+params.Name)
-		return
+		if !isWalletTool(params.Name) || s.agentBank == nil {
+			s.writeRPCError(w, id, rpcErrMethodNotFnd, "unknown tool: "+params.Name)
+			return
+		}
+		result, err = s.callAgentTool(ctx, params.Name, params.Arguments) // B22.11: run and logged as the agent tools are
 	}
 	var refusal *toolRefusal
 	if errors.As(err, &refusal) {

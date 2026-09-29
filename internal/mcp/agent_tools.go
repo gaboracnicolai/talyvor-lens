@@ -113,6 +113,9 @@ func (s *Server) callAgentTool(ctx context.Context, name string, args json.RawMe
 }
 
 func (s *Server) runAgentTool(ctx context.Context, name, workspaceID, agentID string, raw json.RawMessage) (any, error) {
+	if isWalletTool(name) { // B22.11
+		return s.runWalletTool(ctx, name, workspaceID, agentID, raw)
+	}
 	var args struct {
 		ToAgentID  string `json:"to_agent_id"`
 		AmountULXC int64  `json:"amount_ulxc"`
