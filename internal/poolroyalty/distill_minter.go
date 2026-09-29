@@ -299,11 +299,11 @@ func (m *DistillMinter) mintOne(ctx context.Context, r distillRelationship) (boo
 	// card fingerprint (default-allow on missing). Read-only, before the claim +
 	// the credit's balance FOR UPDATE — no lock-ordering surface.
 	if m.linkageEnabled {
-		var linked bool
-		if err := tx.QueryRow(ctx, sharedFingerprintSQL, r.owner, r.requester).Scan(&linked); err != nil {
+		var sharedCard, sharedOwnerKey bool
+		if err := tx.QueryRow(ctx, sharedFingerprintSQL, r.owner, r.requester).Scan(&sharedCard, &sharedOwnerKey); err != nil {
 			return false, fmt.Errorf("poolroyalty: distill owner-linkage check: %w", err)
 		}
-		if linked {
+		if sharedCard || sharedOwnerKey {
 			return false, nil // deflationary no-op
 		}
 	}
