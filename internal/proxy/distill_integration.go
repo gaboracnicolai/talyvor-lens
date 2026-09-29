@@ -373,7 +373,7 @@ func (d *distillIntegration) convertBlock(ctx context.Context, block map[string]
 								visionOutputTokens: co.VisionOutputTokens,
 							}
 						}
-						saved.add(raw, co.Result.Markdown, distill.Savings{}) // OCR never saves tokens
+						saved.add(raw, co.Result.Markdown, distill.Savings{})  // OCR never saves tokens
 						return co.Result.Markdown, visionSpend{}, attrib, true // cross-tenant OCR serve (consented)
 					}
 				}

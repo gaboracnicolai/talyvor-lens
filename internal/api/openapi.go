@@ -212,7 +212,8 @@ func openAPIPaths() map[string]any {
 					`{"type":"document","source":{"type":"file","file_id":"tdoc_…"}} (Anthropic) or ` +
 					`{"type":"file","file":{"file_id":"tdoc_…"}} (OpenAI) — and Lens converts it to text on the way to the model, ` +
 					"reporting the saving in X-Talyvor-Distill-Tokens-Saved and X-Talyvor-Distill-Bytes-Saved. " +
-					"Only the uploading workspace can reference a document.",
+					"Only the uploading workspace can reference a document. A document over 25 MB is refused with 413, " +
+					"a Content-Type Lens cannot read with 415.",
 				"parameters": []map[string]any{
 					{"name": "filename", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
 				},
@@ -221,8 +222,6 @@ func openAPIPaths() map[string]any {
 				}},
 				"responses": map[string]any{
 					"201": map[string]any{"description": "the stored document: id, media_type, filename, size_bytes, uploaded_at"},
-					"413": errResp("413"),
-					"415": errResp("415"),
 				},
 			},
 		},
