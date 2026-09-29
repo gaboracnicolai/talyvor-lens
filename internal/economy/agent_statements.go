@@ -53,6 +53,9 @@ type Statement struct {
 	// Loans the agent or workspace lent or borrowed that were open in the period (B22.5): their terms, and the
 	// events that fell in it. Their money is in Lines, as transfers.
 	Loans []Loan `json:"loans"`
+	// Escrows the agent or workspace paid in or was owed that were open in the period (B22.6): each with the
+	// states it passed into in it. Their money is in Lines, on the payer's escrow:<id> account.
+	Escrows []Escrow `json:"escrows"`
 }
 
 // AgentPeriodStatement is one agent's statement for [from, to).
@@ -73,6 +76,9 @@ func (s *DualTokenStore) AgentPeriodStatement(ctx context.Context, workspaceID, 
 	if err == nil {
 		st.Loans, err = s.statementLoans(ctx, workspaceID, agentID, from, to)
 	}
+	if err == nil {
+		st.Escrows, err = s.statementEscrows(ctx, workspaceID, agentID, from, to)
+	}
 	return st, err
 }
 
@@ -84,7 +90,31 @@ func (s *DualTokenStore) WorkspaceAgentStatement(ctx context.Context, workspaceI
 	if err == nil {
 		st.Loans, err = s.statementLoans(ctx, workspaceID, "", from, to)
 	}
+	if err == nil {
+		st.Escrows, err = s.statementEscrows(ctx, workspaceID, "", from, to)
+	}
 	return st, err
+}
+
+// statementEscrows is the escrows workspaceID (its agent agentID, when not "") paid in or was owed that were
+// open at some time in [from, to), each with the events that fell in it.
+func (s *DualTokenStore) statementEscrows(ctx context.Context, workspaceID, agentID string, from, to time.Time) ([]Escrow, error) {
+	list, err := s.escrows(ctx, `WHERE ((payer_workspace_id = $1 AND ($2 = '' OR payer_agent_id = $2))
+		OR (payee_workspace_id = $1 AND ($2 = '' OR payee_agent_id = $2)))
+		AND created_at < $4 AND (status IN ('held', 'disputed') OR decided_at >= $3)`, workspaceID, agentID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		events := []EscrowEvent{}
+		for _, e := range list[i].Events {
+			if !e.At.Before(from) && e.At.Before(to) {
+				events = append(events, e)
+			}
+		}
+		list[i].Events = events
+	}
+	return list, nil
 }
 
 // statementLoans is the loans workspaceID (its agent agentID, when not "") lent or borrowed that were open at
@@ -113,7 +143,7 @@ func (s *DualTokenStore) statementLoans(ctx context.Context, workspaceID, agentI
 
 // periodStatement reads [from, to) for one account, or for every account when account is "".
 func (s *DualTokenStore) periodStatement(ctx context.Context, workspaceID, account string, from, to time.Time) (Statement, error) {
-	st := Statement{WorkspaceID: workspaceID, From: from, To: to, Accounts: []StatementAccount{}, Lines: []StatementLine{}, Loans: []Loan{}}
+	st := Statement{WorkspaceID: workspaceID, From: from, To: to, Accounts: []StatementAccount{}, Lines: []StatementLine{}, Loans: []Loan{}, Escrows: []Escrow{}}
 	rows, err := s.pool.Query(ctx, `
 		SELECT account,
 		       COALESCE(sum(amount_ulxc) FILTER (WHERE created_at < $3), 0)::bigint,

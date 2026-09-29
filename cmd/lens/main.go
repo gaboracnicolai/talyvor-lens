@@ -182,6 +182,14 @@ func main() {
 		}
 		return
 	}
+	// `lens escrows` (B22.6): the disputed escrows, and the operator's decision on each.
+	if len(os.Args) > 1 && os.Args[1] == "escrows" {
+		if err := runEscrows(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "poolcheck" {
 		if err := runPoolCheck(); err != nil {
 			slog.Error("poolcheck failed", slog.String("err", err.Error()))
@@ -1781,6 +1789,12 @@ func run() error {
 					slog.Warn("agents: loan instalments failed", slog.String("err", err.Error()))
 				} else if res != (economy.LoanRunResult{}) {
 					slog.Info("agents: loan instalments", slog.Int("paid", res.Paid), slog.Int("missed", res.Missed), slog.Int("defaulted", res.Defaulted))
+				}
+				// B22.6: escrows whose deadline passed without a dispute, released to their payees.
+				if n, err := dualToken.RunEscrowDeadlines(ctx, now); err != nil {
+					slog.Warn("agents: escrow deadlines failed", slog.String("err", err.Error()))
+				} else if n > 0 {
+					slog.Info("agents: escrows released at their deadline", slog.Int("released", n))
 				}
 			}
 		}
@@ -4158,6 +4172,7 @@ func run() error {
 		mountAgentTransferRoutes(authed, dualToken)                                                                  // B22.3
 		mountCreditLineRoutes(authed, dualToken)                                                                     // B22.4
 		mountCompanyLoanRoutes(authed, dualToken)                                                                    // B22.5
+		mountAgentEscrowRoutes(authed, dualToken)                                                                    // B22.6
 		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5
