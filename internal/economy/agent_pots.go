@@ -69,15 +69,32 @@ func (s *DualTokenStore) CreatePot(ctx context.Context, workspaceID, agentID, na
 	return p, err
 }
 
-// LockPot locks a pot until a date, or unlocks it (nil).
+// LockPot locks a pot until a date, or unlocks it (nil). A lock still in force can only be made longer: it is
+// what keeps the credits aside, so nobody can lift it early.
 func (s *DualTokenStore) LockPot(ctx context.Context, workspaceID, agentID, potID string, until *time.Time) (Pot, error) {
-	tag, err := s.pool.Exec(ctx, `UPDATE agent_pots SET locked_until = $4 WHERE id = $3 AND agent_id = $2 AND workspace_id = $1`,
-		workspaceID, agentID, potID, until)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Pot{}, err
 	}
-	if tag.RowsAffected() == 0 {
+	defer func() { _ = tx.Rollback(ctx) }()
+	var current *time.Time
+	var inForce bool
+	err = tx.QueryRow(ctx, `SELECT locked_until, COALESCE(locked_until > now(), false) FROM agent_pots
+		WHERE id = $3 AND agent_id = $2 AND workspace_id = $1 FOR UPDATE`, workspaceID, agentID, potID).Scan(&current, &inForce)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Pot{}, ErrPotNotFound
+	}
+	if err != nil {
+		return Pot{}, err
+	}
+	if inForce && (until == nil || until.Before(*current)) {
+		return Pot{}, fmt.Errorf("%w until %s: a lock in force can only be made longer", ErrPotLocked, current.UTC().Format(time.RFC3339))
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent_pots SET locked_until = $2 WHERE id = $1`, potID, until); err != nil {
+		return Pot{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Pot{}, err
 	}
 	return s.pot(ctx, workspaceID, agentID, potID)
 }

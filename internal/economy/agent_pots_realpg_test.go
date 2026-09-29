@@ -60,6 +60,9 @@ func TestAgentPots_TwoPotsMovesAndALock(t *testing.T) {
 	if _, err := s.MoveFromPot(ctx, "ws-p", a.ID, reserve.ID, 5*lxc); !errors.Is(err, ErrPotLocked) {
 		t.Fatalf("taking from the locked reserve = %v, want refused until its date", err)
 	}
+	if _, err := s.LockPot(ctx, "ws-p", a.ID, reserve.ID, nil); !errors.Is(err, ErrPotLocked) {
+		t.Fatalf("lifting the reserve's lock before its date = %v, want refused", err)
+	}
 
 	// The agent spends only its main balance (60 LXC); the pots are not the workspace's to spend either.
 	if err := s.SpendLXCForAgent(ctx, "key-saver", "ws-p", "req-1", 61*lxc, "a call", AgentDebitMeta{}); !errors.Is(err, ErrSubBudgetExceeded) {

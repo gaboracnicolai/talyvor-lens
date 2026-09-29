@@ -29,4 +29,6 @@ A pot's credits are still the agent's:
 The Agent Wallets book shows each agent's `pots_ulxc`. An agent's statement lists each pot and what it held at
 the end of the period, and each move appears as a line.
 
-A locked pot refuses to give anything back before its date.
+A locked pot refuses to give anything back before its date, and a lock still in force can only be made
+longer — neither the agent nor its owner can lift it early. Once its date has passed it can be set again or
+removed.

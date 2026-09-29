@@ -20,7 +20,7 @@ import (
 //	POST /v1/workspaces/{wsID}/agents/{agentID}/pots                {name, kind, target_ulxc, locked_until}
 //	POST /v1/workspaces/{wsID}/agents/{agentID}/pots/{potID}/in     {amount_ulxc} — from the agent's balance
 //	POST /v1/workspaces/{wsID}/agents/{agentID}/pots/{potID}/out    {amount_ulxc} — back, unless locked
-//	PUT  /v1/workspaces/{wsID}/agents/{agentID}/pots/{potID}/lock   {locked_until} — RFC 3339, or null to unlock
+//	PUT  /v1/workspaces/{wsID}/agents/{agentID}/pots/{potID}/lock   {locked_until} — RFC 3339, or null to unlock; a lock in force only lengthens
 //
 // Each takes the agent's own key, the workspace's owner or an admin. Mounted in the authed group.
 
