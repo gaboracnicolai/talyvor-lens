@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/distill"
+	"github.com/talyvor/lens/internal/documents"
 	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -80,6 +82,32 @@ type distillIntegration struct {
 	// B15.7 rule): a conversion from a workspace whose detection is off is never shared. nil shares
 	// as before B18.5 — only a distillIntegration built without SetDistiller has none.
 	detectsPII func(wsID string) bool
+	documents  documentSource // B18.13: uploaded documents a request references by id (nil = none)
+}
+
+// documentSource is where a document a request references by id is read from — only ever for the
+// workspace that uploaded it (*documents.Store).
+type documentSource interface {
+	Content(ctx context.Context, workspaceID, id string) ([]byte, string, error)
+}
+
+// SetDocuments lets requests reference uploaded documents by id (B18.13). Call after SetDistiller.
+func (p *Proxy) SetDocuments(src documentSource) {
+	if p.distiller != nil {
+		p.distiller.documents = src
+	}
+}
+
+// distillSaved is what converting a request's documents saved, for the X-Talyvor-Distill-Tokens-Saved
+// and -Bytes-Saved headers: tokens by the gateway's own measure (distill.Savings.TokensSaved — never a
+// phantom count for a binary file's bytes), and the bytes the model no longer receives.
+type distillSaved struct{ tokens, bytes int }
+
+func (s *distillSaved) add(input []byte, markdown string, sav distill.Savings) {
+	s.tokens += sav.TokensSaved
+	if n := len(input) - len(markdown); n > 0 {
+		s.bytes += n
+	}
 }
 
 // SetDistiller enables the request-path DISTILL integration. converter is the
@@ -129,12 +157,19 @@ func (v visionSpend) recorded() bool { return v.inputTokens > 0 || v.outputToken
 // across any OCR'd blocks) so the caller can record a durable 'vision_ocr' spend
 // row; it is the zero value when no OCR happened.
 func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, body []byte, wsID string, modSet modality.ModalitySet, vision distill.VisionDispatcher) ([]byte, string, modality.ModalitySet, bool, visionSpend, []distillServeFact) {
+	nb, np, nm, did, ocr, facts, _ := d.MaybeDistillSaving(ctx, r, body, wsID, modSet, vision)
+	return nb, np, nm, did, ocr, facts
+}
+
+// MaybeDistillSaving is MaybeDistill that also says what the conversion saved (B18.13).
+func (d *distillIntegration) MaybeDistillSaving(ctx context.Context, r *http.Request, body []byte, wsID string, modSet modality.ModalitySet, vision distill.VisionDispatcher) ([]byte, string, modality.ModalitySet, bool, visionSpend, []distillServeFact, distillSaved) {
 	var ocr visionSpend
+	var saved distillSaved
 	// Fail-safe: a misconfigured integration is inert, never a panic on the
 	// shared request path (production always wires both, but the inert/graceful
 	// contract must hold regardless).
 	if d == nil || d.converter == nil || d.wsManager == nil {
-		return body, "", modSet, false, ocr, nil
+		return body, "", modSet, false, ocr, nil, saved
 	}
 	// Gate 1: a document-or-image block must be present (cheap; already detected
 	// upstream). We include HasImage because some clients send a PDF as an
@@ -143,20 +178,21 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 	// A genuine image (image/png) passes this gate but is filtered out per-block
 	// by FormatFromMediaType, so it is never converted.
 	if !modSet.HasDocument && !modSet.HasImage {
-		return body, "", modSet, false, ocr, nil
+		return body, "", modSet, false, ocr, nil, saved
 	}
-	// Gate 2: workspace policy + per-request opt-in.
-	if !d.shouldDistill(r, wsID) {
-		return body, "", modSet, false, ocr, nil
+	// Gate 2: workspace policy + per-request opt-in. A request that references an uploaded document by
+	// id is always converted: the id means nothing to the provider (B18.13).
+	if !d.shouldDistill(r, wsID) && (d.documents == nil || !bytes.Contains(body, []byte(`"`+documents.IDPrefix))) {
+		return body, "", modSet, false, ocr, nil, saved
 	}
 
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
-		return body, "", modSet, false, ocr, nil // malformed envelope → leave the normal path to handle it
+		return body, "", modSet, false, ocr, nil, saved // malformed envelope → leave the normal path to handle it
 	}
 	msgs, ok := root["messages"].([]any)
 	if !ok {
-		return body, "", modSet, false, ocr, nil
+		return body, "", modSet, false, ocr, nil, saved
 	}
 
 	distilledAny := false
@@ -175,7 +211,7 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 		msgChanged := false
 		for _, bi := range blocks {
 			if block, ok := bi.(map[string]any); ok {
-				if md, vs, attrib, ok := d.tryConvertBlock(ctx, block, vision, wsID); ok {
+				if md, vs, attrib, ok := d.convertBlock(ctx, block, vision, wsID, &saved); ok {
 					newBlocks = append(newBlocks, map[string]any{"type": "text", "text": md})
 					msgChanged = true
 					distilledAny = true
@@ -215,19 +251,19 @@ func (d *distillIntegration) MaybeDistill(ctx context.Context, r *http.Request, 
 
 	if !distilledAny {
 		// Nothing converted (NeedsVision / unsupported / error) → inert.
-		return body, "", modSet, false, ocr, nil
+		return body, "", modSet, false, ocr, nil, saved
 	}
 
 	newBody, err := json.Marshal(root)
 	if err != nil {
-		return body, "", modSet, false, ocr, nil // marshal failure → fail safe to the original
+		return body, "", modSet, false, ocr, nil, saved // marshal failure → fail safe to the original
 	}
 	// Re-derive everything that was computed from the original body.
 	_, newPrompt, perr := extractPrompt(newBody)
 	if perr != nil {
-		return body, "", modSet, false, ocr, nil
+		return body, "", modSet, false, ocr, nil, saved
 	}
-	return newBody, newPrompt, modality.Detect(newBody), true, ocr, distillFacts
+	return newBody, newPrompt, modality.Detect(newBody), true, ocr, distillFacts, saved
 }
 
 // shouldDistill applies the policy + per-request opt-in rules: a document is
@@ -255,7 +291,12 @@ func (d *distillIntegration) shouldDistill(r *http.Request, wsID string) bool {
 // real token cost + model so the caller can book a durable 'vision_ocr' row; it
 // is the zero value for a plain text conversion.
 func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher, wsID string) (string, visionSpend, *distillServeFact, bool) {
-	raw, mediaType, ok := extractBlockDocument(block)
+	return d.convertBlock(ctx, block, vision, wsID, &distillSaved{})
+}
+
+// convertBlock is tryConvertBlock adding what a conversion saved to saved.
+func (d *distillIntegration) convertBlock(ctx context.Context, block map[string]any, vision distill.VisionDispatcher, wsID string, saved *distillSaved) (string, visionSpend, *distillServeFact, bool) {
+	raw, mediaType, ok := d.blockDocument(ctx, block, wsID)
 	if !ok {
 		return "", visionSpend{}, nil, false
 	}
@@ -294,6 +335,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 				if owner != wsID {
 					attrib = &distillServeFact{owner: owner, hash: hash}
 				}
+				saved.add(raw, res.Markdown, distill.SavingsOf(raw, res))
 				return res.Markdown, visionSpend{}, attrib, true // cross-tenant serve (consented)
 			}
 		}
@@ -331,6 +373,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 								visionOutputTokens: co.VisionOutputTokens,
 							}
 						}
+						saved.add(raw, co.Result.Markdown, distill.Savings{})  // OCR never saves tokens
 						return co.Result.Markdown, visionSpend{}, attrib, true // cross-tenant OCR serve (consented)
 					}
 				}
@@ -352,6 +395,7 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 	if err != nil || res.NeedsVision || strings.TrimSpace(res.Markdown) == "" {
 		return "", visionSpend{}, nil, false
 	}
+	saved.add(raw, res.Markdown, sav)
 
 	// (3) POOLED WRITE — if the PRODUCER opted in (+ global switch), publish a
 	//     NATIVE conversion to the shared keyspace stamped with this workspace as
@@ -386,6 +430,40 @@ func (d *distillIntegration) tryConvertBlock(ctx context.Context, block map[stri
 		}
 	}
 	return res.Markdown, vs, nil, true // private path → no cross-tenant attribution
+}
+
+// blockDocument is a content block's document: an uploaded one it references by id (read for this
+// workspace only), or the one it carries inline.
+func (d *distillIntegration) blockDocument(ctx context.Context, block map[string]any, wsID string) ([]byte, string, bool) {
+	if id := documentRef(block); id != "" {
+		if d.documents == nil {
+			return nil, "", false
+		}
+		raw, mediaType, err := d.documents.Content(ctx, wsID, id)
+		return raw, mediaType, err == nil && len(raw) > 0
+	}
+	return extractBlockDocument(block)
+}
+
+// documentRef is the uploaded-document id a block references, in the Anthropic shape
+// {"type":"document","source":{"type":"file","file_id":"tdoc_…"}} or the OpenAI shape
+// {"type":"file","file":{"file_id":"tdoc_…"}}; "" for any other block, a provider's own file id included.
+func documentRef(block map[string]any) string {
+	var id string
+	switch block["type"] {
+	case "document":
+		if src, _ := block["source"].(map[string]any); src != nil && src["type"] == "file" {
+			id = stringOf(src["file_id"])
+		}
+	case "file":
+		if f, _ := block["file"].(map[string]any); f != nil {
+			id = stringOf(f["file_id"])
+		}
+	}
+	if strings.HasPrefix(id, documents.IDPrefix) {
+		return id
+	}
+	return ""
 }
 
 // extractBlockDocument pulls the raw bytes + media type from a content block.

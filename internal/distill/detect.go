@@ -73,6 +73,8 @@ func detectZipOOXML(input []byte) Format {
 			return FormatDOCX
 		case "xl/workbook.xml":
 			return FormatXLSX
+		case "ppt/presentation.xml":
+			return FormatPPTX
 		}
 	}
 	return FormatUnknown

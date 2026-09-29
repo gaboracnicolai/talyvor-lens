@@ -202,6 +202,29 @@ func openAPIPaths() map[string]any {
 				},
 			},
 		},
+		// B18.13 — a document too large to carry inline (the proxy caps a request body at 4 MiB).
+		"/v1/documents": map[string]any{
+			"post": map[string]any{
+				"summary": "Upload a document for chats to reference by id",
+				"description": "The request body is the file (up to 25 MB) and its Content-Type the document's media type: " +
+					"PDF, Word, Excel, PowerPoint, HTML, CSV, JSON, XML, Markdown or plain text; ?filename= optionally names it. " +
+					"A chat request then references the returned id instead of carrying the file — " +
+					`{"type":"document","source":{"type":"file","file_id":"tdoc_…"}} (Anthropic) or ` +
+					`{"type":"file","file":{"file_id":"tdoc_…"}} (OpenAI) — and Lens converts it to text on the way to the model, ` +
+					"reporting the saving in X-Talyvor-Distill-Tokens-Saved and X-Talyvor-Distill-Bytes-Saved. " +
+					"Only the uploading workspace can reference a document. A document over 25 MB is refused with 413, " +
+					"a Content-Type Lens cannot read with 415.",
+				"parameters": []map[string]any{
+					{"name": "filename", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"requestBody": map[string]any{"required": true, "content": map[string]any{
+					"application/octet-stream": map[string]any{"schema": map[string]any{"type": "string", "format": "binary"}},
+				}},
+				"responses": map[string]any{
+					"201": map[string]any{"description": "the stored document: id, media_type, filename, size_bytes, uploaded_at"},
+				},
+			},
+		},
 		"/v1/proxy/anthropic/{path}": map[string]any{
 			"post": map[string]any{
 				"summary": "Proxy to Anthropic",

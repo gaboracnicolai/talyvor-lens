@@ -44,7 +44,7 @@ func (p *Proxy) HandleBedrock(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds 4MB limit")
+			writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds 4MB limit — upload a large document to POST /v1/documents (up to 25 MB) and reference it by id")
 			return
 		}
 		writeError(w, http.StatusBadRequest, "read body: "+err.Error())

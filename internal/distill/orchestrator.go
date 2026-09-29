@@ -156,6 +156,8 @@ func FormatFromMediaType(mt string) (Format, bool) {
 		return FormatDOCX, true
 	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
 		return FormatXLSX, true
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return FormatPPTX, true
 	case "text/plain", "text/markdown":
 		return FormatText, true
 	}
