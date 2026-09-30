@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // agent_payments.go — B19.3: ONE COMPANY'S AGENTS PAY EACH OTHER, INSIDE THE CLOSED LOOP.
@@ -104,6 +106,9 @@ func (s *DualTokenStore) PayAgent(ctx context.Context, workspaceID, fromAgentID,
 // the company's monthly marketplace bill — in the rules' transaction, so the next payment's limits count it.
 func (s *DualTokenStore) payCompanyAgent(ctx context.Context, workspaceID, payeeWorkspace string, pay AgentPayment) (AgentPayment, error) {
 	pay.ToWorkspaceID, pay.Via = payeeWorkspace, "marketplace"
+	if err := workspace.CheckMoneyWall(ctx, s.pool, workspaceID, payeeWorkspace); err != nil {
+		return pay, err
+	}
 	refusal, err := s.companyPayments.CompanyPayeeRefusal(ctx, workspaceID, payeeWorkspace)
 	if err != nil {
 		return pay, err

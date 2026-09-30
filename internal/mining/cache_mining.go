@@ -20,6 +20,7 @@ import (
 
 	"github.com/talyvor/lens/internal/dbjson"
 	"github.com/talyvor/lens/internal/metrics"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // ─── constants ───────────────────────────────────
@@ -132,7 +133,17 @@ type LedgerStore struct {
 	// It can only LOWER a bonded mint (never increase, never below the floor, never burn/slash). Reads via the
 	// caller's tx so mining imports no keel. See mint_gate.go:reputationBondedAmount.
 	driftHaircut func(ctx context.Context, tx pgx.Tx, workspaceID string) (float64, error)
+
+	// wall is B25.1's test-money wall (workspace.CheckMoneyWall), checked by Transfer inside its transaction.
+	// nil ⇒ no wall (tests); production sets it.
+	wall MoneyWall
 }
+
+// MoneyWall refuses money moving between a test (synthetic) workspace and a real one — workspace.CheckMoneyWall.
+type MoneyWall func(ctx context.Context, q workspace.RowQuerier, a, b string) error
+
+// SetMoneyWall sets the check Transfer makes before it moves LENS between two workspaces (B25.1).
+func (s *LedgerStore) SetMoneyWall(w MoneyWall) { s.wall = w }
 
 // NewLedgerStore wraps a real *pgxpool.Pool.
 func NewLedgerStore(pool *pgxpool.Pool) *LedgerStore {
@@ -462,6 +473,12 @@ func (s *LedgerStore) Transfer(
 		return fmt.Errorf("mining: begin transfer: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// B25.1: test LENS moves only between test workspaces, real LENS only between real ones.
+	if s.wall != nil {
+		if err := s.wall(ctx, tx, fromWorkspace, toWorkspace); err != nil {
+			return err
+		}
+	}
 
 	// Impose a global lock order: always acquire the lexicographically
 	// smaller workspace ID first, regardless of debit/credit direction.
@@ -676,6 +693,9 @@ func CountedSupplyTypes() []string {
 // under their own labels keeps total supply byte-identical. Attribution moved; the money
 // did not. Dropping any of them from this list would silently shrink supply and the LXC
 // conversion math that reads it.
+//
+// B25.1: test LENS — rows a test (synthetic) workspace wrote, marked `test` (migration 0173) — is never
+// counted, here or in the burned total: supply and the backing value it prices are real figures.
 func (s *LedgerStore) GetTotalSupply(ctx context.Context) (int64, error) {
 	if s.pool == nil {
 		return 0, nil
@@ -683,7 +703,7 @@ func (s *LedgerStore) GetTotalSupply(ctx context.Context) (int64, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount), 0)
 		FROM lens_token_ledger
-		WHERE amount > 0 AND type = ANY($1)`, countedSupplyTypeList)
+		WHERE amount > 0 AND type = ANY($1) AND NOT test`, countedSupplyTypeList)
 	var n int64
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("mining: total supply: %w", err)
@@ -710,7 +730,7 @@ func (s *LedgerStore) GetCirculatingSupply(ctx context.Context) (int64, error) {
 		return total, nil
 	}
 	row := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = ANY($1)`,
+		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = ANY($1) AND NOT test`,
 		burnedSupplyTypeList)
 	var burned int64
 	if err := row.Scan(&burned); err != nil {
@@ -729,7 +749,7 @@ func (s *LedgerStore) GetTotalBurned(ctx context.Context) (int64, error) {
 		return 0, nil
 	}
 	row := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = ANY($1)`,
+		`SELECT COALESCE(SUM(-amount), 0) FROM lens_token_ledger WHERE type = ANY($1) AND NOT test`,
 		burnedSupplyTypeList)
 	var n int64
 	if err := row.Scan(&n); err != nil {

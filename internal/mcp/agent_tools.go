@@ -8,6 +8,7 @@ import (
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // agent_tools.go — B19.9: AGENTS USE THEIR WALLETS THEMSELVES.
@@ -131,7 +132,7 @@ func (s *Server) runAgentTool(ctx context.Context, name, workspaceID, agentID st
 	refused := func(err error) error {
 		for _, e := range []error{economy.ErrAgentRule, economy.ErrApprovalRequired, economy.ErrAgentFunds, economy.ErrAgentNotFound,
 			economy.ErrSameAgent, economy.ErrApprovalNotNeeded, economy.ErrReceiptNotFound, economy.ErrAgentOwnerless,
-			economy.ErrCapabilityNotCleared} {
+			economy.ErrCapabilityNotCleared, workspace.ErrMoneyWall} {
 			if errors.Is(err, e) {
 				return &toolRefusal{err.Error()}
 			}

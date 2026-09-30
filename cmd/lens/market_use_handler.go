@@ -16,6 +16,7 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/market"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // B20.2 — USE A LISTING, PAY PER USE, AND THE SELLER EARNS (internal/market/use.go).
@@ -60,7 +61,7 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 		switch {
 		case errors.As(err, &need):
 			writeJSONOK(w, http.StatusForbidden, map[string]any{"error": err.Error(), "approval_id": need.ApprovalID})
-		case errors.Is(err, economy.ErrAgentRule):
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, workspace.ErrMoneyWall):
 			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case errors.Is(err, market.ErrNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())

@@ -990,6 +990,7 @@ func run() error {
 
 	// LENS token mining ledger + cache-mining engine (Batch 2 Item 1).
 	tokenLedger := mining.NewLedgerStore(pool)
+	tokenLedger.SetMoneyWall(workspace.CheckMoneyWall) // B25.1: test LENS never reaches a real workspace
 	earningsReader := earnings.NewReader(pool)
 	// U6 Sybil floor: wire the verified-to-earn gate UNCONDITIONALLY at the
 	// ledger chokepoint — a safety restriction must not be liftable by the
@@ -1075,6 +1076,7 @@ func run() error {
 	// royalty mint between two workspaces sharing a captured card fingerprint.
 	// Default-allow-on-missing; the rate cap bounds yield regardless.
 	royaltyMinter.SetOwnerLinkageCheck(true)
+	royaltyMinter.SetMoneyWall(workspace.CheckMoneyWall) // B25.1: no royalty between a test and a real workspace
 	p.SetRoyaltyMinter(royaltyMinter)
 
 	// ⚠ SAY WHEN POOLED HITS WILL SERVE AND PAY NOBODY.
@@ -1205,6 +1207,7 @@ func run() error {
 		func() bool { return cfg.PoolRoyaltyMintingEnabled },
 	)
 	distillMinter.SetOwnerLinkageCheck(true) // U6 PR2 wash guard, like the cache minter
+	distillMinter.SetMoneyWall(workspace.CheckMoneyWall)
 	distillMinter.SetHoldbackWindow(cfg.PoolHoldbackWindow)
 	// PR1 distill mint caps (default 0/0 = off; deflationary — a cap only denies).
 	distillMinter.SetCap(cfg.DistillMintCapPerPair, cfg.DistillMintCapWindow)
@@ -4019,6 +4022,10 @@ func run() error {
 			if err := tokenLedger.Transfer(req.Context(), wsID, in.ToWorkspace, in.Amount, in.Description); err != nil {
 				if errors.Is(err, mining.ErrInsufficientBalance) {
 					writeJSONErr(w, http.StatusPaymentRequired, err.Error())
+					return
+				}
+				if errors.Is(err, workspace.ErrMoneyWall) {
+					writeJSONErr(w, http.StatusForbidden, err.Error())
 					return
 				}
 				writeJSONErr(w, http.StatusBadRequest, err.Error())

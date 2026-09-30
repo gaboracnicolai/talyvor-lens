@@ -11,6 +11,7 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/storedanswers"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // B22.3 — send and request money between any agents on Talyvor (economy/agent_transfers.go).
@@ -165,7 +166,8 @@ func writeTransferErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless), errors.Is(err, economy.ErrOwnerUnverified),
 		errors.Is(err, economy.ErrAlreadyRefunded):
 		writeJSONErr(w, http.StatusConflict, err.Error())
-	case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired), errors.Is(err, economy.ErrCapabilityNotCleared):
+	case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired), errors.Is(err, economy.ErrCapabilityNotCleared),
+		errors.Is(err, workspace.ErrMoneyWall):
 		writeJSONErr(w, http.StatusForbidden, err.Error())
 	default:
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())

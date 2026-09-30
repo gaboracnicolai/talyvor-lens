@@ -34,6 +34,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -41,6 +42,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/talyvor/lens/internal/mining"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // TypePoolRoyalty tags a Pool-B royalty mint in the lens_token_ledger. The
@@ -187,6 +189,7 @@ const (
 	RefusedDust          = "sub_micro_lens"         // valuation floors to 0 µLENS — real, but smaller than the unit
 	RefusedOwnerLinked   = "owner_linkage"          // both workspaces share a captured card fingerprint (U6 wash guard)
 	RefusedAlreadyMinted = "already_minted"         // the server-derived claim key was already taken
+	RefusedMoneyWall     = "test_money_wall"        // one side is a test (synthetic) workspace and the other real (B25.1)
 )
 
 // Which linkage signal matched, set on Result.LinkageSignal when Refused == RefusedOwnerLinked.
@@ -309,6 +312,7 @@ type Minter struct {
 	ledger  ledgerCreditTx
 	share   float64
 	enabled func() bool
+	wall    mining.MoneyWall
 
 	// 2.3b per-pair cap: max mints per (requester, contributor) per rolling
 	// window. 0 = disabled (the default) — the cap branch is skipped
@@ -343,6 +347,10 @@ func (m *Minter) SetAnchor(a Anchor) {
 // Off by default (the check is skipped — no workspace_card_fingerprints read);
 // production enables it. Default-allow-on-missing still applies when enabled.
 func (m *Minter) SetOwnerLinkageCheck(enabled bool) { m.linkageEnabled = enabled }
+
+// SetMoneyWall sets B25.1's test-money wall (workspace.CheckMoneyWall): a royalty between a test workspace and
+// a real one is refused as RefusedMoneyWall. nil (the default) checks nothing; production sets it.
+func (m *Minter) SetMoneyWall(w mining.MoneyWall) { m.wall = w }
 
 // SetHoldbackWindow configures the held->finalizable delay (Stage 2.3a).
 // Non-positive values keep the 72h default. The TRIGGER that settles a held
@@ -476,6 +484,15 @@ func (m *Minter) MintServedHit(ctx context.Context, h ServedHit) (Result, error)
 		return Result{}, fmt.Errorf("poolroyalty: begin mint tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// B25.1: a royalty never crosses between a test workspace and a real one.
+	if m.wall != nil {
+		if err := m.wall(ctx, tx, h.ContributorWorkspace, h.RequesterWorkspace); errors.Is(err, workspace.ErrMoneyWall) {
+			return Result{Refused: RefusedMoneyWall}, nil
+		} else if err != nil {
+			return Result{}, fmt.Errorf("poolroyalty: %w", err)
+		}
+	}
 
 	// U6 PR2 owner-linkage: deny a pooled-royalty mint between two workspaces the
 	// SAME operator controls (a shared captured card fingerprint — the lazy
