@@ -1848,6 +1848,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		settledChargeUSD := 0.0
 		if p.reservationActive() {
 			settledChargeUSD = p.settleReservationBasis(ctx, servedCostUSD, upstreamModel, servedPriceBasis)
+		} else {
+			// B23.13: reservations off, the pre-serve agent debit was the estimate — settle it to the delivered cost.
+			p.settleAgentDebit(ctx, wsID, servedCostUSD, upstreamModel, servedPriceBasis)
 		}
 		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
 			// spendPrompt is "" in metadata mode (no prompt text persisted)
@@ -2347,6 +2350,8 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	settled := 0.0
 	if p.reservationActive() {
 		settled = p.settleReservation(ctx, servedCostUSD, sc.model)
+	} else {
+		p.settleAgentDebit(ctx, sc.wsID, servedCostUSD, sc.model, "") // B23.13, as on the buffered seam
 	}
 	if p.alertManager == nil || sc.logging == workspace.LoggingNone {
 		return settled

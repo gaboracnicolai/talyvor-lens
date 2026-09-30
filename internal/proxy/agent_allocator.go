@@ -46,6 +46,8 @@ type agentSpender interface {
 	// fund a royalty. Collapsing them would either under-bill the customer or over-mint the pool.
 	SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta economy.AgentDebitMeta) (settled, cashBacked int64, err error)
 	ReleaseLXCReservation(ctx context.Context, reservationID, reason string) error
+	// B23.13: with reservations off, settles the pre-serve debit to the delivered cost within the agent's limit.
+	SettleAgentDebit(ctx context.Context, workspaceID, debitKey string, deliveredLXC int64, meta economy.AgentDebitMeta) (economy.AgentDebitSettlement, error)
 }
 
 // SetAgentSpender wires the agent-allocation debit + its enable flag, and mints the process-start salt used
@@ -115,10 +117,17 @@ func (p *Proxy) agentAllocationBlocks(ctx context.Context, apiKeyID, wsID, model
 
 type agentDebitedCtxKey struct{}
 
+// agentDebit is the pre-serve debit a request's charge was booked under, for the post-serve settle (B23.13).
+type agentDebit struct {
+	debitKey       string
+	requestedModel string
+	requestID      string
+}
+
 // agentDebited reports whether this request's charge was already booked by the pre-serve agent debit, so
 // the post-serve shadow debit does not charge it a second time (B23.2).
 func agentDebited(ctx context.Context) bool {
-	debited, _ := ctx.Value(agentDebitedCtxKey{}).(bool)
+	_, debited := ctx.Value(agentDebitedCtxKey{}).(agentDebit)
 	return debited
 }
 
@@ -160,7 +169,8 @@ func (p *Proxy) agentAllocate(ctx context.Context, apiKeyID, wsID, model, prompt
 	err = p.agentSpender.SpendLXCForAgent(ctx, apiKeyID, wsID, debitKey, estLXC, "proof-of-agent-allocation: pre-serve estimate debit",
 		economy.AgentDebitMeta{RequestedModel: model, RequestID: requestID})
 	if err == nil {
-		return context.WithValue(ctx, agentDebitedCtxKey{}, true), nil // debited ⇒ allow (serve)
+		// debited ⇒ allow (serve)
+		return context.WithValue(ctx, agentDebitedCtxKey{}, agentDebit{debitKey: debitKey, requestedModel: model, requestID: requestID}), nil
 	}
 	if !expectedAgentRefusal(err) {
 		// Unexpected (e.g. transient DB) error — fail CLOSED to keep the ceiling airtight.
@@ -324,6 +334,33 @@ func (p *Proxy) settleReservationBasis(ctx context.Context, deliveredUSD float64
 		return 0
 	}
 	return float64(settledLXC) * economy.LXCUSDValue / 1e6 // the USD the consumer ACTUALLY paid
+}
+
+// settleAgentDebit is the reservation-off settle (B23.13): the pre-serve agent debit charged the input-only
+// estimate, so the post-serve seam settles the difference to the DELIVERED cost — refunded when the answer cost
+// less, charged when it cost more, up to what the agent's limit still allows; the rest is written off, with
+// the question it belongs to. No-op for a request no agent debit was booked for.
+func (p *Proxy) settleAgentDebit(ctx context.Context, wsID string, deliveredUSD float64, servedModel, priceBasis string) {
+	d, ok := ctx.Value(agentDebitedCtxKey{}).(agentDebit)
+	if !ok || p.agentSpender == nil {
+		return
+	}
+	deliveredLXC := int64(0)
+	if deliveredUSD > 0 {
+		deliveredLXC = int64(math.Ceil(deliveredUSD / economy.LXCUSDValue * 1e6))
+	}
+	s, err := p.agentSpender.SettleAgentDebit(ctx, wsID, d.debitKey, deliveredLXC, economy.AgentDebitMeta{
+		RequestedModel: d.requestedModel, ServedModel: servedModel, RequestID: d.requestID, PriceBasis: priceBasis})
+	if err != nil {
+		// Logged-and-swallowed — the response is already served; the question stays charged its estimate.
+		slog.Warn("economy: agent debit settle failed (charged the pre-serve estimate)",
+			slog.String("request_id", d.requestID), slog.String("err", err.Error()))
+		return
+	}
+	if s.WrittenOffULXC > 0 {
+		slog.Info("economy: agent's limit cut a question's charge short; the rest is written off",
+			slog.String("request_id", d.requestID), slog.Int64("written_off_ulxc", s.WrittenOffULXC))
+	}
 }
 
 // settleReservationPooled is settleReservationBasis for a CROSS-TENANT POOLED hit: it settles the
