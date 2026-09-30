@@ -280,7 +280,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 //
 // 117 → 118 (B19.12): /v1/workspaces/{wsID}/agents/{agentID}/card (GET and POST), an agent's test-mode
 // card, beside the undocumented agent routes it belongs to.
-const undocumentedNonAdminV1Routes = 118
+//
+// 118 → 119 (B25.2): POST /v1/billing/webhook/test, Stripe test mode's webhook for test users, beside the
+// billing webhook it mirrors.
+const undocumentedNonAdminV1Routes = 119
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

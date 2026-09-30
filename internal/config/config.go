@@ -902,6 +902,17 @@ type Config struct {
 	StripeSecretKey     string
 	StripeWebhookSecret string
 
+	// B25.2 — test (synthetic) workspaces pay through Stripe TEST MODE, always, even once
+	// LENS_STRIPE_SECRET_KEY is live: a test-mode key (sk_test_… or rk_test_…; a live key fails startup),
+	// the signing secret of the test-mode webhook endpoint (POST /v1/billing/webhook/test), and the test-mode
+	// plans (plan → test-mode Price id, like LENS_BILLING_SUBSCRIPTION_PLANS). SECRETS except the plans. With
+	// the key or the secret unset a test workspace cannot buy or subscribe, and the refusal names what is
+	// missing. Envs: LENS_STRIPE_TEST_SECRET_KEY, LENS_STRIPE_TEST_WEBHOOK_SECRET,
+	// LENS_STRIPE_TEST_SUBSCRIPTION_PLANS.
+	StripeTestSecretKey         string
+	StripeTestWebhookSecret     string
+	StripeTestSubscriptionPlans map[string]string
+
 	// StripeIssuingWebhookSecret signs the real-time authorisation endpoint Stripe calls for every agent
 	// card purchase (B19.12) — Dashboard → Issuing → settings, a separate endpoint from the billing
 	// webhook. A SECRET, never logged. Empty ⇒ POST /v1/agent-cards/authorizations is unregistered (404)
@@ -1254,13 +1265,16 @@ func Load() (*Config, error) {
 		RoutingPredictionEnabled:        parseBoolEnv("LENS_ROUTING_PREDICTION_ENABLED"),
 		RoutingPredictionScoringEnabled: parseBoolEnv("LENS_ROUTING_PREDICTION_SCORING_ENABLED"),
 
-		BillingEnabled:             parseBoolEnv("LENS_BILLING_ENABLED"),
-		EarnRequireLivePurchase:    parseBoolEnv("LENS_EARN_REQUIRE_LIVE_PURCHASE"),
-		DashboardEnabled:           parseBoolEnv("LENS_DASHBOARD_ENABLED"),
-		StripeSecretKey:            os.Getenv("LENS_STRIPE_SECRET_KEY"),
-		StripeWebhookSecret:        os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
-		StripeIssuingWebhookSecret: os.Getenv("LENS_STRIPE_ISSUING_WEBHOOK_SECRET"),
-		StripeIssuingCurrency:      getEnv("LENS_STRIPE_ISSUING_CURRENCY", "gbp"),
+		BillingEnabled:              parseBoolEnv("LENS_BILLING_ENABLED"),
+		EarnRequireLivePurchase:     parseBoolEnv("LENS_EARN_REQUIRE_LIVE_PURCHASE"),
+		DashboardEnabled:            parseBoolEnv("LENS_DASHBOARD_ENABLED"),
+		StripeSecretKey:             os.Getenv("LENS_STRIPE_SECRET_KEY"),
+		StripeWebhookSecret:         os.Getenv("LENS_STRIPE_WEBHOOK_SECRET"),
+		StripeTestSecretKey:         os.Getenv("LENS_STRIPE_TEST_SECRET_KEY"),
+		StripeTestWebhookSecret:     os.Getenv("LENS_STRIPE_TEST_WEBHOOK_SECRET"),
+		StripeTestSubscriptionPlans: parsePlans(os.Getenv("LENS_STRIPE_TEST_SUBSCRIPTION_PLANS")),
+		StripeIssuingWebhookSecret:  os.Getenv("LENS_STRIPE_ISSUING_WEBHOOK_SECRET"),
+		StripeIssuingCurrency:       getEnv("LENS_STRIPE_ISSUING_CURRENCY", "gbp"),
 		// Catalog-drift detection (internal/modelwatch). Poller default-ON: it is read-only, costs one
 		// provider GET an hour, and its absence is what let a whole model family be served free. The
 		// SINK is separate and, if unset, reported as a boot-time ERROR rather than silently skipped.
@@ -1353,6 +1367,11 @@ func Load() (*Config, error) {
 		return nil, errors.New(
 			"LENS_BILLING_ENABLED=true requires both LENS_STRIPE_SECRET_KEY and " +
 				"LENS_STRIPE_WEBHOOK_SECRET (one or both are unset)")
+	}
+	// B25.2: the test workspaces' key moves test money only. A live key there would charge real cards for
+	// test credits, so it refuses to start — naming the variable, never echoing the key.
+	if k := c.StripeTestSecretKey; k != "" && !strings.HasPrefix(k, "sk_test_") && !strings.HasPrefix(k, "rk_test_") {
+		return nil, errors.New("LENS_STRIPE_TEST_SECRET_KEY must be a Stripe test-mode key (sk_test_… or rk_test_…)")
 	}
 
 	// HA timers, expressed in whole seconds. Defaults match the

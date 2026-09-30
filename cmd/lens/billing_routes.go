@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -80,5 +83,134 @@ func newSubscriptionCancelHandler(svc subscriptionCanceller, cancel bool) http.H
 			return
 		}
 		writeJSONOK(w, http.StatusOK, st)
+	}
+}
+
+// billingRouter picks the billing Service that takes a workspace's money (B25.2). A test (synthetic)
+// workspace pays through Stripe TEST MODE, always — test, a Service with the test-mode key, webhook secret
+// and plans — and every other workspace through live, the Service there was before. With no test-mode
+// Service a test workspace cannot pay, and the refusal names the variable that is unset.
+type billingRouter struct {
+	live, test *billing.Service
+	isTest     func(wsID string) bool
+	unset      string // the test-mode variables not set, when test is nil
+}
+
+func newBillingRouter(live, test *billing.Service, isTest func(string) bool, testKey, testSecret string) billingRouter {
+	var unset []string
+	if testKey == "" {
+		unset = append(unset, "LENS_STRIPE_TEST_SECRET_KEY")
+	}
+	if testSecret == "" {
+		unset = append(unset, "LENS_STRIPE_TEST_WEBHOOK_SECRET")
+	}
+	return billingRouter{live: live, test: test, isTest: isTest, unset: strings.Join(unset, " and ")}
+}
+
+// pay is the Service for a payment by wsID, or false with the refusal written.
+func (b billingRouter) pay(w http.ResponseWriter, wsID string) (*billing.Service, bool) {
+	if !b.isTest(wsID) {
+		return b.live, true
+	}
+	if b.test == nil {
+		writeJSONErr(w, http.StatusForbidden, "a test workspace pays only through Stripe test mode, and "+b.unset+" is not set")
+		return nil, false
+	}
+	return b.test, true
+}
+
+// sellsSubscriptions reports whether either Service sells a subscription — whether the subscription routes
+// are registered at all.
+func (b billingRouter) sellsSubscriptions() bool {
+	return b.live.SellsSubscriptions() || (b.test != nil && b.test.SellsSubscriptions())
+}
+
+// onSubscriptions runs h with the Service that sells wsID its subscription. A workspace whose Service sells
+// none is answered 404, as these routes answered before a test-mode Service could sell one — except that a
+// test workspace asking to pay (checkout) is told which variable is unset.
+func (b billingRouter) onSubscriptions(checkout bool, h func(svc *billing.Service) http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		wsID := chi.URLParam(req, "wsID")
+		svc := b.live
+		if b.isTest(wsID) {
+			if checkout {
+				var ok bool
+				if svc, ok = b.pay(w, wsID); !ok {
+					return
+				}
+				if !svc.SellsSubscriptions() {
+					writeJSONErr(w, http.StatusForbidden,
+						"a test workspace subscribes only to Stripe test-mode plans, and LENS_STRIPE_TEST_SUBSCRIPTION_PLANS is not set")
+					return
+				}
+			} else if svc = b.test; svc == nil {
+				http.NotFound(w, req)
+				return
+			}
+		}
+		if !svc.SellsSubscriptions() {
+			http.NotFound(w, req)
+			return
+		}
+		h(svc)(w, req)
+	}
+}
+
+// newCheckoutHandler — POST /v1/workspaces/{wsID}/billing/checkout {"usd_cents":…}: a one-off top-up's
+// Stripe Checkout URL, from the Service that takes the workspace's money.
+func newCheckoutHandler(b billingRouter) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		wsID := chi.URLParam(req, "wsID")
+		svc, ok := b.pay(w, wsID)
+		if !ok {
+			return
+		}
+		var in struct {
+			USDCents int64 `json:"usd_cents"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		url, err := svc.CreateCheckout(req.Context(), wsID, in.USDCents)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, billing.ErrAmountNotAllowed) {
+				status = http.StatusBadRequest
+			}
+			writeJSONErr(w, status, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]string{"url": url})
+	}
+}
+
+// newSubscribeHandler — POST /v1/workspaces/{wsID}/billing/subscribe {"plan":"plus"|"pro"|"max"}: the
+// subscription checkout (MODEL 2, W4.6.1 step 1; plans B13.1). An empty body is the single configured price.
+func newSubscribeHandler(svc *billing.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		wsID := chi.URLParam(req, "wsID")
+		var body struct {
+			Plan string `json:"plan"`
+		}
+		if req.ContentLength != 0 {
+			if err := json.NewDecoder(io.LimitReader(req.Body, 1<<10)).Decode(&body); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "body must be {\"plan\": \"<name>\"}")
+				return
+			}
+		}
+		url, err := svc.CreatePlanCheckout(req.Context(), wsID, body.Plan)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, billing.ErrNoSubscriptionPrice) {
+				// A capability this deployment does not have — not a fault.
+				status = http.StatusNotImplemented
+			} else if errors.Is(err, billing.ErrUnknownPlan) {
+				status = http.StatusBadRequest
+			}
+			writeJSONErr(w, status, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]string{"url": url})
 	}
 }

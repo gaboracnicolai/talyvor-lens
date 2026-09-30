@@ -21,7 +21,7 @@ import (
 // embedder ties every text, so only the partition and the verifier decide). wsPoolA is synthetic,
 // wsPoolB real: the same words, and a rephrasing the verifier says YES to, go to the model both ways.
 // Then wsPoolB turns synthetic too and IS served wsPoolA's answer — a partition, not pooling switched
-// off — and the ledger shows the pooled charge with no royalty minted.
+// off — and the ledger shows the pooled charge and, since B25.2, wsPoolA's royalty for it.
 
 func TestB171_ASyntheticPooledAnswerNeverReachesARealWorkspace_NorARealOneASyntheticWorkspace(t *testing.T) {
 	p, ledger, _ := chatCacheProxy(t, "")
@@ -118,7 +118,11 @@ func TestB171_ASyntheticPooledAnswerNeverReachesARealWorkspace_NorARealOneASynth
 	if got := count(`SELECT count(*) FROM lxc_ledger WHERE workspace_id = 'wsPoolB' AND amount < 0 AND metadata ? 'pool_saved_ulxc'`); got != 1 {
 		t.Errorf("wsPoolB has %d pooled-answer charges on its test credits, want 1", got)
 	}
-	if got := count(`SELECT count(*) FROM pool_royalty_mints`); got != 0 {
-		t.Errorf("%d royalty mints — a synthetic workspace earned from the pool, want 0", got)
+	// B25.2: between two test users the contributor earns (marked test on the migrated schema — b252 test).
+	if got := count(`SELECT count(*) FROM pool_royalty_mints WHERE requester_workspace_id = 'wsPoolB' AND contributor_workspace_id = 'wsPoolA'`); got != 1 {
+		t.Errorf("%d royalty mints for wsPoolA's answer served to wsPoolB, both synthetic; want 1", got)
+	}
+	if got := count(`SELECT count(*) FROM pool_royalty_mints`); got != 1 {
+		t.Errorf("%d royalty mints in all — one crossed the partition; want only the synthetic pair's 1", got)
 	}
 }

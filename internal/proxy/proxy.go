@@ -2558,9 +2558,11 @@ func (p *Proxy) mintPooledRoyalty(ctx context.Context, hit *poolroyalty.ServedHi
 	if p.royaltyMinter == nil || hit == nil {
 		return
 	}
-	// B17.1: synthetic workspaces earn nothing and fund nothing — their pool is a test partition.
-	if p.isSynthetic(hit.RequesterWorkspace) || p.isSynthetic(hit.ContributorWorkspace) {
-		slog.Info("poolroyalty: mint skipped — synthetic workspace",
+	// B25.2: a pooled serve between two test (synthetic) workspaces mints its royalty, marked test (0173) —
+	// never paid out, never counted in real totals. Between a test and a real one it mints nothing: the pool
+	// is partitioned so that serve should not happen, and the minter's wall (B25.1) refuses it regardless.
+	if p.isSynthetic(hit.RequesterWorkspace) != p.isSynthetic(hit.ContributorWorkspace) {
+		slog.Info("poolroyalty: mint skipped — test and real money never mix",
 			slog.String("request_id", hit.RequestID), slog.String("contributor", hit.ContributorWorkspace))
 		return
 	}

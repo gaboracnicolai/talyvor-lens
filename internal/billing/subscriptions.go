@@ -71,6 +71,11 @@ func (s *Service) CreateSubscriptionCheckout(ctx context.Context, workspaceID st
 	return s.CreatePlanCheckout(ctx, workspaceID, "")
 }
 
+// SellsSubscriptions reports whether this Service has a subscription price or plans to sell.
+func (s *Service) SellsSubscriptions() bool {
+	return s.subStripe != nil && (s.subPrice != "" || len(s.subPlans) > 0)
+}
+
 // ErrUnknownPlan is a checkout for a plan this deployment does not sell.
 var ErrUnknownPlan = errors.New("billing: unknown subscription plan")
 
@@ -410,6 +415,16 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 		// will not add the metadata.
 		s.log.Warn("billing webhook: subscription event with no workspace", "event", event.ID, "subscription", sub.ID)
 		applied = false
+	}
+	// B25.2 — a test workspace's subscription is the test-mode Service's, a real one's the live Service's.
+	if mine, err := s.takes(ctx, wsID); err != nil {
+		s.fail(w, "workspace kind", event.ID, err)
+		return
+	} else if !mine {
+		s.log.Info("billing webhook: a subscription of the other kind of workspace — test and real money are kept apart",
+			"event", event.ID, "subscription", sub.ID, "workspace", wsID)
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
 	if applied {

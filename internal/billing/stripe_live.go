@@ -22,14 +22,25 @@ import (
 type LiveStripe struct {
 	successURL string
 	cancelURL  string
+	// key is the secret key this instance calls with. The checkout, customer, card and subscription calls
+	// below pass it on each call, so a test-mode instance (B25.2) and the live one never share a key.
+	key string
 }
 
 // NewLiveStripe configures the Stripe SDK with the secret key and the
 // success/cancel redirect URLs Checkout requires.
 func NewLiveStripe(secretKey, successURL, cancelURL string) *LiveStripe {
 	stripe.Key = secretKey
-	return &LiveStripe{successURL: successURL, cancelURL: cancelURL}
+	return &LiveStripe{successURL: successURL, cancelURL: cancelURL, key: secretKey}
 }
+
+// NewTestModeStripe is a second instance with a Stripe TEST-MODE key, for test (synthetic) workspaces
+// (B25.2). It leaves the process-global key, which the live instance set, alone.
+func NewTestModeStripe(secretKey, successURL, cancelURL string) *LiveStripe {
+	return &LiveStripe{successURL: successURL, cancelURL: cancelURL, key: secretKey}
+}
+
+func (l *LiveStripe) backend() stripe.Backend { return stripe.GetBackend(stripe.APIBackend) }
 
 // LiveKey reports whether key is a live-mode Stripe key, which moves real money.
 func LiveKey(key string) bool {
@@ -44,7 +55,7 @@ func (l *LiveStripe) CreateCustomer(ctx context.Context, workspaceID string) (st
 	params := &stripe.CustomerParams{}
 	params.Context = ctx
 	params.AddMetadata("workspace_id", workspaceID)
-	c, err := customer.New(params)
+	c, err := customer.Client{B: l.backend(), Key: l.key}.New(params)
 	if err != nil {
 		return "", err
 	}
@@ -79,7 +90,7 @@ func (l *LiveStripe) CreateCheckoutSession(ctx context.Context, p CheckoutParams
 	params.AddMetadata("lxc_amount", strconv.FormatInt(p.LXCAmount, 10)) // µLXC (SEC-2)
 	params.AddMetadata("usd_cents", strconv.FormatInt(p.USDCents, 10))
 
-	sess, err := session.New(params)
+	sess, err := session.Client{B: l.backend(), Key: l.key}.New(params)
 	if err != nil {
 		return "", "", err
 	}
@@ -94,7 +105,7 @@ func (l *LiveStripe) CardFingerprint(ctx context.Context, paymentIntentID string
 	params := &stripe.PaymentIntentParams{}
 	params.Context = ctx
 	params.AddExpand("payment_method")
-	pi, err := paymentintent.Get(paymentIntentID, params)
+	pi, err := paymentintent.Client{B: l.backend(), Key: l.key}.Get(paymentIntentID, params)
 	if err != nil {
 		return "", err
 	}
@@ -131,7 +142,7 @@ func (l *LiveStripe) CreateSubscriptionCheckoutSession(ctx context.Context, p Su
 	params.Context = ctx
 	params.AddMetadata("workspace_id", p.WorkspaceID)
 	params.SubscriptionData.AddMetadata("workspace_id", p.WorkspaceID)
-	sess, err := session.New(params)
+	sess, err := session.Client{B: l.backend(), Key: l.key}.New(params)
 	if err != nil {
 		return "", "", err
 	}
@@ -144,7 +155,7 @@ func (l *LiveStripe) CreateSubscriptionCheckoutSession(ctx context.Context, p Su
 func (l *LiveStripe) SetCancelAtPeriodEnd(ctx context.Context, subscriptionID string, cancel bool) (*stripe.Subscription, error) {
 	params := &stripe.SubscriptionParams{CancelAtPeriodEnd: stripe.Bool(cancel)}
 	params.Context = ctx
-	return subscription.Update(subscriptionID, params)
+	return subscription.Client{B: l.backend(), Key: l.key}.Update(subscriptionID, params)
 }
 
 // ChangeSubscriptionPrice moves a subscription's one item to priceID with proration (B18.14): Stripe credits
@@ -153,7 +164,7 @@ func (l *LiveStripe) SetCancelAtPeriodEnd(ctx context.Context, subscriptionID st
 func (l *LiveStripe) ChangeSubscriptionPrice(ctx context.Context, subscriptionID, priceID string) (*stripe.Subscription, error) {
 	get := &stripe.SubscriptionParams{}
 	get.Context = ctx
-	cur, err := subscription.Get(subscriptionID, get)
+	cur, err := subscription.Client{B: l.backend(), Key: l.key}.Get(subscriptionID, get)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +176,7 @@ func (l *LiveStripe) ChangeSubscriptionPrice(ctx context.Context, subscriptionID
 		ProrationBehavior: stripe.String("create_prorations"),
 	}
 	params.Context = ctx
-	return subscription.Update(subscriptionID, params)
+	return subscription.Client{B: l.backend(), Key: l.key}.Update(subscriptionID, params)
 }
 
 // CreditInvoice adds a NEGATIVE line of amountCents to a draft invoice (B13.2), idempotent on

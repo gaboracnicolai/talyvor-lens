@@ -1731,11 +1731,25 @@ func run() error {
 	// B1.6 — D, the allowance each paid period grants. Zero (the default) grants
 	// nothing, and then there is nothing for a served request to draw down either.
 	billingSvc = billingSvc.WithAllowance(cfg.SubscriptionAllowanceULXC)
-	if cfg.SubscriptionAllowanceULXC > 0 || (cfg.BillingEnabled && sellsSubscriptions) {
+	// B25.2 — test (synthetic) workspaces pay through Stripe TEST MODE, always, even once the key above is
+	// live: a Service of their own with the test-mode key, webhook (/v1/billing/webhook/test) and plans. Each
+	// Service takes only its own kind of workspace's money. Unset, a test workspace cannot buy or subscribe.
+	var testBillingSvc *billing.Service
+	if cfg.BillingEnabled && cfg.StripeTestSecretKey != "" && cfg.StripeTestWebhookSecret != "" {
+		testStripe := billing.NewTestModeStripe(cfg.StripeTestSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL)
+		testBillingSvc = billing.New(pool, dualToken, testStripe, cfg.StripeTestWebhookSecret).
+			ForTestWorkspaces(true).WithAllowance(cfg.SubscriptionAllowanceULXC)
+		if len(cfg.StripeTestSubscriptionPlans) > 0 {
+			testBillingSvc = testBillingSvc.WithPlans(testStripe, cfg.StripeTestSubscriptionPlans)
+		}
+		billingSvc = billingSvc.ForTestWorkspaces(false)
+	}
+	billRoute := newBillingRouter(billingSvc, testBillingSvc, wsManager.GetSynthetic, cfg.StripeTestSecretKey, cfg.StripeTestWebhookSecret)
+	if cfg.SubscriptionAllowanceULXC > 0 || (cfg.BillingEnabled && billRoute.sellsSubscriptions()) {
 		p.SetSubscriptionAllowance(billingSvc)
 	}
 	bill := billReg{on: cfg.BillingEnabled}
-	subs := billReg{on: cfg.BillingEnabled && sellsSubscriptions}
+	subs := billReg{on: cfg.BillingEnabled && billRoute.sellsSubscriptions()}
 	// Stage 2.4/2.5 shadow LXC spend — observational, post-serve, flag-gated
 	// (LENS_LXC_SHADOW_SPEND_ENABLED, default off). The proxy debits LXC
 	// alongside the cost_usd write; void/non-gating, cannot affect serving.
@@ -2319,6 +2333,10 @@ func run() error {
 	// auth/rate-limit middleware; the handler reads the RAW body itself (Stripe
 	// signs raw bytes) before any JSON.
 	bill.post(r, "/v1/billing/webhook", billingSvc.HandleWebhook)
+	// B25.2 — the Stripe test-mode endpoint, signed with its own secret; it credits test workspaces only.
+	if testBillingSvc != nil {
+		r.Post("/v1/billing/webhook/test", testBillingSvc.HandleWebhook)
+	}
 
 	// B19.12 — Stripe's real-time authorisation of every agent card purchase — PUBLIC (Stripe-signed with
 	// its own secret, no auth), on the bare router like the billing webhook. Unset secret ⇒ unregistered.
@@ -3314,124 +3332,83 @@ func run() error {
 		// U18b billing — FIAT, registered under BillingEnabled (independent of the
 		// economy master). Checkout is workspace-scoped: workspaceIsolationMiddleware
 		// binds {wsID} to the caller's credential (admin bypasses), like its siblings.
-		bill.post(authed, "/v1/workspaces/{wsID}/billing/checkout", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			if refuseSynthetic(w, wsManager.GetSynthetic, wsID) {
-				return
-			}
-			var in struct {
-				USDCents int64 `json:"usd_cents"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			url, err := billingSvc.CreateCheckout(req.Context(), wsID, in.USDCents)
-			if err != nil {
-				status := http.StatusInternalServerError
-				if errors.Is(err, billing.ErrAmountNotAllowed) {
-					status = http.StatusBadRequest
-				}
-				writeJSONErr(w, status, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, map[string]string{"url": url})
-		})
+		// B25.2: a test workspace's checkout is a Stripe test-mode one (billRoute).
+		bill.post(authed, "/v1/workspaces/{wsID}/billing/checkout", newCheckoutHandler(billRoute))
 
 		// MODEL 2 (W4.6.1 step 1) — the subscription checkout. Same {wsID} binding as
 		// its one-off sibling above: the caller's credential owns the workspace, admin
-		// bypasses. Registered only when a Stripe Price is configured.
-		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscribe", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			if refuseSynthetic(w, wsManager.GetSynthetic, wsID) {
-				return
-			}
-			// B13.1 — {"plan":"plus"|"pro"|"max"}; an empty body is the single configured price.
-			var body struct {
-				Plan string `json:"plan"`
-			}
-			if req.ContentLength != 0 {
-				if err := json.NewDecoder(io.LimitReader(req.Body, 1<<10)).Decode(&body); err != nil {
-					writeJSONErr(w, http.StatusBadRequest, "body must be {\"plan\": \"<name>\"}")
-					return
-				}
-			}
-			url, err := billingSvc.CreatePlanCheckout(req.Context(), wsID, body.Plan)
-			if err != nil {
-				status := http.StatusInternalServerError
-				if errors.Is(err, billing.ErrNoSubscriptionPrice) {
-					// A capability this deployment does not have — not a fault.
-					status = http.StatusNotImplemented
-				} else if errors.Is(err, billing.ErrUnknownPlan) {
-					status = http.StatusBadRequest
-				}
-				writeJSONErr(w, status, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, map[string]string{"url": url})
-		})
+		// bypasses. Registered only when a Stripe Price is configured. B25.2: a test workspace subscribes to
+		// a Stripe test-mode plan, and each subscription route answers from the Service that sold it.
+		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscribe", billRoute.onSubscriptions(true, newSubscribeHandler))
 
 		// The read: is this workspace paying, and until when. ⚠ Registered under the
 		// SAME gate as the checkout, so a deployment without subscriptions answers 404
 		// rather than a confident {"subscribed": false} about a product it does not sell.
-		subs.get(authed, "/v1/workspaces/{wsID}/billing/subscription", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			st, err := billingSvc.GetSubscription(req.Context(), wsID)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
+		subs.get(authed, "/v1/workspaces/{wsID}/billing/subscription", billRoute.onSubscriptions(false, func(billingSvc *billing.Service) http.HandlerFunc {
+			return func(w http.ResponseWriter, req *http.Request) {
+				wsID := chi.URLParam(req, "wsID")
+				st, err := billingSvc.GetSubscription(req.Context(), wsID)
+				if err != nil {
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				writeJSONOK(w, http.StatusOK, st)
 			}
-			writeJSONOK(w, http.StatusOK, st)
-		})
+		}))
 
 		// B1.6 — the subscriber's plan this period: the allowance, what has been used
 		// of it, and what the workspace's answers earned back (capped at the fee).
 		// {"allowance": null} when no period is granted.
-		subs.get(authed, "/v1/workspaces/{wsID}/billing/allowance", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			sum, err := billingSvc.Summary(req.Context(), wsID, time.Now())
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
+		subs.get(authed, "/v1/workspaces/{wsID}/billing/allowance", billRoute.onSubscriptions(false, func(billingSvc *billing.Service) http.HandlerFunc {
+			return func(w http.ResponseWriter, req *http.Request) {
+				wsID := chi.URLParam(req, "wsID")
+				sum, err := billingSvc.Summary(req.Context(), wsID, time.Now())
+				if err != nil {
+					writeJSONErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				writeJSONOK(w, http.StatusOK, sum)
 			}
-			writeJSONOK(w, http.StatusOK, sum)
-		})
+		}))
 
 		// B18.14 — change plan: {"plan":"plus"|"pro"|"max"} moves the live subscription to that plan, with
 		// proration. Like cancel, it writes no row — the webhook that follows records the new price and moves
 		// this period's allowance to it.
-		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscription/plan", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			if refuseSynthetic(w, wsManager.GetSynthetic, wsID) {
-				return
-			}
-			var body struct {
-				Plan string `json:"plan"`
-			}
-			if err := json.NewDecoder(io.LimitReader(req.Body, 1<<10)).Decode(&body); err != nil || body.Plan == "" {
-				writeJSONErr(w, http.StatusBadRequest, "body must be {\"plan\": \"<name>\"}")
-				return
-			}
-			st, err := billingSvc.ChangePlan(req.Context(), wsID, body.Plan)
-			if err != nil {
-				status := http.StatusInternalServerError
-				switch {
-				case errors.Is(err, billing.ErrNoSubscriptionPrice):
-					status = http.StatusNotImplemented
-				case errors.Is(err, billing.ErrUnknownPlan):
-					status = http.StatusBadRequest
-				case errors.Is(err, billing.ErrNoLiveSubscription), errors.Is(err, billing.ErrSamePlan):
-					status = http.StatusConflict
+		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscription/plan", billRoute.onSubscriptions(true, func(billingSvc *billing.Service) http.HandlerFunc {
+			return func(w http.ResponseWriter, req *http.Request) {
+				wsID := chi.URLParam(req, "wsID")
+				var body struct {
+					Plan string `json:"plan"`
 				}
-				writeJSONErr(w, status, err.Error())
-				return
+				if err := json.NewDecoder(io.LimitReader(req.Body, 1<<10)).Decode(&body); err != nil || body.Plan == "" {
+					writeJSONErr(w, http.StatusBadRequest, "body must be {\"plan\": \"<name>\"}")
+					return
+				}
+				st, err := billingSvc.ChangePlan(req.Context(), wsID, body.Plan)
+				if err != nil {
+					status := http.StatusInternalServerError
+					switch {
+					case errors.Is(err, billing.ErrNoSubscriptionPrice):
+						status = http.StatusNotImplemented
+					case errors.Is(err, billing.ErrUnknownPlan):
+						status = http.StatusBadRequest
+					case errors.Is(err, billing.ErrNoLiveSubscription), errors.Is(err, billing.ErrSamePlan):
+						status = http.StatusConflict
+					}
+					writeJSONErr(w, status, err.Error())
+					return
+				}
+				writeJSONOK(w, http.StatusOK, st)
 			}
-			writeJSONOK(w, http.StatusOK, st)
-		})
+		}))
 
 		// B1.5 — cancel and resume (billing_routes.go). Cancel is AT PERIOD END.
-		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscription/cancel", newSubscriptionCancelHandler(billingSvc, true))
-		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscription/resume", newSubscriptionCancelHandler(billingSvc, false))
+		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscription/cancel", billRoute.onSubscriptions(false, func(svc *billing.Service) http.HandlerFunc {
+			return newSubscriptionCancelHandler(svc, true)
+		}))
+		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscription/resume", billRoute.onSubscriptions(false, func(svc *billing.Service) http.HandlerFunc {
+			return newSubscriptionCancelHandler(svc, false)
+		}))
 
 		// Admin refund-visibility list (read-only; requireAdmin). An 'anomalous' row
 		// means the customer was CHARGED and NOT credited — v1 resolution is a manual
@@ -3439,11 +3416,9 @@ func run() error {
 		bill.get(authed, "/v1/admin/billing/purchases",
 			requireAdminOrOperatorRead(authManager, newBillingPurchasesHandler(billingSvc)))
 
+		// B25.2: a test workspace converts its test LENS too; the rows it writes are marked test (0173).
 		econ.post(authed, "/v1/workspaces/{wsID}/lxc/convert", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
-			if refuseSynthetic(w, wsManager.GetSynthetic, wsID) {
-				return
-			}
 			var in struct {
 				LXCAmount int64 `json:"lxc_amount_ulxc"` // µLXC (SEC-2)
 			}
