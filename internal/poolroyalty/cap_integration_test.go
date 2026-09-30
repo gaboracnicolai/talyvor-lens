@@ -65,7 +65,7 @@ func TestCapExactness_ConcurrentSamePair_Integration(t *testing.T) {
 		)`,
 		`CREATE TABLE lens_token_ledger (
 			id            UUID             NOT NULL DEFAULT gen_random_uuid(),
-			workspace_id  TEXT             NOT NULL,
+			workspace_id  TEXT             NOT NULL, test BOOLEAN NOT NULL DEFAULT false,
 			amount BIGINT NOT NULL,
 			balance_after BIGINT NOT NULL,
 			type          TEXT             NOT NULL,
@@ -204,7 +204,7 @@ func TestHoldbackLifecycle_Integration(t *testing.T) {
 		)`,
 		`CREATE TABLE lens_token_ledger (
 			id            UUID             NOT NULL DEFAULT gen_random_uuid(),
-			workspace_id  TEXT             NOT NULL,
+			workspace_id  TEXT             NOT NULL, test BOOLEAN NOT NULL DEFAULT false,
 			amount BIGINT NOT NULL,
 			balance_after BIGINT NOT NULL,
 			type          TEXT             NOT NULL,
@@ -536,7 +536,7 @@ func entryCapResetSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) 
 		`DROP TABLE IF EXISTS lens_token_ledger`,
 		`DROP TABLE IF EXISTS lens_token_balances`,
 		`CREATE TABLE lens_token_balances (workspace_id TEXT PRIMARY KEY, balance BIGINT NOT NULL DEFAULT 0, held_balance BIGINT NOT NULL DEFAULT 0, lifetime_earned BIGINT NOT NULL DEFAULT 0, lifetime_spent BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
+		`CREATE TABLE lens_token_ledger (id UUID NOT NULL DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, test BOOLEAN NOT NULL DEFAULT false, amount BIGINT NOT NULL, balance_after BIGINT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (id, workspace_id))`,
 		`CREATE TABLE pool_royalty_mints (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), request_id TEXT NOT NULL UNIQUE, requester_workspace_id TEXT NOT NULL, contributor_workspace_id TEXT NOT NULL, layer TEXT NOT NULL, entry_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', similarity DOUBLE PRECISION NOT NULL DEFAULT 0, avoided_cogs_usd DOUBLE PRECISION NOT NULL DEFAULT 0, minted_amount BIGINT NOT NULL DEFAULT 0, answer_sha256 TEXT NOT NULL DEFAULT '', prompt_sha256 TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'final', finalize_after TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE INDEX IF NOT EXISTS idx_pool_royalty_mints_entry ON pool_royalty_mints (entry_id, created_at)`,
 	} {

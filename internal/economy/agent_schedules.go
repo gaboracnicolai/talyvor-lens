@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // agent_schedules.go — B19.8: SCHEDULED PAYMENTS AND AUTOMATIC TOP-UPS.
@@ -154,6 +156,12 @@ func (s *DualTokenStore) CreateAgentSchedule(ctx context.Context, workspaceID, f
 		return AgentSchedule{}, fmt.Errorf("%w: every must be hour, day, week or month", ErrAgentRule)
 	case fromAgentID == toAgentID:
 		return AgentSchedule{}, ErrSameAgent
+	}
+	var payeeWorkspace string
+	if err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM agent_accounts WHERE id = $1`, toAgentID).Scan(&payeeWorkspace); err == nil {
+		if err := workspace.CheckMoneyWall(ctx, s.pool, workspaceID, payeeWorkspace); err != nil {
+			return AgentSchedule{}, err
+		}
 	}
 	sc, err := scanAgentSchedule(s.pool.QueryRow(ctx, `
 		INSERT INTO agent_payment_schedules (id, workspace_id, from_agent_id, to_agent_id, amount_ulxc, memo, every, next_run_at)
@@ -372,7 +380,7 @@ func (s *DualTokenStore) runScheduleTick(ctx context.Context, now time.Time) (st
 		}
 	case errors.Is(perr, ErrAgentFunds), errors.Is(perr, ErrAgentRule), errors.Is(perr, ErrApprovalRequired), errors.Is(perr, ErrAgentNotFound),
 		errors.Is(perr, ErrAgentOwnerless), errors.Is(perr, ErrListingPayee), errors.Is(perr, ErrOwnerUnverified),
-		errors.Is(perr, ErrCapabilityNotCleared):
+		errors.Is(perr, ErrCapabilityNotCleared), errors.Is(perr, workspace.ErrMoneyWall):
 		if err := sp.Rollback(ctx); err != nil {
 			return "", err
 		}

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/talyvor/lens/internal/economy"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // use.go — B20.2: USE A LISTING, PAY PER USE, AND THE SELLER EARNS.
@@ -235,6 +236,9 @@ func (s *Store) chargeFor(ctx context.Context, l Listing, buyer string) (string,
 		return ChargeOwn, 0, nil
 	case l.PricePerUseULXC == 0:
 		return ChargeFree, 0, nil
+	}
+	if err := workspace.CheckMoneyWall(ctx, s.pool, buyer, l.WorkspaceID); err != nil {
+		return "", 0, err
 	}
 	linked, err := s.linked(ctx, l.WorkspaceID, buyer)
 	if err != nil {

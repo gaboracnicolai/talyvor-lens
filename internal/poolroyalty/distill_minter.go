@@ -29,12 +29,16 @@ package poolroyalty
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/mining"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // distillSweepBatchLimit bounds one tick's mint work so a backlog cannot stall
@@ -117,6 +121,7 @@ type DistillMinter struct {
 	enabled        func() bool
 	holdWindow     time.Duration
 	linkageEnabled bool
+	wall           mining.MoneyWall
 	capPerPair     int           // PR1: max mints per (owner, requester) pair in capWindow; 0 = off
 	capPerContent  int           // PR1: max mints per content_hash in capWindow; 0 = off
 	capWindow      time.Duration // rolling window both caps count over (default 24h)
@@ -154,6 +159,14 @@ func NewDistillMinter(db distillMinterDB, ledger ledgerCreditTx, share float64, 
 func (m *DistillMinter) SetOwnerLinkageCheck(enabled bool) {
 	if m != nil {
 		m.linkageEnabled = enabled
+	}
+}
+
+// SetMoneyWall sets B25.1's test-money wall (workspace.CheckMoneyWall): a relationship between a test workspace
+// and a real one mints nothing. nil (the default) checks nothing; production sets it.
+func (m *DistillMinter) SetMoneyWall(w mining.MoneyWall) {
+	if m != nil {
+		m.wall = w
 	}
 }
 
@@ -294,6 +307,15 @@ func (m *DistillMinter) mintOne(ctx context.Context, r distillRelationship) (boo
 		return false, fmt.Errorf("poolroyalty: distill begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// B25.1: a royalty never crosses between a test workspace and a real one (deflationary no-op).
+	if m.wall != nil {
+		if err := m.wall(ctx, tx, r.owner, r.requester); errors.Is(err, workspace.ErrMoneyWall) {
+			return false, nil
+		} else if err != nil {
+			return false, fmt.Errorf("poolroyalty: distill %w", err)
+		}
+	}
 
 	// U6 PR2 owner-linkage: deny a mint between two workspaces sharing a captured
 	// card fingerprint (default-allow on missing). Read-only, before the claim +

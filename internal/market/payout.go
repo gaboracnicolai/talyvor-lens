@@ -127,14 +127,15 @@ func sellerBalance(ctx context.Context, q queryRower, workspaceID string, now ti
 
 // sellerFunds splits what a seller has available by what paid for it (B22.1): earnings are test or live as
 // the invoice that paid them was, and each Stripe payout as the key that made it was. Earnings taken as credits
-// draw on test earnings first. Test earnings never reach a live payout: a live key pays at most liveLeft.
+// draw on test earnings first. Test earnings never reach a live payout: a live key pays at most liveLeft. A test
+// workspace's earnings (marked test, B25.1) are test earnings whatever paid them.
 func sellerFunds(ctx context.Context, q queryRower, workspaceID string, now time.Time) (testLeft, liveLeft int64, err error) {
 	var testReleased, liveReleased, testPaid, livePaid, credits int64
 	err = q.QueryRow(ctx, `SELECT
 		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2
-			AND NOT e.livemode AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
+			AND (NOT e.livemode OR e.test) AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
 		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2
-			AND e.livemode AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
+			AND e.livemode AND NOT e.test AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
 		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND NOT livemode), 0)::bigint,
 		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND livemode), 0)::bigint,
 		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1 AND method = 'credits'), 0)::bigint`,

@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // schedule.go — B19.17: AN AGENT'S SCHEDULE PAYS A MARKETPLACE LISTING.
@@ -73,6 +75,11 @@ func (s *Store) payable(ctx context.Context, q interface {
 		return l, "a schedule cannot pay the workspace's own listing", nil
 	case l.PricePerUseULXC == 0:
 		return l, "the listing is free, so there is nothing to pay", nil
+	}
+	if err := workspace.CheckMoneyWall(ctx, q, buyer, l.WorkspaceID); errors.Is(err, workspace.ErrMoneyWall) {
+		return l, err.Error(), nil
+	} else if err != nil {
+		return l, "", err
 	}
 	linked, err := s.linked(ctx, l.WorkspaceID, buyer)
 	if err != nil {

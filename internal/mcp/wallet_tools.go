@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/economy"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // wallet_tools.go — B22.11: AGENTS USE ALL OF THEIR WALLET THEMSELVES.
@@ -57,6 +58,7 @@ var walletRefusals = []error{
 	economy.ErrLoanNotFound, economy.ErrLoanTerms, economy.ErrLoanCompaniesOnly, economy.ErrEscrowNotFound, economy.ErrEscrowTerms,
 	economy.ErrPotNotFound, economy.ErrPotLocked, economy.ErrPot, economy.ErrLiveTrading, economy.ErrNoQuote,
 	economy.ErrPortfolioNotFound, economy.ErrSimOrderNotFound, economy.ErrSimOrder, economy.ErrSimHoldings,
+	workspace.ErrMoneyWall,
 }
 
 func isWalletTool(name string) bool { return strings.HasPrefix(name, "wallet_") }

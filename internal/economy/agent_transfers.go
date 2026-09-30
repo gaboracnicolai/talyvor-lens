@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // agent_transfers.go — B22.3: SEND AND REQUEST MONEY BETWEEN ANY AGENTS ON TALYVOR.
@@ -180,6 +182,10 @@ func (s *DualTokenStore) transferTx(ctx context.Context, tx pgx.Tx, t AgentTrans
 		}
 		t.ToWorkspaceID = to.WorkspaceID
 	}
+	// B25.1: test money moves only between test workspaces, real money only between real ones.
+	if err := workspace.CheckMoneyWall(ctx, tx, t.FromWorkspaceID, t.ToWorkspaceID); err != nil {
+		return t, err
+	}
 	// Both agents' rows, in id order, so two opposite transfers cannot deadlock.
 	type side struct{ ws, agent string }
 	sides := []side{{t.FromWorkspaceID, t.FromAgentID}, {t.ToWorkspaceID, t.ToAgentID}}
@@ -325,6 +331,9 @@ func (s *DualTokenStore) RequestCredits(ctx context.Context, workspaceID, agentI
 	}
 	if payer.WalletID == agentID {
 		return MoneyRequest{}, ErrSameAgent
+	}
+	if err := workspace.CheckMoneyWall(ctx, s.pool, workspaceID, payer.WorkspaceID); err != nil {
+		return MoneyRequest{}, err
 	}
 	r, err := scanMoneyRequest(s.pool.QueryRow(ctx, `INSERT INTO agent_money_requests (id, from_workspace_id, from_agent_id, to_workspace_id,
 		to_agent_id, amount_ulxc, memo)

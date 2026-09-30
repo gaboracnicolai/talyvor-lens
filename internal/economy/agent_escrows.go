@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // agent_escrows.go — B22.6: ESCROW, MONEY HELD UNTIL THE DEAL IS DONE.
@@ -118,6 +120,9 @@ func (s *DualTokenStore) PayIntoEscrow(ctx context.Context, workspaceID, payerAg
 }
 
 func (s *DualTokenStore) payIntoEscrowTx(ctx context.Context, tx pgx.Tx, e *Escrow) error {
+	if err := workspace.CheckMoneyWall(ctx, tx, e.PayerWorkspaceID, e.PayeeWorkspaceID); err != nil {
+		return err
+	}
 	// Both agents' rows, in id order (the lock order of every transfer), then the payer's balance row.
 	type side struct{ ws, agent string }
 	sides := []side{{e.PayerWorkspaceID, e.PayerAgentID}, {e.PayeeWorkspaceID, e.PayeeAgentID}}
@@ -232,6 +237,8 @@ func settleEscrowTx(ctx context.Context, tx pgx.Tx, e Escrow, ev EscrowEvent) er
 	ws, agent, desc := e.PayeeWorkspaceID, e.PayeeAgentID, "credits released from escrow"
 	if ev.Kind == "returned" {
 		ws, agent, desc = e.PayerWorkspaceID, e.PayerAgentID, "credits returned from escrow"
+	} else if err := workspace.CheckMoneyWall(ctx, tx, e.PayerWorkspaceID, e.PayeeWorkspaceID); err != nil {
+		return err
 	}
 	if err := lockAgent(ctx, tx, ws, agent); err != nil {
 		return err

@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // company_loans.go — B22.5: LOANS BETWEEN COMPANIES: OFFER, BORROW, REPAY.
@@ -160,6 +162,9 @@ func (s *DualTokenStore) OfferLoan(ctx context.Context, workspaceID, lenderAgent
 		return Loan{}, err
 	}
 	if err := requireCompanies(ctx, tx, workspaceID, to.WorkspaceID); err != nil {
+		return Loan{}, err
+	}
+	if err := workspace.CheckMoneyWall(ctx, tx, workspaceID, to.WorkspaceID); err != nil {
 		return Loan{}, err
 	}
 	for _, side := range []struct{ ws, agent string }{{workspaceID, lenderAgentID}, {to.WorkspaceID, to.WalletID}} {
@@ -410,7 +415,7 @@ func (s *DualTokenStore) runLoanTick(ctx context.Context, now time.Time) (string
 			return "", err
 		}
 	case errors.Is(perr, ErrAgentFunds), errors.Is(perr, ErrCapabilityNotCleared), errors.Is(perr, ErrOwnerUnverified),
-		errors.Is(perr, ErrAgentNotFound):
+		errors.Is(perr, ErrAgentNotFound), errors.Is(perr, workspace.ErrMoneyWall):
 		if err := sp.Rollback(ctx); err != nil {
 			return "", err
 		}

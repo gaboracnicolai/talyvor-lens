@@ -18,6 +18,7 @@ import (
 	"github.com/talyvor/lens/internal/passkey"
 	"github.com/talyvor/lens/internal/storedanswers"
 	"github.com/talyvor/lens/internal/tenant"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // B19.1 — AGENT ACCOUNTS: every agent has its own balance (internal/economy/agent_accounts.go).
@@ -445,6 +446,8 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrSameAgent), errors.Is(err, economy.ErrListingPayee):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, workspace.ErrMoneyWall):
+			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case err != nil:
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		default:
@@ -662,7 +665,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless):
 			writeJSONErr(w, http.StatusConflict, err.Error())
 		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, economy.ErrApprovalRequired), errors.Is(err, economy.ErrWashTrade),
-			errors.Is(err, economy.ErrCapabilityNotCleared):
+			errors.Is(err, economy.ErrCapabilityNotCleared), errors.Is(err, workspace.ErrMoneyWall):
 			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case err != nil:
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
