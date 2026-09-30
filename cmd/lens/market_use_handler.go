@@ -54,7 +54,12 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 				return
 			}
 		}
-		deps := market.UseDeps{Runner: proxyRunner{lens: lens, from: req}, Meter: meter, Agents: agents}
+		// B25.6: a test workspace's paid uses go on its Stripe test-mode bill.
+		m, byKind := meter, stripeByKind{}
+		if k, ok := meter.(stripeByKind); ok {
+			m, byKind = k.meterFor(wsID), k
+		}
+		deps := market.UseDeps{Runner: proxyRunner{lens: lens, from: req}, Meter: m, Agents: agents}
 		u, err := store.Use(req.Context(), deps, wsID, agentID, chi.URLParam(req, "listingID"), in)
 		var need *economy.ApprovalNeededError
 		var ran *runError
@@ -72,6 +77,12 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 		case errors.Is(err, market.ErrNotRunnable):
 			writeJSONErr(w, http.StatusNotImplemented, err.Error())
 		case errors.Is(err, market.ErrNoBill):
+			if byKind.isTest != nil {
+				if _, why := byKind.billFor(wsID); why != nil {
+					writeJSONErr(w, http.StatusForbidden, why.Error())
+					return
+				}
+			}
 			writeJSONErr(w, http.StatusServiceUnavailable, err.Error())
 		case errors.As(err, &ran):
 			// The buyer's own limits pass through (no credit, rate limited, a model their agent may not use). A

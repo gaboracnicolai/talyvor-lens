@@ -68,6 +68,9 @@ func mountAgentCardRoutes(r chi.Router, bank agentCardBank, issuer agentcard.Iss
 		case errors.Is(err, agentcard.ErrLiveKey):
 			writeJSONErr(w, http.StatusConflict, err.Error())
 			return
+		case errors.Is(err, errNoTestMode): // B25.6
+			writeJSONErr(w, http.StatusForbidden, err.Error())
+			return
 		case errors.Is(err, agentcard.ErrNotConfigured):
 			writeJSONErr(w, http.StatusServiceUnavailable, err.Error())
 			return

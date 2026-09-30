@@ -47,8 +47,9 @@ func LiveKey(key string) bool {
 	return strings.HasPrefix(key, "sk_live_") || strings.HasPrefix(key, "rk_live_")
 }
 
-// Livemode reports whether the configured key is live (B22.1: a live key pays out only live earnings).
-func (l *LiveStripe) Livemode() bool { return LiveKey(stripe.Key) }
+// Livemode reports whether this instance's key is live (B22.1: a live key pays out only live earnings). Its own
+// key, never the process-wide one: a test-mode instance beside a live one is test mode (B25.6).
+func (l *LiveStripe) Livemode() bool { return LiveKey(l.key) }
 
 // CreateCustomer creates a Stripe customer tagged with the workspace id.
 func (l *LiveStripe) CreateCustomer(ctx context.Context, workspaceID string) (string, error) {
@@ -206,7 +207,7 @@ func (l *LiveStripe) CreateMarketSubscription(ctx context.Context, customerID, p
 	params.Context = ctx
 	params.AddMetadata("market_workspace_id", workspaceID)
 	params.SetIdempotencyKey("market-bill-" + workspaceID)
-	sub, err := subscription.New(params)
+	sub, err := subscription.Client{B: l.backend(), Key: l.key}.New(params)
 	if err != nil {
 		return "", err
 	}
@@ -226,7 +227,7 @@ func (l *LiveStripe) CreditMarketUse(ctx context.Context, customerID, subscripti
 	}
 	params.Context = ctx
 	params.SetIdempotencyKey(idempotencyKey)
-	item, err := invoiceitem.New(params)
+	item, err := invoiceitem.Client{B: l.backend(), Key: l.key}.New(params)
 	if err != nil {
 		return "", err
 	}
@@ -243,6 +244,6 @@ func (l *LiveStripe) SendMeterEvent(ctx context.Context, eventName, customerID, 
 		Timestamp:  stripe.Int64(at.Unix()),
 	}
 	params.Context = ctx
-	_, err := meterevent.New(params)
+	_, err := meterevent.Client{B: l.backend(), Key: l.key}.New(params)
 	return err
 }
