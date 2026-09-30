@@ -221,13 +221,3 @@ func syntheticID() (string, error) {
 	}
 	return "s" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:]))[:26], nil
 }
-
-// refuseSynthetic answers 403 for a synthetic workspace: its credits are test credits, never bought,
-// subscribed for or converted. Reports whether it refused.
-func refuseSynthetic(w http.ResponseWriter, isSynthetic func(string) bool, wsID string) bool {
-	if !isSynthetic(wsID) {
-		return false
-	}
-	writeJSONErr(w, http.StatusForbidden, "a synthetic workspace has test credits only — it cannot buy, subscribe or convert")
-	return true
-}

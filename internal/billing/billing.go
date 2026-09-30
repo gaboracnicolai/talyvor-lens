@@ -131,6 +131,9 @@ type Service struct {
 	// B22.4 — company credit lines are invoiced monthly (credit_line.go). Unset ⇒ their draws are not invoiced.
 	creditLineStripe creditLineStripeAPI
 
+	// B25.2 — whose money this Service takes (ForTestWorkspaces). nil takes every workspace's.
+	testWorkspaces *bool
+
 	// D, in µLXC — the Model 2 allowance per billing period (W4.6.1 step 2).
 	// ZERO is the default and means "no allowance configured": no grant row is ever
 	// written and Consume covers nothing. See allowance.go.
@@ -152,6 +155,34 @@ func (s *Service) WithPlans(api subscriptionAPI, plans map[string]string) *Servi
 	s.subPlans = plans
 	return s
 }
+
+// ForTestWorkspaces makes this Service take the money of test (synthetic) workspaces only, or of real ones only
+// (B25.2). A test workspace always pays through Stripe TEST MODE — a Service of its own with the test-mode
+// key, webhook secret and plans — so each Service's webhook ignores an event about the other kind of
+// workspace: it is the other Service's. Before the live switch both webhooks hear every event of the one
+// Stripe account, and each takes only its own; after it, a test-mode payment for a real workspace credits
+// nothing.
+func (s *Service) ForTestWorkspaces(test bool) *Service {
+	s.testWorkspaces = &test
+	return s
+}
+
+// takes reports whether this Service takes wsID's money. A workspace with no row counts as real, as it does
+// in workspace.CheckMoneyWall, so the live Service still records it as unknown_workspace.
+func (s *Service) takes(ctx context.Context, wsID string) (bool, error) {
+	if s.testWorkspaces == nil || wsID == "" {
+		return true, nil
+	}
+	var synthetic bool
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT synthetic FROM workspaces WHERE id = $1), false)`,
+		wsID).Scan(&synthetic); err != nil {
+		return false, err
+	}
+	return synthetic == *s.testWorkspaces, nil
+}
+
+// testMode reports whether this is the test workspaces' Service.
+func (s *Service) testMode() bool { return s.testWorkspaces != nil && *s.testWorkspaces }
 
 // New builds a Service. wsExists defaults to a workspaces-table lookup.
 func New(pool *pgxpool.Pool, credits lxcCrediter, sapi stripeAPI, webhookSecret string) *Service {
@@ -334,6 +365,15 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 	}
 
 	wsID := sess.Metadata["workspace_id"]
+	if mine, err := s.takes(ctx, wsID); err != nil {
+		s.fail(w, "workspace kind", event.ID, err)
+		return
+	} else if !mine {
+		s.log.Info("billing webhook: a payment for the other kind of workspace — test and real money are kept apart",
+			"event", event.ID, "session", sess.ID, "workspace", wsID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	metaLXC, _ := strconv.ParseInt(sess.Metadata["lxc_amount"], 10, 64) // µLXC (SEC-2)
 	// B22.2 — ADAPTIVE PRICING. A customer shown their own currency paid sess.Currency / sess.AmountTotal,
 	// and Stripe converted it; what they bought is the session's SOURCE amount, in USD, which Stripe reports
@@ -515,6 +555,11 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 // error) with a WARN — it cannot affect the payment.
 func (s *Service) captureCardFingerprint(ctx context.Context, wsID, paymentIntentID string) {
 	if wsID == "" || paymentIntentID == "" {
+		return
+	}
+	// B25.2: every test user pays with the same Stripe test card, so its fingerprint would link them all
+	// and refuse every royalty between them.
+	if s.testMode() {
 		return
 	}
 	fp, err := s.stripe.CardFingerprint(ctx, paymentIntentID)

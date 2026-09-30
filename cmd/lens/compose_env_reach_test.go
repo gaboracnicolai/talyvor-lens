@@ -211,6 +211,13 @@ var credentialExemptions = map[string]string{
 		"through env_file: lens.env, like LENS_VAPID_PRIVATE_KEY and for the same reason: an environment: entry " +
 		"would arrive as \"\" and override the lens.env value, unregistering the endpoint so no purchase is approved.",
 
+	"LENS_STRIPE_TEST_SECRET_KEY": "B25.2's Stripe test-mode key for synthetic workspaces reaches the process " +
+		"through env_file: lens.env, like LENS_SYNTHETIC_KEY and for the same reason: an environment: entry would " +
+		"arrive as \"\" and override the lens.env value, so no test user could pay.",
+
+	"LENS_STRIPE_TEST_WEBHOOK_SECRET": "B25.2's test-mode webhook secret reaches the process through env_file: " +
+		"lens.env, with LENS_STRIPE_TEST_SECRET_KEY and for the same reason.",
+
 	// ⚠ FOUR MORE EXEMPTIONS WERE WRITTEN HERE AND REMOVED, because
 	// TestCredentialExemptionsAreStillRead refused them: LENS_TEST_NVIDIA_EAT{,_NONCE},
 	// LENS_POVI_KEY_VALUE and LENS_POVI_KEY_CRASHER are read ONLY from _test.go files, which the

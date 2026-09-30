@@ -173,15 +173,3 @@ func TestSynthetic_AHundredAreCreatedAndResetInOneCallEach(t *testing.T) {
 		t.Errorf("%d unauthorized calls recorded, want 1", got)
 	}
 }
-
-// A synthetic workspace cannot buy, subscribe or convert: the three money routes call refuseSynthetic first.
-func TestSynthetic_AWorkspaceWithTestCreditsCannotBuy(t *testing.T) {
-	isSynthetic := func(ws string) bool { return ws == "s-test" }
-	w := httptest.NewRecorder()
-	if !refuseSynthetic(w, isSynthetic, "s-test") || w.Code != http.StatusForbidden {
-		t.Errorf("synthetic workspace: refused=%v code=%d, want refused with 403", w.Code == http.StatusForbidden, w.Code)
-	}
-	if refuseSynthetic(httptest.NewRecorder(), isSynthetic, "u-real") {
-		t.Error("a real workspace was refused a purchase")
-	}
-}
