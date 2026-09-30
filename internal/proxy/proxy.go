@@ -2828,7 +2828,25 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 		upstreamURL = eu
 	}
 	body = adaptReasoningParams(model, body)
+	// B17.11: OpenAI serves its -pro and -codex models only on /v1/responses (responses_api.go). The
+	// chat body goes there translated, and a successful reply comes back as a chat completion.
+	translate := cfg.ProviderName() == "openai" && responsesOnly(model) && classifyEndpoint(r) == endpointChat
+	if translate {
+		ru, ok := responsesURLFor(upstreamURL)
+		if !ok {
+			return nil, nil, 0, fmt.Errorf("proxy: %s needs OpenAI's /v1/responses, and %q has no such endpoint", model, upstreamURL)
+		}
+		if body, err = toResponsesBody(body); err != nil {
+			return nil, nil, 0, fmt.Errorf("proxy: %s: %w", model, err)
+		}
+		upstreamURL = ru
+	}
 	resp, respBody, attempts, err = inference.RunUpstream(ctx, p.httpClient, p.retryConfig, upstreamURL, cfg.ApplyAuth, body, auth.StripCredentialHeaders(r.Header))
+	if translate && err == nil && resp != nil && resp.StatusCode/100 == 2 {
+		if chat, cerr := fromResponsesBody(respBody); cerr == nil {
+			respBody = chat
+		}
+	}
 	return resp, respBody, attempts, err
 }
 
