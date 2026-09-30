@@ -133,8 +133,24 @@ type OwnerVerifier interface {
 	MayEarn(ctx context.Context, tx pgx.Tx, workspaceID string) (bool, error)
 }
 
-// SetOwnerVerifier sets what the verified-agent badge follows (B19.11).
-func (s *DualTokenStore) SetOwnerVerifier(v OwnerVerifier) { s.ownerVerifier = v }
+// SetOwnerVerifier sets what the verified-agent badge follows (B19.11). A test workspace's people are verified
+// for its money, which is test money the wall keeps among test workspaces (B25.3).
+func (s *DualTokenStore) SetOwnerVerifier(v OwnerVerifier) {
+	if v != nil {
+		v = testOwnersVerified{v}
+	}
+	s.ownerVerifier = v
+}
+
+// testOwnersVerified verifies a test workspace's people, and asks the verifier it wraps about everyone else's.
+type testOwnersVerified struct{ OwnerVerifier }
+
+func (v testOwnersVerified) MayEarn(ctx context.Context, tx pgx.Tx, workspaceID string) (bool, error) {
+	if test, err := testWorkspace(ctx, tx, workspaceID); err != nil || test {
+		return test, err
+	}
+	return v.OwnerVerifier.MayEarn(ctx, tx, workspaceID)
+}
 
 // requireOwner refuses to give an agent with no owner a balance (B19.11).
 func requireOwner(ctx context.Context, tx pgx.Tx, agentID string) error {

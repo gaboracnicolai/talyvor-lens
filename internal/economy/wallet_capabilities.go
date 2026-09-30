@@ -269,7 +269,8 @@ func capabilityCleared(ctx context.Context, q pgxDB, key string) (bool, error) {
 // spendForCapability judges a spend of amount µLXC of workspaceID's credits on capability key, in tx. A
 // GREEN capability, or a cleared one, takes any credits and 0 is returned. An uncleared AMBER or RED one
 // takes test-funded credits only: they are taken here and their amount returned, or the spend is refused with
-// a *CapabilityRefusal when the test-funded credits do not cover it.
+// a *CapabilityRefusal when the test-funded credits do not cover it — unless the workspace is a test one, whose
+// every credit is test money: it takes what test-funded credits there are, and the rest of the spend with them.
 func spendForCapability(ctx context.Context, tx pgx.Tx, workspaceID, key string, amount int64) (testFunded int64, err error) {
 	c, ok := CapabilityByKey(key)
 	if !ok {
@@ -285,13 +286,32 @@ func spendForCapability(ctx context.Context, tx pgx.Tx, workspaceID, key string,
 	if err != nil {
 		return 0, err
 	}
+	take := amount
 	if have < amount {
-		return 0, &CapabilityRefusal{Capability: c}
+		// B25.3: a test workspace's credits are test money whatever funded them — its starting grant included —
+		// and the wall (workspace.CheckMoneyWall) keeps them among test workspaces, so all of the spend is.
+		test, err := testWorkspace(ctx, tx, workspaceID)
+		if err != nil {
+			return 0, err
+		}
+		if !test {
+			return 0, &CapabilityRefusal{Capability: c}
+		}
+		take = have
 	}
-	if _, err := tx.Exec(ctx, `UPDATE lxc_balances SET test_funded_ulxc = $2 WHERE workspace_id = $1`, workspaceID, have-amount); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE lxc_balances SET test_funded_ulxc = $2 WHERE workspace_id = $1`, workspaceID, have-take); err != nil {
 		return 0, fmt.Errorf("economy: take test-funded credits: %w", err)
 	}
-	return amount, nil
+	return take, nil
+}
+
+// testWorkspace reports whether workspaceID is a test (synthetic) workspace. One with no row is real.
+func testWorkspace(ctx context.Context, q pgxDB, workspaceID string) (bool, error) {
+	var test bool
+	if err := q.QueryRow(ctx, `SELECT COALESCE((SELECT synthetic FROM workspaces WHERE id = $1), false)`, workspaceID).Scan(&test); err != nil {
+		return false, fmt.Errorf("economy: test workspace: %w", err)
+	}
+	return test, nil
 }
 
 // requireBilledCapability judges money on a Stripe bill for capability key: real money when the key is live,
