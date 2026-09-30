@@ -118,10 +118,11 @@ func (t LoanTerms) validate() error {
 	return nil
 }
 
-// requireCompanies refuses a loan unless both workspaces are companies.
+// requireCompanies refuses a loan unless both workspaces are companies. A test workspace is a test company
+// (B25.3): test users lend to each other, and the wall keeps it among test workspaces.
 func requireCompanies(ctx context.Context, q pgxDB, workspaceIDs ...string) error {
 	var companies int
-	if err := q.QueryRow(ctx, `SELECT count(*) FROM workspaces WHERE id = ANY($1) AND company`, workspaceIDs).Scan(&companies); err != nil {
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM workspaces WHERE id = ANY($1) AND (company OR synthetic)`, workspaceIDs).Scan(&companies); err != nil {
 		return fmt.Errorf("economy: companies: %w", err)
 	}
 	if companies != len(workspaceIDs) {
@@ -194,7 +195,14 @@ func (s *DualTokenStore) OfferLoan(ctx context.Context, workspaceID, lenderAgent
 			return Loan{}, err
 		}
 		if !cleared && have < terms.PrincipalULXC {
-			return Loan{}, &CapabilityRefusal{Capability: c}
+			// B25.3: a test lender's credits are test money, whatever funded them.
+			test, err := testWorkspace(ctx, tx, workspaceID)
+			if err != nil {
+				return Loan{}, err
+			}
+			if !test {
+				return Loan{}, &CapabilityRefusal{Capability: c}
+			}
 		}
 	}
 	l, err := scanLoan(tx.QueryRow(ctx, `INSERT INTO agent_loans (id, lender_workspace_id, lender_agent_id, borrower_workspace_id,
