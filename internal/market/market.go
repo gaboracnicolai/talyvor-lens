@@ -208,8 +208,9 @@ func (s *Store) Publish(ctx context.Context, workspaceID string, d Draft) (Listi
 		return Listing{}, fmt.Errorf("market: publish: %w", err)
 	}
 	v := Version{Version: 1, ArtifactSHA256: sum, Changelog: d.Changelog, Scan: scan, Needs: needsOf(d.Kind, artifact), Artifact: artifact}
+	// jsonb goes as text: behind PgBouncer (simple protocol) a []byte goes out as bytea, which jsonb refuses (B17.16).
 	if err := tx.QueryRow(ctx, `INSERT INTO market_listing_versions (listing_id, version, artifact, artifact_sha256, changelog, scan)
-		VALUES ($1, 1, $2, $3, $4, $5) RETURNING created_at`, l.ID, artifact, sum, d.Changelog, scanJSON).Scan(&v.CreatedAt); err != nil {
+		VALUES ($1, 1, $2, $3, $4, $5) RETURNING created_at`, l.ID, string(artifact), sum, d.Changelog, string(scanJSON)).Scan(&v.CreatedAt); err != nil {
 		return Listing{}, fmt.Errorf("market: publish: %w", err)
 	}
 	l.Versions = []Version{v}
@@ -245,7 +246,7 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 	scanJSON, _ := json.Marshal(scan)
 	v := Version{Version: latest + 1, ArtifactSHA256: sum, Changelog: changelog, Scan: scan, Needs: needsOf(kind, canonical), Artifact: canonical}
 	if err := tx.QueryRow(ctx, `INSERT INTO market_listing_versions (listing_id, version, artifact, artifact_sha256, changelog, scan)
-		VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`, listingID, v.Version, canonical, sum, changelog, scanJSON).Scan(&v.CreatedAt); err != nil {
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`, listingID, v.Version, string(canonical), sum, changelog, string(scanJSON)).Scan(&v.CreatedAt); err != nil {
 		return Version{}, fmt.Errorf("market: version: %w", err)
 	}
 	if scan.Held != "" {
