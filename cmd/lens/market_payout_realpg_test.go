@@ -21,6 +21,11 @@ import (
 	"github.com/talyvor/lens/internal/market"
 )
 
+// everyWorkspace is one Connect client for every workspace, as before B25.6 gave test workspaces their own.
+func everyWorkspace(c market.ConnectStripe) connectByWorkspace {
+	return func(string) (market.ConnectStripe, error) { return c, nil }
+}
+
 // connectFake is Stripe Connect in test mode: one Express account per seller whose onboarding finishes when
 // the test says so, the transfers it was asked for, and the invoice each charge paid.
 type connectFake struct {
@@ -86,7 +91,7 @@ func TestMarketPayouts_OnboardEarnPaidOutAfterHoldbackAndRefundsReverse(t *testi
 	r := chi.NewRouter()
 	mountMarketRoutes(r, store)
 	mountMarketUseRoutes(r, store, lens, svc, bank)
-	mountMarketPayoutRoutes(r, store, connect, bank, marketPayoutURLs{refresh: "https://app.test/expired", ret: "https://app.test/selling"})
+	mountMarketPayoutRoutes(r, store, everyWorkspace(connect), bank, marketPayoutURLs{refresh: "https://app.test/expired", ret: "https://app.test/selling"})
 	r.Post("/v1/billing/webhook", svc.HandleWebhook)
 
 	call := func(ws, method, path, body string) (int, string) {

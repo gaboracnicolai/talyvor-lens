@@ -57,7 +57,7 @@ func (l *LiveStripe) CreateConnectedAccount(ctx context.Context, workspaceID, co
 	params.Context = ctx
 	params.AddMetadata("market_workspace_id", workspaceID)
 	params.SetIdempotencyKey("market-seller-" + workspaceID + "-" + country)
-	a, err := account.New(params)
+	a, err := account.Client{B: l.backend(), Key: l.key}.New(params)
 	if err != nil {
 		return ConnectAccount{}, err
 	}
@@ -74,7 +74,7 @@ func (l *LiveStripe) OnboardingLink(ctx context.Context, accountID, refreshURL, 
 		Type:       stripe.String("account_onboarding"),
 	}
 	params.Context = ctx
-	link, err := accountlink.New(params)
+	link, err := accountlink.Client{B: l.backend(), Key: l.key}.New(params)
 	if err != nil {
 		return "", err
 	}
@@ -85,7 +85,7 @@ func (l *LiveStripe) OnboardingLink(ctx context.Context, accountID, refreshURL, 
 func (l *LiveStripe) ConnectedAccount(ctx context.Context, accountID string) (ConnectAccount, error) {
 	params := &stripe.AccountParams{}
 	params.Context = ctx
-	a, err := account.GetByID(accountID, params)
+	a, err := account.Client{B: l.backend(), Key: l.key}.GetByID(accountID, params)
 	if err != nil {
 		return ConnectAccount{}, err
 	}
@@ -99,7 +99,7 @@ func (l *LiveStripe) TransferToSeller(ctx context.Context, accountID string, cen
 	list := &stripe.TransferListParams{TransferGroup: stripe.String(payoutID), Destination: stripe.String(accountID)}
 	list.Context = ctx
 	list.Limit = stripe.Int64(1)
-	if it := transfer.List(list); it.Next() {
+	if it := (transfer.Client{B: l.backend(), Key: l.key}).List(list); it.Next() {
 		return it.Transfer().ID, nil
 	} else if err := it.Err(); err != nil {
 		return "", err
@@ -115,7 +115,7 @@ func (l *LiveStripe) TransferToSeller(ctx context.Context, accountID string, cen
 	params.AddMetadata("market_payout_id", payoutID)
 	params.AddMetadata("market_workspace_id", workspaceID)
 	params.SetIdempotencyKey("market-payout-" + payoutID)
-	t, err := transfer.New(params)
+	t, err := transfer.Client{B: l.backend(), Key: l.key}.New(params)
 	if err != nil {
 		return "", err
 	}
@@ -127,7 +127,7 @@ func (l *LiveStripe) TransferToSeller(ctx context.Context, accountID string, cen
 func (l *LiveStripe) ChargeInvoice(ctx context.Context, chargeID string) (string, int64, error) {
 	params := &stripe.ChargeParams{}
 	params.Context = ctx
-	ch, err := charge.Get(chargeID, params)
+	ch, err := charge.Client{B: l.backend(), Key: l.key}.Get(chargeID, params)
 	if err != nil {
 		return "", 0, err
 	}

@@ -87,7 +87,7 @@ func TestB253_EveryWalletBankAndMarketplaceFunctionBetweenTwoTestUsers(t *testin
 	mountCashOutRoutes(r, bank)
 	mountMarketRoutes(r, marketStore)
 	mountMarketUseRoutes(r, marketStore, lens, svc, bank)
-	mountMarketPayoutRoutes(r, marketStore, connect, bank, marketPayoutURLs{refresh: "https://app.test/expired", ret: "https://app.test/selling"})
+	mountMarketPayoutRoutes(r, marketStore, everyWorkspace(connect), bank, marketPayoutURLs{refresh: "https://app.test/expired", ret: "https://app.test/selling"})
 	r.Get("/v1/admin/marketplace/review", requireAdminOrModerator(am, moderators, newMarketReviewQueueHandler(marketStore)))
 	r.Post("/v1/admin/marketplace/listings/{listingID}/approve", requireAdminOrModerator(am, moderators, newMarketApproveHandler(marketStore)))
 	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdminOrModerator(am, moderators, newMarketTakedownHandler(marketStore, svc)))

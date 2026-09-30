@@ -912,6 +912,11 @@ type Config struct {
 	StripeTestSecretKey         string
 	StripeTestWebhookSecret     string
 	StripeTestSubscriptionPlans map[string]string
+	// StripeTestMarketBillPriceID is the test-mode twin of MarketBillPriceID (B25.6): the metered Price, on a
+	// test-mode meter of the same event name, a test workspace's paid marketplace uses are billed on. Unset,
+	// a test workspace with the test-mode key cannot use a paid listing. Env:
+	// LENS_STRIPE_TEST_MARKET_BILL_PRICE_ID, default EMPTY.
+	StripeTestMarketBillPriceID string
 
 	// StripeIssuingWebhookSecret signs the real-time authorisation endpoint Stripe calls for every agent
 	// card purchase (B19.12) — Dashboard → Issuing → settings, a separate endpoint from the billing
@@ -1273,6 +1278,7 @@ func Load() (*Config, error) {
 		StripeTestSecretKey:         os.Getenv("LENS_STRIPE_TEST_SECRET_KEY"),
 		StripeTestWebhookSecret:     os.Getenv("LENS_STRIPE_TEST_WEBHOOK_SECRET"),
 		StripeTestSubscriptionPlans: parsePlans(os.Getenv("LENS_STRIPE_TEST_SUBSCRIPTION_PLANS")),
+		StripeTestMarketBillPriceID: getEnv("LENS_STRIPE_TEST_MARKET_BILL_PRICE_ID", ""),
 		StripeIssuingWebhookSecret:  os.Getenv("LENS_STRIPE_ISSUING_WEBHOOK_SECRET"),
 		StripeIssuingCurrency:       getEnv("LENS_STRIPE_ISSUING_CURRENCY", "gbp"),
 		// Catalog-drift detection (internal/modelwatch). Poller default-ON: it is read-only, costs one

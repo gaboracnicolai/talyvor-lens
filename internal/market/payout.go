@@ -321,9 +321,24 @@ func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceI
 // payouts, and it retries every transfer Stripe has not yet accepted. It answers how many transfers Stripe
 // accepted.
 func (s *Store) PayOut(ctx context.Context, api ConnectStripe, now time.Time) (int, error) {
-	rows, err := s.pool.Query(ctx, `SELECT workspace_id, stripe_account_id FROM market_sellers s
-		WHERE NOT EXISTS (SELECT 1 FROM market_payouts p WHERE p.workspace_id = s.workspace_id AND p.method = 'stripe' AND p.month = $1)
-		ORDER BY workspace_id`, monthOf(now))
+	return s.payOut(ctx, api, now, nil)
+}
+
+// PayOutSellers is the payout run for one kind of seller only — test (synthetic) workspaces, or real ones
+// (B25.6) — so that each kind is paid with its own key: a test seller through Stripe test mode, always, even
+// once Lens's key is live.
+func (s *Store) PayOutSellers(ctx context.Context, api ConnectStripe, test bool, now time.Time) (int, error) {
+	return s.payOut(ctx, api, now, &test)
+}
+
+func (s *Store) payOut(ctx context.Context, api ConnectStripe, now time.Time, test *bool) (int, error) {
+	q, args := `SELECT workspace_id, stripe_account_id FROM market_sellers s
+		WHERE NOT EXISTS (SELECT 1 FROM market_payouts p WHERE p.workspace_id = s.workspace_id AND p.method = 'stripe' AND p.month = $1)`,
+		[]any{monthOf(now)}
+	if test != nil {
+		q, args = q+` AND COALESCE((SELECT synthetic FROM workspaces w WHERE w.id = s.workspace_id), false) = $2`, append(args, *test)
+	}
+	rows, err := s.pool.Query(ctx, q+` ORDER BY workspace_id`, args...)
 	if err != nil {
 		return 0, fmt.Errorf("market: sellers to pay: %w", err)
 	}
@@ -391,7 +406,7 @@ func (s *Store) PayOut(ctx context.Context, api ConnectStripe, now time.Time) (i
 			return 0, fmt.Errorf("market: payout for %s: %w", x.ws, err)
 		}
 	}
-	n, err := s.transferUnpaid(ctx, api)
+	n, err := s.transferUnpaid(ctx, api, test)
 	if err == nil {
 		err = askErr
 	}
@@ -399,11 +414,15 @@ func (s *Store) PayOut(ctx context.Context, api ConnectStripe, now time.Time) (i
 }
 
 // transferUnpaid asks Stripe for the transfer of every payout it has not yet accepted.
-func (s *Store) transferUnpaid(ctx context.Context, api ConnectStripe) (int, error) {
+func (s *Store) transferUnpaid(ctx context.Context, api ConnectStripe, test *bool) (int, error) {
 	// A payout is transferred only with a key of its own mode (B22.1): a test payout left unpaid when the key
-	// went live is never sent as real money.
-	rows, err := s.pool.Query(ctx, `SELECT id, workspace_id, stripe_account_id, net_usd_micros FROM market_payouts
-		WHERE paid_at IS NULL AND livemode = $1 ORDER BY created_at, id LIMIT 200`, liveKey(api))
+	// went live is never sent as real money. With test set, only that kind of seller's payouts (B25.6).
+	q, args := `SELECT id, workspace_id, stripe_account_id, net_usd_micros FROM market_payouts
+		WHERE paid_at IS NULL AND livemode = $1`, []any{liveKey(api)}
+	if test != nil {
+		q, args = q+` AND test = $2`, append(args, *test)
+	}
+	rows, err := s.pool.Query(ctx, q+` ORDER BY created_at, id LIMIT 200`, args...)
 	if err != nil {
 		return 0, fmt.Errorf("market: payouts to transfer: %w", err)
 	}

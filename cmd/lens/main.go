@@ -1693,28 +1693,17 @@ func run() error {
 	// B20.2 — a buyer's paid marketplace uses go on their monthly Stripe bill, and a paid invoice clears them.
 	marketStore := market.NewStore(pool)
 	dualToken.SetListingCharger(marketStore) // B19.17: a schedule may pay a marketplace listing
-	var marketMeter market.Meter
-	var marketRefunder market.Refunder // B20.4: a taken-down listing's buyers are credited on their bill
+	// The real workspaces' Stripe (B25.6: a test workspace's is on the test-mode key, below).
+	liveSide := stripeSide{cards: agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)} // B19.12
 	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {
 		billingSvc = billingSvc.WithMarketBill(liveStripe, cfg.MarketBillPriceID, cfg.MarketMeterEvent, marketStore)
-		marketMeter, marketRefunder = billingSvc, billingSvc
-		dualToken.SetCompanyPayments(marketStore) // B19.15: an agent pays another company's agent on the monthly bill
-		go haComps.leader.Run(ctx, "market-meter-pending", 30*time.Second, func(lctx context.Context) {
-			meterPendingMarketUses(lctx, marketStore, billingSvc)
-		})
-		go haComps.leader.Run(ctx, "market-refund-pending", 30*time.Second, func(lctx context.Context) {
-			refundTakenDownMarketUses(lctx, marketStore, billingSvc)
-		})
+		liveSide.bill = billingSvc
 	}
 	// B20.5 — sellers connect a Stripe account and are paid monthly; a buyer's refund or chargeback reverses
 	// the earnings it paid for.
-	var marketConnect market.ConnectStripe
 	if cfg.BillingEnabled {
-		marketConnect = liveStripe
+		liveSide.connect = liveStripe
 		billingSvc = billingSvc.WithMarketPayouts(liveStripe, marketStore)
-		go haComps.leader.Run(ctx, "market-payouts", 30*time.Second, func(lctx context.Context) {
-			payMarketSellers(lctx, marketStore, liveStripe)
-		})
 	}
 	// B22.4 — company credit lines: each month's draws go on one Stripe invoice; paying it repays the line.
 	if cfg.BillingEnabled {
@@ -1735,6 +1724,10 @@ func run() error {
 	// live: a Service of their own with the test-mode key, webhook (/v1/billing/webhook/test) and plans. Each
 	// Service takes only its own kind of workspace's money. Unset, a test workspace cannot buy or subscribe.
 	var testBillingSvc *billing.Service
+	var testSide stripeSide // B25.6 — a test workspace's marketplace bill, payouts and agent cards, in test mode
+	if cfg.StripeTestSecretKey != "" {
+		testSide.cards = agentcard.NewStripe(cfg.StripeTestSecretKey, cfg.StripeIssuingCurrency)
+	}
 	if cfg.BillingEnabled && cfg.StripeTestSecretKey != "" && cfg.StripeTestWebhookSecret != "" {
 		testStripe := billing.NewTestModeStripe(cfg.StripeTestSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL)
 		testBillingSvc = billing.New(pool, dualToken, testStripe, cfg.StripeTestWebhookSecret).
@@ -1743,6 +1736,35 @@ func run() error {
 			testBillingSvc = testBillingSvc.WithPlans(testStripe, cfg.StripeTestSubscriptionPlans)
 		}
 		billingSvc = billingSvc.ForTestWorkspaces(false)
+		// B25.6 — its marketplace bill is metered, refunded and cleared, its seller account made and paid, and its
+		// agents' card purchases settled, all in test mode, from the test-mode webhook.
+		if cfg.StripeTestMarketBillPriceID != "" {
+			testBillingSvc = testBillingSvc.WithMarketBill(testStripe, cfg.StripeTestMarketBillPriceID, cfg.MarketMeterEvent, marketStore)
+			testSide.bill = testBillingSvc
+		}
+		testBillingSvc = testBillingSvc.WithMarketPayouts(testStripe, marketStore)
+		testSide.connect = testStripe
+		if cfg.StripeIssuingWebhookSecret != "" {
+			testBillingSvc = testBillingSvc.WithAgentCards(dualToken)
+		}
+	}
+	stripeKinds := newStripeByKind(wsManager.GetSynthetic, billing.LiveKey(cfg.StripeSecretKey), testBillingSvc != nil, liveSide, testSide)
+	var marketMeter market.Meter
+	var marketRefunder market.Refunder // B20.4: a taken-down listing's buyers are credited on their bill
+	if stripeKinds.hasBill() {
+		marketMeter, marketRefunder = stripeKinds, stripeKinds
+		dualToken.SetCompanyPayments(marketStore) // B19.15: an agent pays another company's agent on the monthly bill
+		go haComps.leader.Run(ctx, "market-meter-pending", 30*time.Second, func(lctx context.Context) {
+			meterPendingMarketUses(lctx, marketStore, stripeKinds)
+		})
+		go haComps.leader.Run(ctx, "market-refund-pending", 30*time.Second, func(lctx context.Context) {
+			refundTakenDownMarketUses(lctx, marketStore, stripeKinds)
+		})
+	}
+	if cfg.BillingEnabled {
+		go haComps.leader.Run(ctx, "market-payouts", 30*time.Second, func(lctx context.Context) {
+			payMarketSellers(lctx, marketStore, stripeKinds)
+		})
 	}
 	billRoute := newBillingRouter(billingSvc, testBillingSvc, wsManager.GetSynthetic, cfg.StripeTestSecretKey, cfg.StripeTestWebhookSecret)
 	if cfg.SubscriptionAllowanceULXC > 0 || (cfg.BillingEnabled && billRoute.sellsSubscriptions()) {
@@ -4186,18 +4208,18 @@ func run() error {
 
 		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.
 		mountAgentAccountRoutes(authed, dualToken, tenantStore)
-		mountAgentCardRoutes(authed, dualToken, agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)) // B19.12
-		mountWalletCapabilityRoutes(authed, dualToken)                                                               // B22.1
-		mountAgentTransferRoutes(authed, dualToken)                                                                  // B22.3
-		mountCreditLineRoutes(authed, dualToken)                                                                     // B22.4
-		mountCompanyLoanRoutes(authed, dualToken)                                                                    // B22.5
-		mountAgentEscrowRoutes(authed, dualToken)                                                                    // B22.6
-		mountAgentPotRoutes(authed, dualToken)                                                                       // B22.7
-		mountSimTradingRoutes(authed, dualToken)                                                                     // B22.8
-		mountCashOutRoutes(authed, dualToken)                                                                        // B22.9
-		mountMarketRoutes(authed, marketStore)                                                                       // B20.1
-		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)                                         // B20.2
-		mountMarketPayoutRoutes(authed, marketStore, marketConnect, dualToken,                                       // B20.5
+		mountAgentCardRoutes(authed, dualToken, stripeKinds)                            // B19.12, B25.6
+		mountWalletCapabilityRoutes(authed, dualToken)                                  // B22.1
+		mountAgentTransferRoutes(authed, dualToken)                                     // B22.3
+		mountCreditLineRoutes(authed, dualToken)                                        // B22.4
+		mountCompanyLoanRoutes(authed, dualToken)                                       // B22.5
+		mountAgentEscrowRoutes(authed, dualToken)                                       // B22.6
+		mountAgentPotRoutes(authed, dualToken)                                          // B22.7
+		mountSimTradingRoutes(authed, dualToken)                                        // B22.8
+		mountCashOutRoutes(authed, dualToken)                                           // B22.9
+		mountMarketRoutes(authed, marketStore)                                          // B20.1
+		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
+		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5
 			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.

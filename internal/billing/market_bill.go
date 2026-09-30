@@ -198,6 +198,16 @@ func (s *Service) handleInvoicePaid(w http.ResponseWriter, ctx context.Context, 
 		s.fail(w, "market bill lookup", event.ID, err)
 		return
 	}
+	// B25.6: a test workspace's bill is the test-mode Service's, a real one's the live Service's.
+	if mine, err := s.takes(ctx, workspaceID); err != nil {
+		s.fail(w, "workspace kind", event.ID, err)
+		return
+	} else if !mine {
+		s.log.Info("billing webhook: a marketplace invoice of the other kind of workspace — test and real money are kept apart",
+			"event", event.ID, "invoice", inv.ID, "workspace", workspaceID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	paidAt := time.Unix(event.Created, 0).UTC()
 	if inv.StatusTransitions.PaidAt > 0 {
 		paidAt = time.Unix(inv.StatusTransitions.PaidAt, 0).UTC()

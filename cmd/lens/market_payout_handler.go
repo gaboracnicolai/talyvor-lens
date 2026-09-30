@@ -19,13 +19,23 @@ import (
 //	POST /v1/workspaces/{wsID}/marketplace/payouts/connect  {country}  a link to Stripe's onboarding (creating the account)
 //	POST /v1/workspaces/{wsID}/marketplace/payouts/credits  take the available balance as Talyvor credits, 1:1
 //
-// connect nil (billing is off): the seller cannot connect, and the page shows what was last recorded.
+// connectFor is the Connect client a workspace's seller account is made and paid with — a test workspace's in
+// Stripe test mode (B25.6). nil (billing is off, or no test-mode key for a test workspace): the seller cannot
+// connect, told why, and the page shows what was last recorded.
 
 type marketPayoutURLs struct{ refresh, ret string }
 
-func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connect market.ConnectStripe, crediter market.Crediter, urls marketPayoutURLs) {
+// connectByWorkspace is a workspace's Connect client, or nil and why it has none: errPayoutsOff, or (B25.6)
+// errNoTestMode.
+type connectByWorkspace func(wsID string) (market.ConnectStripe, error)
+
+var errPayoutsOff = errors.New("payouts are not configured here: Stripe billing is off")
+
+func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connectFor connectByWorkspace, crediter market.Crediter, urls marketPayoutURLs) {
 	r.Get("/v1/workspaces/{wsID}/marketplace/payouts", func(w http.ResponseWriter, req *http.Request) {
-		p, err := store.SellerPayouts(req.Context(), connect, chi.URLParam(req, "wsID"), time.Now())
+		wsID := chi.URLParam(req, "wsID")
+		connect, _ := connectFor(wsID)
+		p, err := store.SellerPayouts(req.Context(), connect, wsID, time.Now())
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -33,8 +43,13 @@ func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connect market.C
 		writeJSONOK(w, http.StatusOK, p)
 	})
 	r.Post("/v1/workspaces/{wsID}/marketplace/payouts/connect", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
+		connect, err := connectFor(chi.URLParam(req, "wsID"))
 		if connect == nil {
-			writeJSONErr(w, http.StatusServiceUnavailable, "payouts are not configured here: Stripe billing is off")
+			status := http.StatusServiceUnavailable
+			if errors.Is(err, errNoTestMode) {
+				status = http.StatusForbidden
+			}
+			writeJSONErr(w, status, err.Error())
 			return
 		}
 		var in struct {
@@ -70,8 +85,9 @@ func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connect market.C
 }
 
 // payMarketSellers is the monthly payout run, asked every hour: a seller is paid at most once a month, as
-// soon as their available balance reaches the minimum, and a transfer Stripe did not accept is retried.
-func payMarketSellers(ctx context.Context, store *market.Store, connect market.ConnectStripe) {
+// soon as their available balance reaches the minimum, and a transfer Stripe did not accept is retried. A
+// test seller is paid in Stripe test mode (B25.6).
+func payMarketSellers(ctx context.Context, store *market.Store, kinds stripeByKind) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
@@ -79,7 +95,7 @@ func payMarketSellers(ctx context.Context, store *market.Store, connect market.C
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if n, err := store.PayOut(ctx, connect, time.Now()); err != nil {
+			if n, err := kinds.payOut(ctx, store, time.Now()); err != nil {
 				slog.Warn("market: paying sellers", "paid", n, "err", err)
 			} else if n > 0 {
 				slog.Info("market: paid sellers", "paid", n)
