@@ -1749,18 +1749,18 @@ func run() error {
 		}
 	}
 	stripeKinds := newStripeByKind(wsManager.GetSynthetic, billing.LiveKey(cfg.StripeSecretKey), testBillingSvc != nil, liveSide, testSide)
-	var marketMeter market.Meter
-	var marketRefunder market.Refunder // B20.4: a taken-down listing's buyers are credited on their bill
-	if stripeKinds.hasBill() {
-		marketMeter, marketRefunder = stripeKinds, stripeKinds
-		dualToken.SetCompanyPayments(marketStore) // B19.15: an agent pays another company's agent on the monthly bill
-		go haComps.leader.Run(ctx, "market-meter-pending", 30*time.Second, func(lctx context.Context) {
-			meterPendingMarketUses(lctx, marketStore, stripeKinds)
-		})
-		go haComps.leader.Run(ctx, "market-refund-pending", 30*time.Second, func(lctx context.Context) {
-			refundTakenDownMarketUses(lctx, marketStore, stripeKinds)
-		})
-	}
+	// Every workspace's bill is picked per workspace: in Stripe, or for a test workspace on a Lens with none in
+	// Stripe, kept by Lens (B17.15). A workspace with neither is refused a paid use and a company payment.
+	var marketMeter market.Meter = stripeKinds
+	var marketRefunder market.Refunder = stripeKinds // B20.4: a taken-down listing's buyers are credited on their bill
+	// B19.15: an agent pays another company's agent on the monthly bill
+	dualToken.SetCompanyPayments(companyPaymentsOnBill{Store: marketStore, bills: stripeKinds})
+	go haComps.leader.Run(ctx, "market-meter-pending", 30*time.Second, func(lctx context.Context) {
+		meterPendingMarketUses(lctx, marketStore, stripeKinds)
+	})
+	go haComps.leader.Run(ctx, "market-refund-pending", 30*time.Second, func(lctx context.Context) {
+		refundTakenDownMarketUses(lctx, marketStore, stripeKinds)
+	})
 	if cfg.BillingEnabled {
 		go haComps.leader.Run(ctx, "market-payouts", 30*time.Second, func(lctx context.Context) {
 			payMarketSellers(lctx, marketStore, stripeKinds)

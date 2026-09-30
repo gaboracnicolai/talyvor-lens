@@ -660,6 +660,8 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		switch {
 		case errors.Is(err, economy.ErrAgentNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, errNoCompanyBill): // B17.15
+			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case errors.Is(err, economy.ErrSameAgent):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless):

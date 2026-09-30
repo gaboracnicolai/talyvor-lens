@@ -73,10 +73,8 @@ func (k stripeByKind) side(wsID string) stripeSide {
 	return k.live
 }
 
-// hasBill reports whether any workspace has a marketplace bill.
-func (k stripeByKind) hasBill() bool { return k.live.bill != nil || k.test.bill != nil }
-
-// billFor is the marketplace bill wsID's paid uses go on. nil with no error: there is none here for anyone.
+// billFor is the marketplace bill in Stripe wsID's paid uses go on. nil with no error: there is none in
+// Stripe here for anyone.
 func (k stripeByKind) billFor(wsID string) (*billing.Service, error) {
 	if b := k.side(wsID).bill; b != nil {
 		return b, nil
@@ -87,10 +85,41 @@ func (k stripeByKind) billFor(wsID string) (*billing.Service, error) {
 	return nil, nil
 }
 
+// marketBill is a workspace's marketplace bill: in Stripe (*billing.Service), or kept by Lens.
+type marketBill interface {
+	market.Meter
+	market.Refunder
+}
+
+// lensKeptBill is a test workspace's marketplace bill when Lens has none in Stripe for anyone (B17.15). Its
+// paid uses and payments to other companies' agents go on it and are never sent to Stripe; B25.7's synthetic
+// bill-pay pays it, and its sellers then earn past the holdback as from any bill. Test money either way.
+type lensKeptBill struct{}
+
+func (lensKeptBill) MeterMarketUse(context.Context, string, string, int64, time.Time) error {
+	return nil
+}
+
+func (lensKeptBill) CreditMarketRefund(_ context.Context, _, useID string, _ int64, _ string) (string, error) {
+	return "lens_kept_" + useID, nil
+}
+
+// billOf is the bill wsID's paid uses go on, or nil and why not.
+func (k stripeByKind) billOf(wsID string) (marketBill, error) {
+	b, err := k.billFor(wsID)
+	switch {
+	case b != nil:
+		return b, nil
+	case err == nil && k.isTest(wsID):
+		return lensKeptBill{}, nil
+	}
+	return nil, err
+}
+
 // meterFor is the bill wsID's paid uses are metered onto, or nil — then a paid listing is refused
 // (market.ErrNoBill) before it runs, so no use waits on a bill it can never go on.
 func (k stripeByKind) meterFor(wsID string) market.Meter {
-	if b, _ := k.billFor(wsID); b != nil {
+	if b, _ := k.billOf(wsID); b != nil {
 		return b
 	}
 	return nil
@@ -98,7 +127,7 @@ func (k stripeByKind) meterFor(wsID string) market.Meter {
 
 // MeterMarketUse puts a use on its buyer's bill: market.Meter, for the pass that bills pending uses.
 func (k stripeByKind) MeterMarketUse(ctx context.Context, buyerWorkspaceID, useID string, ulxc int64, at time.Time) error {
-	b, err := k.billFor(buyerWorkspaceID)
+	b, err := k.billOf(buyerWorkspaceID)
 	if b == nil {
 		return errors.Join(market.ErrNoBill, err)
 	}
@@ -107,11 +136,29 @@ func (k stripeByKind) MeterMarketUse(ctx context.Context, buyerWorkspaceID, useI
 
 // CreditMarketRefund credits a refunded use on its buyer's bill: market.Refunder (B20.4).
 func (k stripeByKind) CreditMarketRefund(ctx context.Context, buyerWorkspaceID, useID string, ulxc int64, description string) (string, error) {
-	b, err := k.billFor(buyerWorkspaceID)
+	b, err := k.billOf(buyerWorkspaceID)
 	if b == nil {
 		return "", errors.Join(market.ErrNoBill, err)
 	}
 	return b.CreditMarketRefund(ctx, buyerWorkspaceID, useID, ulxc, description)
+}
+
+// errNoCompanyBill refuses a payment to another company's agent from a company with no marketplace bill.
+var errNoCompanyBill = errors.New("another company's agent is paid on your marketplace bill, and there is none for your workspace here")
+
+// companyPaymentsOnBill is the marketplace an agent pays another company's agent through (B19.15). The
+// payment goes on the paying company's bill, so a payer with none is refused before anything is judged or
+// recorded, as its paid listing would be.
+type companyPaymentsOnBill struct {
+	*market.Store
+	bills stripeByKind
+}
+
+func (c companyPaymentsOnBill) CompanyPayeeRefusal(ctx context.Context, payerWorkspaceID, payeeWorkspaceID string) (string, error) {
+	if b, why := c.bills.billOf(payerWorkspaceID); b == nil {
+		return "", errors.Join(errNoCompanyBill, why)
+	}
+	return c.Store.CompanyPayeeRefusal(ctx, payerWorkspaceID, payeeWorkspaceID)
 }
 
 // connectFor is the Connect client wsID's seller account is made and paid with, or nil and why not.
