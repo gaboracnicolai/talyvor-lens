@@ -234,6 +234,12 @@ func (h *Handler) decide(ctx context.Context, event *stripe.Event) (economy.Card
 	if m := auth.MerchantData; m != nil {
 		a.MerchantName, a.MerchantCategory, a.MerchantID = m.Name, m.Category, m.NetworkID
 	}
+	return h.Authorize(ctx, a)
+}
+
+// Authorize prices a request in USD at the day's ECB rate and lets the agent's rules and balance decide it —
+// every request Stripe sends, and (B25.7) a test agent's purchase a tester makes without Stripe.
+func (h *Handler) Authorize(ctx context.Context, a economy.CardAuthorization) (economy.CardDecision, error) {
 	if a.Refusal == "" {
 		c, err := h.rates.ToUSD(ctx, a.AmountMinor, a.Currency, a.At)
 		if errors.Is(err, ecbrate.ErrNoRate) {

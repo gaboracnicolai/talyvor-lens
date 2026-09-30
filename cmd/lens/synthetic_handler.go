@@ -29,6 +29,9 @@ import (
 //	POST /v1/synthetic/workspaces/reset  — every synthetic workspace: its stored answers deleted, its
 //	                                     test credits restored.
 //
+// B25.7 adds four more that bring a test workspace's slow money due inside one tester run
+// (synthetic_due_handler.go).
+//
 // The key is compared in constant time, calls are rate-limited, and every call — refused ones too —
 // is written to synthetic_operations. What makes a workspace synthetic, and what that forbids, is in
 // internal/workspace/synthetic.go and the proxy's partition.
@@ -72,6 +75,7 @@ type syntheticDeps struct {
 	answers    syntheticAnswers
 	audit      syntheticAudit
 	mint       tokenMinter
+	due        syntheticDueDeps // B25.7; unset, its routes are not registered
 }
 
 // callLimiter admits at most max calls in any window of per.
@@ -106,6 +110,7 @@ func mountSyntheticRoutes(r chi.Router, key string, d syntheticDeps) {
 	limit := &callLimiter{max: syntheticMaxCalls, per: syntheticCallsPer}
 	r.Post("/v1/synthetic/workspaces", syntheticGuard(key, "create", limit, d, d.create))
 	r.Post("/v1/synthetic/workspaces/reset", syntheticGuard(key, "reset", limit, d, d.reset))
+	mountSyntheticDueRoutes(r, key, d)
 }
 
 // syntheticGuard checks the key and the rate, runs the action, and records the call either way.
