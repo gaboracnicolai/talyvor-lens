@@ -84,12 +84,11 @@ func TestB232_AnAgentsQuestionIsChargedExactlyOnce(t *testing.T) {
 				t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 			}
 
-			// With reservations on the charge is the delivered cost; off, it is the pre-serve estimate that
-			// path has always billed (LXCReservationEnabled) — in both, it is charged once.
-			want := delivered
+			// The charge is the delivered cost in both. With reservations off it is the pre-serve estimate plus
+			// the one row settling it to the delivered cost (B23.13) — still no shadow debit on top.
+			want, wantRows := delivered, int64(1)
 			if !tc.reservation {
-				_, prompt, _ := extractPrompt([]byte(body))
-				want = lxcEstimate("gpt-4o", prompt)
+				wantRows = 2
 			}
 
 			var spends, spent, net int64
@@ -98,9 +97,9 @@ func TestB232_AnAgentsQuestionIsChargedExactlyOnce(t *testing.T) {
 				FROM lxc_ledger WHERE workspace_id = $1`, ws).Scan(&spends, &spent, &net); err != nil {
 				t.Fatal(err)
 			}
-			if spends != 1 || spent != want || net != -want {
-				t.Errorf("lxc_ledger: %d spend rows totalling %d µLXC, net %d — want exactly 1 of %d, net −%d",
-					spends, spent, net, want, want)
+			if spends != wantRows || spent != want || net != -want {
+				t.Errorf("lxc_ledger: %d spend rows totalling %d µLXC, net %d — want %d totalling %d, net −%d",
+					spends, spent, net, wantRows, want, want)
 			}
 			var agentBal, spendAcct int64
 			if err := pool.QueryRow(ctx, `SELECT

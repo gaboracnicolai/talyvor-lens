@@ -246,6 +246,36 @@ func (s *DualTokenStore) GetAgentRules(ctx context.Context, workspaceID, agentID
 	return r, nil
 }
 
+// agentPeriodLimit is one of an agent's spending limits over a period: what it may spend since `since`.
+type agentPeriodLimit struct {
+	ulxc  int64
+	since time.Time
+	name  string
+}
+
+// periodLimits are r's daily and monthly limits, their periods begun in loc as of now.
+func (r AgentRules) periodLimits(now time.Time, loc *time.Location) []agentPeriodLimit {
+	return []agentPeriodLimit{
+		{r.DailyLimitULXC, time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc), "daily"},
+		{r.MonthlyLimitULXC, time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc), "monthly"},
+	}
+}
+
+// agentSpentSince is what an agent has spent since `since`, as its daily and monthly limits count it.
+func agentSpentSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, since time.Time) (int64, error) {
+	var spent int64
+	// What it paid other agents counts (B19.3), and its card purchases (B19.12); what they paid it does not raise its limit. What it
+	// used of paid marketplace listings counts too (B20.2), though it is billed to its company.
+	err := tx.QueryRow(ctx, `SELECT (
+		(SELECT COALESCE(-sum(amount_ulxc), 0) FROM agent_postings
+		 WHERE workspace_id = $1 AND account = $2 AND created_at >= $3
+		   AND (kind IN ('spend', 'hold', 'settle', 'release', 'card') OR (kind = 'pay' AND amount_ulxc < 0)))
+		+ (SELECT COALESCE(sum(price_ulxc), 0) FROM market_uses
+		   WHERE buyer_workspace_id = $1 AND agent_id = $4 AND charge = 'billed' AND used_at >= $3))::bigint`,
+		workspaceID, agentAccount(agentID), since, agentID).Scan(&spent)
+	return spent, err
+}
+
 // enforceAgentRules judges a positive movement of amount µLXC (a hold or a debit, ref its reservation or
 // request id) against the agent's rules, inside the movement's transaction with the agent's row locked.
 // A paused agent is refused first; a movement the rules let through is then watched for unusual spend (B19.6).
@@ -295,31 +325,11 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 		return ruleRefusal("this %s would cost up to %s LXC; the agent's limit per request is %s LXC",
 			what, lxcString(amount), lxcString(r.MaxPerRequestULXC))
 	}
-	spentSince := func(since time.Time) (int64, error) {
-		var spent int64
-		// What it paid other agents counts (B19.3), and its card purchases (B19.12); what they paid it does not raise its limit. What it
-		// used of paid marketplace listings counts too (B20.2), though it is billed to its company.
-		err := tx.QueryRow(ctx, `SELECT (
-			(SELECT COALESCE(-sum(amount_ulxc), 0) FROM agent_postings
-			 WHERE workspace_id = $1 AND account = $2 AND created_at >= $3
-			   AND (kind IN ('spend', 'hold', 'settle', 'release', 'card') OR (kind = 'pay' AND amount_ulxc < 0)))
-			+ (SELECT COALESCE(sum(price_ulxc), 0) FROM market_uses
-			   WHERE buyer_workspace_id = $1 AND agent_id = $4 AND charge = 'billed' AND used_at >= $3))::bigint`,
-			workspaceID, agentAccount(agentID), since, agentID).Scan(&spent)
-		return spent, err
-	}
-	for _, limit := range []struct {
-		ulxc  int64
-		since time.Time
-		name  string
-	}{
-		{r.DailyLimitULXC, time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc), "daily"},
-		{r.MonthlyLimitULXC, time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc), "monthly"},
-	} {
+	for _, limit := range r.periodLimits(now, loc) {
 		if limit.ulxc == 0 {
 			continue
 		}
-		spent, err := spentSince(limit.since)
+		spent, err := agentSpentSince(ctx, tx, workspaceID, agentID, limit.since)
 		if err != nil {
 			return fmt.Errorf("economy: agent spend so far: %w", err)
 		}
