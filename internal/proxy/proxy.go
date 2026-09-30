@@ -1852,6 +1852,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// B23.13: reservations off, the pre-serve agent debit was the estimate — settle it to the delivered cost.
 			p.settleAgentDebit(ctx, wsID, servedCostUSD, upstreamModel, servedPriceBasis)
 		}
+		// The LXC charge — B17.17: OUTSIDE the logging gate too, for B23.2's reason. It is the bill, not
+		// a log (the ledger row is an amount and "chat: metered usage", no content): inside the gate a
+		// LoggingNone workspace's chat was shown a price and charged nothing. Void, post-serve, same ctx.
+		// B1.6: a subscriber's non-agent request draws the plan allowance on EITHER arm below —
+		// the session-key chat has no reservation, so the settle alone would charge it nothing.
+		// B9.8: a chat request is charged by chargeChatUsage (allowance, then prepaid) and nothing else.
+		subscriber := p.chargeChatUsage(ctx, wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
+		if !p.reservationActive() && !subscriber {
+			p.shadowSpendLXC(ctx, wsID, servedCostUSD)
+		}
 		if p.alertManager != nil && loggingPolicy != workspace.LoggingNone {
 			// spendPrompt is "" in metadata mode (no prompt text persisted)
 			// and the redacted form in full mode when PII was detected.
@@ -1874,21 +1884,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					slog.String("err", recErr.Error()),
 				)
 			}
-			// Shadow LXC debit — INSIDE the logging gate, alongside the durable
-			// cost_usd write, so it fires iff that write fires (a LoggingNone
-			// workspace gets neither; symmetric with the streaming seam, which
-			// returns early on LoggingNone). Void, post-serve, same ctx — cannot
-			// affect the response. Inert unless the flag is on AND a sink wired.
-			// B1.6: a subscriber's non-agent request draws the plan allowance on EITHER arm below —
-			// the session-key chat has no reservation, so the settle alone would charge it nothing.
-			// B9.8: a chat request is charged by chargeChatUsage (allowance, then prepaid) and nothing else.
-			subscriber := p.chargeChatUsage(ctx, wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
-			if !p.reservationActive() && !subscriber {
-				p.shadowSpendLXC(ctx, wsID, servedCostUSD)
-			}
 			// Routing-pattern capture (Phase-3) — post-serve, VOID, structurally
-			// mint-free. Same logging gate + post-serve position as the shadow
-			// debit (a LoggingNone workspace gets neither); the opt-in WRITE gate
+			// mint-free. Same logging gate + post-serve position as the cost_usd
+			// write (a LoggingNone workspace gets neither); the opt-in WRITE gate
 			// is in the sink SQL. cacheHit=false: this is the upstream model-call
 			// path (cache hits short-circuit far earlier). Quality is the
 			// just-scored value; latency is the real request elapsed. A finished
@@ -2353,6 +2351,13 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	} else {
 		p.settleAgentDebit(ctx, sc.wsID, servedCostUSD, sc.model, "") // B23.13, as on the buffered seam
 	}
+	// The LXC charge, mutually exclusive with the settle above by the flag. B17.17: before the logging
+	// gate, as on the buffered seam — a LoggingNone workspace's chat is charged too.
+	// B1.6: the same allowance draw as the buffered seam (see there).
+	subscriber := p.chargeChatUsage(ctx, sc.wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
+	if !p.reservationActive() && !subscriber {
+		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
+	}
 	if p.alertManager == nil || sc.logging == workspace.LoggingNone {
 		return settled
 	}
@@ -2375,12 +2380,6 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", recErr.Error()))
 	}
 	p.recordVisionOCRSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.sessionID, sc.requestID, sc.visionOCR)
-	// The shadow debit, mutually exclusive with the settle above by the flag.
-	// B1.6: the same allowance draw as the buffered seam (see there).
-	subscriber := p.chargeChatUsage(ctx, sc.wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
-	if !p.reservationActive() && !subscriber {
-		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
-	}
 	return settled
 }
 

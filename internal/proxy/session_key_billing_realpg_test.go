@@ -18,6 +18,7 @@ import (
 	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/sessionkey"
+	"github.com/talyvor/lens/internal/workspace"
 	"github.com/talyvor/lens/migrations"
 )
 
@@ -242,6 +243,34 @@ func TestChatBilling_EveryChatRequestIsCharged_BothSeams(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// B17.17: request logging "none" keeps content, not the bill. The e2e testers saw an answer priced in
+// the chat and no spend row for it, because the charge sat behind the logging gate on both seams.
+func TestChatBilling_LoggingNoneIsChargedToo_BothSeams(t *testing.T) {
+	cost := settleULXC(alerts.CostUSD("gpt-4o", 10000, 100))
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "buffered", true: "streamed"}[stream], func(t *testing.T) {
+			p, _, store, pool := chatProxy(t, costWireFunded, 0, economy.DefaultAgentCeilingLXC)
+			if err := p.workspaceManager.SetLoggingPolicy(context.Background(), "ws-log", workspace.LoggingNone); err != nil {
+				t.Fatal(err)
+			}
+			var calls int64
+			chatUpstream(t, p, stream, &calls)
+			if code := driveWithAuth(t, p, sessionKeyAuthContext(t, "ws-log"), stream, "b1717-none"); code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", code)
+			}
+			if atomic.LoadInt64(&calls) != 1 {
+				t.Fatalf("upstream calls = %d, want 1", calls)
+			}
+			if rows, debited, desc := prepaidDebits(t, pool); rows != 1 || debited != cost || desc != "chat: metered usage" {
+				t.Errorf("prepaid ledger = %d row(s), %d µLXC, %q; want 1, %d µLXC, %q", rows, debited, desc, cost, "chat: metered usage")
+			}
+			if bal := seamBalance(t, store, "ws-log"); bal != costWireFunded-cost {
+				t.Errorf("balance = %d, want %d", bal, costWireFunded-cost)
+			}
+		})
 	}
 }
 
