@@ -299,6 +299,23 @@ func (s *DualTokenStore) GetLoan(ctx context.Context, workspaceID, loanID string
 	return loans[0], nil
 }
 
+// BringTestLoanDue — B25.7: a TEST loan's next instalment made due at now, so that a tester run, which lasts
+// minutes, sees what happens a period after acceptance: the minute tick (RunLoanRepayments) takes it, or misses
+// it — and brought due again while late, the loan defaults. Only a loan marked test (migration 0173) that
+// workspaceID lends or borrows, active or late, moves; any other is ErrLoanNotFound and nothing changes.
+func (s *DualTokenStore) BringTestLoanDue(ctx context.Context, workspaceID, loanID string, now time.Time) (Loan, error) {
+	tag, err := s.pool.Exec(ctx, `UPDATE agent_loans SET next_due_at = LEAST(next_due_at, $3)
+		WHERE id = $2 AND (lender_workspace_id = $1 OR borrower_workspace_id = $1) AND test AND status IN ('active', 'late')`,
+		workspaceID, loanID, now)
+	if err != nil {
+		return Loan{}, fmt.Errorf("economy: bring a test loan due: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return Loan{}, ErrLoanNotFound
+	}
+	return s.GetLoan(ctx, workspaceID, loanID)
+}
+
 // ListLoans reads the loans workspaceID lends or borrows, newest first, with their events.
 func (s *DualTokenStore) ListLoans(ctx context.Context, workspaceID string) ([]Loan, error) {
 	return s.loans(ctx, `WHERE lender_workspace_id = $1 OR borrower_workspace_id = $1`, workspaceID)
