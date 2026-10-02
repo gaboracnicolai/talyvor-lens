@@ -27,12 +27,22 @@ type Verifier struct {
 	// purchases stop verifying — WITHOUT a code change or a migration, which is the
 	// point: the trial works now and the door shuts before open signup.
 	requireLive bool
+	// testWorkspaces verifies every test (synthetic) workspace — see WithTestWorkspaces.
+	testWorkspaces bool
 }
 
 // New builds the verified-to-earn verifier. Wire it UNCONDITIONALLY at startup
 // via LedgerStore.SetMintVerifier — a safety restriction must not be liftable by
 // the economy toggle.
 func New(requireLive bool) Verifier { return Verifier{requireLive: requireLive} }
+
+// WithTestWorkspaces also verifies every test (synthetic) workspace, whatever requireLive says (B26.6): its
+// starting grant is test-backed money, and what it earns is test money — marked test (0173) and never paid
+// out (B25.1). Production's mint verifier is built with it; a real workspace is judged exactly as before.
+func (v Verifier) WithTestWorkspaces() Verifier {
+	v.testWorkspaces = true
+	return v
+}
 
 // mayEarnSQL. The purchase half additionally requires that the purchase's MODE was
 // RECORDED (livemode IS NOT NULL) and, when $2 is true, that it was REAL money
@@ -55,6 +65,12 @@ func (v Verifier) MayEarn(ctx context.Context, tx pgx.Tx, workspaceID string) (b
 		return false, nil
 	}
 	var ok bool
+	if v.testWorkspaces {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT synthetic FROM workspaces WHERE id = $1), false)`,
+			workspaceID).Scan(&ok); err != nil || ok {
+			return ok, err
+		}
+	}
 	if err := tx.QueryRow(ctx, mayEarnSQL, workspaceID, v.requireLive).Scan(&ok); err != nil {
 		return false, err
 	}

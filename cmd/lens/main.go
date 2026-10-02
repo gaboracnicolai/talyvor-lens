@@ -664,7 +664,7 @@ func run() error {
 		func() bool { return cfg.CachePoolableEnabled && poolGate.Attested() },
 		wsManager.GetCachePoolable,
 	))
-	// B17.1: synthetic workspaces pool among themselves only, and earn nothing.
+	// B17.1: synthetic workspaces pool among themselves only, and earn only test money (B25.2, B26.6).
 	p.SetSyntheticLookup(wsManager.GetSynthetic)
 	// Per-team / per-sprint budget governance (Upgrade 19). Seed the
 	// in-memory snapshot from token_events, refresh it periodically, then
@@ -997,7 +997,7 @@ func run() error {
 	// economy toggle (mirrors the LXC-fiat unconditional wiring). Every
 	// mint-type credit now requires a verified-to-earn workspace; conservation
 	// credits pass through. nil-safe for tests (they construct ledgers without it).
-	tokenLedger.SetMintVerifier(earnverify.New(cfg.EarnRequireLivePurchase))
+	tokenLedger.SetMintVerifier(earnverify.New(cfg.EarnRequireLivePurchase).WithTestWorkspaces()) // B26.6
 
 	// SHADOW MODE for the six UNPROVEN mints (LENS_SHADOW_MINTS_ENABLED, default off). Each
 	// computes what it WOULD pay, records it to lens_shadow_mints, and credits NOTHING — no

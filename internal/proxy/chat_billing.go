@@ -141,7 +141,8 @@ type lxcMetaSpender interface {
 // price (list × (1 − r)) from the plan allowance first, then prepaid LXC, with the pool figures on the
 // prepaid row. It returns the royalty basis in USD — the allowance-covered part (paid for by the plan
 // fee) plus the CASH-BACKED part of the prepaid debit, as the agent settle does — and whether this
-// was a chat request at all. The funding invariant is unchanged: nothing charged, nothing minted.
+// was a chat request at all. The funding invariant is unchanged: nothing charged, nothing minted. A test
+// workspace's whole prepaid debit is test-backed (B26.6), as economy's settle counts it.
 func (p *Proxy) chargeChatPooled(ctx context.Context, price pooledPrice) (float64, bool) {
 	sessionID, ok := chatSession(ctx)
 	if !ok || p == nil {
@@ -173,6 +174,9 @@ func (p *Proxy) chargeChatPooled(ctx context.Context, price pooledPrice) (float6
 			slog.Error("billing: chat pooled serve UNBILLED — prepaid debit failed",
 				slog.String("workspace", workspaceID), slog.Int64("ulxc", rest), slog.String("err", err.Error()))
 		} else {
+			if p.isSynthetic(workspaceID) {
+				cash = rest
+			}
 			funded += cash
 			charged += rest
 		}
