@@ -589,6 +589,59 @@ func (s *DualTokenStore) GrantLXC(ctx context.Context, workspaceID string, lxcAm
 	return newBal, nil
 }
 
+// GrantLXCUpTo grants each of workspaceIDs whose balance is below target the difference, in ONE
+// transaction of set-based statements however many workspaces there are (B26.1: a synthetic reset of
+// thousands). Each grant is what GrantLXC writes — one admin_grant lxc_ledger row (funding "grant") and
+// the balance, lifetime minted and test-funded part moved with it — so the ledger cannot tell them apart.
+// It returns how many workspaces were granted.
+func (s *DualTokenStore) GrantLXCUpTo(ctx context.Context, workspaceIDs []string, target int64, reason string, metadata map[string]interface{}) (int, error) {
+	if target <= 0 {
+		return 0, errors.New("economy: grant target must be positive")
+	}
+	if s.pool == nil || len(workspaceIDs) == 0 {
+		return 0, nil
+	}
+	meta, _ := lotFunding(LXCTypeGrant, target, metadata)
+	metaJSON, err := dbjson.Marshal(meta)
+	if err != nil {
+		return 0, fmt.Errorf("economy: marshal lxc ledger metadata: %w", err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("economy: begin grant: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO lxc_balances (workspace_id, balance, lifetime_minted, lifetime_spent)
+		SELECT id, 0, 0, 0 FROM unnest($1::text[]) AS id ON CONFLICT (workspace_id) DO NOTHING`, workspaceIDs); err != nil {
+		return 0, fmt.Errorf("economy: ensure lxc balance rows: %w", err)
+	}
+	// The balance row is locked, the ledger row written and the balance moved in one statement; the
+	// test-funded clamp is writeLXCBalance's.
+	tag, err := tx.Exec(ctx, `
+		WITH short AS (
+		    SELECT workspace_id, $2::bigint - balance AS delta
+		    FROM lxc_balances WHERE workspace_id = ANY($1::text[]) AND balance < $2::bigint
+		    FOR UPDATE
+		), ledger AS (
+		    INSERT INTO lxc_ledger (workspace_id, amount, balance_after, type, description, metadata)
+		    SELECT workspace_id, delta, $2::bigint, $3, $4, $5::jsonb FROM short
+		)
+		UPDATE lxc_balances b
+		SET balance = $2::bigint, lifetime_minted = b.lifetime_minted + s.delta, updated_at = NOW(),
+		    test_funded_ulxc = CASE WHEN b.test_funded_ulxc <= $2::bigint THEN b.test_funded_ulxc ELSE LEAST(b.test_funded_ulxc, GREATEST(
+		        $2::bigint + (SELECT COALESCE(sum(held_ulxc), 0) FROM lxc_reservations r WHERE r.workspace_id = b.workspace_id AND r.status = 'held'), 0)) END
+		FROM short s WHERE b.workspace_id = s.workspace_id`,
+		workspaceIDs, target, LXCTypeGrant, reason, metaJSON)
+	if err != nil {
+		return 0, fmt.Errorf("economy: grant up to %d: %w", target, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("economy: commit grant: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // GetLXCBalance returns the current LXC balance (0 for a fresh
 // workspace — not an error).
 func (s *DualTokenStore) GetLXCBalance(ctx context.Context, workspaceID string) (int64, error) {

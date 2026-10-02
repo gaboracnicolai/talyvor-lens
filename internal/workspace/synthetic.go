@@ -60,6 +60,32 @@ func (m *Manager) CreateSynthetic(ctx context.Context, id, name string) error {
 	return nil
 }
 
+// ResolveSynthetic returns the active synthetic workspaces among named — every one, when named is empty —
+// and, separately, the named ids that are not an active synthetic workspace. ONE query either way.
+func (m *Manager) ResolveSynthetic(ctx context.Context, named []string) (ids, notSynthetic []string, err error) {
+	if len(named) == 0 {
+		ids, err = m.ListSynthetic(ctx)
+		return ids, nil, err
+	}
+	if m.pool == nil {
+		return nil, named, nil
+	}
+	if err := m.pool.QueryRow(ctx, `SELECT COALESCE(array_agg(id ORDER BY id), '{}') FROM workspaces
+		WHERE id = ANY($1::text[]) AND synthetic AND active`, named).Scan(&ids); err != nil {
+		return nil, nil, fmt.Errorf("workspace: resolve synthetic: %w", err)
+	}
+	found := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		found[id] = true
+	}
+	for _, id := range named {
+		if !found[id] {
+			notSynthetic = append(notSynthetic, id)
+		}
+	}
+	return ids, notSynthetic, nil
+}
+
 // ListSynthetic returns every active synthetic workspace, from the database.
 func (m *Manager) ListSynthetic(ctx context.Context) ([]string, error) {
 	if m.pool == nil {

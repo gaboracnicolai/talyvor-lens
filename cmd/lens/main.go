@@ -2391,10 +2391,11 @@ func run() error {
 			slog.String("remedy", "set LENS_PROVISION_SECRET here and to the SAME value on the gateway; leave unset if this deployment has no such gateway"))
 	}
 	// B17.1 — synthetic test workspaces, only when LENS_SYNTHETIC_KEY is set.
+	syntheticAnswers := storedanswers.New(pool, redisClient)
 	mountSyntheticRoutes(r, cfg.SyntheticKey, syntheticDeps{
 		workspaces: wsManager,
 		credits:    dualToken,
-		answers:    storedanswers.New(pool, redisClient),
+		answers:    syntheticAnswers,
 		audit:      pool,
 		mint: func(workspaceID, userID string, scopes []string, ttl time.Duration) (string, error) {
 			return auth.GenerateToken(workspaceID, userID, scopes, authManager.PrivateKey(), ttl)
@@ -2407,6 +2408,12 @@ func run() error {
 		func(workspaceID, userID string, scopes []string, ttl time.Duration) (string, error) {
 			return auth.GenerateToken(workspaceID, userID, scopes, authManager.PrivateKey(), ttl)
 		})
+	// B26.1 — synthetic workspaces older than seven days are deleted, by the leader alone.
+	if cfg.SyntheticKey != "" {
+		go haComps.leader.Run(ctx, "synthetic-purge", 30*time.Second, func(lctx context.Context) {
+			runSyntheticPurge(lctx, wsManager, syntheticAnswers)
+		})
+	}
 
 	r.Group(func(authed chi.Router) {
 		// Helicone-compat translates Helicone-* headers and rewrites
