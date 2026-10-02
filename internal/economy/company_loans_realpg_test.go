@@ -125,3 +125,88 @@ func TestCompanyLoans_LendRepayLateDefaultAndWhoMayBorrow(t *testing.T) {
 		}
 	}
 }
+
+// B26.8 — three loans fall due in one tick and the first of them cannot be paid: the run records the miss,
+// takes the other two in the same tick and reports Missed=1. Missed again a period on, the run reports the default.
+func TestCompanyLoans_OneRunTakesEveryDueLoanAndCountsTheMiss(t *testing.T) {
+	pool := supplyPool(t)
+	ctx := context.Background()
+	s := NewDualTokenStore(nil, pool, nil)
+	s.SetOwnerVerifier(earnVerified{})
+	const lxc = int64(1_000_000)
+	for _, ws := range []string{"co-a", "co-b"} {
+		if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id, name, cache_prefix, earn_verified, company) VALUES ($1, $1, $1, true, true)`, ws); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent := func(ws, handle string, credits int64) Agent {
+		t.Helper()
+		a, err := s.CreateAgent(ctx, ws, handle, "owner-"+ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetAgentHandle(ctx, ws, a.ID, handle); err != nil {
+			t.Fatal(err)
+		}
+		if credits > 0 {
+			if _, err := s.CreditLXC(ctx, ws, credits, "stripe top-up", map[string]interface{}{"funding": FundingTest}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.FundAgent(ctx, ws, a.ID, credits); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return a
+	}
+	lender := agent("co-a", "lender", 500*lxc)
+	// One instalment of 110 LXC on a 100 LXC loan: "short" holds only the principal, the other two 20 LXC more.
+	terms := LoanTerms{PrincipalULXC: 100 * lxc, InterestBPS: 1000, Instalments: 1, Every: "day", LateFeeULXC: 2 * lxc}
+	var ids []string
+	var due time.Time
+	for _, b := range []struct {
+		handle string
+		extra  int64
+	}{{"short", 0}, {"payer-one", 20 * lxc}, {"payer-two", 20 * lxc}} {
+		agent("co-b", b.handle, b.extra)
+		offer, err := s.OfferLoan(ctx, "co-a", lender.ID, "@"+b.handle, terms)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loan, err := s.AnswerLoan(ctx, "co-b", offer.ID, true)
+		if err != nil || loan.NextDueAt == nil {
+			t.Fatalf("accept %s = %+v, %v", b.handle, loan, err)
+		}
+		ids = append(ids, loan.ID)
+		due = *loan.NextDueAt
+	}
+
+	res, err := s.RunLoanRepayments(ctx, due.Add(time.Second))
+	if err != nil || res != (LoanRunResult{Paid: 2, Missed: 1}) {
+		t.Fatalf("the tick = %+v, %v; want Paid=2 Missed=1", res, err)
+	}
+	loans, err := s.ListLoans(ctx, "co-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, l := range loans {
+		var kinds []string
+		for _, e := range l.Events {
+			kinds = append(kinds, e.Kind)
+		}
+		got[l.ID] = l.Status + ": " + strings.Join(kinds, " ")
+	}
+	for i, want := range []string{"late: payout missed late", "repaid: payout instalment", "repaid: payout instalment"} {
+		if got[ids[i]] != want {
+			t.Errorf("loan %d after the tick = %q, want %q", i, got[ids[i]], want)
+		}
+	}
+
+	res, err = s.RunLoanRepayments(ctx, due.AddDate(0, 0, 1).Add(time.Second))
+	if err != nil || res != (LoanRunResult{Missed: 1, Defaulted: 1}) {
+		t.Fatalf("the retry a day on = %+v, %v; want Missed=1 Defaulted=1", res, err)
+	}
+	if l, err := s.GetLoan(ctx, "co-b", ids[0]); err != nil || l.Status != "defaulted" {
+		t.Fatalf("the short loan after its retry = %+v, %v; want defaulted", l, err)
+	}
+}

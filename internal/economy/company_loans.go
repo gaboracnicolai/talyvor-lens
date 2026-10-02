@@ -449,7 +449,8 @@ func (s *DualTokenStore) runLoanTick(ctx context.Context, now time.Time) (string
 			return "", err
 		}
 		// Missed once: late, and tried again one period on. Missed again: in default.
-		kind, status, next := "late", "late", any(dueOf(*l.NextDueAt, l.Every, 1))
+		status, next := "late", any(dueOf(*l.NextDueAt, l.Every, 1))
+		kind = "late"
 		if l.Status == "late" {
 			kind, status, next = "defaulted", "defaulted", nil
 		}
