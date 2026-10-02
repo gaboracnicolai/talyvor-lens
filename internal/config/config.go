@@ -465,7 +465,8 @@ type Config struct {
 	// pre-serve seam RESERVES a conservative hold and the post-serve seam SETTLES the delivered cost (or
 	// RELEASES a cache hit, free). When off, the legacy pre-serve estimate debit (SpendLXCForAgent) runs — the
 	// rollback path — and a served question is then settled to its delivered cost within the agent's limit,
-	// the rest written off (B23.13). Env: LENS_LXC_RESERVATION_ENABLED (default TRUE).
+	// the rest written off (B23.13); a cache serve to nothing, or a pooled one to its discounted price (B26.9).
+	// Env: LENS_LXC_RESERVATION_ENABLED (default TRUE).
 	LXCReservationEnabled bool
 	// LXCReservationMaxOutputTokens BOUNDS the conservative hold when a request omits max_tokens. Held output
 	// = explicit max_tokens if set, else THIS cap — deliberately NOT the catalog maximum: holding a model's

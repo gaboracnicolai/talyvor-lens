@@ -343,16 +343,22 @@ func (p *Proxy) settleReservationBasis(ctx context.Context, deliveredUSD float64
 // less, charged when it cost more, up to what the agent's limit still allows; the rest is written off, with
 // the question it belongs to. No-op for a request no agent debit was booked for.
 func (p *Proxy) settleAgentDebit(ctx context.Context, wsID string, deliveredUSD float64, servedModel, priceBasis string) {
-	d, ok := ctx.Value(agentDebitedCtxKey{}).(agentDebit)
-	if !ok || p.agentSpender == nil {
-		return
-	}
 	deliveredLXC := int64(0)
 	if deliveredUSD > 0 {
 		deliveredLXC = int64(math.Ceil(deliveredUSD / economy.LXCUSDValue * 1e6))
 	}
-	s, err := p.agentSpender.SettleAgentDebit(ctx, wsID, d.debitKey, deliveredLXC, economy.AgentDebitMeta{
-		RequestedModel: d.requestedModel, ServedModel: servedModel, RequestID: d.requestID, PriceBasis: priceBasis})
+	p.settleAgentDebitULXC(ctx, wsID, deliveredLXC, economy.AgentDebitMeta{ServedModel: servedModel, PriceBasis: priceBasis})
+}
+
+// settleAgentDebitULXC is settleAgentDebit for a cost already in µLXC — a cache serve's price (B26.9). meta
+// carries what the settling row says about the serve; the requested model and the question come from the debit.
+func (p *Proxy) settleAgentDebitULXC(ctx context.Context, wsID string, deliveredLXC int64, meta economy.AgentDebitMeta) {
+	d, ok := ctx.Value(agentDebitedCtxKey{}).(agentDebit)
+	if !ok || p.agentSpender == nil {
+		return
+	}
+	meta.RequestedModel, meta.RequestID = d.requestedModel, d.requestID
+	s, err := p.agentSpender.SettleAgentDebit(ctx, wsID, d.debitKey, deliveredLXC, meta)
 	if err != nil {
 		// Logged-and-swallowed — the response is already served; the question stays charged its estimate.
 		slog.Warn("economy: agent debit settle failed (charged the pre-serve estimate)",
