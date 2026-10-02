@@ -354,7 +354,7 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 // RETURNS the µLXC ACTUALLY charged (finalLXC after the [0, held] clamp) so the caller can tie a downstream
 // action — a cross-tenant royalty mint — to what the consumer REALLY paid. The idempotent no-op and every
 // error path return 0 (this call charged nothing new): a royalty funded on a 0 return mints nothing, which
-// is the deflationary-safe direction.
+// is the deflationary-safe direction. cashBackedULXC is the part that may fund that royalty (royaltyBacked).
 func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) (settledULXC, cashBackedULXC int64, err error) {
 	if reservationID == "" {
 		return 0, 0, errors.New("economy: settle requires reservation_id")
@@ -440,6 +440,9 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 	// second settle a no-op — neither can double-decrement.
 	cashSpent, err := consumeCashBacked(ctx, tx, workspaceID, afterRelease, finalLXC)
 	if err != nil {
+		return 0, 0, err
+	}
+	if cashSpent, err = royaltyBacked(ctx, tx, workspaceID, finalLXC, cashSpent); err != nil {
 		return 0, 0, err
 	}
 	if _, err := tx.Exec(ctx,

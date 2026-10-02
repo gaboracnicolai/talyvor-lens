@@ -85,6 +85,20 @@ func consumeCashBacked(ctx context.Context, tx pgx.Tx, workspaceID string, balan
 	return fromCash, nil
 }
 
+// royaltyBacked is the part of a settled spend that may fund a royalty: its cash-backed part, except for a
+// test (synthetic) workspace, whose money is all test money — its starting grant counts as test-backed
+// (B26.6) — so the whole charge funds the royalty. The wall keeps that royalty between test workspaces
+// (B25.1), the mint row carries the test mark (0173), and it is never paid out.
+func royaltyBacked(ctx context.Context, tx pgx.Tx, workspaceID string, charged, fromCash int64) (int64, error) {
+	if fromCash >= charged {
+		return fromCash, nil
+	}
+	if test, err := testWorkspace(ctx, tx, workspaceID); err != nil || !test {
+		return fromCash, err
+	}
+	return charged, nil
+}
+
 // addCashBacked increases the cash-backed portion. Called ONLY on a real purchase.
 func addCashBacked(ctx context.Context, tx pgx.Tx, workspaceID string, amount int64) error {
 	if amount <= 0 {
