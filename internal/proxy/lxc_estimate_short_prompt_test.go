@@ -72,14 +72,14 @@ func TestLXCGateBlocks_ASubFourBytePromptIsAdmittedOnAZeroBalance(t *testing.T) 
 
 	// CONTROL: zero balance + a normal prompt ⇒ blocked. Fixture is live.
 	if !gateProxy(&fakeLXCReader{balance: 0}, true, true).
-		lxcGateBlocks(context.Background(), "wsA", "gpt-4o", ordinary, lp) {
+		lxcGateBlocks(context.Background(), "wsA", "gpt-4o", ordinary) {
 		t.Fatalf("CONTROL FAILED: a zero balance must BLOCK a %d-byte prompt (est %d µLXC); "+
 			"the admission below would otherwise prove nothing", len(ordinary), lxcEstimate("gpt-4o", ordinary))
 	}
 
 	for _, short := range []string{"ok?", "go", "y"} {
 		r := &fakeLXCReader{balance: 0}
-		if gateProxy(r, true, true).lxcGateBlocks(context.Background(), "wsA", "gpt-4o", short, lp) {
+		if gateProxy(r, true, true).lxcGateBlocks(context.Background(), "wsA", "gpt-4o", short) {
 			t.Fatalf("MEASURED BEHAVIOUR CHANGED: a %d-byte prompt is now gated on a zero balance — "+
 				"update this test and lxc_gate.go's comment deliberately", len(short))
 		}

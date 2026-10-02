@@ -208,13 +208,13 @@ func TestLXCGateBlocks_AnEmbeddingsRequestIsAdmittedOnAZeroBalance(t *testing.T)
 	// this, "it was admitted" is equally consistent with a gate that is simply off.
 	const ordinary = "a prompt long enough that the input-token estimate is a clean positive number"
 	if !gateProxy(&fakeLXCReader{balance: 0}, true, true).
-		lxcGateBlocks(context.Background(), "wsEmb", model, ordinary, lp) {
+		lxcGateBlocks(context.Background(), "wsEmb", model, ordinary) {
 		t.Fatalf("CONTROL FAILED: a zero balance must BLOCK a %d-byte prompt on %s (est %d µLXC)",
 			len(ordinary), model, lxcEstimate(model, ordinary))
 	}
 
 	r := &fakeLXCReader{balance: 0}
-	if gateProxy(r, true, true).lxcGateBlocks(context.Background(), "wsEmb", model, prompt, lp) {
+	if gateProxy(r, true, true).lxcGateBlocks(context.Background(), "wsEmb", model, prompt) {
 		t.Fatalf("MEASURED BEHAVIOUR CHANGED: a %d-byte embeddings request is now gated on a zero "+
 			"balance — update this test and lxc_gate.go's comment deliberately", len(body))
 	}

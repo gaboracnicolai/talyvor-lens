@@ -900,7 +900,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// afford the estimated LXC cost. Sits alongside the budget gate, BEFORE the
 	// upstream call. Inert unless LXCGatingEnabled AND shadow are both on; the
 	// estimate is input-only (under-blocks); a balance-read error fails open.
-	if p.lxcGateBlocks(ctx, wsID, model, prompt, loggingPolicy) {
+	if p.lxcGateBlocks(ctx, wsID, model, prompt) {
 		writeError(w, http.StatusPaymentRequired, "insufficient LXC balance for estimated request cost")
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "lxc_blocked").Inc()
 		return

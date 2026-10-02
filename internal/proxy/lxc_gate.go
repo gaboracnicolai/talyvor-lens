@@ -9,7 +9,6 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/economy"
-	"github.com/talyvor/lens/internal/workspace"
 )
 
 // lxc_gate.go — LXC GATING (Phase-2 Stage 2.4/2.5): the pre-serve check that
@@ -146,18 +145,15 @@ func reserveEstimateLXC(model, prompt string, maxOutTokens int) int64 {
 // call) does writeError(402)+return on true, so "upstream never called" is
 // structural by placement. Returns false (allow) whenever the gate is inert,
 // the estimate is zero, or the balance read errors (fail-open).
-func (p *Proxy) lxcGateBlocks(ctx context.Context, workspaceID, model, prompt string, loggingPolicy workspace.LoggingPolicy) bool {
+//
+// B26.2: the same for every logging policy. The debit fires for LoggingNone on both seams since B17.17,
+// so exempting it here (as this gate once did) let such a workspace be served past a zero balance.
+func (p *Proxy) lxcGateBlocks(ctx context.Context, workspaceID, model, prompt string) bool {
 	if p == nil || p.lxcGate == nil || p.lxcGatingEnabled == nil || !p.lxcGatingEnabled() {
 		return false
 	}
-	// COHERENCE: inert unless shadow is also on (no block without accounting)...
+	// COHERENCE: inert unless shadow is also on (no block without accounting).
 	if p.lxcShadowEnabled == nil || !p.lxcShadowEnabled() {
-		return false
-	}
-	// ...AND inert for LoggingNone, where the shadow debit never fires — so the
-	// gate's live-condition exactly matches the debit's fire-condition. Blocking
-	// a LoggingNone workspace would freeze it on a balance that never moves.
-	if loggingPolicy == workspace.LoggingNone {
 		return false
 	}
 	estLXC := lxcEstimate(model, prompt)
