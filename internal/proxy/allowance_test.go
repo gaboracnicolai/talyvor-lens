@@ -24,7 +24,7 @@ func (f *fakeAllowance) RemainingULXC(_ context.Context, _ string, _ time.Time) 
 func TestLXCGate_AllowanceLeftAdmitsASubscriberWithNoPrepaid(t *testing.T) {
 	p := gateProxy(&fakeLXCReader{balance: 0}, true, true)
 	p.SetSubscriptionAllowance(&fakeAllowance{remaining: 1e9})
-	if p.lxcGateBlocks(context.Background(), "wsA", "gpt-4o", "the quick brown fox jumps over the lazy dog repeatedly to accrue tokens", lp) {
+	if p.lxcGateBlocks(context.Background(), "wsA", "gpt-4o", "the quick brown fox jumps over the lazy dog repeatedly to accrue tokens") {
 		t.Fatal("a subscriber with allowance left was refused for having no prepaid LXC")
 	}
 }
