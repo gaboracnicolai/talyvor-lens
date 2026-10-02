@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/localrouter"
 )
@@ -360,6 +362,30 @@ func (p *Proxy) settleAgentDebit(ctx context.Context, wsID string, deliveredUSD 
 	if s.WrittenOffULXC > 0 {
 		slog.Info("economy: agent's limit cut a question's charge short; the rest is written off",
 			slog.String("request_id", d.requestID), slog.Int64("written_off_ulxc", s.WrittenOffULXC))
+	}
+}
+
+// settleServedOffSeam settles an agent's question answered OFF the upstream seams — by a registered node or
+// by local routing (B26.5). Before it, those paths neither settled nor released, so the stranded sweeper
+// refunded the hold in full and the question was free. Priced as the buffered seam prices a serve without
+// provider usage: the served model's catalog charge rate on len/4 tokens, through the resolver so an
+// unpriced model still cannot come out at zero. No-op for a request no hold or agent debit was booked for,
+// so a non-agent serve never trips the unpriced-model alert.
+func (p *Proxy) settleServedOffSeam(ctx context.Context, wsID, servedModel string, inT, outT int) {
+	_, held := reservationFrom(ctx)
+	_, debited := ctx.Value(agentDebitedCtxKey{}).(agentDebit)
+	if !held && !debited {
+		return
+	}
+	servedCostUSD, prov := alerts.CostUSDResolved(servedModel, catalog.PurposeCharge, inT, 0, 0, outT)
+	priceBasis := ""
+	if prov == catalog.ProvenanceFallback {
+		priceBasis = prov.String()
+	}
+	if p.reservationActive() {
+		p.settleReservationBasis(ctx, servedCostUSD, servedModel, priceBasis)
+	} else {
+		p.settleAgentDebit(ctx, wsID, servedCostUSD, servedModel, priceBasis)
 	}
 }
 

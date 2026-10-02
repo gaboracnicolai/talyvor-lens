@@ -2150,6 +2150,8 @@ func (p *Proxy) tryNodeRouting(
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out) // JSON API response (application/json), mirrors tryLocalRouting
+	// B26.5: the agent's hold settles to what the node delivered, on the same len/4 measurement as the mint basis.
+	p.settleServedOffSeam(ctx, wsID, model, len(prompt)/4, len(nr.Text)/4)
 
 	if !piiDetected {
 		p.storeAnswer(ctx, provider, model, cachePrompt, prompt, reqFP, turn, wsID, requestID, out)
@@ -2240,6 +2242,8 @@ func (p *Proxy) tryLocalRouting(
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(formatted)
+	// B26.5: the agent's hold settles to what the local model delivered, on the token counts the spend row uses.
+	p.settleServedOffSeam(ctx, wsID, decision.Model, len(prompt)/4, len(formatted)/4)
 
 	if !piiDetected {
 		p.storeAnswer(ctx, provider, model, cachePrompt, prompt, reqFP, turn, wsID, requestID, formatted)
@@ -2248,8 +2252,9 @@ func (p *Proxy) tryLocalRouting(
 	if piiDetected {
 		eventPrompt = redactedPrompt
 	}
-	// Local runs are free, so the cost recorded by RecordSpend is 0
-	// (the model isn't in the price table). recordTokenEvent stores
+	// Local runs are free to Talyvor, so the cost recorded by RecordSpend is 0
+	// (the model isn't in the price table). An agent's hold is still settled
+	// above, at the model's catalog charge rate or its floor (B26.5). recordTokenEvent stores
 	// the local model name so usage analytics distinguish local from
 	// cloud traffic (gated on the logging policy inside — full only).
 	p.recordTokenEvent(ctx, provider, decision.Model, eventPrompt, formatted, 0, piiDetected, wsID)
