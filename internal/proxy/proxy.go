@@ -1131,7 +1131,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		span.AddEvent("cache.check.exact")
 		if !endpoint.cacheable() {
 			span.AddEvent("cache.skip.non_chat")
-		} else if c := p.tryExact(ctx, cfg.ProviderName(), model, cache.FingerprintedKey(cachePrompt, reqFP)); c != nil {
+		} else if c := p.tryExact(ctx, cfg.ProviderName(), model, cache.FingerprintedKey(cachePrompt, reqFP), wsID); c != nil {
 			cached, layer = c, "cache_hit_exact"
 			hitHashes = answerHashes(cfg.ProviderName(), model, cachePrompt, prompt, reqFP)
 			span.AddEvent("cache.hit.exact")
@@ -2443,8 +2443,13 @@ func (p *Proxy) recordVisionOCRSpend(ctx context.Context, wsID, team, sprint, fe
 	}
 }
 
-func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []byte {
-	if p.exact == nil {
+// tryExact and trySemantic read the workspace's OWN copies. B26.7: a LoggingNone workspace has none —
+// storeCaches writes nothing for it — so neither reads one either, and an answer kept before the switch
+// to "none" is never replayed: every repeat goes to the model. Gated here, as the write is, so both
+// seams (the SSE replay is the streamed one) are covered. The pooled reads are another workspace's
+// answer and stay open to it.
+func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt, workspaceID string) []byte {
+	if p.exact == nil || p.loggingPolicyFor(workspaceID) == workspace.LoggingNone {
 		return nil
 	}
 	cached, err := p.exact.Get(ctx, provider, model, prompt)
@@ -2455,7 +2460,7 @@ func (p *Proxy) tryExact(ctx context.Context, provider, model, prompt string) []
 }
 
 func (p *Proxy) trySemantic(ctx context.Context, provider, model string, turn cache.Turn, reqFP, workspaceID string) (string, []byte) {
-	if p.semantic == nil {
+	if p.semantic == nil || p.loggingPolicyFor(workspaceID) == workspace.LoggingNone {
 		return "", nil
 	}
 	id, cached, err := p.semantic.GetWithID(ctx, provider, model, turn, reqFP, workspaceID)

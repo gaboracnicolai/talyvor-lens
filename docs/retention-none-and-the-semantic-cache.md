@@ -24,6 +24,12 @@ one choke point for every cache write — the buffered path, local and node rout
 path all call it — so no call site can forget. The distill integration makes the private conversion
 cache read-only and skips both pooled writes for `none`; the template recorder is skipped for `none`.
 
+Since B26.7 the reads match: `Proxy.tryExact` and `Proxy.trySemantic`, the workspace's own exact and
+semantic reads, return nothing for `none`, so an answer kept **before** a switch to `none` is never
+replayed — the repeat goes to the model and is charged as a model call, buffered and streamed. The
+pooled reads are untouched. Proved by `internal/proxy/b267_logging_none_no_replay_realpg_test.go` on
+`lxc_ledger`.
+
 ## How it is proved
 
 `internal/proxy/b184_logging_none_realpg_test.go`, through the real handler, with the exact cache, the
