@@ -1,11 +1,11 @@
-package proxy
+package inference
 
 import (
 	"encoding/json"
 	"strings"
 )
 
-// adaptReasoningParams rewrites a chat body bound for an OpenAI model that takes max_completion_tokens
+// AdaptReasoningParams rewrites a chat body bound for an OpenAI model that takes max_completion_tokens
 // instead of max_tokens: every GPT-5.x and GPT-6 model, and chat-latest (B17.11 — the chat sends
 // max_tokens: 4096, and each of them answered it with a 400). GPT-5.x and GPT-6 are reasoning models
 // and reject temperature as well, so it is dropped for them; chat-latest takes it and keeps it. Sent
@@ -14,9 +14,9 @@ import (
 //
 // Keyed on the DISPATCHED model, not the provider, so a request routed or fallen back onto one of
 // these models is adapted too. Every other model's body, and any body that does not parse, passes
-// through byte-for-byte. Called from forward (buffered) and StreamHandler.serve (streamed) — the two
-// copies of the upstream call.
-func adaptReasoningParams(model string, body []byte) []byte {
+// through byte-for-byte. Called from the proxy's forward (buffered) and StreamHandler.serve (streamed) —
+// the two copies of the upstream call — and from ProviderInferer.Infer (B26.10).
+func AdaptReasoningParams(model string, body []byte) []byte {
 	reasoning := strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "gpt-6")
 	if !reasoning && model != "chat-latest" {
 		return body

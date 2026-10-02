@@ -15,6 +15,7 @@ import (
 	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/inference"
 	"github.com/talyvor/lens/internal/keypool"
 	"github.com/talyvor/lens/internal/metrics"
 	"github.com/talyvor/lens/internal/retry"
@@ -338,13 +339,13 @@ func (s *StreamHandler) serve(
 	// Ask the provider to surface usage in the stream (OpenAI-family:
 	// stream_options.include_usage; identity for Anthropic). Best-effort.
 	body = ops.prepareBody(body)
-	// GPT-6 rejects max_tokens and temperature — the same rewrite forward applies (reasoning_params.go),
+	// GPT-6 rejects max_tokens and temperature — the same rewrite forward applies (inference.AdaptReasoningParams),
 	// for the model the body is SENT to, which routing may have changed (sc.model).
 	upstreamModel := sc.model
 	if upstreamModel == "" {
 		upstreamModel = model
 	}
-	body = adaptReasoningParams(upstreamModel, body)
+	body = inference.AdaptReasoningParams(upstreamModel, body)
 
 	// The key pool, as forwardWithFallback uses it: a healthy pooled key for this provider when the
 	// operator configured any, else the deployment's single key. A transport failure counts against it.

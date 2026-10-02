@@ -65,7 +65,7 @@ func upstreamLines(ops streamOps, body io.Reader) lineSource {
 func providerStreamOps(cfg providerConfig, model string) (streamOps, error) {
 	switch name := cfg.ProviderName(); name {
 	case "openai", "mistral", "groq", "vllm":
-		if name == "openai" && responsesOnly(model) {
+		if name == "openai" && inference.ResponsesOnly(model) {
 			return responsesStreamFor(cfg.UpstreamURL(model), cfg.ApplyAuth, model) // B17.11
 		}
 		return openAIStreamOps{url: cfg.UpstreamURL(model), setAuth: cfg.ApplyAuth}, nil

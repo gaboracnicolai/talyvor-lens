@@ -90,7 +90,7 @@ func seedModels() []Model {
 		// Every rate transcribed from each model's page under https://developers.openai.com/api/docs/models/
 		// (gpt-6-astra, gpt-6-sol, gpt-6-luna; fetched 2026-09-26), Standard tier, with the page's own
 		// cached-input column — 0.1x again, so set explicitly. 1.05M context, 128K max output, same pages.
-		// These are reasoning models: the proxy rewrites max_tokens/temperature for them (reasoning_params.go).
+		// These are reasoning models: the proxy rewrites max_tokens/temperature for them (inference.AdaptReasoningParams).
 		{ID: "gpt-6-astra", Provider: "openai", DisplayName: "GPT-6 Astra", ReleaseDate: "2026-09-03", Tier: TierFrontier, InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
 		{ID: "gpt-6-sol", Provider: "openai", DisplayName: "GPT-6 Sol", ReleaseDate: "2026-09-22", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
 		{ID: "gpt-6-luna", Provider: "openai", DisplayName: "GPT-6 Luna", ReleaseDate: "2026-09-22", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
