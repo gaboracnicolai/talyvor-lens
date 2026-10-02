@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -153,6 +154,27 @@ func newMarketReviewQueueHandler(store *market.Store) http.Handler {
 			return
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{"listings": q})
+	})
+}
+
+// parkedUseLister is the slice of *market.Store the parked-uses read needs.
+type parkedUseLister interface {
+	ParkedUses(ctx context.Context) ([]market.ParkedUse, error)
+}
+
+// newMarketParkedUsesHandler answers GET /v1/admin/marketplace/parked-uses (B26.3): every billed use Stripe
+// refused market.MaxMeterRefusals times, with Stripe's reason — off its buyer's bill until an operator acts.
+func newMarketParkedUsesHandler(store parkedUseLister) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		parked, err := store.ParkedUses(req.Context())
+		if err != nil {
+			writeMarketAdminErr(w, err)
+			return
+		}
+		if parked == nil {
+			parked = []market.ParkedUse{}
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"parked_uses": parked})
 	})
 }
 
