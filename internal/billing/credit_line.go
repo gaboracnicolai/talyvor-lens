@@ -31,9 +31,19 @@ type creditLineStripeAPI interface {
 	CreateCreditLineInvoice(ctx context.Context, customerID, workspaceID string, cents int64, description, idempotencyKey string) (string, time.Time, error)
 }
 
-// WithCreditLines turns on the monthly invoicing of company credit lines.
+// WithCreditLines turns on the monthly invoicing of company credit lines. A Service ForTestWorkspaces invoices
+// only its own kind of company's (B26.4): a test company's through the test-mode key, a real one's through the
+// main key.
 func (s *Service) WithCreditLines(api creditLineStripeAPI) *Service {
 	s.creditLineStripe = api
+	return s
+}
+
+// RefuseTestCreditLines makes this Service refuse to invoice a test (synthetic) company's credit line, naming
+// unset, the test-mode variables that would invoice it in Stripe test mode (B26.4). It is for a live main key
+// with no test workspaces' Service: their draws wait uninvoiced rather than go on a live invoice.
+func (s *Service) RefuseTestCreditLines(unset string) *Service {
+	s.creditLineTestUnset = unset
 	return s
 }
 
@@ -45,18 +55,24 @@ func (s *Service) InvoiceCreditLines(ctx context.Context, now time.Time) (int, e
 	}
 	now = now.UTC()
 	periodEnd := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT workspace_id FROM credit_line_draws WHERE invoice_id = '' AND drawn_at < $1`, periodEnd)
+	// A workspace with no row counts as real, as it does in takes.
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT d.workspace_id, COALESCE(w.synthetic, false) FROM credit_line_draws d
+		LEFT JOIN workspaces w ON w.id = d.workspace_id WHERE d.invoice_id = '' AND d.drawn_at < $1`, periodEnd)
 	if err != nil {
 		return 0, fmt.Errorf("billing: credit line draws: %w", err)
 	}
-	var workspaces []string
+	type company struct {
+		id   string
+		test bool
+	}
+	var companies []company
 	for rows.Next() {
-		var ws string
-		if err := rows.Scan(&ws); err != nil {
+		var c company
+		if err := rows.Scan(&c.id, &c.test); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		workspaces = append(workspaces, ws)
+		companies = append(companies, c)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -64,10 +80,18 @@ func (s *Service) InvoiceCreditLines(ctx context.Context, now time.Time) (int, e
 	}
 	n := 0
 	var errs []error
-	for _, ws := range workspaces {
-		made, err := s.invoiceCreditLine(ctx, ws, periodEnd)
+	for _, c := range companies {
+		if s.testWorkspaces != nil && c.test != *s.testWorkspaces {
+			continue // the other kind of workspace's Service invoices it (B26.4)
+		}
+		if c.test && s.creditLineTestUnset != "" {
+			errs = append(errs, fmt.Errorf("billing: credit line invoice for %s: a test workspace uses Stripe only in test mode: set %s for its credit line",
+				c.id, s.creditLineTestUnset))
+			continue
+		}
+		made, err := s.invoiceCreditLine(ctx, c.id, periodEnd)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("billing: credit line invoice for %s: %w", ws, err))
+			errs = append(errs, fmt.Errorf("billing: credit line invoice for %s: %w", c.id, err))
 			continue
 		}
 		if made {
@@ -173,7 +197,7 @@ func (l *LiveStripe) CreateCreditLineInvoice(ctx context.Context, customerID, wo
 	ip.Context = ctx
 	ip.AddMetadata("credit_line_workspace_id", workspaceID)
 	ip.SetIdempotencyKey(idempotencyKey + "-invoice")
-	draft, err := invoice.New(ip)
+	draft, err := invoice.Client{B: l.backend(), Key: l.key}.New(ip) // B26.4: its own key, as a test-mode instance must
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -186,13 +210,13 @@ func (l *LiveStripe) CreateCreditLineInvoice(ctx context.Context, customerID, wo
 	}
 	item.Context = ctx
 	item.SetIdempotencyKey(idempotencyKey + "-item")
-	if _, err := invoiceitem.New(item); err != nil {
+	if _, err := (invoiceitem.Client{B: l.backend(), Key: l.key}).New(item); err != nil {
 		return "", time.Time{}, err
 	}
 	fp := &stripe.InvoiceFinalizeInvoiceParams{}
 	fp.Context = ctx
 	fp.SetIdempotencyKey(idempotencyKey + "-finalize")
-	final, err := invoice.FinalizeInvoice(draft.ID, fp)
+	final, err := invoice.Client{B: l.backend(), Key: l.key}.FinalizeInvoice(draft.ID, fp)
 	if err != nil {
 		return "", time.Time{}, err
 	}

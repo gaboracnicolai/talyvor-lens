@@ -58,6 +58,11 @@ func (s *b256Stripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]any{"id": "sub_" + form.Get("metadata[market_workspace_id]"), "object": "subscription"})
 	case p == "/v1/billing/meter_events":
 		reply(map[string]any{"object": "billing.meter_event", "identifier": form.Get("identifier")})
+	case p == "/v1/invoices": // B26.4: a credit line invoice
+		reply(map[string]any{"id": "in_" + form.Get("metadata[credit_line_workspace_id]"), "object": "invoice"})
+	case strings.HasPrefix(p, "/v1/invoices/") && strings.HasSuffix(p, "/finalize"):
+		reply(map[string]any{"id": strings.TrimSuffix(strings.TrimPrefix(p, "/v1/invoices/"), "/finalize"), "object": "invoice",
+			"due_date": time.Now().AddDate(0, 0, 14).Unix()})
 	case p == "/v1/invoiceitems":
 		reply(map[string]any{"id": fmt.Sprintf("ii_b256_%d", n), "object": "invoiceitem"})
 	case p == "/v1/accounts":

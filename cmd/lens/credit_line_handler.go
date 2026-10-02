@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/economy"
 )
 
@@ -43,16 +44,33 @@ type creditLineInvoicer interface {
 	InvoiceCreditLines(ctx context.Context, now time.Time) (int, error)
 }
 
+// creditLineInvoicers turns on credit line invoicing and returns the Services that invoice: the main one, on
+// the main key, and the test workspaces' own, on the test-mode key — each only its own kind of company's
+// (B26.4). With none of their own while the main key is live, a test company's draws are refused, naming
+// what to set, rather than go on a live invoice.
+func creditLineInvoicers(main *billing.Service, mainStripe *billing.LiveStripe, mainKeyLive bool, test *billing.Service, testStripe *billing.LiveStripe) []creditLineInvoicer {
+	bills := []creditLineInvoicer{main.WithCreditLines(mainStripe)}
+	switch {
+	case test != nil:
+		bills = append(bills, test.WithCreditLines(testStripe))
+	case mainKeyLive:
+		main.RefuseTestCreditLines("LENS_STRIPE_TEST_SECRET_KEY and LENS_STRIPE_TEST_WEBHOOK_SECRET")
+	}
+	return bills
+}
+
 // invoiceCreditLines puts each company's last month of credit line draws on a Stripe invoice, hourly, so a
 // month's invoice goes out within the hour of its first day.
-func invoiceCreditLines(ctx context.Context, billing creditLineInvoicer) {
+func invoiceCreditLines(ctx context.Context, bills ...creditLineInvoicer) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
-		if n, err := billing.InvoiceCreditLines(ctx, time.Now()); err != nil {
-			slog.Warn("credit lines: invoicing", "invoiced", n, "err", err)
-		} else if n > 0 {
-			slog.Info("credit lines: invoiced", "invoices", n)
+		for _, b := range bills {
+			if n, err := b.InvoiceCreditLines(ctx, time.Now()); err != nil {
+				slog.Warn("credit lines: invoicing", "invoiced", n, "err", err)
+			} else if n > 0 {
+				slog.Info("credit lines: invoiced", "invoices", n)
+			}
 		}
 		select {
 		case <-ctx.Done():

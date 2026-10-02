@@ -130,6 +130,8 @@ type Service struct {
 	agentCards AgentCardSettler
 	// B22.4 — company credit lines are invoiced monthly (credit_line.go). Unset ⇒ their draws are not invoiced.
 	creditLineStripe creditLineStripeAPI
+	// B26.4 — set, a test company's credit line is refused, naming these test-mode variables (RefuseTestCreditLines).
+	creditLineTestUnset string
 
 	// B25.2 — whose money this Service takes (ForTestWorkspaces). nil takes every workspace's.
 	testWorkspaces *bool
