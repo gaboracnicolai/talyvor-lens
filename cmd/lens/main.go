@@ -1705,13 +1705,6 @@ func run() error {
 		liveSide.connect = liveStripe
 		billingSvc = billingSvc.WithMarketPayouts(liveStripe, marketStore)
 	}
-	// B22.4 — company credit lines: each month's draws go on one Stripe invoice; paying it repays the line.
-	if cfg.BillingEnabled {
-		billingSvc = billingSvc.WithCreditLines(liveStripe)
-		go haComps.leader.Run(ctx, "credit-line-invoices", 30*time.Second, func(lctx context.Context) {
-			invoiceCreditLines(lctx, billingSvc)
-		})
-	}
 	// B19.25 — an agent card purchase's capture, reversal or refund settles the agent's balance, from the
 	// Issuing events on the regular webhook. Cards exist only with the real-time endpoint configured.
 	if cfg.StripeIssuingWebhookSecret != "" {
@@ -1724,12 +1717,13 @@ func run() error {
 	// live: a Service of their own with the test-mode key, webhook (/v1/billing/webhook/test) and plans. Each
 	// Service takes only its own kind of workspace's money. Unset, a test workspace cannot buy or subscribe.
 	var testBillingSvc *billing.Service
+	var testStripe *billing.LiveStripe
 	var testSide stripeSide // B25.6 — a test workspace's marketplace bill, payouts and agent cards, in test mode
 	if cfg.StripeTestSecretKey != "" {
 		testSide.cards = agentcard.NewStripe(cfg.StripeTestSecretKey, cfg.StripeIssuingCurrency)
 	}
 	if cfg.BillingEnabled && cfg.StripeTestSecretKey != "" && cfg.StripeTestWebhookSecret != "" {
-		testStripe := billing.NewTestModeStripe(cfg.StripeTestSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL)
+		testStripe = billing.NewTestModeStripe(cfg.StripeTestSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL)
 		testBillingSvc = billing.New(pool, dualToken, testStripe, cfg.StripeTestWebhookSecret).
 			ForTestWorkspaces(true).WithAllowance(cfg.SubscriptionAllowanceULXC)
 		if len(cfg.StripeTestSubscriptionPlans) > 0 {
@@ -1747,6 +1741,14 @@ func run() error {
 		if cfg.StripeIssuingWebhookSecret != "" {
 			testBillingSvc = testBillingSvc.WithAgentCards(dualToken)
 		}
+	}
+	// B22.4 — company credit lines: each month's draws go on one Stripe invoice; paying it repays the line.
+	// B26.4 — a test company's goes on a Stripe test-mode invoice, from the test workspaces' Service.
+	if cfg.BillingEnabled {
+		creditLines := creditLineInvoicers(billingSvc, liveStripe, billing.LiveKey(cfg.StripeSecretKey), testBillingSvc, testStripe)
+		go haComps.leader.Run(ctx, "credit-line-invoices", 30*time.Second, func(lctx context.Context) {
+			invoiceCreditLines(lctx, creditLines...)
+		})
 	}
 	stripeKinds := newStripeByKind(wsManager.GetSynthetic, billing.LiveKey(cfg.StripeSecretKey), testBillingSvc != nil, liveSide, testSide)
 	// Every workspace's bill is picked per workspace: in Stripe, or for a test workspace on a Lens with none in
