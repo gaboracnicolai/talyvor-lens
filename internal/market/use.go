@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	stripe "github.com/stripe/stripe-go/v81"
 
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/workspace"
@@ -250,8 +251,47 @@ func (s *Store) chargeFor(ctx context.Context, l Listing, buyer string) (string,
 	return ChargeBilled, l.PricePerUseULXC, nil
 }
 
+// A use Stripe refuses waits MeterRefusalBackoff before it is tried again, three times longer after each
+// refusal (10m, 30m, 1h30, 4h30); its MaxMeterRefusals-th refusal parks it for an operator.
+const (
+	MaxMeterRefusals    = 5
+	MeterRefusalBackoff = 10 * time.Minute
+)
+
+// meterRefusal is Stripe's reason when it answered a meter event with a refusal of that one use — a 4xx
+// other than 401/403 (Lens's own key), 409 (a request in flight) and 429 (slow down), which would refuse
+// every use alike. "" when it did not: Stripe unreachable, or our side.
+func meterRefusal(err error) string {
+	var se *stripe.Error
+	if !errors.As(err, &se) || se.HTTPStatusCode < 400 || se.HTTPStatusCode >= 500 {
+		return ""
+	}
+	switch se.HTTPStatusCode {
+	case 401, 403, 409, 429:
+		return ""
+	}
+	reason := se.Msg
+	if se.Code != "" {
+		reason = string(se.Code) + ": " + reason
+	}
+	if reason == "" {
+		reason = fmt.Sprintf("Stripe answered %d", se.HTTPStatusCode)
+	}
+	return reason
+}
+
+// meter puts one use on its buyer's bill. A use Stripe refuses records the reason, counts the refusal and
+// waits out its backoff before MeterPending tries it again; its MaxMeterRefusals-th refusal parks it.
 func (s *Store) meter(ctx context.Context, m Meter, useID, buyer string, ulxc int64, at time.Time) error {
 	if err := m.MeterMarketUse(ctx, buyer, useID, ulxc, at); err != nil {
+		if reason := meterRefusal(err); reason != "" {
+			if _, uerr := s.pool.Exec(ctx, `UPDATE market_uses SET meter_refusals = meter_refusals + 1, meter_refused_reason = $2,
+				meter_retry_at = now() + make_interval(secs => $3 * power(3, meter_refusals)),
+				meter_parked_at = CASE WHEN meter_refusals + 1 >= $4 THEN now() END
+				WHERE id = $1 AND metered_at IS NULL`, useID, reason, MeterRefusalBackoff.Seconds(), MaxMeterRefusals); uerr != nil {
+				return errors.Join(err, uerr)
+			}
+		}
 		return err
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE market_uses SET metered_at = now() WHERE id = $1 AND metered_at IS NULL`, useID)
@@ -259,10 +299,13 @@ func (s *Store) meter(ctx context.Context, m Meter, useID, buyer string, ulxc in
 }
 
 // MeterPending bills the uses that ran but whose meter event Stripe has not yet accepted — a Stripe outage
-// when they were used. Each keeps its id as the meter event's identifier, so none is billed twice.
+// when they were used. Each keeps its id as the meter event's identifier, so none is billed twice. A use
+// Stripe refuses is skipped and every other use still billed; one refused too often stays parked
+// (ParkedUses). Stripe unreachable stops the pass: the next one tries again.
 func (s *Store) MeterPending(ctx context.Context, m Meter, olderThan time.Duration) (int, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, buyer_workspace_id, price_ulxc, used_at FROM market_uses
 		WHERE charge = 'billed' AND metered_at IS NULL AND ran_at IS NOT NULL AND ran_at < now() - make_interval(secs => $1)
+		  AND meter_parked_at IS NULL AND (meter_retry_at IS NULL OR meter_retry_at <= now())
 		  AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = market_uses.id) -- refunded before it was billed: never billed
 		ORDER BY used_at LIMIT 200`, olderThan.Seconds())
 	if err != nil {
@@ -289,11 +332,45 @@ func (s *Store) MeterPending(ctx context.Context, m Meter, olderThan time.Durati
 	n := 0
 	for _, p := range todo {
 		if err := s.meter(ctx, m, p.id, p.buyer, p.ulxc, p.at); err != nil {
+			if meterRefusal(err) != "" {
+				continue
+			}
 			return n, err
 		}
 		n++
 	}
 	return n, nil
+}
+
+// ParkedUse is a billed use Stripe refused MaxMeterRefusals times: never on its buyer's bill until an
+// operator sees to it.
+type ParkedUse struct {
+	ID               string    `json:"id"`
+	ListingID        string    `json:"listing_id"`
+	BuyerWorkspaceID string    `json:"buyer_workspace_id"`
+	PriceULXC        int64     `json:"price_ulxc"`
+	UsedAt           time.Time `json:"used_at"`
+	Refusals         int       `json:"refusals"`
+	Reason           string    `json:"reason"` // Stripe's, from its last refusal
+	ParkedAt         time.Time `json:"parked_at"`
+}
+
+// ParkedUses lists every parked use still off its buyer's bill, most recently parked first.
+func (s *Store) ParkedUses(ctx context.Context) ([]ParkedUse, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, listing_id, buyer_workspace_id, price_ulxc, used_at, meter_refusals, meter_refused_reason, meter_parked_at
+		FROM market_uses WHERE meter_parked_at IS NOT NULL AND metered_at IS NULL ORDER BY meter_parked_at DESC, id`)
+	if err != nil {
+		return nil, fmt.Errorf("market: parked uses: %w", err)
+	}
+	parked, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (ParkedUse, error) {
+		var p ParkedUse
+		err := r.Scan(&p.ID, &p.ListingID, &p.BuyerWorkspaceID, &p.PriceULXC, &p.UsedAt, &p.Refusals, &p.Reason, &p.ParkedAt)
+		return p, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("market: parked uses: %w", err)
+	}
+	return parked, nil
 }
 
 // resolve reads the listing and the version the buyer may use, with its artifact. A held listing is its

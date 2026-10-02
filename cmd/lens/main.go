@@ -2182,6 +2182,8 @@ func run() error {
 	r.Get("/v1/admin/marketplace/review", requireAdminOrModerator(authManager, moderatorKeys, newMarketReviewQueueHandler(marketStore)))
 	r.Post("/v1/admin/marketplace/listings/{listingID}/approve", requireAdminOrModerator(authManager, moderatorKeys, newMarketApproveHandler(marketStore)))
 	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdminOrModerator(authManager, moderatorKeys, newMarketTakedownHandler(marketStore, marketRefunder)))
+	// B26.3 — the billed uses Stripe refused too often to keep retrying, with its reason. market_handler.go.
+	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
 	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
 	// unchanged).

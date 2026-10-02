@@ -45,6 +45,7 @@ var operatorReadable = map[string]string{
 	"/v1/admin/workspaces/last-activity":  "B18.17: each workspace's last request, the operator table's last-activity column. Query-only.",
 	"/v1/admin/distill/attribution":       "distill attribution rows. distillattrib.Reader is Query-only by construction.",
 	"/v1/admin/billing/purchases":         "the purchases column of the operator table.",
+	"/v1/admin/marketplace/parked-uses":   "B26.3: billed marketplace uses Stripe refused too often to retry, with its reason — for an operator to see to. market.Store.ParkedUses is Query-only.",
 	"/v1/admin/pool-royalty/detect":       "self-dealing detection read. Query-only reader, explicitly NOT economy-gated so forensics survive the kill switch.",
 	"/v1/admin/pool-royalty/resolve":      "the resolution view of the same detection. Query-only.",
 	"/v1/admin/pool-royalty/margin":       "margin observability. Query-only.",
