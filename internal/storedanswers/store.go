@@ -237,6 +237,96 @@ func (s *Store) redisMarked(ctx context.Context, pattern, wsID string, del bool)
 	return n, nil
 }
 
+const deleteAllOfSQL = `WITH d AS (
+  DELETE FROM prompt_embeddings
+  WHERE (is_poolable AND contributor_workspace_id = ANY($1::text[])) OR (NOT is_poolable AND workspace_id = ANY($1::text[]))
+  RETURNING is_poolable)
+SELECT count(*) FILTER (WHERE is_poolable), count(*) FILTER (WHERE NOT is_poolable) FROM d`
+
+// DeleteAllOf removes what Delete with ScopeAll removes, for every one of wsIDs at once: one statement
+// and one pass over Redis, however many workspaces there are (B26.1 — the synthetic reset of thousands
+// of test users). It writes no stored_answer_deletions rows; its one caller, the synthetic reset, is
+// recorded in synthetic_operations.
+func (s *Store) DeleteAllOf(ctx context.Context, wsIDs []string) (Counts, error) {
+	var c Counts
+	if len(wsIDs) == 0 {
+		return c, nil
+	}
+	// Redis before Postgres, as in Delete: a Redis failure leaves the rows, and the call simply runs again.
+	if err := s.redisOwnedBy(ctx, wsIDs, &c); err != nil {
+		return Counts{}, err
+	}
+	if err := s.db.QueryRow(ctx, deleteAllOfSQL, wsIDs).Scan(&c.SharedAnswers, &c.PrivateAnswers); err != nil {
+		return Counts{}, fmt.Errorf("storedanswers: delete answers: %w", err)
+	}
+	return c, nil
+}
+
+// redisOwnedBy is redisMarked for many workspaces and all three marker kinds in ONE scan: every marker
+// whose value is one of wsIDs is deleted with the value key it marks, and counted by kind.
+func (s *Store) redisOwnedBy(ctx context.Context, wsIDs []string, c *Counts) error {
+	if s.rdb == nil {
+		return nil
+	}
+	owners := make(map[string]bool, len(wsIDs))
+	for _, id := range wsIDs {
+		owners[id] = true
+	}
+	// kind says which count a marker key adds to and how long its suffix is; nil is not a marker.
+	kind := func(key string) (*int64, string) {
+		switch {
+		case strings.HasPrefix(key, "lens:distill:") && strings.HasSuffix(key, ":owner"):
+			return &c.SharedConversions, ":owner"
+		case strings.HasPrefix(key, "lens:distill:") && strings.HasSuffix(key, ":ws"):
+			return &c.PrivateConversions, ":ws"
+		case strings.HasPrefix(key, "lens:exact:") && strings.HasSuffix(key, ":owner"):
+			return &c.CachedCopies, ":owner"
+		}
+		return nil, ""
+	}
+	var batch []string
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		vals, err := s.rdb.MGet(ctx, batch...).Result()
+		if err != nil {
+			return fmt.Errorf("storedanswers: read markers: %w", err)
+		}
+		var doomed []string
+		for i, v := range vals {
+			if owner, ok := v.(string); ok && owners[owner] {
+				n, suffix := kind(batch[i])
+				*n++
+				doomed = append(doomed, batch[i], strings.TrimSuffix(batch[i], suffix))
+			}
+		}
+		if len(doomed) > 0 {
+			if err := s.rdb.Del(ctx, doomed...).Err(); err != nil {
+				return fmt.Errorf("storedanswers: delete markers: %w", err)
+			}
+		}
+		batch = batch[:0]
+		return nil
+	}
+	iter := s.rdb.Scan(ctx, 0, "lens:*", 1000).Iterator()
+	for iter.Next(ctx) {
+		if n, _ := kind(iter.Val()); n == nil {
+			continue
+		}
+		batch = append(batch, iter.Val())
+		if len(batch) == 500 {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("storedanswers: scan markers: %w", err)
+	}
+	return flush()
+}
+
 const requestCols = `id, workspace_id, requested_by, note, status, requested_at, completed_at, COALESCE(completed_by, '')`
 
 func scanRequest(row pgx.Row) (Request, error) {

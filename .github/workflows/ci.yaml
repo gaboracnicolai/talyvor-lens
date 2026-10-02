@@ -15,6 +15,8 @@ jobs:
     # skipped on another, which is the failure it exists to catch.
     env:
       LENS_TEST_DATABASE_URL: postgres://postgres:lens_test@localhost:5432/lens_test?sslmode=disable
+      # B26.1: the synthetic reset's scale test runs on a real Redis here (a miniredis without it).
+      LENS_TEST_REDIS_URL: redis://localhost:6379/0
     # Throwaway Postgres for two standing regression guards:
     # (1) the LENS_TEST_DATABASE_URL-gated integration tests (pool-mint-cap
     #     exactness + dbmigrate runner) — they create their own schema/fixtures
@@ -36,6 +38,15 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10

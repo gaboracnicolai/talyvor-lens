@@ -6,7 +6,9 @@ import (
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/storedanswers"
+	"github.com/talyvor/lens/internal/workspace"
 )
 
 // B17.1 — SYNTHETIC ACCOUNTS THAT CAN NEVER TOUCH REAL MONEY OR REAL USERS.
@@ -26,8 +29,13 @@ import (
 //
 //	POST /v1/synthetic/workspaces        {"count":100} — creates that many synthetic workspaces, each
 //	                                     with test credits and a token the harness uses as that user.
-//	POST /v1/synthetic/workspaces/reset  — every synthetic workspace: its stored answers deleted, its
-//	                                     test credits restored.
+//	POST /v1/synthetic/workspaces/reset  — every synthetic workspace, or only those named in
+//	                                     {"workspaces":["s…",…]}: its stored answers deleted, its test
+//	                                     credits restored. Set-based (B26.1): a handful of statements and
+//	                                     one Redis pass however many there are.
+//
+// And, while the key is set, synthetic workspaces older than seven days are deleted every six hours
+// (runSyntheticPurge, B26.1).
 //
 // B25.7 adds four more that bring a test workspace's slow money due inside one tester run
 // (synthetic_due_handler.go).
@@ -45,6 +53,9 @@ const (
 	syntheticMaxCount   = 1000
 	syntheticCallsPer   = time.Minute
 	syntheticMaxCalls   = 10
+	// syntheticPurgeAge is how old a synthetic workspace is when the clean-up deletes it (B26.1).
+	syntheticPurgeAge   = 7 * 24 * time.Hour
+	syntheticPurgeEvery = 6 * time.Hour
 )
 
 // syntheticScopes is what a synthetic user's token may do: ask questions, read its analytics, and
@@ -53,16 +64,16 @@ var syntheticScopes = []string{auth.ScopeProxy, auth.ScopeAnalytics, auth.ScopeK
 
 type syntheticWorkspaces interface {
 	CreateSynthetic(ctx context.Context, id, name string) error
-	ListSynthetic(ctx context.Context) ([]string, error)
+	ResolveSynthetic(ctx context.Context, named []string) (ids, notSynthetic []string, err error)
 }
 
 type syntheticCredits interface {
 	GrantLXC(ctx context.Context, workspaceID string, lxcAmount int64, reason string, metadata map[string]interface{}) (int64, error)
-	GetLXCBalance(ctx context.Context, workspaceID string) (int64, error)
+	GrantLXCUpTo(ctx context.Context, workspaceIDs []string, target int64, reason string, metadata map[string]interface{}) (int, error)
 }
 
 type syntheticAnswers interface {
-	Delete(ctx context.Context, wsID string, scope storedanswers.Scope, by string, requestID int64) (storedanswers.Counts, error)
+	DeleteAllOf(ctx context.Context, wsIDs []string) (storedanswers.Counts, error)
 }
 
 type syntheticAudit interface {
@@ -192,29 +203,75 @@ func (d syntheticDeps) create(w http.ResponseWriter, r *http.Request) (int, stri
 }
 
 func (d syntheticDeps) reset(w http.ResponseWriter, r *http.Request) (int, string) {
-	ids, err := d.workspaces.ListSynthetic(r.Context())
+	var in struct {
+		Workspaces []string `json:"workspaces"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+			writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return 0, "error: bad request"
+		}
+	}
+	ids, notSynthetic, err := d.workspaces.ResolveSynthetic(r.Context(), in.Workspaces)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return 0, "error: " + err.Error()
 	}
-	for i, id := range ids {
-		if _, err := d.answers.Delete(r.Context(), id, storedanswers.ScopeAll, "synthetic-reset", 0); err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, fmt.Sprintf("reset %d, then %s: %v", i, id, err))
-			return i, "error: " + err.Error()
-		}
-		bal, err := d.credits.GetLXCBalance(r.Context(), id)
-		if err == nil && bal < syntheticCreditULXC {
-			_, err = d.credits.GrantLXC(r.Context(), id, syntheticCreditULXC-bal, "synthetic test credits restored",
-				map[string]interface{}{"synthetic": true})
-		}
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, fmt.Sprintf("reset %d, then %s: %v", i, id, err))
-			return i, "error: " + err.Error()
-		}
+	if len(notSynthetic) > 0 {
+		writeJSONErr(w, http.StatusBadRequest, fmt.Sprintf("%d named workspaces are not active synthetic workspaces, nothing was reset: %s",
+			len(notSynthetic), strings.Join(notSynthetic[:min(len(notSynthetic), 5)], ", ")))
+		return 0, "error: not synthetic"
 	}
-	slog.Info("synthetic: workspaces reset", "count", len(ids))
+	if _, err := d.answers.DeleteAllOf(r.Context(), ids); err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, fmt.Sprintf("stored answers of %d: %v", len(ids), err))
+		return 0, "error: " + err.Error()
+	}
+	if _, err := d.credits.GrantLXCUpTo(r.Context(), ids, syntheticCreditULXC, "synthetic test credits restored",
+		map[string]interface{}{"synthetic": true}); err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, fmt.Sprintf("credits of %d: %v", len(ids), err))
+		return 0, "error: " + err.Error()
+	}
+	slog.Info("synthetic: workspaces reset", "count", len(ids), "named", len(in.Workspaces) > 0)
 	writeJSONOK(w, http.StatusOK, map[string]any{"reset": len(ids)})
 	return len(ids), "ok"
+}
+
+type syntheticPurger interface {
+	PurgeStaleSynthetic(ctx context.Context, cutoff time.Time) (workspace.PurgeResult, error)
+}
+
+// runSyntheticPurge deletes the synthetic workspaces older than syntheticPurgeAge, and their Redis copies,
+// at start and every syntheticPurgeEvery until ctx ends.
+func runSyntheticPurge(ctx context.Context, ws syntheticPurger, answers syntheticAnswers) {
+	t := time.NewTicker(syntheticPurgeEvery)
+	defer t.Stop()
+	for {
+		if err := purgeStaleSynthetic(ctx, ws, answers, time.Now()); err != nil {
+			slog.Warn("synthetic: stale workspaces not purged", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func purgeStaleSynthetic(ctx context.Context, ws syntheticPurger, answers syntheticAnswers, now time.Time) error {
+	res, err := ws.PurgeStaleSynthetic(ctx, now.Add(-syntheticPurgeAge))
+	if err != nil {
+		return err
+	}
+	if len(res.Purged) > 0 {
+		if _, err := answers.DeleteAllOf(ctx, res.Purged); err != nil {
+			return fmt.Errorf("purged %d, then their stored answers: %w", len(res.Purged), err)
+		}
+	}
+	if len(res.Purged)+len(res.Kept) > 0 {
+		slog.Info("synthetic: stale workspaces purged", "purged", len(res.Purged),
+			"kept_crossing_real", len(res.Kept), "tables_unreached", res.Unreached)
+	}
+	return nil
 }
 
 // syntheticID is "s" and 26 random base32 characters — the shape of a provisioned "u…" id, never
