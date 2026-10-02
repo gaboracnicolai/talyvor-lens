@@ -1216,7 +1216,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					// SERVE point. FUNDING INVARIANT (settle-then-mint): resolve the pre-serve HOLD FIRST — a
 					// pooled hit bills the consumer avoided_COGS (returned), an own hit is free — then mint a
 					// royalty funded by what the consumer ACTUALLY paid ($0 charge ⇒ $0 mint).
-					funded := p.settlePooledServe(ctx, price)
+					funded := p.settlePooledServe(ctx, wsID, price)
 					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
 					// Cache-serve spend visibility (0100): the served request
 					// becomes a zero-provider-cost token_events row tagged with
@@ -1249,7 +1249,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// SERVE point. FUNDING INVARIANT (settle-then-mint): resolve the pre-serve HOLD FIRST — a
 				// pooled hit bills the consumer avoided_COGS (returned), an own hit is free — then mint a
 				// royalty funded by what the consumer ACTUALLY paid ($0 charge ⇒ $0 mint).
-				funded := p.settlePooledServe(ctx, price)
+				funded := p.settlePooledServe(ctx, wsID, price)
 				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
 				// Cache-serve spend visibility (0100): see recordCacheServe.
 				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
@@ -3443,10 +3443,19 @@ func (p *Proxy) pricePooledServe(pooledHit *poolroyalty.ServedHit, prompt string
 // plain-key cache hit is not metered and so funds NO royalty. An own-cache hit (price.Pooled false)
 // RELEASES the hold in full: free, exactly as before.
 //
+// B26.9 — WITH RESERVATIONS OFF there is no hold: the agent was debited its pre-serve estimate, so this
+// settles that debit to the serve's real price as B23.13 settles a model serve — an own-cache hit to
+// nothing, a pooled hit to its discounted price, never past the owner's limit. It still returns 0: that
+// path does not say which part of the charge real money paid for, so it funds no royalty.
+//
 // The LIST price and the rate ride onto the ledger row so the customer's evidence is the row itself.
 // The SAVING is not passed — the row derives it from what was actually debited, because the settle
 // clamps to the hold and a passed-in saving could then contradict the amount charged.
-func (p *Proxy) settlePooledServe(ctx context.Context, price pooledPrice) float64 {
+func (p *Proxy) settlePooledServe(ctx context.Context, wsID string, price pooledPrice) float64 {
+	if !p.reservationActive() {
+		p.settleAgentDebitULXC(ctx, wsID, price.ChargedULXC, economy.AgentDebitMeta{ServedModel: price.modelForRow,
+			PriceBasis: price.PriceBasis, PoolListULXC: price.ListULXC, PoolDiscountRate: price.Rate})
+	}
 	if !price.Pooled {
 		p.releaseReservation(ctx, "own cache hit")
 		return 0

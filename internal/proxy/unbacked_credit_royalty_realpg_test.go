@@ -215,7 +215,7 @@ func (e *unbackedEnv) serveCrossTenantPooledHit(t *testing.T) float64 {
 		Layer: "semantic", EntryID: "entry-" + e.tag, Provider: "openai", Model: "gpt-4o",
 	}
 	prompt, served := "a cross-tenant consumer prompt", []byte("a shared cached response of some length")
-	funded := e.p.settlePooledServe(rctx, e.p.pricePooledServe(hit, prompt, served))
+	funded := e.p.settlePooledServe(rctx, "", e.p.pricePooledServe(hit, prompt, served))
 	e.p.mintPooledRoyalty(rctx, hit, prompt, served, funded, workspace.LoggingMetadata)
 	return funded
 }

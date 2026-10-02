@@ -126,7 +126,9 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 		if out.SettledULXC < 0 {
 			desc = "agent debit settle: estimate above the delivered cost, refunded"
 		}
-		if err := insertLXCLedger(ctx, tx, workspaceID, -out.SettledULXC, newBal, LXCTypeSpend, desc, meta.toMap()); err != nil {
+		// A pooled cache serve's row says what the question would have cost and what it saved (B26.9).
+		if err := insertLXCLedger(ctx, tx, workspaceID, -out.SettledULXC, newBal, LXCTypeSpend, desc,
+			meta.toSpendMap(estimate+out.SettledULXC)); err != nil {
 			return out, err
 		}
 		if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, wsSpent+out.SettledULXC); err != nil {
