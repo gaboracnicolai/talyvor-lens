@@ -191,6 +191,15 @@ func main() {
 		}
 		return
 	}
+	// `lens synthetic-crossings` (B26.15): the money that crossed between a test workspace and a real one before
+	// the wall, and --reverse to give each back.
+	if len(os.Args) > 1 && os.Args[1] == "synthetic-crossings" {
+		if err := runSyntheticCrossings(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "poolcheck" {
 		if err := runPoolCheck(); err != nil {
 			slog.Error("poolcheck failed", slog.String("err", err.Error()))

@@ -127,6 +127,7 @@ var Manifest = map[string]Entry{
 	"agent_tool_calls":          {Retain, "B19.9: audit-guarded (0145, append-only): every call an agent made to its wallet tools; the record of what it asked and was refused"},
 	"market_earnings":           {Retain, "B20.2: audit-guarded (0149, append-only): a seller's share of each cleared use — money owed to them, paid out by B20.5"},
 	"market_refunds":            {Retain, "B20.4: audit-guarded (0152, append-only but for its Stripe credit): each refunded use of a taken-down listing — money given back to its buyer and taken from its seller"},
+	"test_crossing_reversals":   {Retain, "B26.15: keys `from_workspace_id`+`to_workspace_id`; audit-guarded (0177, append-only): each crossing between a test workspace and a real one that the operator reversed, naming the original row; financial-record retention"},
 	"market_payouts":            {Retain, "B20.5: audit-guarded (0153, append-only but for its Stripe transfer): each payout of a seller's earnings, in money through Stripe or in credits"},
 
 	// token_events is audit-guarded TOO, but migration 0055's trigger carries a sanctioned
