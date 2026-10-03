@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/stripe/stripe-go/v81/customer"
 	"github.com/stripe/stripe-go/v81/invoiceitem"
 	"github.com/stripe/stripe-go/v81/paymentintent"
+	"github.com/stripe/stripe-go/v81/price"
 	"github.com/stripe/stripe-go/v81/subscription"
 )
 
@@ -148,6 +150,41 @@ func (l *LiveStripe) CreateSubscriptionCheckoutSession(ctx context.Context, p Su
 		return "", "", err
 	}
 	return sess.URL, sess.ID, nil
+}
+
+// PlanLookupKeys are the Stripe lookup keys B13.1 gave the plan Prices (talyvor-lens #548), by plan.
+var PlanLookupKeys = map[string]string{"plus": "talyvor_plus_monthly", "pro": "talyvor_pro_monthly", "max": "talyvor_max_monthly"}
+
+// PlanPrices returns the plans this key's Stripe account holds under PlanLookupKeys: plan → the id of the active
+// Price with that lookup key (B17.21). Only the ids — every amount stays in Stripe.
+func (l *LiveStripe) PlanPrices(ctx context.Context) (map[string]string, error) {
+	params := &stripe.PriceListParams{Active: stripe.Bool(true)}
+	params.Context = ctx
+	byKey := map[string]string{}
+	for plan, key := range PlanLookupKeys {
+		byKey[key] = plan
+		params.LookupKeys = append(params.LookupKeys, stripe.String(key))
+	}
+	plans := map[string]string{}
+	it := price.Client{B: l.backend(), Key: l.key}.List(params)
+	for it.Next() {
+		if plan, ok := byKey[it.Price().LookupKey]; ok {
+			plans[plan] = it.Price().ID
+		}
+	}
+	return plans, it.Err()
+}
+
+// SubscriptionJSON is the subscription as Stripe serialises it (B17.21): what customer.subscription.created
+// carries, for a completed subscription checkout to record it the same way.
+func (l *LiveStripe) SubscriptionJSON(ctx context.Context, subscriptionID string) (json.RawMessage, error) {
+	params := &stripe.SubscriptionParams{}
+	params.Context = ctx
+	sub, err := subscription.Client{B: l.backend(), Key: l.key}.Get(subscriptionID, params)
+	if err != nil {
+		return nil, err
+	}
+	return sub.LastResponse.RawJSON, nil
 }
 
 // SetCancelAtPeriodEnd flips the subscription's cancel_at_period_end flag. B1.5.

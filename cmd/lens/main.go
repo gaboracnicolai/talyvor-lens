@@ -1691,10 +1691,15 @@ func run() error {
 	}
 	// B13.1 — the named plans (Plus, Pro, Max). Each period's included usage is computed from the plan's
 	// price at grant time; LENS_SUBSCRIPTION_ALLOWANCE_ULXC is only the fallback for an unknown fee.
-	if len(cfg.BillingSubscriptionPlans) > 0 {
-		billingSvc = billingSvc.WithPlans(liveStripe, cfg.BillingSubscriptionPlans)
+	// B17.21 — on a Stripe test-mode key with no plan configured, the plans its Stripe account holds.
+	livePlans := cfg.BillingSubscriptionPlans
+	if cfg.BillingEnabled && cfg.BillingSubscriptionPriceID == "" {
+		livePlans = sellablePlans(ctx, livePlans, cfg.StripeSecretKey, liveStripe, "LENS_BILLING_SUBSCRIPTION_PLANS")
 	}
-	sellsSubscriptions := cfg.BillingSubscriptionPriceID != "" || len(cfg.BillingSubscriptionPlans) > 0
+	if len(livePlans) > 0 {
+		billingSvc = billingSvc.WithPlans(liveStripe, livePlans)
+	}
+	sellsSubscriptions := cfg.BillingSubscriptionPriceID != "" || len(livePlans) > 0
 	// B13.2 — a subscriber's final royalty earnings come off their next renewal invoice (capped at the fee).
 	if sellsSubscriptions {
 		billingSvc = billingSvc.WithBillCredits(tokenLedger, liveStripe)
@@ -1735,8 +1740,8 @@ func run() error {
 		testStripe = billing.NewTestModeStripe(cfg.StripeTestSecretKey, cfg.BillingSuccessURL, cfg.BillingCancelURL)
 		testBillingSvc = billing.New(pool, dualToken, testStripe, cfg.StripeTestWebhookSecret).
 			ForTestWorkspaces(true).WithAllowance(cfg.SubscriptionAllowanceULXC)
-		if len(cfg.StripeTestSubscriptionPlans) > 0 {
-			testBillingSvc = testBillingSvc.WithPlans(testStripe, cfg.StripeTestSubscriptionPlans)
+		if plans := sellablePlans(ctx, cfg.StripeTestSubscriptionPlans, cfg.StripeTestSecretKey, testStripe, "LENS_STRIPE_TEST_SUBSCRIPTION_PLANS"); len(plans) > 0 {
+			testBillingSvc = testBillingSvc.WithPlans(testStripe, plans)
 		}
 		billingSvc = billingSvc.ForTestWorkspaces(false)
 		// B25.6 — its marketplace bill is metered, refunded and cleared, its seller account made and paid, and its
@@ -1777,7 +1782,7 @@ func run() error {
 			payMarketSellers(lctx, marketStore, stripeKinds)
 		})
 	}
-	billRoute := newBillingRouter(billingSvc, testBillingSvc, wsManager.GetSynthetic, cfg.StripeTestSecretKey, cfg.StripeTestWebhookSecret)
+	billRoute := newBillingRouter(billingSvc, testBillingSvc, wsManager.GetSynthetic, cfg.StripeSecretKey, cfg.StripeTestSecretKey, cfg.StripeTestWebhookSecret)
 	if cfg.SubscriptionAllowanceULXC > 0 || (cfg.BillingEnabled && billRoute.sellsSubscriptions()) {
 		p.SetSubscriptionAllowance(billingSvc)
 	}

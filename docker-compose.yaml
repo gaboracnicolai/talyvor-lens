@@ -237,7 +237,8 @@ services:
       - LENS_STRIPE_WEBHOOK_SECRET=${LENS_STRIPE_WEBHOOK_SECRET:-}
       - LENS_BILLING_SUCCESS_URL=${LENS_BILLING_SUCCESS_URL:-}
       - LENS_BILLING_CANCEL_URL=${LENS_BILLING_CANCEL_URL:-}
-      # Model 2 subscriptions. Empty ⇒ /billing/subscribe and its siblings are not registered.
+      # Model 2 subscriptions. Empty (and, on a test-mode key, no talyvor_*_monthly Price in Stripe — B17.21)
+      # ⇒ /billing/subscribe and its siblings are not registered.
       - LENS_BILLING_SUBSCRIPTION_PRICE_ID=${LENS_BILLING_SUBSCRIPTION_PRICE_ID:-}
       # B13.1 — the named plans (plus=price_…,pro=price_…,max=price_…). Empty ⇒ only the single price above.
       - LENS_BILLING_SUBSCRIPTION_PLANS=${LENS_BILLING_SUBSCRIPTION_PLANS:-}
