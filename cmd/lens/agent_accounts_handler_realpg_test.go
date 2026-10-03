@@ -199,6 +199,63 @@ func TestAgentRoutes_ATakeBackSentTwiceWithOneKeyMovesOnce(t *testing.T) {
 	}
 }
 
+// B17.33 — the app sends a pot move again, with the same Idempotency-Key, when the first met a deploy and
+// got no answer: 1.2 LXC in, then 0.4 out sent twice under one key, leaves the pot 0.8 and the agent the rest.
+func TestAgentPotRoutes_AMoveOutSentTwiceWithOneKeyMovesOnce(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const ws = "ws-pots-retry"
+	if _, err := pool.Exec(ctx, `INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1, 5000000, 5000000)`, ws); err != nil {
+		t.Fatal(err)
+	}
+	store := economy.NewDualTokenStore(nil, pool, nil)
+	r := chi.NewRouter()
+	mountAgentAccountRoutes(r, store, tenant.NewStore(pool))
+	mountAgentPotRoutes(r, store)
+	owner := &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "owner", Scopes: []string{auth.ScopeKeys}}
+	call := func(path, body, key string) (int, map[string]any) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req = req.WithContext(auth.WithAuthContext(req.Context(), owner))
+		if key != "" {
+			req.Header.Set("Idempotency-Key", key)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w.Code, out
+	}
+	base := "/v1/workspaces/" + ws + "/agents"
+	_, a := call(base, `{"name":"saver"}`, "")
+	saver := base + "/" + a["id"].(string)
+	if code, out := call(saver+"/fund", `{"amount_ulxc":3000000}`, ""); code != http.StatusOK {
+		t.Fatalf("fund = %d %v", code, out)
+	}
+	_, p := call(saver+"/pots", `{"name":"Reserve","kind":"goal","target_ulxc":2000000}`, "")
+	pot := saver + "/pots/" + p["id"].(string)
+	for i := 0; i < 2; i++ {
+		if code, out := call(pot+"/in", `{"amount_ulxc":1200000}`, "in-1"); code != http.StatusOK || out["balance_ulxc"].(float64) != 1_200_000 {
+			t.Fatalf("move in #%d with key in-1 = %d %v, want 200 and 1,200,000 µLXC", i+1, code, out)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if code, out := call(pot+"/out", `{"amount_ulxc":400000}`, "out-1"); code != http.StatusOK || out["balance_ulxc"].(float64) != 800_000 {
+			t.Fatalf("move out #%d with key out-1 = %d %v, want 200 and 800,000 µLXC", i+1, code, out)
+		}
+	}
+	var potHolds, agentHolds int64
+	if err := pool.QueryRow(ctx, `SELECT
+	    COALESCE(sum(amount_ulxc) FILTER (WHERE account = 'pot:' || $2), 0)::bigint,
+	    COALESCE(sum(amount_ulxc) FILTER (WHERE account = 'agent:' || $3), 0)::bigint
+	  FROM agent_postings WHERE workspace_id = $1`, ws, p["id"], a["id"]).Scan(&potHolds, &agentHolds); err != nil {
+		t.Fatal(err)
+	}
+	if potHolds != 800_000 || agentHolds != 2_200_000 {
+		t.Errorf("the ledger has the pot at %d µLXC and the agent at %d, want 800,000 and 2,200,000", potHolds, agentHolds)
+	}
+}
+
 // B19.2 — the owner sets an agent's rules and decides its approvals through the routes; a proxy key
 // can read the rules but not change them, and a misspelt or invalid rule is refused rather than
 // stored as no rule.
