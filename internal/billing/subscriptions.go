@@ -558,19 +558,47 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleSubscriptionCheckout acks a checkout.session.* event for a SUBSCRIPTION-mode
-// session. It writes nothing: the session buys no LXC, so there is no lxc_purchases
-// expectation to record, and the subscription itself arrives on
-// customer.subscription.created, which handleSubscription records and grants from.
-func (s *Service) handleSubscriptionCheckout(w http.ResponseWriter, event *stripe.Event, sess *stripe.CheckoutSession) {
+// subscriptionReader reads a subscription as Stripe serialises it (B17.21). Optional, like planChangeAPI: a test
+// double without it still builds a Service, and its subscription checkouts are only acknowledged.
+type subscriptionReader interface {
+	SubscriptionJSON(ctx context.Context, subscriptionID string) (json.RawMessage, error)
+}
+
+// handleSubscriptionCheckout handles a checkout.session.* event for a SUBSCRIPTION-mode session. It buys no
+// LXC, so there is no lxc_purchases row. B17.21 — the subscription it made is read from Stripe and recorded
+// exactly as customer.subscription.created would record it, through handleSubscription and its idempotency
+// and ordering guards, and the period's allowance is granted. So a subscriber is recorded on an endpoint that
+// sends Stripe only checkout events; when customer.subscription.created arrives too, it is the stale
+// duplicate those guards already refuse.
+func (s *Service) handleSubscriptionCheckout(w http.ResponseWriter, ctx context.Context, event *stripe.Event, sess *stripe.CheckoutSession) {
 	subID := ""
 	if sess.Subscription != nil {
 		subID = sess.Subscription.ID
 	}
-	s.log.Info("billing webhook: subscription checkout — no LXC purchase; customer.subscription.* carries it",
-		"event", event.ID, "type", string(event.Type), "session", sess.ID,
-		"subscription", subID, "workspace", sess.Metadata["workspace_id"])
-	w.WriteHeader(http.StatusOK)
+	wsID := sess.Metadata["workspace_id"]
+	reader, ok := s.subStripe.(subscriptionReader)
+	if !ok || subID == "" {
+		s.log.Info("billing webhook: subscription checkout — no LXC purchase; customer.subscription.* carries it",
+			"event", event.ID, "type", string(event.Type), "session", sess.ID, "subscription", subID, "workspace", wsID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// The other kind of workspace's subscription is in the other Service's Stripe mode: not this key's to read.
+	if mine, err := s.takes(ctx, wsID); err != nil {
+		s.fail(w, "workspace kind", event.ID, err)
+		return
+	} else if !mine {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	raw, err := reader.SubscriptionJSON(ctx, subID)
+	if err != nil {
+		s.fail(w, "subscription read", event.ID, err)
+		return
+	}
+	carried := *event
+	carried.Data = &stripe.EventData{Raw: raw}
+	s.handleSubscription(w, ctx, &carried)
 }
 
 // periodStart reads the subscription's current period start, falling back to the

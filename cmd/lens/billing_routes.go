@@ -89,14 +89,18 @@ func newSubscriptionCancelHandler(svc subscriptionCanceller, cancel bool) http.H
 // billingRouter picks the billing Service that takes a workspace's money (B25.2). A test (synthetic)
 // workspace pays through Stripe TEST MODE, always — test, a Service with the test-mode key, webhook secret
 // and plans — and every other workspace through live, the Service there was before. With no test-mode
-// Service a test workspace cannot pay, and the refusal names the variable that is unset.
+// Service a test workspace pays through live when live's own key is a test-mode one (B17.21: it is Stripe
+// test mode already); otherwise it cannot pay, and the refusal names the variable that is unset.
 type billingRouter struct {
 	live, test *billing.Service
 	isTest     func(wsID string) bool
 	unset      string // the test-mode variables not set, when test is nil
 }
 
-func newBillingRouter(live, test *billing.Service, isTest func(string) bool, testKey, testSecret string) billingRouter {
+func newBillingRouter(live, test *billing.Service, isTest func(string) bool, liveKey, testKey, testSecret string) billingRouter {
+	if test == nil && liveKey != "" && !billing.LiveKey(liveKey) {
+		test = live
+	}
 	var unset []string
 	if testKey == "" {
 		unset = append(unset, "LENS_STRIPE_TEST_SECRET_KEY")

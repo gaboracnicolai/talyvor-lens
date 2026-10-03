@@ -122,9 +122,9 @@ func TestB252_ATestUserPaysInStripeTestModeAndARealUsersCheckoutIsUnchanged(t *t
 		return s
 	}
 	route := func(test *billing.Service) http.Handler {
-		b := newBillingRouter(live, test, isTest, "sk_test_b252", testSecret)
+		b := newBillingRouter(live, test, isTest, "sk_live_b252", "sk_test_b252", testSecret)
 		if test == nil {
-			b = newBillingRouter(live, nil, isTest, "", "")
+			b = newBillingRouter(live, nil, isTest, "sk_live_b252", "", "")
 		}
 		r := chi.NewRouter()
 		r.Post("/v1/workspaces/{wsID}/billing/checkout", newCheckoutHandler(b))

@@ -352,7 +352,7 @@ func (s *Service) handleSessionCredit(w http.ResponseWriter, ctx context.Context
 	// every new subscriber landed on the admin list as "charged and NOT credited".
 	// Only `payment` (and a mode-less legacy payload) is a top-up.
 	if sess.Mode == stripe.CheckoutSessionModeSubscription {
-		s.handleSubscriptionCheckout(w, event, &sess)
+		s.handleSubscriptionCheckout(w, ctx, event, &sess)
 		return
 	}
 
