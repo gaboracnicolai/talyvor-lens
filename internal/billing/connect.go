@@ -3,20 +3,23 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	stripe "github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/account"
-	"github.com/stripe/stripe-go/v81/accountlink"
 	"github.com/stripe/stripe-go/v81/charge"
 	"github.com/stripe/stripe-go/v81/transfer"
 )
 
 // connect.go — B20.5: SELLERS ARE PAID IN MONEY, THROUGH STRIPE CONNECT.
 //
-// A seller's Express account is created by Lens and onboarded by Stripe (identity, bank and tax details
-// are Stripe's to collect). Their payouts are transfers from the platform balance to that account; Stripe
+// A seller's account is created by Lens and onboarded by Stripe (identity, bank and tax details are
+// Stripe's to collect). B17.23: it is created with Accounts v2 — Stripe refuses a new Connect integration
+// v1's account creation — as a recipient with the Express dashboard, Talyvor paying Stripe's fees and
+// owning its losses, as v1's Express accounts had it. Their payouts are transfers from the platform balance to that account; Stripe
 // pays the account out to the seller's bank. What Stripe says of the account is asked of it (when the
 // seller opens their payouts page, and before each payout) rather than read from account.updated, which
 // Stripe sends only to a Connect endpoint with a signing secret of its own. The webhook reverses the
@@ -42,40 +45,82 @@ func connectAccountOf(a *stripe.Account) ConnectAccount {
 	return c
 }
 
-// CreateConnectedAccount creates a seller's Express account, asking for the transfers capability their
-// payouts need. country "" lets Stripe use the platform's. One account per workspace, however often asked.
-func (l *LiveStripe) CreateConnectedAccount(ctx context.Context, workspaceID, country string) (ConnectAccount, error) {
-	params := &stripe.AccountParams{
-		Type: stripe.String(string(stripe.AccountTypeExpress)),
-		Capabilities: &stripe.AccountCapabilitiesParams{
-			Transfers: &stripe.AccountCapabilitiesTransfersParams{Requested: stripe.Bool(true)},
-		},
+// connectAPIVersion is the Stripe API version the Accounts v2 calls are made at; the one stripe-go v81
+// pins has no /v2/core/accounts.
+const connectAPIVersion = "2026-08-26.dahlia"
+
+// v2Post posts body as JSON to one of Stripe's v2 endpoints, through the same backend as every other
+// call, and decodes its answer into out. A refusal is a *stripe.Error, as a v1 one is.
+func (l *LiveStripe) v2Post(ctx context.Context, path, idempotencyKey string, body, out any) error {
+	rb, ok := l.backend().(stripe.RawRequestBackend)
+	if !ok {
+		return errors.New("billing: the Stripe backend cannot call the v2 API")
 	}
-	if country != "" {
-		params.Country = stripe.String(country)
-	}
-	params.Context = ctx
-	params.AddMetadata("market_workspace_id", workspaceID)
-	params.SetIdempotencyKey("market-seller-" + workspaceID + "-" + country)
-	a, err := account.Client{B: l.backend(), Key: l.key}.New(params)
+	raw, err := json.Marshal(body)
 	if err != nil {
-		return ConnectAccount{}, err
+		return err
 	}
-	return connectAccountOf(a), nil
+	params := &stripe.RawParams{Params: stripe.Params{Context: ctx, Headers: http.Header{"Stripe-Version": {connectAPIVersion}}}}
+	if idempotencyKey != "" {
+		params.SetIdempotencyKey(idempotencyKey)
+	}
+	resp, err := rb.RawRequest(http.MethodPost, path, l.key, string(raw), params)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(resp.RawJSON, out)
 }
 
-// OnboardingLink is a single-use link to Stripe's onboarding for the account: it returns to returnURL when
-// done, and to refreshURL when the link has expired.
-func (l *LiveStripe) OnboardingLink(ctx context.Context, accountID, refreshURL, returnURL string) (string, error) {
-	params := &stripe.AccountLinkParams{
-		Account:    stripe.String(accountID),
-		RefreshURL: stripe.String(refreshURL),
-		ReturnURL:  stripe.String(returnURL),
-		Type:       stripe.String("account_onboarding"),
+// CreateConnectedAccount creates a seller's account, asking for the transfers capability their payouts
+// need. country "" leaves it to the seller to say in onboarding. One account per workspace, however
+// often asked.
+func (l *LiveStripe) CreateConnectedAccount(ctx context.Context, workspaceID, country string) (ConnectAccount, error) {
+	body := map[string]any{
+		"dashboard": "express",
+		"defaults": map[string]any{"responsibilities": map[string]string{
+			"fees_collector": "application", "losses_collector": "application"}},
+		"configuration": map[string]any{"recipient": map[string]any{"capabilities": map[string]any{
+			"stripe_balance": map[string]any{"stripe_transfers": map[string]bool{"requested": true}}}}},
+		"metadata": map[string]string{"market_workspace_id": workspaceID},
+		"include":  []string{"identity"},
 	}
-	params.Context = ctx
-	link, err := accountlink.Client{B: l.backend(), Key: l.key}.New(params)
-	if err != nil {
+	if country != "" {
+		body["identity"] = map[string]string{"country": strings.ToLower(country)}
+	}
+	var a struct {
+		ID       string `json:"id"`
+		Identity *struct {
+			Country string `json:"country"`
+		} `json:"identity"`
+	}
+	if err := l.v2Post(ctx, "/v2/core/accounts", "market-seller-v2-"+workspaceID+"-"+country, body, &a); err != nil {
+		return ConnectAccount{}, err
+	}
+	c := ConnectAccount{ID: a.ID, Country: strings.ToUpper(country), CurrentlyDue: []string{}}
+	if a.Identity != nil && a.Identity.Country != "" {
+		c.Country = strings.ToUpper(a.Identity.Country)
+	}
+	return c, nil
+}
+
+// OnboardingLink is a single-use link to Stripe's onboarding for the account's recipient configuration:
+// it returns to returnURL when done, and to refreshURL when the link has expired.
+func (l *LiveStripe) OnboardingLink(ctx context.Context, accountID, refreshURL, returnURL string) (string, error) {
+	body := map[string]any{
+		"account": accountID,
+		"use_case": map[string]any{
+			"type": "account_onboarding",
+			"account_onboarding": map[string]any{
+				"configurations": []string{"recipient"},
+				"refresh_url":    refreshURL,
+				"return_url":     returnURL,
+			},
+		},
+	}
+	var link struct {
+		URL string `json:"url"`
+	}
+	if err := l.v2Post(ctx, "/v2/core/account_links", "", body, &link); err != nil {
 		return "", err
 	}
 	return link.URL, nil

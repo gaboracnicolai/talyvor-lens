@@ -65,10 +65,14 @@ func (s *b256Stripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"due_date": time.Now().AddDate(0, 0, 14).Unix()})
 	case p == "/v1/invoiceitems":
 		reply(map[string]any{"id": fmt.Sprintf("ii_b256_%d", n), "object": "invoiceitem"})
-	case p == "/v1/accounts":
-		reply(map[string]any{"id": "acct_" + form.Get("metadata[market_workspace_id]"), "object": "account", "country": "GB"})
-	case p == "/v1/account_links":
-		reply(map[string]any{"object": "account_link", "url": "https://connect.stripe.com/setup/e/" + form.Get("account")})
+	case p == "/v2/core/accounts": // B17.23: Accounts v2, JSON
+		var in struct{ Metadata map[string]string }
+		_ = json.Unmarshal(body, &in)
+		reply(map[string]any{"id": "acct_" + in.Metadata["market_workspace_id"], "object": "v2.core.account", "identity": map[string]any{"country": "gb"}})
+	case p == "/v2/core/account_links":
+		var in struct{ Account string }
+		_ = json.Unmarshal(body, &in)
+		reply(map[string]any{"object": "v2.core.account_link", "url": "https://connect.stripe.com/setup/e/" + in.Account})
 	case strings.HasPrefix(p, "/v1/accounts/"): // onboarding finished
 		reply(map[string]any{"id": strings.TrimPrefix(p, "/v1/accounts/"), "object": "account", "country": "GB",
 			"details_submitted": true, "payouts_enabled": true})
@@ -288,11 +292,11 @@ func TestB256_ATestUsersBillPayoutsAndCardsStayInStripeTestModeAfterTheLiveSwitc
 	calls = fake.during(func() {
 		do(tSeller, http.MethodPost, "/v1/workspaces/"+tSeller+"/marketplace/payouts/connect", `{"country":"gb"}`, http.StatusOK, nil)
 	})
-	only("the test seller's Connect account", testKey, calls, "POST /v1/accounts", "POST /v1/account_links")
+	only("the test seller's Connect account", testKey, calls, "POST /v2/core/accounts", "POST /v2/core/account_links")
 	calls = fake.during(func() {
 		do(rSeller, http.MethodPost, "/v1/workspaces/"+rSeller+"/marketplace/payouts/connect", `{"country":"gb"}`, http.StatusOK, nil)
 	})
-	only("the real seller's Connect account", liveKey, calls, "POST /v1/accounts", "POST /v1/account_links")
+	only("the real seller's Connect account", liveKey, calls, "POST /v2/core/accounts", "POST /v2/core/account_links")
 	calls = fake.during(func() {
 		if n, err := kinds.payOut(ctx, store, now); err != nil || n != 2 {
 			t.Fatalf("the payout run paid %d, %v; want both sellers", n, err)
