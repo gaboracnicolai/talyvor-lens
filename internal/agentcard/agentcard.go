@@ -38,12 +38,18 @@ type Cardholder struct {
 	FirstName  string `json:"first_name"`
 	LastName   string `json:"last_name"`
 	Email      string `json:"email"`
+	Phone      string `json:"phone_number"` // E.164; testPhone when empty (B17.19)
 	Line1      string `json:"line1"`
 	Line2      string `json:"line2"`
 	City       string `json:"city"`
 	PostalCode string `json:"postal_code"`
 	Country    string `json:"country"` // ISO 3166-1 alpha-2; GB when empty
 }
+
+// testPhone is the cardholder's phone when they give none: Stripe issues no card to a cardholder without one
+// (it sends 3-D Secure codes there), and every card here is test mode, where Stripe sends none. Ofcom keeps
+// +44 7700 900000–900999 unallocated for drama, so it reaches nobody (B17.19).
+const testPhone = "+447700900000"
 
 // Validate says what a cardholder is missing, or "".
 func (c Cardholder) Validate() string {
@@ -117,6 +123,11 @@ func (s *Stripe) IssueCard(ctx context.Context, workspaceID, agentID, agentName 
 	if holder.Email != "" {
 		hp.Email = stripe.String(holder.Email)
 	}
+	phone := strings.TrimSpace(holder.Phone)
+	if phone == "" {
+		phone = testPhone
+	}
+	hp.PhoneNumber = stripe.String(phone)
 	hp.Context = ctx
 	hp.AddMetadata("workspace_id", workspaceID)
 	holderObj, err := s.api.IssuingCardholders.New(hp)

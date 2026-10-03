@@ -14,7 +14,7 @@ import (
 
 // B19.12 — agent cards in test mode, through Stripe Issuing (internal/agentcard, economy/agent_cards.go).
 //
-//	POST /v1/workspaces/{wsID}/agents/{id}/card   {first_name, last_name, email, line1, line2, city, postal_code, country}
+//	POST /v1/workspaces/{wsID}/agents/{id}/card   {first_name, last_name, email, phone_number, line1, line2, city, postal_code, country}
 //	     issue the agent a virtual card, its owner the cardholder — test mode only (class RED): with a live
 //	     Stripe key it is 409 and nothing is issued
 //	GET  /v1/workspaces/{wsID}/agents/{id}/card   the card and its authorisations, newest first (approved and declined)
@@ -35,7 +35,7 @@ func mountAgentCardRoutes(r chi.Router, bank agentCardBank, issuer agentcard.Iss
 		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
 		var holder agentcard.Cardholder
 		if err := json.NewDecoder(req.Body).Decode(&holder); err != nil {
-			writeJSONErr(w, http.StatusBadRequest, "body must be the cardholder: {first_name, last_name, email, line1, line2, city, postal_code, country}")
+			writeJSONErr(w, http.StatusBadRequest, "body must be the cardholder: {first_name, last_name, email, phone_number, line1, line2, city, postal_code, country}")
 			return
 		}
 		if missing := holder.Validate(); missing != "" {
