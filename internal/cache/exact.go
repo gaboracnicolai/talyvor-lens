@@ -133,6 +133,27 @@ func (c *ExactCache) RememberServed(ctx context.Context, wsID, requestID string,
 	return c.client.Set(ctx, servedKeyPrefix+wsID+":"+requestID, ref, ttl).Err()
 }
 
+const pooledPaidKeyPrefix = "lens:pooled-paid:"
+
+// pooledPaidKey names "workspace wsID paid for the pooled answer at entryID whose bytes hash to digest".
+// It holds no content: the entry and the answer are hashed.
+func pooledPaidKey(wsID, entryID, digest string) string {
+	sum := sha256.Sum256([]byte(entryID + "\x00" + digest))
+	return pooledPaidKeyPrefix + wsID + ":" + hex.EncodeToString(sum[:])
+}
+
+// MarkPooledPaid records that workspace wsID was charged for the pooled answer at entryID (B17.29),
+// for as long as a cached answer lives.
+func (c *ExactCache) MarkPooledPaid(ctx context.Context, wsID, entryID, digest string) error {
+	return c.client.Set(ctx, pooledPaidKey(wsID, entryID, digest), "1", c.ttl).Err()
+}
+
+// PooledPaid reports whether MarkPooledPaid recorded exactly this answer at entryID for wsID.
+func (c *ExactCache) PooledPaid(ctx context.Context, wsID, entryID, digest string) (bool, error) {
+	n, err := c.client.Exists(ctx, pooledPaidKey(wsID, entryID, digest)).Result()
+	return n == 1, err
+}
+
 // ServedRef returns what RememberServed recorded for the request, or nil when nothing was (or it
 // has expired).
 func (c *ExactCache) ServedRef(ctx context.Context, wsID, requestID string) ([]byte, error) {

@@ -1202,7 +1202,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// billing failure must never affect an already-served response), so the saving can only
 			// reach the client if it is computed and headered here. Pure: no I/O, no settle.
 			// Zero-valued and header-free for an own-cache hit (pooledHit == nil), which is free.
-			price := p.pricePooledServe(pooledHit, prompt, cached)
+			// B17.29 — a pooled answer this workspace has already paid for is its own earlier answer:
+			// priced and minted as an own-cache hit, free and nothing more to the contributor. chargedHit
+			// is pooledHit unless so; a thumbs-down still reaches the pooled entry through pooledHit.
+			chargedHit := pooledHit
+			if p.pooledPaidBefore(ctx, wsID, pooledHit, cached) {
+				chargedHit = nil
+			}
+			price := p.pricePooledServe(chargedHit, prompt, cached)
 			price.setSavingHeaders(w)
 			if streaming {
 				// SSE replay: synthesises the provider's streaming wire
@@ -1217,7 +1224,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					// pooled hit bills the consumer avoided_COGS (returned), an own hit is free — then mint a
 					// royalty funded by what the consumer ACTUALLY paid ($0 charge ⇒ $0 mint).
 					funded := p.settlePooledServe(ctx, wsID, price)
-					p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
+					p.mintPooledRoyalty(ctx, chargedHit, prompt, cached, funded, loggingPolicy)
+					p.markPooledPaid(ctx, wsID, chargedHit, cached)
 					// Cache-serve spend visibility (0100): the served request
 					// becomes a zero-provider-cost token_events row tagged with
 					// its layer, so hit rate is countable next to every miss.
@@ -1250,7 +1258,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				// pooled hit bills the consumer avoided_COGS (returned), an own hit is free — then mint a
 				// royalty funded by what the consumer ACTUALLY paid ($0 charge ⇒ $0 mint).
 				funded := p.settlePooledServe(ctx, wsID, price)
-				p.mintPooledRoyalty(ctx, pooledHit, prompt, cached, funded, loggingPolicy)
+				p.mintPooledRoyalty(ctx, chargedHit, prompt, cached, funded, loggingPolicy)
+				p.markPooledPaid(ctx, wsID, chargedHit, cached)
 				// Cache-serve spend visibility (0100): see recordCacheServe.
 				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
 				p.rememberServed(ctx, wsID, requestID, layer, hitIDs, hitHashes, hitContributor(pooledHit), cached)

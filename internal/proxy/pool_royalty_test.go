@@ -154,15 +154,11 @@ func TestPoolRoyalty_ServedPooledHit_FiresMintKeyedOnRequestID(t *testing.T) {
 		t.Errorf("AvoidedCOGSUSD = %v, want > 0 (the live call this hit avoided)", h.AvoidedCOGSUSD)
 	}
 
-	// Client retry with the SAME request id: the proxy reports the same key —
-	// the DB UNIQUE(request_id) claim is what collapses it to one mint.
+	// Client retry with the SAME request id: wsB has paid for this answer, so the retry is its own
+	// earlier answer (B17.29) — free, and reported to nobody: still exactly one mint.
 	dispatchAgentWS(t, p, "wsB", "what is 2+2", "req-royalty-1")
-	hits = rec.recorded()
-	if len(hits) != 2 {
-		t.Fatalf("retry must also be reported (DB dedups); hits=%d", len(hits))
-	}
-	if hits[1].RequestID != hits[0].RequestID {
-		t.Errorf("retry RequestID = %q, want %q (same key → exactly-once at the claim)", hits[1].RequestID, hits[0].RequestID)
+	if hits = rec.recorded(); len(hits) != 1 {
+		t.Fatalf("a retry of a paid pooled answer was reported for royalty again; hits=%d", len(hits))
 	}
 }
 
