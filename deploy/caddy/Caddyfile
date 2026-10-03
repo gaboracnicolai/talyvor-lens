@@ -22,7 +22,15 @@
 
 	# Terminate TLS here and forward plain HTTP to lens over the internal compose
 	# network. lens never needs a certificate, so its container stays read_only.
-	reverse_proxy lens:8080
+	#
+	# B17.27 — while lens is redeployed its container is gone for a few seconds.
+	# lb_try_duration holds a request that cannot reach lens and sends it once lens
+	# is back, instead of answering 502. Caddy only re-sends a request that never
+	# reached lens, so a POST is never sent twice.
+	reverse_proxy lens:8080 {
+		lb_try_duration 30s
+		lb_try_interval 250ms
+	}
 }
 
 talyvor.com {
@@ -30,5 +38,10 @@ talyvor.com {
 }
 
 app.talyvor.com {
-	reverse_proxy host.docker.internal:8787
+	# B17.27 — the same wait for the app: a screen opened while talyvor-bff restarts
+	# (every suite deploy) loads once it is back instead of showing a 502.
+	reverse_proxy host.docker.internal:8787 {
+		lb_try_duration 30s
+		lb_try_interval 250ms
+	}
 }
