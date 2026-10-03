@@ -22,7 +22,7 @@ func caddySite(caddyfile, host string) (string, bool) {
 			if b == "}" {
 				return strings.Join(body, "\n"), true
 			}
-			body = append(body, strings.TrimSpace(b))
+			body = append(body, strings.TrimPrefix(b, "\t"))
 		}
 	}
 	return "", false
@@ -61,11 +61,30 @@ func TestCaddyfile_RoutesTheAppAndTheApexDomain(t *testing.T) {
 	}
 }
 
-// indentBack re-tabs a block body the way the Caddyfile writes it (one tab per line).
+// indentBack re-tabs a block body the way the Caddyfile writes it (one more tab per line).
 func indentBack(body string) string {
 	lines := strings.Split(body, "\n")
 	for i, l := range lines {
 		lines[i] = "\t" + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// B17.27 — a screen opened while lens or the app restarts waits for it instead of showing a 502: both
+// proxied sites hold a request that cannot reach their upstream (lb_try_duration) until it is back.
+func TestCaddyfile_WaitsForARestartingUpstreamInsteadOf502(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/caddy/Caddyfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"{$LENS_DOMAIN}", "app.talyvor.com"} {
+		body, ok := caddySite(string(raw), host)
+		if !ok {
+			t.Errorf("%s: no site block", host)
+			continue
+		}
+		if !strings.Contains(body, "reverse_proxy ") || !strings.Contains(body, "\tlb_try_duration 30s") {
+			t.Errorf("%s: its reverse_proxy does not wait for a restarting upstream (lb_try_duration 30s)", host)
+		}
+	}
 }
