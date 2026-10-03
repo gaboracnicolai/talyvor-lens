@@ -149,3 +149,38 @@ func TestMarketRoutes_PublishOfEachKindVersionsAndTheScan(t *testing.T) {
 		t.Errorf("the refused version moved the listing: %s", body)
 	}
 }
+
+// B17.34 — a publish sent again with the same Idempotency-Key (a retry through a deploy's restart) answers
+// the listing it made and publishes no second one; another key publishes another.
+func TestMarketRoutes_PublishSentAgainWithItsKeyPublishesOnce(t *testing.T) {
+	pool := agentRoutesDB(t)
+	r := chi.NewRouter()
+	mountMarketRoutes(r, market.NewStore(pool))
+	const ws = "ws-seller"
+	owner := &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "seller", Scopes: []string{auth.ScopeKeys}}
+	base := "/v1/workspaces/" + ws + "/marketplace/listings"
+	publish := func(key string) (int, market.Listing) {
+		t.Helper()
+		body := `{"kind":"prompt","title":"Totals","price_per_use_ulxc":1000000,"visibility":"public","artifact":{"template":"What is {{a}} + {{b}}?"}}`
+		req := httptest.NewRequest(http.MethodPost, base, strings.NewReader(body))
+		req.Header.Set("Idempotency-Key", key)
+		req = req.WithContext(auth.WithAuthContext(req.Context(), owner))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		var l market.Listing
+		_ = json.Unmarshal(w.Body.Bytes(), &l)
+		return w.Code, l
+	}
+	code1, first := publish("publish-1")
+	code2, again := publish("publish-1")
+	if code1 != http.StatusCreated || code2 != http.StatusOK || again.ID != first.ID || len(again.Versions) != 1 {
+		t.Fatalf("sent twice with one key: %d %s, then %d %s (%d versions); want 201 then 200 with the same listing", code1, first.ID, code2, again.ID, len(again.Versions))
+	}
+	if code, other := publish("publish-2"); code != http.StatusCreated || other.ID == first.ID {
+		t.Fatalf("another key = %d %s; want a second listing", code, other.ID)
+	}
+	var n int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM market_listings WHERE workspace_id = $1`, ws).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("%d listings (%v); want 2 for two keys", n, err)
+	}
+}

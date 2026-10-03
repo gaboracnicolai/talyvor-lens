@@ -171,6 +171,45 @@ func checkArtifact(kind string, artifact json.RawMessage, words ...string) (cano
 
 // Publish creates a listing owned by workspaceID, with its first version.
 func (s *Store) Publish(ctx context.Context, workspaceID string, d Draft) (Listing, error) {
+	l, _, err := s.PublishOnce(ctx, workspaceID, "", d)
+	return l, err
+}
+
+// PublishOnce is Publish under an idempotency key (B17.34): a key workspaceID has already published with
+// answers that listing, as its owner reads it, with again true, and publishes nothing. An empty key always
+// publishes.
+func (s *Store) PublishOnce(ctx context.Context, workspaceID, key string, d Draft) (l Listing, again bool, err error) {
+	if key != "" {
+		if l, err := s.publishedWith(ctx, workspaceID, key); !errors.Is(err, ErrNotFound) {
+			return l, err == nil, err
+		}
+	}
+	l, err = s.publish(ctx, workspaceID, key, d)
+	if errors.Is(err, errKeyTaken) {
+		// The same key published concurrently and won the insert: answer its listing.
+		l, err = s.publishedWith(ctx, workspaceID, key)
+		return l, err == nil, err
+	}
+	return l, false, err
+}
+
+// errKeyTaken is publish's answer when another publish holds its key.
+var errKeyTaken = errors.New("market: publish key taken")
+
+// publishedWith reads the listing workspaceID published with key, or ErrNotFound.
+func (s *Store) publishedWith(ctx context.Context, workspaceID, key string) (Listing, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `SELECT id FROM market_listings WHERE workspace_id = $1 AND publish_key = $2`, workspaceID, key).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Listing{}, ErrNotFound
+	}
+	if err != nil {
+		return Listing{}, fmt.Errorf("market: publish key: %w", err)
+	}
+	return s.Get(ctx, workspaceID, id)
+}
+
+func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (Listing, error) {
 	if _, ok := requiredField[d.Kind]; !ok {
 		return Listing{}, invalid("kind must be agent, prompt, skill, evaluation or pipeline")
 	}
@@ -202,9 +241,14 @@ func (s *Store) Publish(ctx context.Context, workspaceID string, d Draft) (Listi
 	if scan.Held != "" {
 		l.ReviewStatus, l.ReviewReason = ReviewHeld, scan.Held
 	}
-	if err := tx.QueryRow(ctx, `INSERT INTO market_listings (id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, review_status, review_reason)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING created_at, updated_at`,
-		l.ID, workspaceID, d.Kind, d.Title, d.Description, d.PricePerUseULXC, d.Visibility, l.ReviewStatus, l.ReviewReason).Scan(&l.CreatedAt, &l.UpdatedAt); err != nil {
+	err = tx.QueryRow(ctx, `INSERT INTO market_listings (id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, review_status, review_reason, publish_key)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''))
+		ON CONFLICT (workspace_id, publish_key) WHERE publish_key IS NOT NULL DO NOTHING RETURNING created_at, updated_at`,
+		l.ID, workspaceID, d.Kind, d.Title, d.Description, d.PricePerUseULXC, d.Visibility, l.ReviewStatus, l.ReviewReason, key).Scan(&l.CreatedAt, &l.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Listing{}, errKeyTaken
+	}
+	if err != nil {
 		return Listing{}, fmt.Errorf("market: publish: %w", err)
 	}
 	v := Version{Version: 1, ArtifactSHA256: sum, Changelog: d.Changelog, Scan: scan, Needs: needsOf(d.Kind, artifact), Artifact: artifact}

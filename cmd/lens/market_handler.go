@@ -22,7 +22,8 @@ import (
 //	GET  /v1/marketplace/listings/{id}                             a listing and its versions (artifacts for its owner only)
 //	POST /v1/marketplace/listings/{id}/reports                     {reason, details}   B20.4: report a listing
 //
-// A publish the scan refuses is 422 with what it found (secrets, personal data, prompt injection); one the
+// A publish sent again with the Idempotency-Key it was first sent with answers 200 with the listing that key
+// made, and publishes nothing (B17.34). A publish the scan refuses is 422 with what it found (secrets, personal data, prompt injection); one the
 // review holds (B20.4, internal/market/review.go) is 201 with review_status "held" and the reason, and only
 // its owner sees it until an admin approves it. Publishing takes the workspace's owner or an admin; reading
 // and reporting take any of its credentials.
@@ -49,9 +50,19 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 			writeJSONErr(w, http.StatusBadRequest, "body must be the listing: "+err.Error())
 			return
 		}
-		l, err := store.Publish(req.Context(), chi.URLParam(req, "wsID"), d)
+		// B17.34: a publish sent again with the same Idempotency-Key answers the listing it made (200).
+		key := req.Header.Get("Idempotency-Key")
+		if len(key) > 128 {
+			writeJSONErr(w, http.StatusBadRequest, "the Idempotency-Key must be at most 128 characters")
+			return
+		}
+		l, again, err := store.PublishOnce(req.Context(), chi.URLParam(req, "wsID"), key, d)
 		if err != nil {
 			writeErr(w, err)
+			return
+		}
+		if again {
+			writeJSONOK(w, http.StatusOK, l)
 			return
 		}
 		writeJSONOK(w, http.StatusCreated, l)
