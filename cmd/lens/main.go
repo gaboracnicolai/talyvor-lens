@@ -3000,22 +3000,7 @@ func run() error {
 		// service's in-memory snapshot so edits take effect on the next
 		// request without waiting for the periodic refresh.
 
-		authed.Post("/v1/workspaces/{wsID}/budgets", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			var in budgets.Budget
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			in.WorkspaceID = wsID
-			created, err := budgetStore.Create(req.Context(), in)
-			if err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			_ = budgetService.Reload(req.Context())
-			writeJSONOK(w, http.StatusCreated, created)
-		})
+		authed.Post("/v1/workspaces/{wsID}/budgets", budgetCreateHandler(budgetStore, budgetService.Reload))
 
 		authed.Get("/v1/workspaces/{wsID}/budgets", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
@@ -3052,37 +3037,9 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, b)
 		})
 
-		authed.Patch("/v1/workspaces/{wsID}/budgets/{id}", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			id := chi.URLParam(req, "id")
-			var in budgets.Budget
-			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-				return
-			}
-			updated, err := budgetStore.Update(req.Context(), wsID, id, in)
-			if errors.Is(err, budgets.ErrNotFound) {
-				writeJSONErr(w, http.StatusNotFound, "budget not found")
-				return
-			}
-			if err != nil {
-				writeJSONErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			_ = budgetService.Reload(req.Context())
-			writeJSONOK(w, http.StatusOK, updated)
-		})
+		authed.Patch("/v1/workspaces/{wsID}/budgets/{id}", budgetUpdateHandler(budgetStore, budgetService.Reload))
 
-		authed.Delete("/v1/workspaces/{wsID}/budgets/{id}", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			id := chi.URLParam(req, "id")
-			if err := budgetStore.Delete(req.Context(), wsID, id); err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			_ = budgetService.Reload(req.Context())
-			writeJSONOK(w, http.StatusOK, map[string]bool{"ok": true})
-		})
+		authed.Delete("/v1/workspaces/{wsID}/budgets/{id}", budgetDeleteHandler(budgetStore, budgetService.Reload))
 
 		// ─── cost forecasting (Upgrade 20) ───
 		// Read-only, cached projections. scope defaults to workspace,
