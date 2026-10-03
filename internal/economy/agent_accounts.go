@@ -236,8 +236,9 @@ func (s *DualTokenStore) WithdrawAgent(ctx context.Context, workspaceID, agentID
 
 type moveKeyKey struct{}
 
-// WithMoveKey carries the Idempotency-Key of a fund or withdraw (B17.26): the app sends a move again,
-// with the same key, when the first met a restart and got no answer, and the move lands once.
+// WithMoveKey carries the Idempotency-Key of a fund or withdraw (B17.26), or of a move into or out of a pot
+// (B17.33): the app sends a move again, with the same key, when the first met a restart and got no answer,
+// and the move lands once.
 func WithMoveKey(ctx context.Context, key string) context.Context {
 	return context.WithValue(ctx, moveKeyKey{}, key)
 }

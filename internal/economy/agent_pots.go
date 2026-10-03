@@ -133,10 +133,30 @@ func (s *DualTokenStore) movePot(ctx context.Context, workspaceID, agentID, potI
 	}
 	from, to, kind := agentAccount(agentID), potAccount(potID), "pot_in"
 	if !in {
+		kind = "pot_out"
+	}
+	// B17.33: as for a fund (B17.26), the Idempotency-Key is the entry's ref; under the agent's lock, a key
+	// already posted to this pot is a retry of a move that landed, answered with the pot and moved nothing.
+	// Checked first: a lock set since the move landed must not turn its retry into a refusal.
+	ref := potID
+	if key, _ := ctx.Value(moveKeyKey{}).(string); key != "" {
+		ref = key
+		var landed bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_postings
+		  WHERE workspace_id = $1 AND account = $2 AND kind = $3 AND ref = $4)`,
+			workspaceID, potAccount(potID), kind, ref).Scan(&landed); err != nil {
+			return Pot{}, fmt.Errorf("economy: earlier %s: %w", kind, err)
+		}
+		if landed {
+			_ = tx.Rollback(ctx)
+			return s.pot(ctx, workspaceID, agentID, potID)
+		}
+	}
+	if !in {
 		if locked {
 			return Pot{}, fmt.Errorf("%w until %s", ErrPotLocked, until.UTC().Format(time.RFC3339))
 		}
-		from, to, kind = potAccount(potID), agentAccount(agentID), "pot_out"
+		from, to = potAccount(potID), agentAccount(agentID)
 	}
 	have, err := accountBalance(ctx, tx, workspaceID, from)
 	if err != nil {
@@ -145,7 +165,7 @@ func (s *DualTokenStore) movePot(ctx context.Context, workspaceID, agentID, potI
 	if have < amount {
 		return Pot{}, fmt.Errorf("%w: %d µLXC there", ErrAgentFunds, have)
 	}
-	if err := postEntry(ctx, tx, workspaceID, kind, potID, leg{from, -amount}, leg{to, amount}); err != nil {
+	if err := postEntry(ctx, tx, workspaceID, kind, ref, leg{from, -amount}, leg{to, amount}); err != nil {
 		return Pot{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

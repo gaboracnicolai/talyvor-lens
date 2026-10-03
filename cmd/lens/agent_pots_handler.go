@@ -20,6 +20,7 @@ import (
 //	POST /v1/workspaces/{wsID}/agents/{agentID}/pots                {name, kind, target_ulxc, locked_until}
 //	POST /v1/workspaces/{wsID}/agents/{agentID}/pots/{potID}/in     {amount_ulxc} — from the agent's balance
 //	POST /v1/workspaces/{wsID}/agents/{agentID}/pots/{potID}/out    {amount_ulxc} — back, unless locked
+//	  (either move sent again with the same Idempotency-Key header lands once — B17.33)
 //	PUT  /v1/workspaces/{wsID}/agents/{agentID}/pots/{potID}/lock   {locked_until} — RFC 3339, or null to unlock; a lock in force only lengthens
 //
 // Each takes the agent's own key, the workspace's owner or an admin. Mounted in the authed group.
@@ -91,7 +92,13 @@ func mountAgentPotRoutes(r chi.Router, bank agentPotBank) {
 				writeJSONErr(w, http.StatusBadRequest, `body must be {"amount_ulxc": <positive µLXC>}`)
 				return
 			}
-			p, err := move(req.Context(), ws, agentID, chi.URLParam(req, "potID"), in.AmountULXC)
+			// B17.33: a move sent again with the same Idempotency-Key lands once.
+			key := req.Header.Get("Idempotency-Key")
+			if len(key) > 128 {
+				writeJSONErr(w, http.StatusBadRequest, "the Idempotency-Key must be at most 128 characters")
+				return
+			}
+			p, err := move(economy.WithMoveKey(req.Context(), key), ws, agentID, chi.URLParam(req, "potID"), in.AmountULXC)
 			if err != nil {
 				writePotErr(w, err)
 				return
