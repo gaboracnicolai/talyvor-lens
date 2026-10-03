@@ -65,6 +65,8 @@ func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connectFor conne
 		switch {
 		case errors.Is(err, market.ErrInvalid):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case stripeRefusal(err) != "": // B26.12: why Stripe will not open the seller's account
+			writeJSONErr(w, http.StatusBadRequest, stripeRefusal(err))
 		case err != nil:
 			writeJSONErr(w, http.StatusBadGateway, err.Error())
 		default:
