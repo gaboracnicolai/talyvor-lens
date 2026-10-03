@@ -74,8 +74,11 @@ func mountAgentCardRoutes(r chi.Router, bank agentCardBank, issuer agentcard.Iss
 		case errors.Is(err, agentcard.ErrNotConfigured):
 			writeJSONErr(w, http.StatusServiceUnavailable, err.Error())
 			return
+		case stripeRefusal(err) != "": // B26.12: what Stripe will not take in the cardholder
+			writeJSONErr(w, http.StatusBadRequest, stripeRefusal(err))
+			return
 		case err != nil:
-			writeJSONErr(w, http.StatusBadGateway, err.Error()) // Stripe's own words: what the cardholder lacks
+			writeJSONErr(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		card, err = bank.SaveAgentCard(req.Context(), wsID, card)
