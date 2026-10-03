@@ -8,7 +8,8 @@
 // from a scratch search_path strands the pgvector `vector` type in that scratch schema, so every later
 // migration fails with `type "vector" does not exist`.
 //
-// The internal/*/schema_isolation_test.go harnesses predate this package and do the same inline.
+// Every internal/*/schema_isolation_test.go harness calls Isolate, so a setup failure fails that package
+// instead of letting its tests run silently in public.
 package testschema
 
 import (
