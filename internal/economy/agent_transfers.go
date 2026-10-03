@@ -416,7 +416,7 @@ func (s *DualTokenStore) RefundTransfer(ctx context.Context, workspaceID, transf
 // ListAgentTransfers reads the transfers an agent of workspaceID sent or received, newest first.
 func (s *DualTokenStore) ListAgentTransfers(ctx context.Context, workspaceID, agentID string) ([]AgentTransfer, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, entry_id::text, from_workspace_id, from_agent_id, to_workspace_id, to_agent_id, amount_ulxc, memo,
-		class, test_funded_ulxc, request_id, schedule_id, refund_of, created_at FROM agent_transfers
+		class, test_funded_ulxc, request_id, schedule_id, refund_of, loan_id, created_at FROM agent_transfers
 		WHERE (from_workspace_id = $1 AND from_agent_id = $2) OR (to_workspace_id = $1 AND to_agent_id = $2)
 		ORDER BY created_at DESC, id LIMIT 200`, workspaceID, agentID)
 	if err != nil {
@@ -425,7 +425,7 @@ func (s *DualTokenStore) ListAgentTransfers(ctx context.Context, workspaceID, ag
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (AgentTransfer, error) {
 		var t AgentTransfer
 		return t, row.Scan(&t.ID, &t.EntryID, &t.FromWorkspaceID, &t.FromAgentID, &t.ToWorkspaceID, &t.ToAgentID, &t.AmountULXC, &t.Memo,
-			&t.Class, &t.TestFundedULXC, &t.RequestID, &t.ScheduleID, &t.RefundOf, &t.CreatedAt)
+			&t.Class, &t.TestFundedULXC, &t.RequestID, &t.ScheduleID, &t.RefundOf, &t.LoanID, &t.CreatedAt)
 	})
 }
 
