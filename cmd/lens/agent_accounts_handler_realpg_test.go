@@ -149,6 +149,56 @@ func TestAgentRoutes_AWorkspaceFundsTwoAgentsAndTakesFundsBack(t *testing.T) {
 	}
 }
 
+// B17.26 — the app sends a Take back again, with the same Idempotency-Key, when the first met a deploy
+// and got no answer: the LXC moves once, and the retry answers the balance it left.
+func TestAgentRoutes_ATakeBackSentTwiceWithOneKeyMovesOnce(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const ws = "ws-agents-retry"
+	if _, err := pool.Exec(ctx, `INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1, 5000000, 5000000)`, ws); err != nil {
+		t.Fatal(err)
+	}
+	store := economy.NewDualTokenStore(nil, pool, nil)
+	r := chi.NewRouter()
+	mountAgentAccountRoutes(r, store, tenant.NewStore(pool))
+	owner := &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "owner", Scopes: []string{auth.ScopeKeys}}
+	call := func(path, body, key string) (int, map[string]any) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req = req.WithContext(auth.WithAuthContext(req.Context(), owner))
+		if key != "" {
+			req.Header.Set("Idempotency-Key", key)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w.Code, out
+	}
+	base := "/v1/workspaces/" + ws + "/agents"
+	_, a := call(base, `{"name":"south"}`, "")
+	south := base + "/" + a["id"].(string)
+	if code, out := call(south+"/fund", `{"amount_ulxc":1000000}`, "fund-1"); code != http.StatusOK {
+		t.Fatalf("fund = %d %v", code, out)
+	}
+	for i := 0; i < 2; i++ {
+		if code, out := call(south+"/withdraw", `{"amount_ulxc":250000}`, "back-1"); code != http.StatusOK || out["balance_ulxc"].(float64) != 750_000 {
+			t.Fatalf("take back #%d with key back-1 = %d %v, want 200 and 750,000 µLXC", i+1, code, out)
+		}
+	}
+	if code, out := call(south+"/withdraw", `{"amount_ulxc":250000}`, "back-2"); code != http.StatusOK || out["balance_ulxc"].(float64) != 500_000 {
+		t.Fatalf("take back with a new key = %d %v, want 200 and 500,000 µLXC", code, out)
+	}
+	var n, sum int64
+	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(amount_ulxc), 0)::bigint FROM agent_postings
+	  WHERE workspace_id = $1 AND account = 'workspace' AND kind = 'withdraw'`, ws).Scan(&n, &sum); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 || sum != 500_000 {
+		t.Errorf("the workspace was credited by %d take-back row(s) totalling %d µLXC, want 2 rows, 500,000 µLXC", n, sum)
+	}
+}
+
 // B19.2 — the owner sets an agent's rules and decides its approvals through the routes; a proxy key
 // can read the rules but not change them, and a misspelt or invalid rule is refused rather than
 // stored as no rule.
