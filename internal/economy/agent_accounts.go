@@ -234,6 +234,14 @@ func (s *DualTokenStore) WithdrawAgent(ctx context.Context, workspaceID, agentID
 	return s.moveAgentFunds(ctx, workspaceID, agentID, amount, "withdraw")
 }
 
+type moveKeyKey struct{}
+
+// WithMoveKey carries the Idempotency-Key of a fund or withdraw (B17.26): the app sends a move again,
+// with the same key, when the first met a restart and got no answer, and the move lands once.
+func WithMoveKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, moveKeyKey{}, key)
+}
+
 func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentID string, amount int64, kind string) (int64, error) {
 	if amount <= 0 {
 		return 0, errors.New("economy: the amount must be positive")
@@ -251,6 +259,20 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 	if err != nil {
 		return 0, err
 	}
+	// B17.26: the key is the entry's ref; under the agent's lock, a key already posted is a retry of a
+	// move that landed, answered with the balance and moved nothing.
+	ref, _ := ctx.Value(moveKeyKey{}).(string)
+	if ref != "" {
+		var landed bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_postings
+		  WHERE workspace_id = $1 AND account = $2 AND kind = $3 AND ref = $4)`,
+			workspaceID, agentAccount(agentID), kind, ref).Scan(&landed); err != nil {
+			return 0, fmt.Errorf("economy: earlier %s: %w", kind, err)
+		}
+		if landed {
+			return bal, nil
+		}
+	}
 	if kind == "fund" {
 		if err := requireOwner(ctx, tx, agentID); err != nil {
 			return 0, err
@@ -266,7 +288,7 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 		if unallocated := wsBal - allocated; unallocated < amount {
 			return 0, fmt.Errorf("%w: the workspace has %d µLXC not held by its agents", ErrAgentFunds, unallocated)
 		}
-		err = postEntry(ctx, tx, workspaceID, kind, "", leg{"workspace", -amount}, leg{agentAccount(agentID), amount})
+		err = postEntry(ctx, tx, workspaceID, kind, ref, leg{"workspace", -amount}, leg{agentAccount(agentID), amount})
 		if err != nil {
 			return 0, err
 		}
@@ -275,7 +297,7 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 		if bal < amount {
 			return 0, fmt.Errorf("%w: the agent holds %d µLXC", ErrAgentFunds, bal)
 		}
-		if err := postEntry(ctx, tx, workspaceID, kind, "", leg{agentAccount(agentID), -amount}, leg{"workspace", amount}); err != nil {
+		if err := postEntry(ctx, tx, workspaceID, kind, ref, leg{agentAccount(agentID), -amount}, leg{"workspace", amount}); err != nil {
 			return 0, err
 		}
 		bal -= amount

@@ -227,8 +227,14 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 				writeJSONErr(w, http.StatusBadRequest, `body must be {"amount_ulxc": <positive µLXC>}`)
 				return
 			}
+			// B17.26: a move sent again with the same Idempotency-Key lands once.
+			key := req.Header.Get("Idempotency-Key")
+			if len(key) > 128 {
+				writeJSONErr(w, http.StatusBadRequest, "the Idempotency-Key must be at most 128 characters")
+				return
+			}
 			agentID := chi.URLParam(req, "agentID")
-			bal, err := fn(req.Context(), chi.URLParam(req, "wsID"), agentID, in.AmountULXC)
+			bal, err := fn(economy.WithMoveKey(req.Context(), key), chi.URLParam(req, "wsID"), agentID, in.AmountULXC)
 			switch {
 			case errors.Is(err, economy.ErrAgentNotFound):
 				writeJSONErr(w, http.StatusNotFound, err.Error())
