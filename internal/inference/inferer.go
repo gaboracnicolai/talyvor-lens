@@ -32,8 +32,8 @@ func NewProviderInferer(httpClient *http.Client, rc retry.Config, ep Endpoints) 
 }
 
 // Infer runs `model` on `input` and returns the assistant's reply text. The flow mirrors the gateway's:
-// resolve provider → ConfigFor → build (translate) request → RunUpstream → parse (reverse-translate) →
-// extract the first choice's content.
+// resolve provider → ConfigFor → build (translate) request → adapt reasoning params / Responses leg →
+// RunUpstream → parse (reverse-translate) → extract the first choice's content.
 func (pi *ProviderInferer) Infer(ctx context.Context, model, input string) (string, error) {
 	m, ok := catalog.Get(model)
 	if !ok {
@@ -49,13 +49,33 @@ func (pi *ProviderInferer) Infer(ctx context.Context, model, input string) (stri
 	if err != nil {
 		return "", fmt.Errorf("inferer: build request: %w", err)
 	}
+	// B26.10: the same upstream leg the proxy's forward runs — GPT-5.x, GPT-6 and chat-latest take
+	// max_completion_tokens, and OpenAI serves its -pro and -codex models only on /v1/responses.
+	sendBody = AdaptReasoningParams(model, sendBody)
+	upstreamURL := cfg.UpstreamURL(model)
+	translate := cfg.ProviderName() == "openai" && ResponsesOnly(model)
+	if translate {
+		ru, ok := ResponsesURLFor(upstreamURL)
+		if !ok {
+			return "", fmt.Errorf("inferer: %s needs OpenAI's /v1/responses, and %q has no such endpoint", model, upstreamURL)
+		}
+		if sendBody, err = ToResponsesBody(sendBody); err != nil {
+			return "", fmt.Errorf("inferer: %s: %w", model, err)
+		}
+		upstreamURL = ru
+	}
 
-	resp, respBody, _, err := RunUpstream(ctx, pi.httpClient, pi.retry, cfg.UpstreamURL(model), cfg.ApplyAuth, sendBody, nil)
+	resp, respBody, _, err := RunUpstream(ctx, pi.httpClient, pi.retry, upstreamURL, cfg.ApplyAuth, sendBody, nil)
 	if err != nil {
 		return "", fmt.Errorf("inferer: upstream call: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("inferer: upstream status %d for model %q", resp.StatusCode, model)
+	}
+	if translate {
+		if respBody, err = FromResponsesBody(respBody); err != nil {
+			return "", fmt.Errorf("inferer: translate response: %w", err)
+		}
 	}
 
 	parsed, err := cfg.ParseResponse(respBody, model)
