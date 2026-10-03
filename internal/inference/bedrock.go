@@ -28,12 +28,20 @@ type BedrockConfig struct {
 
 // bedrockModelMap is the friendly-name → AWS Bedrock model-id table. The 4.6 ids are AWS's, from the
 // model cards' "Programmatic Access" tables (B23.7, fetched 2026-09-29).
+//
+// B26.11 — the Sonnet and Haiku 4.5 ids are AWS's too (checked 2026-10-03; they were
+// anthropic.claude-sonnet-4-5-20251022-v2:0 and anthropic.claude-haiku-4-5-20241022-v1:0, which match
+// no AWS model). docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-4-5.html
+// gives anthropic.claude-sonnet-4-5-20250929-v1:0. …/model-card-anthropic-claude-haiku-4-5.html gives
+// no bare bedrock-runtime id ("requires a geo or global inference profile ID"), so Haiku 4.5 goes by
+// its global profile — the card's own example, and not tied to one geography's Regions as us./eu. are.
+// A global profile can route a request outside the configured Region.
 var bedrockModelMap = map[string]string{
 	"claude-opus-4-6":   "anthropic.claude-opus-4-6-v1",
 	"claude-sonnet-4-6": "anthropic.claude-sonnet-4-6",
 	"claude-opus-4-5":   "anthropic.claude-opus-4-5-20251101-v1:0",
-	"claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-20251022-v2:0",
-	"claude-haiku-4-5":  "anthropic.claude-haiku-4-5-20241022-v1:0",
+	"claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+	"claude-haiku-4-5":  "global.anthropic.claude-haiku-4-5-20251001-v1:0",
 }
 
 // ModelToBedrockID maps a friendly model name to its AWS Bedrock model id (ok=false when unsupported).

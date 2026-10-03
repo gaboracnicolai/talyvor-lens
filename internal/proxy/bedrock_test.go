@@ -125,6 +125,10 @@ func TestHandleBedrock_SendsAWSsOwnModelIDs(t *testing.T) {
 		{"anthropic.claude-opus-4-6-20251101-v1:0", "anthropic.claude-opus-4-6-v1"},
 		{"anthropic.claude-sonnet-4-6-20251101-v1:0", "anthropic.claude-sonnet-4-6"},
 		{"claude-opus-4-6", "anthropic.claude-opus-4-6-v1"},
+		// B26.11 — the 4.5 ids from AWS's model cards (checked 2026-10-03); Haiku 4.5 has no on-demand
+		// bare id on bedrock-runtime, so it goes by its global inference profile.
+		{"claude-sonnet-4-5", "anthropic.claude-sonnet-4-5-20250929-v1:0"},
+		{"claude-haiku-4-5", "global.anthropic.claude-haiku-4-5-20251001-v1:0"},
 	}
 	for _, tc := range cases {
 		for _, stream := range []bool{false, true} {
