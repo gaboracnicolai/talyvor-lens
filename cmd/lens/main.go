@@ -103,6 +103,7 @@ import (
 	"github.com/talyvor/lens/internal/proxy"
 	"github.com/talyvor/lens/internal/quality"
 	"github.com/talyvor/lens/internal/ratelimit"
+	"github.com/talyvor/lens/internal/reqtrack"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/roi"
 	"github.com/talyvor/lens/internal/routedecision"
@@ -391,6 +392,8 @@ func run() error {
 	}
 	redisClient := redis.NewClient(redisOpts)
 	defer func() { _ = redisClient.Close() }()
+	// B27.11: a request in a Redis command reads "redis" on /healthz and in the slow-request log.
+	redisClient.AddHook(reqtrack.RedisHook{})
 
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		logger.Warn("redis ping failed", slog.String("err", err.Error()))
@@ -411,6 +414,8 @@ func run() error {
 	}
 	poolCfg.MaxConns = cfg.DBMaxConns
 	poolCfg.MinConns = cfg.DBMinConns
+	// B27.11: a request waiting for a pool connection reads "db_acquire", one in a query "db_query".
+	poolCfg.ConnConfig.Tracer = reqtrack.PgxTracer{}
 	if cfg.DBPgBouncer {
 		// PgBouncer in transaction mode doesn't support the extended query
 		// protocol (prepared statements). Simple protocol is compatible with
@@ -2014,6 +2019,10 @@ func run() error {
 	r.Use(middleware.RequestID)
 	r.Use(clientIPMiddleware())
 	r.Use(middleware.Recoverer)
+	// B27.11: every request is in /healthz's "requests" section while it runs and for five minutes
+	// after, by route template and phase; one past ten seconds is logged as it crosses and as it ends.
+	requestTracker := reqtrack.New(10*time.Second, logger)
+	r.Use(requestTracker.Middleware(r))
 	r.Use(middleware.Timeout(60 * time.Second))
 
 	// Production-API middlewares — must run *after* the chi RequestID
@@ -2080,6 +2089,13 @@ func run() error {
 		// U8/U9: replica reachability + replay lag. Healthy no-op when no
 		// replica is configured (the feature is off, not broken).
 		"read_replica": replicaLagMonitor,
+	}).AddSection("database_pool", func(context.Context) any {
+		if pool == nil {
+			return nil
+		}
+		return reqtrack.PoolStats(pool)
+	}).AddSection("requests", func(ctx context.Context) any {
+		return requestTracker.Snapshot(ctx)
 	})
 	r.Get("/healthz", healthHandler.ServeHTTP)
 

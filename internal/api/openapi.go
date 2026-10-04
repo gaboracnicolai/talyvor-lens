@@ -97,6 +97,36 @@ func OpenAPISpec() map[string]any {
 						"version":        map[string]any{"type": "string"},
 						"uptime_seconds": map[string]any{"type": "integer"},
 						"checks":         map[string]any{"type": "object", "additionalProperties": true},
+						// B27.11: state, not pass/fail — what tells a hang from a restart from a blip.
+						"database_pool": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"in_use":         map[string]any{"type": "integer"},
+								"idle":           map[string]any{"type": "integer"},
+								"max":            map[string]any{"type": "integer"},
+								"wait_count":     map[string]any{"type": "integer", "description": "acquires that found no idle connection and waited"},
+								"wait_ms":        map[string]any{"type": "integer", "description": "total time those acquires waited"},
+								"canceled_waits": map[string]any{"type": "integer", "description": "acquires that gave up waiting"},
+							},
+						},
+						"requests": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"in_flight":  map[string]any{"type": "integer", "description": "requests being served, not counting this probe"},
+								"long_lived": map[string]any{"type": "integer", "description": "of those, subscriptions meant to stay open (SSE)"},
+								"slowest_5m": map[string]any{
+									"type":        "object",
+									"nullable":    true,
+									"description": "the slowest request of the last five minutes, finished or still running; route template only, never a path",
+									"properties": map[string]any{
+										"route":   map[string]any{"type": "string"},
+										"ms":      map[string]any{"type": "integer"},
+										"phase":   map[string]any{"type": "string", "enum": []string{"handler", "db_acquire", "db_query", "redis", "upstream"}},
+										"running": map[string]any{"type": "boolean"},
+									},
+								},
+							},
+						},
 					},
 				},
 				"WorkspaceConfig": map[string]any{
