@@ -1,15 +1,107 @@
 # Talyvor Lens
 
-**AI token intelligence proxy — sit between your app and the providers you already use, and pay for fewer provider calls.**
+**The gateway that enforces Agent Wallet rules before any model call.**
 
-Lens cuts spend by not making calls: an exact and semantic response cache, cross-tenant
-reuse of cached answers, cross-provider routing, and document distillation. **We do not
-publish a headline savings percentage, because we have not finished measuring one** — see
+Talyvor gives every AI agent a wallet — a balance, spending rules, approvals, a card and a live
+statement. Lens is the part that makes the rules hold. Each agent calls its models through Lens
+with a key of its own, and Lens judges every request against that agent's wallet **before the
+provider is called**: a request the rules refuse never reaches the provider, one above the
+approval amount waits for a person, and every charge lands on the agent's statement.
+
+Lens is an API. The wallet console is the Talyvor app ([app.talyvor.com](https://app.talyvor.com),
+or self-host `talyvor-suite`); the Lens host itself serves only a small service page at `/` and
+component health at `/status`.
+
+## Agent wallet quickstart
+
+Create an agent, fund it, give it rules and a key, let it call a model, read its statement.
+
+You need a running Lens whose workspace holds some credit: [Quick start](#quick-start-2-commands)
+below, then steps 3–4 of [docs/quickstart.md](docs/quickstart.md) (the admin key and the
+workspace's first LXC). These calls use that admin key, `LENS_API_KEY`, which is why step 1 names
+the agent's owner; signed in to the app as the workspace's owner, the same calls run on your
+session and the agent is yours.
+
+Amounts are in µLXC: 1 LXC = 1,000,000 µLXC = $0.10, so $1 is `10000000`.
+
+```bash
+export LENS=http://localhost:8080
+export WS=default
+
+# 1. Create the agent. Every agent has an owner: the person answerable for what it spends.
+AGENT=$(curl -s -X POST $LENS/v1/workspaces/$WS/agents \
+  -H "Authorization: Bearer $LENS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"researcher","owner_user_id":"you@example.com"}' | jq -r .id)
+
+# 2. Fund it: $2 of the workspace's credit moves into the agent's wallet.
+curl -s -X POST $LENS/v1/workspaces/$WS/agents/$AGENT/fund \
+  -H "Authorization: Bearer $LENS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"amount_ulxc":20000000}'
+# → {"agent_id":"agt_…","balance_ulxc":20000000}
+
+# 3. Give it rules: $0.50 a day, the small model only, and anything above $0.10 asks you first.
+curl -s -X PUT $LENS/v1/workspaces/$WS/agents/$AGENT/rules \
+  -H "Authorization: Bearer $LENS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"daily_limit_ulxc":5000000,"approval_above_ulxc":1000000,"allowed_models":["gpt-4o-mini"]}'
+
+# 4. Issue the agent its own key. It is shown once.
+AGENT_KEY=$(curl -s -X POST $LENS/v1/workspaces/$WS/agents/$AGENT/keys \
+  -H "Authorization: Bearer $LENS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"researcher key"}' | jq -r .key)
+
+# 5. The agent calls its model through Lens, with its own key. Any OpenAI client works the same
+#    way: change base_url to $LENS/v1/proxy/openai/v1 and use the agent's key.
+curl -s $LENS/v1/proxy/openai/v1/chat/completions \
+  -H "Authorization: Bearer $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello!"}]}'
+
+# 6. Read its statement: the funding, then every charge, newest first.
+#    Add ?from=2026-10-01&to=2026-11-01&format=csv for a month an auditor can open.
+curl -s $LENS/v1/workspaces/$WS/agents/$AGENT/statement \
+  -H "Authorization: Bearer $LENS_API_KEY"
+
+# 7. The requests waiting for your approval.
+curl -s $LENS/v1/workspaces/$WS/agents/approvals \
+  -H "Authorization: Bearer $LENS_API_KEY"
+```
+
+What Lens does with the agent's request in step 5, before the provider sees it:
+
+| The agent's wallet says | Lens answers |
+|---|---|
+| within its rules and its balance | forwards it and charges the agent — buffered and streamed alike |
+| a rule refuses it (`gpt-4o` here, or the day's $0.50 spent) | `403`, naming the rule. The provider is never called |
+| it could cost more than `approval_above_ulxc` | `403`, naming the approval it filed. The owner approves it once (`POST /v1/workspaces/{wsID}/agents/approvals/{id}/approve`) and the retry goes through |
+| its balance cannot cover it | `402` |
+
+## What an agent's wallet holds
+
+All under `/v1/workspaces/{wsID}/agents`. Moving money, creating agents and issuing keys take the
+workspace's owner or an admin; reading takes any of the workspace's credentials.
+
+| | | |
+|---|---|---|
+| **Balance** | fund and withdraw; a top-up that refills it below a floor | `/{id}/fund`, `/{id}/withdraw`, `/{id}/topup` |
+| **Rules** | per request, per day, per month; an approval amount; allowed models, providers and marketplace listings; active hours in a timezone; pause on unusual spend | `/{id}/rules` |
+| **Approvals** | approve or deny, signed with a passkey once the workspace has one, with a web push when one is filed | `/approvals`, `/approvals/{id}/approve`, `/approvals/{id}/deny` |
+| **Payments** | agent to agent, scheduled payments, requests, escrow | `/{id}/pay`, `/{id}/schedules` — [transfers](docs/agent-transfers.md), [escrow](docs/escrow.md) |
+| **Card** | a virtual card whose every purchase Lens approves or declines by the agent's rules (test mode) | `/{id}/card` — [agent cards](docs/agent-cards.md) |
+| **Pots** | credits set aside as a goal, a budget or a reserve, lockable until a date | `/{id}/pots` — [pots](docs/agent-pots.md) |
+| **Statement** | one agent's, or every wallet in the workspace, for any period, JSON or CSV | `/{id}/statement`, `/statement` |
+| **Controls** | unusual-spend alerts, pause one agent or all of them, the month-end forecast | `/alerts`, `/{id}/pause`, `/pause-all`, `/forecast` |
+
+The routes are listed with their bodies at the top of
+[`cmd/lens/agent_accounts_handler.go`](cmd/lens/agent_accounts_handler.go).
+
+## The gateway underneath
+
+Under the wallet, Lens is a drop-in gateway, and it also cuts what each call costs: an exact and
+semantic response cache, opt-in cross-tenant reuse of cached answers (pooling), cross-provider
+routing, and document distillation. **We do not publish a headline savings percentage, because we
+have not finished measuring one** — see
 [What we can and cannot tell you about savings](#what-we-can-and-cannot-tell-you-about-savings).
 
-Drop-in replacement for OpenAI, Anthropic, Google Gemini, AWS Bedrock, Mistral, Groq, and vLLM. Change one URL. Get caching, routing, attribution, guardrails, audit, and fallback.
-
-Lens is an API. The dashboard is a separate app ([app.talyvor.com](https://app.talyvor.com), or self-host `talyvor-suite`); the Lens host itself serves only a small service page at `/` and component health at `/status`.
+Drop-in replacement for OpenAI, Anthropic, Google Gemini, AWS Bedrock, Mistral, Groq, and vLLM. Change one URL. Get the wallet's rules, caching, routing, attribution, guardrails, audit, and fallback.
 
 ## Why Talyvor Lens?
 
@@ -218,25 +310,6 @@ Full index at [`docs/README.md`](docs/README.md). Highlights:
 - [Migration guides](docs/README.md#migration-guides)
 - [Benchmarks](benchmarks/README.md)
 
-## What is on by default
-
-A self-hoster's most reasonable question, and one this README previously answered wrongly.
-
-| Switch | Default | Effect |
-|---|---|---|
-| `LENS_ECONOMY_ENABLED` | **true** | Master economy switch. Registers the economy route surface and permits mint/earn/stake/marketplace state. Set `false` for a pure fiat-SaaS deployment — it then force-offs every economy gate regardless of their own env values. |
-| Pool-royalty / distill / pattern mints | **on** (under the master switch) | The three live traffic mints, default-on for the closed test. |
-| `LENS_ANNOTATION_MINTING_ENABLED` | false | Annotation mint — spendable-immediate, so explicit opt-in. |
-| `LENS_TRUSTFUL_COMPUTE_MINT_ENABLED` | false | Legacy receipt-less compute mint. An unprotected mint path is opt-in, never on by accident. |
-| `LENS_MINT_RATE_CAP_LENS_24H` | 1000 | Per-workspace ceiling on minted LENS across **all** mint types in a rolling 24h. `0` disables. |
-| `LENS_BILLING_ENABLED` | false | Stripe billing / LXC purchase. Off means no one can buy LXC on this deployment. |
-
-**The important consequence:** economy-on does *not* mean a fresh workspace earns anything. Every
-mint-type credit passes the **verified-to-earn** gate below, which requires a completed real-money
-LXC purchase or an admin vouch. A default deployment has the economy *armed* and mints *nothing*
-until a workspace is verified. That is a meaningfully different statement from "off by default",
-and the previous wording obscured it.
-
 ## Architecture
 
 Single Go binary, no Python or Node runtime. PostgreSQL (with pgvector) for state, Redis for the hot exact cache + rate-limit ledger, NATS for the learner / anomaly event bus.
@@ -246,157 +319,11 @@ count in this line was stale at 37 for some time — it is now derived from the 
 as accurate at the commit you are reading and re-derive with
 `find . -name '*_test.go' | sed 's|/[^/]*$||' | sort -u | wc -l` if it matters to you.
 
-## LENS Token Economy
+## The LENS token economy
 
-LENS is a compute-backed utility token. You earn it by contributing infrastructure to the
-network. There are **two units** and they behave differently — the distinction matters before
-any number below makes sense:
-
-- **LXC** is the billing credit, and its peg is **fixed**: 1 LXC = $0.10 of compute credit,
-  never computed or adjusted (`economy.LXCUSDValue`). This is what inference is billed against.
-- **LENS** is the mined token. `1 LENS = $0.10` is its **published nominal** peg
-  (`marketplace.LENSPerUSD`), but LENS does not convert to LXC at a fixed rate: the conversion
-  runs through a **floating** rate engine (`economy.RateEngine.ComputeFairRate`) derived from
-  supply and backing, plus a 5% spread, bounded to ±10% movement per approval and floored until
-  a live marketplace price exists. **Treat $0.10/LENS as a unit of account, not a redemption
-  guarantee.**
-
-Everything in this section is gated on the economy master switch (see
-[What is on by default](#what-is-on-by-default)), and staking or trading requires a workspace
-that already holds LENS.
-
-### Mining Types
-
-| # | Track | What you contribute | Earn rate |
-|---|---|---|---|
-| 1 | **Pool royalty** | A cached answer of yours reused by *another* workspace (opt-in both sides) | `s` × the provider cost that call avoided; `s` = 0.5 by default (`LENS_POOL_ROYALTY_SHARE`) |
-| 2 | **Compute mining** | GPU inference capacity (Ollama / vLLM / llama.cpp) | 0.025–0.150 LENS / 1k tokens (by GPU class) |
-| 3 | **Embedding mining** | CPU-friendly embedding generation | 0.002–0.004 LENS / 1k embeddings |
-| 4 | **Quality oracle** | Stake-gated annotation of LLM responses | 0.100 LENS / annotation + agreement bonus |
-| 5 | **Pattern mining** | Anonymised routing patterns (opt-in) | 0.001 LENS × (1 + rarity × 4), but see the reachable ceiling below |
-
-**Row 1 changed, and the old row was wrong.** This table used to list a *cache-mining* track at
-"0.001–0.010 LENS / hit". That track (`CacheMiner`) was **retired**, not renamed: it duplicated
-pool-royalty at the same serve point (and would have double-minted if both were wired), and its
-one unique path — minting for a hit on your *own* cache — is self-inflation, since no second
-party received anything. The cache moat is real; it is delivered by pool-royalty, which pays only
-when the value actually goes to someone else. The `talyvor-cachenode` binary is unaffected: you
-still contribute cache capacity with it, you now earn through row 1.
-
-**Pattern mining's ceiling is 2×, not 5×.** The formula reads as though rarity 1.0 pays a 5×
-multiplier. It cannot: the anti-gaming corroboration floor caps reachable rarity at 0.25, so the
-reachable ceiling is `1 + 0.25×4 = 2.0`. The public `/v1/tokens/rates` API was corrected to
-advertise the reachable 2× some time ago; this table was not, until now.
-
-### Node Software
-
-| Binary | Default port | Purpose |
-|---|---|---|
-| `talyvor-lens` | 8080 | The Lens proxy itself |
-| `talyvor-node` | 9090 | GPU inference mining |
-| `talyvor-cachenode` | 9091 | Cache contribution mining |
-| `talyvor-embednode` | 9092 | Embedding farm mining |
-
-Build all four: `make binaries` (drops them into `./bin/`).
-
-### Token Economics — built and wired
-
-Each of these is implemented, wired to a route, and gated on the economy master switch. All of
-them additionally need a workspace that already holds LENS.
-
-- **Staking** and the **Marketplace** (peer-to-peer LENS trading) are **not served** since B18.1:
-  buying credited the buyer without debiting anyone, and stake yield had no ceiling. Their routes
-  are unregistered until Nicolai decides whether to retire or fix them; the logic remains in
-  `internal/economy`.
-- **Quality oracle stake**: **10 LENS** minimum lockup before an annotation is accepted
-  (`mining.StakeRequirement`), Sybil-resistant.
-- **LXC peg**: 1 LXC = $0.10, fixed (see above).
-
-### Token Economics — roadmap, not built
-
-**These are deliberate future work for the agent-service marketplace**, where agents transact in
-LENS with each other directly rather than a human paying a fiat invoice. They are listed here so
-they are not mistaken for shipped features — and so nobody deletes them later as dead weight,
-because the burn primitive is a real, tested part of the eventual design.
-
-- **LENS-burn discount — NOT BUILT.** The intent is that spending LENS on inference costs less
-  than paying fiat, with the burned LENS leaving circulation permanently. **No discount
-  multiplier exists anywhere in the codebase today**; the only trace is a comment in
-  `economy/marketplace.go` naming the future path. Paying with LENS currently gets you no
-  discount, because there is no LENS-payment path for inference at all.
-- **Burn in circulation — PRIMITIVE ONLY.** `mining.LedgerStore.Burn` is implemented and tested,
-  and `GetTotalBurned` is wired into the economy-stats readout — but **it has no production
-  caller**. Nothing in a running Lens ever burns LENS, so total-burned reads zero and will keep
-  reading zero until the discount path above exists. The primitive is kept deliberately: it is
-  the supply-side half of the burn-and-mint design the marketplace needs.
-
-Why they are not simply deleted: the agent marketplace is the reason the token is a token rather
-than a loyalty-points balance. Removing the burn machinery would mean rebuilding it, and the
-tested primitive is the cheap half.
-
-### Sybil resistance (verified-to-earn)
-
-**Correction:** this section used to say the token economy "ships dark (off by default)". It does
-not. `LENS_ECONOMY_ENABLED` **defaults TRUE** (`config.go`: `c.EconomyEnabled = true`, explicit
-opt-out), and three traffic mints — pool-royalty, distill and pattern — are default-on under it.
-What actually keeps a fresh deployment from minting value is not the master switch but the **U6
-Sybil floor** below, which is wired unconditionally and which the master switch cannot lift:
-
-- **Verified-to-earn gate.** A workspace may mint / accrue royalty only when it is **verified-to-earn**: it has a **completed real-money LXC purchase** (derived at read time) OR an admin-set `earn_verified` flag (the enterprise / self-host vouch). Refunded / anomalous purchases do **not** count (closes the buy→refund→stay-verified loop). The gate is enforced at the **ledger chokepoint** (`applyTx` + `heldInner`): every mint-type credit — cache, compute, embedding, annotation, pattern, PoVI receipt, and the pool-royalty held mint — passes through it; conservation moves (marketplace, unstake, LENS→LXC convert) are never gated. The gate is wired **unconditionally** — a safety restriction the economy master-switch cannot lift.
-- **Idempotent mints.** The previously-unprotected compute / cache / embedding tracks now claim a `(request_id, workspace_id, mint_type)` row before crediting (the pattern track's proven shape). `request_id` must be **server-derived** work-product content; an empty id mints nothing.
-- **Legacy trust-mint off by default.** The receipt-less compute mint (`LENS_TRUSTFUL_COMPUTE_MINT_ENABLED`) now **defaults false** — an unprotected mint path is opt-in, not on-by-accident.
-
-The **PR2 wash-hardening** then bounds the steady-state yield (verification raised the *entry* bar but not the *steady-state* yield, which a determined operator amortizes):
-
-- **Per-identity rate cap (the universal bound).** A per-workspace rolling **24h** ceiling on **minted LENS across all mint types**, enforced at the same ledger chokepoint (`LENS_MINT_RATE_CAP_LENS_24H`, default **1000** LENS/24h, `0` = off). It sums every mint type together — an attacker can't evade by splitting across tracks — and is exact under concurrency (the SUM rides the balance `FOR UPDATE`). Held mints count at the mint moment; the finalize settlement is **not** double-counted. Conservation moves are never throttled.
-- **Card-fingerprint owner-linkage (the cheap bonus).** The Stripe webhook captures a **hash** of the card fingerprint (never the raw value) **best-effort, after the credit commits** — a capture failure can never drop the payment. A pool-royalty mint between two workspaces that share a fingerprint (one operator, one card) is denied; **default-allow on missing** (an absent fingerprint never blocks honest cross-actor reuse). Catches the lazy one-card washer.
-
-**Residual (honest):** a determined operator can still wash **under the rate cap** across **many cards** (rotating cards evades the fingerprint linkage). The rate cap bounds the per-identity yield; deeper owner-linkage (e.g. network/behavioral signals) carries a high privacy cost and is deferred. The verification cost + the rate cap + the cheap linkage together make casual washing unprofitable and bound the determined case.
-
-### Quick start (GPU miner)
-
-```bash
-export LENS_URL=https://lens.talyvor.com
-export LENS_API_KEY=tlv_...
-export LENS_WORKSPACE_ID=your-workspace
-export NODE_URL=https://your-server.com
-export NODE_PROVIDER=ollama
-export NODE_MODELS=llama3.1,mistral
-export NODE_GPU_TYPE=rtx4090
-./bin/talyvor-node start
-```
-
-### Quick start (cache miner)
-
-```bash
-export LENS_URL=https://lens.talyvor.com
-export LENS_API_KEY=tlv_...
-export LENS_WORKSPACE_ID=your-workspace
-export CACHE_NODE_URL=https://your-cache.example.com
-export CACHE_NODE_REDIS_URL=redis://localhost:6379/0
-export CACHE_NODE_MAX_GB=100
-./bin/talyvor-cachenode start
-```
-
-### Quick start (embedding miner — CPU-friendly)
-
-```bash
-export LENS_URL=https://lens.talyvor.com
-export LENS_API_KEY=tlv_...
-export LENS_WORKSPACE_ID=your-workspace
-export EMBED_NODE_URL=https://your-embed.example.com
-export EMBED_NODE_MODEL=nomic-embed-text
-export EMBED_NODE_DIMENSIONS=768
-./bin/talyvor-embednode start
-```
-
-### Reading the economy
-
-There are no built-in browser pages for these; the reads are API endpoints:
-
-- `/v1/workspaces/{ws}/tokens/balance`, `.../tokens/mining/*` — balance and mining (authenticated)
-- `/v1/economy/stats`, `/v1/tokens/rates`, `/v1/oracle/stats` — global supply, rates and the
-  oracle queue (public, present only when the economy is enabled)
+The LENS token, mining, the miner binaries and the switches that arm them — including what a
+fresh self-hosted deployment has on by default — are in [docs/token-economy.md](docs/token-economy.md).
+They are a closed test underneath the wallets, not something an agent needs to spend.
 
 ## License
 

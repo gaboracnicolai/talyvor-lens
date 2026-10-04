@@ -181,6 +181,7 @@ After a few requests the summary shows total cost, cached request count, and the
 
 ## Next steps
 
+- **Give an agent a wallet** — the [agent wallet quickstart](../README.md#agent-wallet-quickstart): an agent of its own, funded, with rules and its own key, and a statement of every charge.
 - **Set up per-workspace logging policy** — `PUT /v1/workspaces/{wsID}/logging` to switch a workspace to `metadata` (no prompt text persisted) or `none` (privacy mode).
 - **Configure guardrails** — `PUT /v1/guardrails/policy` to enable PII redaction, prompt-injection blocking, blocked topics, or custom regex rules per workspace.
 - **Add a prompt template** — `POST /v1/prompts` to register a versioned prompt; reference it from your application as `lens:prompt:<name>`.
