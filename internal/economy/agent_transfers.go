@@ -62,6 +62,9 @@ type AgentTransfer struct {
 	RefundOf        string    `json:"refund_of,omitempty"`
 	LoanID          string    `json:"loan_id,omitempty"` // B22.5: the loan it paid out or repaid
 	CreatedAt       time.Time `json:"created_at"`
+	// B28.299: on a list, the transfer that gave this one back, and whether the listed agent may still give it back.
+	RefundedBy string `json:"refunded_by,omitempty"`
+	Refundable bool   `json:"refundable,omitempty"`
 
 	capability string // the wallet capability it moves as, when not a plain transfer's (B22.5: a loan's)
 }
@@ -413,10 +416,12 @@ func (s *DualTokenStore) RefundTransfer(ctx context.Context, workspaceID, transf
 		ToAgentID: orig.FromAgentID, AmountULXC: orig.AmountULXC, Memo: "refund: " + orig.Memo, RefundOf: transferID}, false)
 }
 
-// ListAgentTransfers reads the transfers an agent of workspaceID sent or received, newest first.
+// ListAgentTransfers reads the transfers an agent of workspaceID sent or received, newest first. Each says which
+// transfer gave it back, and is refundable when the agent received it and RefundTransfer would still take it.
 func (s *DualTokenStore) ListAgentTransfers(ctx context.Context, workspaceID, agentID string) ([]AgentTransfer, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, entry_id::text, from_workspace_id, from_agent_id, to_workspace_id, to_agent_id, amount_ulxc, memo,
-		class, test_funded_ulxc, request_id, schedule_id, refund_of, loan_id, created_at FROM agent_transfers
+		class, test_funded_ulxc, request_id, schedule_id, refund_of, loan_id, created_at,
+		COALESCE((SELECT r.id FROM agent_transfers r WHERE r.refund_of = t.id), '') FROM agent_transfers t
 		WHERE (from_workspace_id = $1 AND from_agent_id = $2) OR (to_workspace_id = $1 AND to_agent_id = $2)
 		ORDER BY created_at DESC, id LIMIT 200`, workspaceID, agentID)
 	if err != nil {
@@ -424,8 +429,10 @@ func (s *DualTokenStore) ListAgentTransfers(ctx context.Context, workspaceID, ag
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (AgentTransfer, error) {
 		var t AgentTransfer
-		return t, row.Scan(&t.ID, &t.EntryID, &t.FromWorkspaceID, &t.FromAgentID, &t.ToWorkspaceID, &t.ToAgentID, &t.AmountULXC, &t.Memo,
-			&t.Class, &t.TestFundedULXC, &t.RequestID, &t.ScheduleID, &t.RefundOf, &t.LoanID, &t.CreatedAt)
+		err := row.Scan(&t.ID, &t.EntryID, &t.FromWorkspaceID, &t.FromAgentID, &t.ToWorkspaceID, &t.ToAgentID, &t.AmountULXC, &t.Memo,
+			&t.Class, &t.TestFundedULXC, &t.RequestID, &t.ScheduleID, &t.RefundOf, &t.LoanID, &t.CreatedAt, &t.RefundedBy)
+		t.Refundable = t.ToWorkspaceID == workspaceID && t.ToAgentID == agentID && t.RefundOf == "" && t.LoanID == "" && t.RefundedBy == ""
+		return t, err
 	})
 }
 
