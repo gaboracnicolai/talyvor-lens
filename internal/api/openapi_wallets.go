@@ -62,7 +62,9 @@ func openAPIWalletSchemas() map[string]any {
 			"additionalProperties": false,
 			"properties": map[string]any{
 				"max_per_request_ulxc":   ulxc,
+				"hourly_limit_ulxc":      map[string]any{"type": "integer", "format": "int64", "description": "the clock hour, in timezone; absent keeps the stored cap"},
 				"daily_limit_ulxc":       ulxc,
+				"weekly_limit_ulxc":      map[string]any{"type": "integer", "format": "int64", "description": "the week from Monday, in timezone; absent keeps the stored cap"},
 				"monthly_limit_ulxc":     ulxc,
 				"approval_above_ulxc":    map[string]any{"type": "integer", "format": "int64", "description": "a request that could cost more waits for a person's approval"},
 				"allowed_models":         strs,

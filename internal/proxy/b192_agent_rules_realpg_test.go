@@ -81,6 +81,13 @@ func TestB192_EachAgentRuleRefusesBeforeTheProvider_AndARetryIsChargedOnce(t *te
 	}
 	setRules := func(r economy.AgentRules) {
 		t.Helper()
+		var none int64 // each case's rules replace the last case's whole, hourly and weekly caps too
+		if r.HourlyLimitULXC == nil {
+			r.HourlyLimitULXC = &none
+		}
+		if r.WeeklyLimitULXC == nil {
+			r.WeeklyLimitULXC = &none
+		}
 		if _, err := store.SetAgentRules(ctx, ws, agent.ID, r); err != nil {
 			t.Fatalf("set rules %+v: %v", r, err)
 		}
@@ -96,6 +103,7 @@ func TestB192_EachAgentRuleRefusesBeforeTheProvider_AndARetryIsChargedOnce(t *te
 		t.Fatalf("a question charged %d µLXC and holds %d — want a positive charge below the hold", charge, hold)
 	}
 
+	capped := charge + hold - 1
 	now := time.Now().UTC()
 	elsewhen := func(h int) string { return now.Add(time.Duration(h) * time.Hour).Format("15:04") }
 	for _, tc := range []struct {
@@ -107,6 +115,8 @@ func TestB192_EachAgentRuleRefusesBeforeTheProvider_AndARetryIsChargedOnce(t *te
 		{"limit per request", economy.AgentRules{MaxPerRequestULXC: hold - 1}, "gpt-4o", "limit per request"},
 		{"daily limit", economy.AgentRules{DailyLimitULXC: charge + hold - 1}, "gpt-4o", "daily limit"},
 		{"monthly limit", economy.AgentRules{MonthlyLimitULXC: charge + hold - 1}, "gpt-4o", "monthly limit"},
+		{"hourly limit", economy.AgentRules{HourlyLimitULXC: &capped}, "gpt-4o", "hourly limit"},
+		{"weekly limit", economy.AgentRules{WeeklyLimitULXC: &capped}, "gpt-4o", "weekly limit"},
 		{"allowed models", economy.AgentRules{AllowedModels: []string{"gpt-4o-mini"}}, "gpt-4o", `model \"gpt-4o\"`},
 		{"allowed providers", economy.AgentRules{AllowedProviders: []string{"anthropic"}}, "gpt-4o", `provider \"openai\"`},
 		{"active hours", economy.AgentRules{ActiveFrom: elsewhen(2), ActiveUntil: elsewhen(3)}, "gpt-4o", "may spend only between"},

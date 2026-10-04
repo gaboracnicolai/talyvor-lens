@@ -281,13 +281,13 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 		t.Fatal(err)
 	}
 	rules := "/v1/workspaces/" + ws + "/agents/" + agent.ID + "/rules"
-	const set = `{"max_per_request_ulxc":2000000,"daily_limit_ulxc":10000000,"approval_above_ulxc":1000000,
-		"allowed_models":["gpt-4o"],"allowed_providers":["openai"],"active_from":"09:00","active_until":"18:00","timezone":"Europe/Bucharest"}`
+	const set = `{"max_per_request_ulxc":2000000,"hourly_limit_ulxc":3000000,"daily_limit_ulxc":10000000,"weekly_limit_ulxc":40000000,
+		"approval_above_ulxc":1000000,"allowed_models":["gpt-4o"],"allowed_providers":["openai"],"active_from":"09:00","active_until":"18:00","timezone":"Europe/Bucharest"}`
 
 	if code, _ := call(proxyKey, http.MethodPut, rules, set); code != http.StatusForbidden {
 		t.Errorf("a proxy key set an agent's rules: %d, want 403", code)
 	}
-	for _, bad := range []string{`{"daily_limit":5}`, `{"active_from":"09:00"}`, `{"timezone":"Mars/Olympus"}`, `{"daily_limit_ulxc":-1}`} {
+	for _, bad := range []string{`{"daily_limit":5}`, `{"active_from":"09:00"}`, `{"timezone":"Mars/Olympus"}`, `{"daily_limit_ulxc":-1}`, `{"hourly_limit_ulxc":-1}`} {
 		if code, body := call(owner, http.MethodPut, rules, bad); code != http.StatusBadRequest {
 			t.Errorf("PUT %s = %d %s, want 400", bad, code, body)
 		}
@@ -298,8 +298,21 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 	code, body := call(proxyKey, http.MethodGet, rules, "")
 	var got economy.AgentRules
 	if err := json.Unmarshal([]byte(body), &got); code != http.StatusOK || err != nil ||
-		got.DailyLimitULXC != 10_000_000 || got.Timezone != "Europe/Bucharest" || len(got.AllowedModels) != 1 {
+		got.DailyLimitULXC != 10_000_000 || got.Timezone != "Europe/Bucharest" || len(got.AllowedModels) != 1 ||
+		got.HourlyLimitULXC == nil || *got.HourlyLimitULXC != 3_000_000 || got.WeeklyLimitULXC == nil || *got.WeeklyLimitULXC != 40_000_000 {
 		t.Errorf("GET rules = %d %s", code, body)
+	}
+	// B28.300: rules saved by a client that predates the hourly and weekly caps keep them; a zero clears one.
+	for _, tc := range []struct{ put, hourly, weekly string }{
+		{`{"daily_limit_ulxc":10000000}`, `"hourly_limit_ulxc":3000000`, `"weekly_limit_ulxc":40000000`},
+		{`{"hourly_limit_ulxc":0}`, `"hourly_limit_ulxc":0`, `"weekly_limit_ulxc":40000000`},
+	} {
+		if code, body := call(owner, http.MethodPut, rules, tc.put); code != http.StatusOK || !strings.Contains(body, tc.hourly) || !strings.Contains(body, tc.weekly) {
+			t.Errorf("PUT %s = %d %s, want %s and %s", tc.put, code, body, tc.hourly, tc.weekly)
+		}
+		if _, body := call(owner, http.MethodGet, rules, ""); !strings.Contains(body, tc.hourly) || !strings.Contains(body, tc.weekly) {
+			t.Errorf("after PUT %s, GET = %s, want %s and %s", tc.put, body, tc.hourly, tc.weekly)
+		}
 	}
 	if code, _ := call(owner, http.MethodPut, "/v1/workspaces/"+ws+"/agents/agt_nobody/rules", set); code != http.StatusNotFound {
 		t.Errorf("rules for an agent that is not this workspace's = %d, want 404", code)
