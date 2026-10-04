@@ -126,9 +126,10 @@ func TestHandleBedrock_SendsAWSsOwnModelIDs(t *testing.T) {
 		{"anthropic.claude-sonnet-4-6-20251101-v1:0", "anthropic.claude-sonnet-4-6"},
 		{"claude-opus-4-6", "anthropic.claude-opus-4-6-v1"},
 		// B26.11 — the 4.5 ids from AWS's model cards (checked 2026-10-03); Haiku 4.5 has no on-demand
-		// bare id on bedrock-runtime, so it goes by its global inference profile.
+		// bare id on bedrock-runtime, so it goes by an inference profile — B27.10: the US geo profile,
+		// since this proxy is configured for us-east-1.
 		{"claude-sonnet-4-5", "anthropic.claude-sonnet-4-5-20250929-v1:0"},
-		{"claude-haiku-4-5", "global.anthropic.claude-haiku-4-5-20251001-v1:0"},
+		{"claude-haiku-4-5", "us.anthropic.claude-haiku-4-5-20251001-v1:0"},
 	}
 	for _, tc := range cases {
 		for _, stream := range []bool{false, true} {
@@ -162,6 +163,43 @@ func TestHandleBedrock_SendsAWSsOwnModelIDs(t *testing.T) {
 			if w.Code != http.StatusOK || gotPath != want {
 				t.Errorf("model %q stream=%v: status %d, AWS was asked %q, want %q; body=%s", tc.model, stream, w.Code, gotPath, want, w.Body.String())
 			}
+		}
+	}
+}
+
+// B27.10 — an operator who configured an EU Region gets Haiku 4.5 through the EU geo profile, which
+// AWS keeps inside EU Regions, not the global one — on the plain path and the streaming one.
+func TestHandleBedrock_Haiku45StaysInTheConfiguredEURegionsGeography(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		var gotPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			if stream {
+				w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+				for _, ev := range []string{
+					`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`,
+					`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+					`{"type":"message_stop"}`,
+				} {
+					_, _ = w.Write(bedrockChunk(ev))
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"hi"}],"role":"assistant"}`)
+		}))
+		p := newBedrockProxy(t, srv.URL, false)
+		p.SetBedrockConfig(BedrockConfig{Region: "eu-central-1", AccessKeyID: "AKIA-TEST", SecretAccessKey: "SECRET"})
+		body := `{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":` + map[bool]string{false: "false", true: "true"}[stream] + `}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/proxy/bedrock/invoke", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		p.HandleBedrock(w, req)
+		srv.Close()
+
+		want := "/model/eu.anthropic.claude-haiku-4-5-20251001-v1:0" + map[bool]string{false: "/invoke", true: "/invoke-with-response-stream"}[stream]
+		if w.Code != http.StatusOK || gotPath != want {
+			t.Errorf("stream=%v: status %d, AWS was asked %q, want %q; body=%s", stream, w.Code, gotPath, want, w.Body.String())
 		}
 	}
 }

@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/talyvor/lens/internal/catalog"
@@ -33,9 +35,8 @@ type BedrockConfig struct {
 // anthropic.claude-sonnet-4-5-20251022-v2:0 and anthropic.claude-haiku-4-5-20241022-v1:0, which match
 // no AWS model). docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-4-5.html
 // gives anthropic.claude-sonnet-4-5-20250929-v1:0. …/model-card-anthropic-claude-haiku-4-5.html gives
-// no bare bedrock-runtime id ("requires a geo or global inference profile ID"), so Haiku 4.5 goes by
-// its global profile — the card's own example, and not tied to one geography's Regions as us./eu. are.
-// A global profile can route a request outside the configured Region.
+// no bare bedrock-runtime id ("requires a geo or global inference profile ID"), so Haiku 4.5 is listed
+// by its global profile here and BedrockModelIDForRegion swaps in the geo profile for the Region (B27.10).
 var bedrockModelMap = map[string]string{
 	"claude-opus-4-6":   "anthropic.claude-opus-4-6-v1",
 	"claude-sonnet-4-6": "anthropic.claude-sonnet-4-6",
@@ -58,6 +59,51 @@ func ModelToBedrockID(model string) (string, bool) {
 		return m.ID, true
 	}
 	return "", false
+}
+
+// bedrockGeoPrefix — B27.10. A global inference profile can route a request to any Region in the world,
+// so for a model Lens sends by its global profile, each Bedrock source Region maps to the geo profile
+// (us., eu., au., jp., in.) whose source Regions include it. That keeps the request inside the
+// operator's geography. A Region missing here has no geo profile and stays on global.
+//
+// From AWS's "Geo inference details" tables at
+// docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html (fetched
+// 2026-10-04). ca-central-1 is a source Region of the US profile on that page.
+var bedrockGeoPrefix = map[string]map[string]string{
+	"global.anthropic.claude-haiku-4-5-20251001-v1:0": {
+		"us-east-1": "us", "us-east-2": "us", "us-west-1": "us", "us-west-2": "us", "ca-central-1": "us",
+		"eu-central-1": "eu", "eu-central-2": "eu", "eu-north-1": "eu", "eu-south-1": "eu",
+		"eu-south-2": "eu", "eu-west-1": "eu", "eu-west-2": "eu", "eu-west-3": "eu",
+		"ap-southeast-2": "au", "ap-southeast-4": "au", "ap-southeast-6": "au",
+		"ap-northeast-1": "jp", "ap-northeast-3": "jp",
+		"ap-south-1": "in", "ap-south-2": "in",
+	},
+}
+
+// globalOnlyLogged remembers which (Region, model id) pairs already logged that they go by the global
+// profile, so the line appears once per process rather than on every request.
+var globalOnlyLogged sync.Map
+
+// BedrockModelIDForRegion is ModelToBedrockID for a request signed for region: a global inference
+// profile id becomes the geo profile containing region, and stays global (with a log line saying so)
+// only where AWS publishes no geo profile for that Region.
+func BedrockModelIDForRegion(model, region string) (string, bool) {
+	id, ok := ModelToBedrockID(model)
+	if !ok {
+		return "", false
+	}
+	rest, isGlobal := strings.CutPrefix(id, "global.")
+	if !isGlobal {
+		return id, true
+	}
+	if geo, ok := bedrockGeoPrefix[id][region]; ok {
+		return geo + "." + rest, true
+	}
+	if _, seen := globalOnlyLogged.LoadOrStore(region+"|"+id, struct{}{}); !seen {
+		slog.Warn("bedrock: no geo inference profile for this Region, using the global profile — requests can be served outside the Region's geography",
+			slog.String("region", region), slog.String("model_id", id))
+	}
+	return id, true
 }
 
 // TranslateToBedrockFormat converts an OpenAI-shaped chat request to the Bedrock Anthropic body (strips
