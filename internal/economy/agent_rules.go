@@ -276,6 +276,30 @@ func agentSpentSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID string
 	return spent, err
 }
 
+// CheckAgentRules judges an agent key's request that moves no LXC — one answered on its workspace's own
+// provider key under BYOK (B27.26) — against the agent's rules: paused, active hours, models, providers. The
+// amount rules pass at zero. A key attached to no agent has none. The request rides ctx (WithAgentRequest).
+func (s *DualTokenStore) CheckAgentRules(ctx context.Context, scopedKeyID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var agentID, workspaceID string
+	err = tx.QueryRow(ctx, `SELECT a.id, a.workspace_id FROM agent_account_keys k JOIN agent_accounts a ON a.id = k.agent_id
+		WHERE k.scoped_key_id = $1`, scopedKeyID).Scan(&agentID, &workspaceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("economy: agent of key: %w", err)
+	}
+	if err := enforceAgentRules(ctx, tx, workspaceID, agentID, 0, "byok"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // enforceAgentRules judges a positive movement of amount µLXC (a hold or a debit, ref its reservation or
 // request id) against the agent's rules, inside the movement's transaction with the agent's row locked.
 // A paused agent is refused first; a movement the rules let through is then watched for unusual spend (B19.6).

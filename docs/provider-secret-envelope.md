@@ -10,9 +10,16 @@ operator runbook for the key that protects it. Built 2026-08-26 (W6.10, tab-h3n8
 boot validation), its compose/`.env.example` declarations, and `Config.ProviderSecretsEnabled()` —
 the single gate every future custody path must consult.
 
-**Not shipped, on purpose:** there is no table, no route and no handler that stores a provider
+**Not shipped, on purpose:** there was no table, no route and no handler that stores a provider
 secret. W6.10's own words are *"NOTHING ACCEPTS A PROVIDER SECRET UNTIL THIS SHIPS"* — this is the
-"this". W6.4 / W6.8 build the store, and the contract they must honour is in the last section.
+"this". The contract the store must honour is in the last section.
+
+**The store, B27.26 (BYOK):** `internal/byok` keeps a workspace's keys in `workspace_provider_keys`
+(migration 0181), sealed with `workspaceID|provider` as the aad and `key_id` indexed for step 4 of the
+rotation runbook. `GET`/`PUT`/`DELETE /v1/workspaces/{wsID}/provider-keys[/{provider}]` are registered
+only while `ProviderSecretsEnabled()`; they answer with the provider and the last four characters, never
+the key. A key is accepted only from a workspace on the BYOK plan and is opened only by the serving path,
+which sends it to its own provider.
 
 ## Why envelope and not a single static key
 

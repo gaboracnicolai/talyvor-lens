@@ -139,6 +139,7 @@ type SubscriptionStatus struct {
 	CancelAtPeriodEnd bool       `json:"cancel_at_period_end"`
 	SubscriptionID    string     `json:"subscription_id,omitempty"`
 	Livemode          bool       `json:"livemode"`
+	BYOK              bool       `json:"byok"` // B27.26: the BYOK plan — own provider keys, no tokens charged
 }
 
 // GetSubscription answers "is this workspace paying". `Subscribed` is TRUE only for
@@ -156,10 +157,10 @@ func (s *Service) GetSubscription(ctx context.Context, workspaceID string) (*Sub
 		periodEnd *time.Time
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT stripe_subscription_id, status, current_period_end, cancel_at_period_end, livemode
+		SELECT stripe_subscription_id, status, current_period_end, cancel_at_period_end, livemode, byok
 		FROM subscriptions
 		WHERE workspace_id = $1 AND status IN ('trialing','active','past_due','unpaid')`, workspaceID).
-		Scan(&st.SubscriptionID, &status, &periodEnd, &st.CancelAtPeriodEnd, &st.Livemode)
+		Scan(&st.SubscriptionID, &status, &periodEnd, &st.CancelAtPeriodEnd, &st.Livemode, &st.BYOK)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &SubscriptionStatus{Subscribed: false}, nil
 	}
@@ -223,6 +224,9 @@ func (s *Service) SetCancelAtPeriodEnd(ctx context.Context, workspaceID string, 
 // ErrSamePlan is a plan change to the plan the workspace is already on.
 var ErrSamePlan = errors.New("billing: the workspace is already on that plan")
 
+// ErrBYOKPlanChange is a plan change to or from BYOK (B27.26): cancel, then subscribe to the other plan.
+var ErrBYOKPlanChange = errors.New("billing: BYOK is not changed to or from another plan — cancel, then subscribe")
+
 // planChangeAPI is the Stripe call that moves a subscription to another price (B18.14). Optional, as
 // subscriptionAPI is kept apart from stripeAPI: a test double without it still builds a Service.
 type planChangeAPI interface {
@@ -257,6 +261,11 @@ func (s *Service) ChangePlan(ctx context.Context, workspaceID, plan string) (*Su
 	}
 	if current == price {
 		return nil, fmt.Errorf("%w (%s)", ErrSamePlan, plan)
+	}
+	// B27.26: BYOK carries no allowance and the others carry one, so a prorated move between them has no
+	// allowance to move — it is a cancel and a new subscription.
+	if plan == BYOKPlan || current == s.subPlans[BYOKPlan] {
+		return nil, ErrBYOKPlanChange
 	}
 	sub, err := api.ChangeSubscriptionPrice(ctx, subID, price)
 	if err != nil {
@@ -433,9 +442,10 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 				UPDATE subscriptions
 				SET status = $1, current_period_end = $2, cancel_at_period_end = $3,
 				    price_id = COALESCE(NULLIF($4, ''), price_id),
+				    byok = CASE WHEN $4 = '' THEN byok ELSE $7 END,
 				    last_event_at = $5, updated_at = NOW()
 				WHERE stripe_subscription_id = $6`,
-				status, periodEnd(&sub), sub.CancelAtPeriodEnd, priceOf(&sub), eventAt, sub.ID); err != nil {
+				status, periodEnd(&sub), sub.CancelAtPeriodEnd, priceOf(&sub), eventAt, sub.ID, s.isBYOK(&sub)); err != nil {
 				s.fail(w, "subscription update", event.ID, err)
 				return
 			}
@@ -465,10 +475,10 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 			_, err = sp.Exec(ctx, `
 				INSERT INTO subscriptions
 					(workspace_id, stripe_subscription_id, stripe_customer_id, price_id,
-					 status, current_period_end, cancel_at_period_end, livemode, last_event_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+					 status, current_period_end, cancel_at_period_end, livemode, last_event_at, byok)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 				wsID, sub.ID, customerOf(&sub), priceOf(&sub), status, periodEnd(&sub),
-				sub.CancelAtPeriodEnd, event.Livemode, eventAt)
+				sub.CancelAtPeriodEnd, event.Livemode, eventAt, s.isBYOK(&sub))
 			if isUniqueViolation(err) {
 				_ = sp.Rollback(ctx)
 				s.log.Warn("billing webhook: workspace already has a live subscription — NOT applied",
@@ -534,7 +544,8 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 	// ⚠ ONLY WHEN THE EVENT WAS APPLIED and the subscription is actually live. A
 	// stale or refused event must not hand out an allowance — that would be the
 	// out-of-order bug wearing a different hat, and an expensive one.
-	if applied && (status == "active" || status == "trialing") {
+	// B27.26: BYOK is a platform fee, not tokens — its period grants no allowance.
+	if applied && (status == "active" || status == "trialing") && !s.isBYOK(&sub) {
 		if end := periodEnd(&sub); end != nil {
 			start := periodStart(&sub)
 			created, err := s.grantPeriod(ctx, wsID, sub.ID, start, *end, feeOf(&sub))
@@ -675,6 +686,16 @@ func customerOf(sub *stripe.Subscription) string {
 		return ""
 	}
 	return sub.Customer.ID
+}
+
+// isBYOK reports whether sub bills the BYOK Price (B27.26): by its lookup key, or as the Price this Service
+// sells as BYOK.
+func (s *Service) isBYOK(sub *stripe.Subscription) bool {
+	if sub.Items == nil || len(sub.Items.Data) == 0 || sub.Items.Data[0] == nil || sub.Items.Data[0].Price == nil {
+		return false
+	}
+	pr := sub.Items.Data[0].Price
+	return pr.LookupKey == BYOKLookupKey || (pr.ID != "" && pr.ID == s.subPlans[BYOKPlan])
 }
 
 func priceOf(sub *stripe.Subscription) string {

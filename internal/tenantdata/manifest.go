@@ -225,6 +225,7 @@ var Manifest = map[string]Entry{
 	"market_sellers":               {Delete, "B20.5: the seller's connected Stripe account and what Stripe last said of it"},
 	"market_listing_reports":       {Delete, "B20.4: keys `reporter_workspace_id`: the reports a workspace made of listings; reports of its own listings cascade with them"},
 	"workspace_passkeys":           {Delete, "B19.16: the owner's passkeys' public keys"},
+	"workspace_provider_keys":      {Delete, "B27.26: the workspace's own provider keys (BYOK), sealed; deleting the row is the end of Talyvor's custody"},
 	"webauthn_challenges":          {Delete, ""},
 	"workspace_push_subscriptions": {Delete, "B19.16: the owner's devices' push endpoints and keys"},
 	"annotator_stakes":             {Delete, ""},

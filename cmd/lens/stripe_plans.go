@@ -13,6 +13,11 @@ type planFinder interface {
 	PlanPrices(ctx context.Context) (map[string]string, error)
 }
 
+// byokPriceEnsurer creates the BYOK test-mode Price when the account has none (satisfied by *billing.LiveStripe).
+type byokPriceEnsurer interface {
+	EnsureBYOKPrice(ctx context.Context) error
+}
+
 // sellablePlans is the named plans a Service with this Stripe key sells (B17.21): the configured ones, or — on
 // a Stripe TEST-MODE key with none configured — the plan Prices its account holds under the lookup keys B13.1
 // gave them (billing.PlanLookupKeys), so a test user can subscribe on a deployment whose env names no plan. A
@@ -23,6 +28,13 @@ func sellablePlans(ctx context.Context, configured map[string]string, key string
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	// B27.26: BYOK's $199 test-mode Price is made here when the account lacks it, so BYOK is on sale beside
+	// Plus, Pro and Max without a step in the Stripe dashboard.
+	if e, ok := s.(byokPriceEnsurer); ok {
+		if err := e.EnsureBYOKPrice(ctx); err != nil {
+			slog.Warn("billing: the BYOK test-mode Price could not be created — BYOK is not sold", "err", err)
+		}
+	}
 	found, err := s.PlanPrices(ctx)
 	if err != nil {
 		slog.Warn("billing: "+env+" is not set and Stripe's plan Prices could not be read — no plan is sold", "err", err)
