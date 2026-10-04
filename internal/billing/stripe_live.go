@@ -215,6 +215,21 @@ func (l *LiveStripe) PlanPrices(ctx context.Context) (map[string]string, error) 
 	return plans, it.Err()
 }
 
+// PriceUSDCents is what one unit of a Price bills, in US cents (B28.439) — the fee a subscriber to it is
+// granted their included usage for (feeOf). 0 for a Price that is not USD or has no fixed amount.
+func (l *LiveStripe) PriceUSDCents(ctx context.Context, priceID string) (int64, error) {
+	params := &stripe.PriceParams{}
+	params.Context = ctx
+	p, err := price.Client{B: l.backend(), Key: l.key}.Get(priceID, params)
+	if err != nil {
+		return 0, err
+	}
+	if p.Currency != stripe.CurrencyUSD || p.UnitAmount <= 0 {
+		return 0, nil
+	}
+	return p.UnitAmount, nil
+}
+
 // SubscriptionJSON is the subscription as Stripe serialises it (B17.21): what customer.subscription.created
 // carries, for a completed subscription checkout to record it the same way.
 func (l *LiveStripe) SubscriptionJSON(ctx context.Context, subscriptionID string) (json.RawMessage, error) {

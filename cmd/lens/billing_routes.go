@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -216,5 +218,25 @@ func newSubscribeHandler(svc *billing.Service) http.HandlerFunc {
 			return
 		}
 		writeJSONOK(w, http.StatusOK, map[string]string{"url": url})
+	}
+}
+
+// newPlansHandler — GET /v1/billing/plans (B28.439): public and credential-free, each plan's id, the price
+// Stripe bills it at (usd_cents) and the usage it includes this month (included_ulxc) — what a new
+// subscriber to it is granted. Registered only where subscriptions are sold; it describes the plans the real
+// workspaces' Service sells, or the test-mode Service's on a deployment that sells only those.
+func newPlansHandler(b billingRouter) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		svc := b.live
+		if !svc.SellsSubscriptions() && b.test != nil {
+			svc = b.test
+		}
+		plans, err := svc.Plans(req.Context(), time.Now())
+		if err != nil {
+			slog.Error("billing: the public plans read failed", "err", err)
+			writeJSONErr(w, http.StatusBadGateway, "the plans could not be read")
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"plans": plans})
 	}
 }

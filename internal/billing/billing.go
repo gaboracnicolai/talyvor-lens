@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -114,6 +115,7 @@ type Service struct {
 	subStripe subscriptionAPI
 	subPrice  string
 	subPlans  map[string]string // B13.1: plan name → Stripe Price id
+	planFees  sync.Map          // B28.439: Stripe Price id → its USD cents (plans.go)
 	// B13.2 — earnings off the next bill (bill_credit.go). Both nil ⇒ invoice.created is ignored.
 	billLens     lensDebiter
 	billInvoices invoiceCrediter
