@@ -51,6 +51,10 @@ type Agent struct {
 	Handle string `json:"handle,omitempty"`
 	// PotsULXC is what the agent keeps aside in its pots (B22.7): its, but not spendable until moved back.
 	PotsULXC int64 `json:"pots_ulxc"`
+	// B28.298: what the agent is for, in its owner's words, and when it was archived — swept to zero, its
+	// keys revoked, and refused every movement of its own from then on (agent_lifecycle.go).
+	Description string     `json:"description"`
+	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 }
 
 // AgentBook reconciles a workspace with its agents: WorkspaceBalanceULXC (lxc_balances) =
@@ -282,6 +286,9 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 		if err := requireOwner(ctx, tx, agentID); err != nil {
 			return 0, err
 		}
+		if err := requireNotArchived(ctx, tx, agentID); err != nil {
+			return 0, err
+		}
 		wsBal, _, _, err := readLXCBalance(ctx, tx, workspaceID)
 		if err != nil {
 			return 0, err
@@ -383,7 +390,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 		}
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id, COALESCE(a.handle, ''),
+		SELECT a.id, a.name, a.description, a.archived_at, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id, COALESCE(a.handle, ''),
 		       COALESCE((SELECT b.balance_ulxc FROM agent_account_balances b WHERE b.workspace_id = a.workspace_id AND b.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
 		                   AND p.kind IN ('spend', 'hold', 'settle', 'release', 'card')), 0)::bigint,
@@ -398,7 +405,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 	for rows.Next() {
 		var a Agent
 		var spendLegs int64
-		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.Handle, &a.BalanceULXC, &spendLegs, &a.Keys, &a.PotsULXC); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Description, &a.ArchivedAt, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.Handle, &a.BalanceULXC, &spendLegs, &a.Keys, &a.PotsULXC); err != nil {
 			return book, err
 		}
 		a.SpentULXC = -spendLegs

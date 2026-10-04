@@ -50,15 +50,18 @@ type AgentSpendAlert struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
-// refuseIfPaused refuses any movement of an agent that is paused, on its own or with every agent in its
-// workspace (B19.7).
+// refuseIfPaused refuses any movement of an agent that is archived (B28.298) or paused, on its own or with
+// every agent in its workspace (B19.7).
 func refuseIfPaused(ctx context.Context, tx pgx.Tx, agentID string) error {
-	var pausedAt, allPausedAt *time.Time
+	var pausedAt, allPausedAt, archivedAt *time.Time
 	var reason, allReason string
-	if err := tx.QueryRow(ctx, `SELECT a.paused_at, a.paused_reason, w.paused_at, COALESCE(w.reason, '')
+	if err := tx.QueryRow(ctx, `SELECT a.paused_at, a.paused_reason, w.paused_at, COALESCE(w.reason, ''), a.archived_at
 		FROM agent_accounts a LEFT JOIN agent_workspace_pauses w ON w.workspace_id = a.workspace_id WHERE a.id = $1`,
-		agentID).Scan(&pausedAt, &reason, &allPausedAt, &allReason); err != nil {
+		agentID).Scan(&pausedAt, &reason, &allPausedAt, &allReason, &archivedAt); err != nil {
 		return fmt.Errorf("economy: agent paused: %w", err)
+	}
+	if archivedAt != nil {
+		return ruleRefusal("the agent is archived")
 	}
 	if allPausedAt != nil {
 		if allReason == "" {

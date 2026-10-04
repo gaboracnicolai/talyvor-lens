@@ -40,6 +40,8 @@ func openAPIWalletSchemas() map[string]any {
 				"owner_user_id": map[string]any{"type": "string", "description": "the person answerable for what it spends"},
 				"verified":      map[string]any{"type": "boolean"},
 				"handle":        map[string]any{"type": "string", "description": "its @handle, once its owner picks one"},
+				"description":   map[string]any{"type": "string", "description": "what the agent is for, in its owner's words"},
+				"archived_at":   map[string]any{"type": "string", "format": "date-time", "nullable": true, "description": "set once the agent is archived: swept to zero, its keys revoked"},
 			},
 		},
 		"AgentBook": map[string]any{
@@ -199,6 +201,24 @@ func openAPIWalletPaths() map[string]any {
 				[]map[string]any{ws},
 				map[string]any{"201": ok("the new agent, balance zero", ref("Agent")), "400": map[string]any{"description": "no name, or no owner"}}),
 				body(obj([]string{"name"}, map[string]any{"name": str, "owner_user_id": str}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}": map[string]any{
+			"patch": withBody(op("Rename or describe the agent",
+				"Owner or admin. Either field or both; a name cannot be blank and a description is at most 500 characters.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the agent", ref("Agent")), "400": map[string]any{"description": "a blank name, a description too long, or an unknown field"}, "404": map[string]any{"description": "no such agent"}}),
+				body(obj(nil, map[string]any{"name": str, "description": str}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/archive": map[string]any{
+			"post": op("Archive the agent",
+				"Owner or admin. In one step: the agent's whole balance goes back to the workspace as one withdraw, its proxy keys are revoked, its top-up and schedules stop. It stays listed, with archived_at, and its statement is kept; it can no longer be funded or move money of its own.",
+				[]map[string]any{ws, agent},
+				map[string]any{
+					"200": ok("what archiving did", obj(nil, map[string]any{"agent_id": str, "swept_ulxc": map[string]any{"type": "integer", "format": "int64"},
+						"revoked_keys": map[string]any{"type": "array", "items": str}, "archived_at": map[string]any{"type": "string", "format": "date-time"}})),
+					"404": map[string]any{"description": "no such agent"},
+					"409": map[string]any{"description": "already archived, or LXC is still kept in its pots"},
+				}),
 		},
 		"/v1/workspaces/{wsID}/agents/{agentID}/keys": map[string]any{
 			"post": withBody(op("Issue the agent a proxy key of its own",

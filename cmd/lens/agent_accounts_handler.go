@@ -95,11 +95,20 @@ import (
 //
 //	POST /v1/workspaces/{wsID}/agents/{id}/claim             the signed-in person becomes its owner
 //
+// B28.298 — an agent's lifecycle (internal/economy/agent_lifecycle.go):
+//
+//	PATCH /v1/workspaces/{wsID}/agents/{id}   {"name"?, "description"?}   rename it, describe it; returns the agent
+//	POST  /v1/workspaces/{wsID}/agents/{id}/archive   retire it: its whole balance back to the workspace in one
+//	                                                  withdraw entry, its keys revoked, its top-up and schedules
+//	                                                  stopped; it is listed with archived_at from then on
+//
 // Mounted in the authed group, so {wsID} is bound to the caller's credential. Moving money, creating
 // agents and issuing keys take the workspace's owner or an admin; reading takes any of its credentials.
 
 type agentBank interface {
 	CreateAgent(ctx context.Context, workspaceID, name, ownerUserID string) (economy.Agent, error)
+	UpdateAgent(ctx context.Context, workspaceID, agentID string, name, description *string) (economy.Agent, error)
+	ArchiveAgent(ctx context.Context, workspaceID, agentID string) (economy.AgentArchive, error)
 	ClaimAgent(ctx context.Context, workspaceID, agentID, userID string) error
 	AttachAgentKey(ctx context.Context, workspaceID, agentID, scopedKeyID string) error
 	FundAgent(ctx context.Context, workspaceID, agentID string, amount int64) (int64, error)
@@ -181,6 +190,42 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		}
 		writeJSONOK(w, http.StatusCreated, a)
 	}))
+	r.Patch("/v1/workspaces/{wsID}/agents/{agentID}", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Name        *string `json:"name"`
+			Description *string `json:"description"`
+		}
+		dec := json.NewDecoder(req.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&in); err != nil || (in.Name == nil && in.Description == nil) {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"name": "<new name>", "description": "<what it is for>"}, either or both`)
+			return
+		}
+		a, err := bank.UpdateAgent(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in.Name, in.Description)
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrAgentDetails):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, a)
+		}
+	}))
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/archive", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		out, err := bank.ArchiveAgent(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"))
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrAgentArchived), errors.Is(err, economy.ErrAgentPotsHeld):
+			writeJSONErr(w, http.StatusConflict, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, out)
+		}
+	}))
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/keys", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
 		wsID, agentID := chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID")
 		var in struct {
@@ -196,12 +241,18 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		found := false
+		found, archived := false, false
 		for _, a := range book.Agents {
-			found = found || a.ID == agentID
+			if a.ID == agentID {
+				found, archived = true, a.ArchivedAt != nil
+			}
 		}
 		if !found {
 			writeJSONErr(w, http.StatusNotFound, economy.ErrAgentNotFound.Error())
+			return
+		}
+		if archived {
+			writeJSONErr(w, http.StatusConflict, economy.ErrAgentArchived.Error())
 			return
 		}
 		raw, key, err := keys.CreateAPIKey(req.Context(), wsID, in.Name, []string{"proxy"}, nil)
@@ -238,7 +289,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			switch {
 			case errors.Is(err, economy.ErrAgentNotFound):
 				writeJSONErr(w, http.StatusNotFound, err.Error())
-			case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless):
+			case errors.Is(err, economy.ErrAgentFunds), errors.Is(err, economy.ErrAgentOwnerless), errors.Is(err, economy.ErrAgentArchived):
 				writeJSONErr(w, http.StatusConflict, err.Error())
 			case err != nil:
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
