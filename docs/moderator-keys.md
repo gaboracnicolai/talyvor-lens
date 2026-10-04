@@ -1,7 +1,7 @@
 # Moderator keys (B20.13)
 
-A moderator key lets the web app run the marketplace review queue, and retry a parked use, without
-holding Lens admin. It can do exactly four things:
+A moderator key lets the web app run the marketplace review queue, retry a parked use, and record
+operator actions in the audit trail, without holding Lens admin. It can do exactly five things:
 
 | Route | What it does |
 |---|---|
@@ -9,6 +9,7 @@ holding Lens admin. It can do exactly four things:
 | `POST /v1/admin/marketplace/listings/{id}/approve` | keep a listing up and resolve its reports |
 | `POST /v1/admin/marketplace/listings/{id}/takedown` `{"reason": "…"}` | take it down and refund its buyers |
 | `POST /v1/admin/marketplace/parked-uses/{id}/retry` | put a use Stripe refused too often back on the next metering run (B27.19) |
+| `POST /v1/admin/operator-audit/record` `{"action": "…", "target": "…", "detail": "…", "at": "RFC 3339"}` | append one operator action to the audit trail, under the operator `X-Talyvor-Operator` names; `at` is optional and must be within the last 24 hours (B27.28) |
 
 Every other admin route answers **403** to it, and so does every workspace route. A revoked key
 answers **401**.

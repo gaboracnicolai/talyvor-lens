@@ -46,6 +46,8 @@ var operatorReadable = map[string]string{
 	"/v1/admin/distill/attribution":       "distill attribution rows. distillattrib.Reader is Query-only by construction.",
 	"/v1/admin/billing/purchases":         "the purchases column of the operator table.",
 	"/v1/admin/marketplace/parked-uses":   "B26.3: billed marketplace uses Stripe refused too often to retry, with its reason — for an operator to see to. market.Store.ParkedUses is Query-only.",
+	"/v1/admin/operator-audit":            "B27.28: the operator audit trail, filtered — the Operator screen shows it. operatoraudit.Store.List is Query-only.",
+	"/v1/admin/operator-audit/export":     "B27.28: the same trail as a CSV download. operatoraudit.Store.List is Query-only.",
 	"/v1/admin/pool-royalty/detect":       "self-dealing detection read. Query-only reader, explicitly NOT economy-gated so forensics survive the kill switch.",
 	"/v1/admin/pool-royalty/resolve":      "the resolution view of the same detection. Query-only.",
 	"/v1/admin/pool-royalty/margin":       "margin observability. Query-only.",
@@ -78,6 +80,7 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/marketplace/listings/{listingID}/approve":         "B20.4: releases a held listing to every buyer.",
 	"/v1/admin/marketplace/listings/{listingID}/takedown":        "B20.4: TAKES A LISTING DOWN AND REFUNDS ITS BUYERS. Moves money.",
 	"/v1/admin/marketplace/parked-uses/{useID}/retry":            "B27.19: puts a parked use back in the metering queue, onto its buyer's bill. Moves money.",
+	"/v1/admin/operator-audit/record":                            "B27.28: appends to the append-only operator audit trail. A write is a write even when it is not money; the web app writes it on its moderator key.",
 
 	// ⚠ MEASURED, AND THE PROVISIONAL CLASSIFICATION WAS WRONG. The W1.3 groundwork report listed
 	// attest/{output_id} as provisionally READ because it is registered with r.Handle and reads

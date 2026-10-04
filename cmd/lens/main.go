@@ -90,6 +90,7 @@ import (
 	"github.com/talyvor/lens/internal/modelwatch"
 	"github.com/talyvor/lens/internal/moderatorkey"
 	"github.com/talyvor/lens/internal/nodelatency"
+	"github.com/talyvor/lens/internal/operatoraudit"
 	"github.com/talyvor/lens/internal/opsusage"
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/outputverify"
@@ -2234,6 +2235,13 @@ func run() error {
 	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
 	// B27.19 — an operator retries one: the global key or a moderator key, recorded under the operator's name.
 	r.Post("/v1/admin/marketplace/parked-uses/{useID}/retry", requireAdminOrModerator(authManager, moderatorKeys, newMarketParkedUseRetryHandler(marketStore)))
+	// B27.28 — the operator audit trail: the web app records each operator action on its moderator key
+	// (naming the operator), operators read it back filtered or as CSV. Append-only in the database (0182).
+	// operator_audit_handler.go.
+	operatorAudit := operatoraudit.NewStore(pool)
+	r.Post("/v1/admin/operator-audit/record", requireAdminOrModerator(authManager, moderatorKeys, newOperatorAuditRecordHandler(operatorAudit)))
+	r.Get("/v1/admin/operator-audit", requireAdminOrOperatorRead(authManager, newOperatorAuditListHandler(operatorAudit)))
+	r.Get("/v1/admin/operator-audit/export", requireAdminOrOperatorRead(authManager, newOperatorAuditExportHandler(operatorAudit)))
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
 	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
 	// unchanged).
