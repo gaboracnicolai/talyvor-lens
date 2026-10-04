@@ -53,7 +53,8 @@ func TestPhase4a_LiveEconomy_Acceptance(t *testing.T) {
 	}
 	ringDet := NewRingDetector(pool, "pool_royalty_mints")
 	clearer := NewSettlementClearer(ringDet, pool, "pool_royalty_mints", failClosed, 24*time.Hour)
-	time.Sleep(4 * time.Millisecond) // the clearer clears only rows past their holdback (B27.14)
+	// the clearer clears only rows past their holdback (B27.14)
+	time.Sleep(4 * time.Millisecond)
 	if _, err := clearer.RunOnce(ctx); err != nil { // examine (clean) → held→cleared
 		t.Fatalf("clearer: %v", err)
 	}

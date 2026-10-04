@@ -101,7 +101,7 @@ func TestSubscription_PlanChange_PlusToPro_ProratesAndMovesTheAllowance(t *testi
 	}
 
 	// Stripe's update event records Pro and moves the allowance — once, though it is delivered twice.
-	body, sig = signedAt(secret, "evt_plan_updated", "customer.subscription.updated", now,planSub(subID, ws, "price_pro", 5000, start, end))
+	body, sig = signedAt(secret, "evt_plan_updated", "customer.subscription.updated", now, planSub(subID, ws, "price_pro", 5000, start, end))
 	for range 2 {
 		if code := postEvent(svc, body, sig); code != http.StatusOK {
 			t.Fatalf("updated = %d", code)
