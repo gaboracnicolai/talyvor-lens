@@ -2,6 +2,22 @@
 
 Index of every doc shipped with the repo. The main [project README](../README.md) lives at the repo root.
 
+## Agent Wallets
+
+Every AI agent gets a wallet — a balance, spending rules, approvals, a card and a live statement — and
+Lens enforces the rules before the model call or payment.
+
+- [Agent wallet quickstart](../README.md#agent-wallet-quickstart) — create an agent, fund it, give it rules and its own key, read its statement.
+- [Sending and requesting money between agents](agent-transfers.md)
+- [Escrow](escrow.md) — credits held until the deal is done.
+- [Pots](agent-pots.md) — goals, budgets and reserves inside one agent's wallet.
+- [Agent cards](agent-cards.md) — a virtual card whose every purchase is judged by the agent's rules (test mode).
+- [Cash-out](cash-out.md) — credits back into money, behind a licensed partner.
+
+## The LENS token economy
+
+- [The LENS token economy](token-economy.md) — the token, mining, the miner binaries, and what a fresh deployment has on by default. A closed test underneath the wallets.
+
 ## Migration guides
 
 - [Migrate from Helicone](migrate-from-helicone.md) — 1-line change. Helicone wire format (URL + headers) accepted as-is via the compatibility middleware.

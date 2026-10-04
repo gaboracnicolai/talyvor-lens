@@ -1,5 +1,7 @@
 # Talyvor — Work Coordination
 
+**The product:** Agent Wallets — every AI agent gets a wallet (a budget, spending rules, approvals, a card and a live statement), and Lens enforces the rules before the model call or payment. How Talyvor earns from it is in [Product narrative (v4)](#product-narrative-v4-4-oct-2026--agent-wallets) below.
+
 **Purpose:** two people build in these repos in parallel, each running Claude / Claude Code. Our Claudes share no memory and cannot see each other's work — **GitHub is the only place our work meets, so GitHub is the single source of truth.** This file is how we avoid double work and handle the seams where our work touches.
 
 **Last synced:** _(update at each session start)_
@@ -81,16 +83,19 @@ Most of the time we're in different code and won't collide. Collisions happen at
 
 ---
 
-## Product-narrative reframe (v3) — what it changes for the build
-The investor/client deck + 8-yr model were reworked to v3. Three shifts that touch the code:
-1. ~~**Savings are stated net of our savings-share fee** on every customer-facing surface — gross inference reduction 56–90% → customer net ~40–65%.~~ **RETIRED — this was the inverted model, and it is the last place it survived.** There is no savings-share fee: `grep -ri 'savings.share'` over `internal/` and `cmd/` returns nothing outside this file. **Every bill reduction is entirely the customer's.** Talyvor earns from exactly one event — a CROSS-TENANT pooled cache hit — and it earns there by *paying the contributor*, not by taking a cut of anyone's saving:
+## Product narrative (v4, 4 Oct 2026) — Agent Wallets
+**Talyvor's main product is Agent Wallets: every AI agent gets a wallet — a budget, spending rules, approvals, a card and a live statement — and Lens enforces the rules before the model call or payment.** That is the main line for every build decision in this repo. The Marketplace is where agents spend; Chat is the chat app and the wallet console; Talyvor Edge makes the rules unbypassable in a customer's own cluster. Pooling is ONE cost-saving feature under the wallet, never the pitch. The token economy (LENS, mining) is a closed test underneath — [docs/token-economy.md](docs/token-economy.md).
 
-   - **Own-cache hit → FREE.** The pre-serve hold is released in full (`resolveCacheReservation` → `releaseReservation`). Charging a workspace for its own repeat would be pure extraction, and the code says so.
-   - **Cross-tenant pooled hit →** the requester is billed `avoided_COGS`, *the value received*; the contributor is minted `s × avoided_COGS` (`s = 0.5`, `LENS_POOL_ROYALTY_SHARE`); Talyvor keeps `(1−s)`.
-   - **Everything else** (routing to a cheaper model, distillation, compression, an exact-cache hit) reduces the bill and Talyvor takes **nothing** from the reduction.
+What it changes for the build:
+1. **Lens is the enforcement point.** An agent spends from its wallet — model calls on a key attached to it (`cmd/lens/agent_accounts_handler.go`), payments and card purchases from its balance — and its rules are judged inside the hold or debit of that key, under the agent's row lock (`internal/economy/agent_rules.go`) — so they bind buffered and streamed requests, card authorizations and agent payments alike, and a refused request never reaches the provider. A new path that spends money must go through that seam, or it is a way around the wallet.
+2. **Talyvor earns four ways, and a customer's saving is not one of them:**
+   - **Plans** — the Plus, Pro and Max subscriptions (Stripe lookup keys `talyvor_plus_monthly`, `talyvor_pro_monthly`, `talyvor_max_monthly`; `billing.PlanLookupKeys`). Their prices live in Stripe, not in this repo.
+   - **BYOK** — a workspace brings its own provider keys and pays a platform fee instead of tokens: **$199 a month**, Nicolai's decision of 4 Oct 2026 (`billing.BYOKUSDCents`, lookup key `talyvor_byok_monthly`).
+   - **The marketplace fee** — a seller keeps every dollar of their first US$1M of lifetime sales and 85% past it (`market.SellerShare`); Stripe's Connect fees are passed through at cost and are not revenue.
+   - **The pool margin** — on a cross-tenant pooled cache hit the requester is billed `avoided_COGS`, the contributor is minted `s × avoided_COGS` (`s = 0.5`, `LENS_POOL_ROYALTY_SHARE`), and Talyvor keeps `(1−s)`.
 
-   Any dashboard/ROI surface should therefore show **one** number — what the customer was charged — because there is no gross/net split to disclose. The 56–90% / ~40–65% / ~99% figures were deck numbers; nothing in the tree computes them, and the README's own 60–80% was removed for the same reason (see the savings section there). Do not reintroduce a percentage that no code produces. *(code-truth correction 2026-07: verified against `internal/proxy/proxy.go` recordCacheServe + `mintPooledRoyalty`, and the absence of any fee in the billing path.)*
-2. **Moat = cross-user semantic reuse + cross-provider routing + DISTILL + open-model migration** — explicitly NOT single-provider prefix caching (providers now do that natively, free). Pool-B value comes from *cross-tenant* reuse.
+   **Every other bill reduction is entirely the customer's.** There is no savings-share fee (`grep -ri 'savings.share'` over `internal/` and `cmd/` returns nothing outside this file). An **own-cache hit is FREE** — the pre-serve hold is released in full (`resolveCacheReservation` → `releaseReservation`); routing to a cheaper model, distillation, compression and an exact-cache hit reduce the bill and Talyvor takes **nothing** from the reduction. Any dashboard/ROI surface therefore shows **one** number — what the customer was charged — because there is no gross/net split to disclose. The old deck's 56–90% / ~40–65% / ~99% figures were never computed by anything in the tree, and the README's own 60–80% was removed for the same reason (see the savings section there). Do not reintroduce a percentage that no code produces. *(code-truth correction 2026-07: verified against `internal/proxy/proxy.go` recordCacheServe + `mintPooledRoyalty`, and the absence of any fee in the billing path.)*
+3. **Cost-saving moat under the wallet = cross-user semantic reuse + cross-provider routing + DISTILL + open-model migration** — explicitly NOT single-provider prefix caching (providers now do that natively, free). Pool-B value comes from *cross-tenant* reuse.
 **⚠ DEFAULT-ON NOTE (code-truth correction 2026-07) — four flags this file repeatedly calls "default off" are now DEFAULT-ON.** `config.go` sets `*f.p = true` for all four in the Phase-4a block (env-overridable, and still force-off'd when `LENS_ECONOMY_ENABLED=false`):
 
 | Flag | This file said | Actual |
@@ -102,7 +107,7 @@ The investor/client deck + 8-yr model were reworked to v3. Three shifts that tou
 
 The comment in `config.go` explains why: "the THREE live traffic mints ship DEFAULT-ON for the closed test". `LENS_ECONOMY_ENABLED` itself is also default TRUE — which this file already states correctly under U3, while the README claimed the opposite ("ships dark") until it was corrected. **What actually keeps a fresh deployment from minting is not a flag but the unconditional verified-to-earn gate** (`SetMintVerifier`, no conditional): the economy is armed by default and mints nothing until a workspace has a completed real-money LXC purchase or an admin vouch. Any statement in this file of the form "inert behind default-false flags" should be read against that.
 
-3. **Enterprise data governance is a hard precondition for cross-user pooling** (private-by-default, opt-in, PII-strip, isolation, deletion, TTL, audit). That is exactly what Phase-2 Stage 2.0 builds, sitting on top of the collaborator's tenant isolation (#84).
+4. **Enterprise data governance is a hard precondition for cross-user pooling** (private-by-default, opt-in, PII-strip, isolation, deletion, TTL, audit). That is exactly what Phase-2 Stage 2.0 builds, sitting on top of the collaborator's tenant isolation (#84).
 
 ---
 

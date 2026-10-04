@@ -1,11 +1,42 @@
 # Talyvor — Roadmap & Status
 
-_Status board for the Talyvor build. COORDINATION.md remains the operational cross-branch seam doc; this is the strategic/status view. Last updated at main 5d52ea7 — Phase-2 BUILD COMPLETE (through LXC gating + PoVI-resolved); what remains before flip-on is not code._
+_Status board for the Talyvor build. COORDINATION.md remains the operational cross-branch seam doc; this is the strategic/status view. Rewritten 4 Oct 2026 around Agent Wallets; the token-economy phases that came first are kept below as history._
 
-## How to read this
+## The main line — Agent Wallets
+
+**Every AI agent gets a wallet — a budget, spending rules, approvals, a card and a live statement — and Lens enforces the rules before the model call or payment.** The Marketplace is where agents spend; Chat is the chat app and the wallet console; Talyvor Edge makes the rules unbypassable in a customer's own cluster. Pooling is one cost-saving feature under the wallet, never the pitch.
+
+This is the parked "agent-settlement-rail" option at the bottom of this file, promoted: the LENS ledger generalised into agent-to-agent settlement and controls, with the moat in the controls layer.
+
+**Built, on main in Lens** (the routes: `cmd/lens/agent_accounts_handler.go`; the walkthrough: the README's agent wallet quickstart):
+- An account per agent, with its own keys; fund and withdraw (B19.1). A workspace's own spending cannot use what its agents hold (B19.13).
+- Spending rules enforced before the provider is called — per request, day and month, an approval amount, allowed models, providers and marketplace listings, active hours (B19.2, B19.14).
+- Approvals, signed with a passkey and announced by web push (B19.16); every agent tied to a verified owner (B19.11).
+- Agents pay each other (B19.3) and other companies' agents and listings through the marketplace (B19.15); send and request between any agents (B22.3); scheduled payments and automatic top-ups (B19.8, B19.17).
+- Statements an enterprise can audit, JSON or CSV, per agent or per workspace (B19.5).
+- Unusual-spend alerts, pause one or every agent, the month-end forecast (B19.6, B19.7).
+- Agent cards in Stripe Issuing test mode, settled against the agent's balance (B19.12, B19.25).
+- Escrow, pots, a company credit line, loans between companies, cash-out behind a licensed partner, simulated investing (B22.4–B22.9).
+- Agents drive all of it themselves through the API, both SDKs and MCP tools (B19.9, B19.18, B22.11).
+
+**Next** — the B28 series: the product's own pages, screens, docs and specs say wallets first (B28.1–B28.18), then the wallet itself grows — a stored running balance, rename and archive, hourly, weekly and per-model caps, a request-rate rule, payee allow and block lists (B28.20 onward). The queue of record is `~/talyvor-queue/BUILD.md`.
+
+## How Talyvor earns
+
+Four lines. A customer's saving is not one of them — every bill reduction from caching, routing, distillation or compression is entirely the customer's (COORDINATION.md, "Product narrative (v4)").
+1. **Plans** — Plus, Pro and Max subscriptions (`billing.PlanLookupKeys`; prices live in Stripe).
+2. **BYOK** — bring your own provider keys and pay a **$199 a month** platform fee instead of tokens (Nicolai's decision, 4 Oct 2026; `billing.BYOKUSDCents`).
+3. **The marketplace fee** — a seller keeps all of their first US$1M of lifetime sales and 85% past it (`market.SellerShare`).
+4. **The pool margin** — on a cross-tenant pooled cache hit Talyvor keeps `(1−s)` of the `avoided_COGS` the requester is billed; the contributor is minted `s` (0.5 by default).
+
+## History — the token-economy build (kept for the record)
+
+What came before the wallets, unchanged. The LENS token itself is described in [docs/token-economy.md](docs/token-economy.md).
+
+### How to read this
 The build runs as a relay: prompts composed, run in Claude Code, reviewed, merged. The unit of progress is a "stage" (recon → build → review → merge), not calendar time — wall-clock depends on relay cadence, not engineering size. Effort below is in stages and relative size, deliberately not dates.
 
-## Phase 2 — LENS token economy  [BUILD COMPLETE]
+### Phase 2 — LENS token economy  [BUILD COMPLETE]
 
 Done & merged on main (all inert behind LENS_POOL_ROYALTY_MINTING_ENABLED=false):
 - DISTILL — complete.
@@ -41,7 +72,7 @@ Decisions on record (resolved — kept for history):
 
 Minting flip-on gate: supply-accounting precondition LIFTED by 2.2. Remaining: anti-gaming machinery complete (2.3 arc), business case, external audit. Minting stays inert until all land.
 
-## Phase 3 — deepen the mineable primitives  [IN PROGRESS]
+### Phase 3 — deepen the mineable primitives  [IN PROGRESS]
 
 Pool-B mines ONE thing today (served cross-tenant cached responses). Phase 3 adds the others.
 
@@ -55,7 +86,7 @@ Pool-B mines ONE thing today (served cross-tenant cached responses). Phase 3 add
 - **BUILT + INERT (behind default-false flags): the distill-reuse royalty (the S4 mint for distill artifacts).** Both former reopening conditions have since been met: (a) **vision-OCR result caching LANDED** — `internal/distill/orchestrator.go` now caches OCR (`CachedOCR` / `MarshalCachedOCR` / `ocrHitSavings`; pooled OCR write `internal/proxy/distill_integration.go:329`), so the avoided-COGS basis is real, not ≈0 — and the mint was then built. The full path is on main: avoided-COGS basis (0061 `distill_royalty_basis`), the gated `DistillMinter` over `distill_royalty_mints` (0062), adjudication (0063) + margin view (0064), plus caps + detector + resolver + revoke/adjudication — **full parity with the cache royalty's anti-gaming + observability set** (BUILD_STATE.md §A3). It is **INERT behind `LENS_DISTILL_POOLABLE_ENABLED` + `LENS_POOL_ROYALTY_MINTING_ENABLED` (both default-false + kill-switch-force-off'd) + per-WS dual consent** — armed exactly like the cache royalty, gated only by the CONSOLIDATED FLIP-ON CHECKLIST. Condition (b) — material cross-tenant reuse in prod (from `distill_serve_attribution`) — remains the *economic* go-signal for flipping the flag, not a build prerequisite.
 - **Rationale (updated):** the original park-the-build rationale (no surplus behind ≈0 avoided cost) was dissolved when OCR caching landed — the avoided-COGS basis is now real. The build is done + inert; the remaining gate is the **flip-on** (the CONSOLIDATED FLIP-ON CHECKLIST + condition (b) prod-reuse evidence), consistent with the descriptive-first discipline (build mint-free, arm behind flags, flip only on audit + economic signal).
 
-## WorkTier — work classification  [CLASSIFIER BUILT (descriptive/inert, default-off); consumers sequenced]
+### WorkTier — work classification  [CLASSIFIER BUILT (descriptive/inert, default-off); consumers sequenced]
 
 **STATUS — the descriptive classifier is BUILT on main (default-off, inert).** `internal/worktier`: a pure `Classify` over post-serve NON-CONTENT signals → a 4-axis `WorkTier{size, cost, complexity, sensitivity}`, persisted per-served-request to `work_tier_observations` (migration 0059) **with the RAW signal behind every axis** (input/output tokens, cost_usd, complexity_score [0,5], pii_detected, guardrail_fired) so thresholds/the scorer are re-bucketable offline — freeze the interface, not the implementation. Wired post-flush in the proxy (shares the pattern-capture obsLimiter, best-effort, void), gated `LENS_WORKTIER_ENABLED` (default false; a CAPABILITY flag, NOT economy-killswitched). **Mint-free by construction** (the package imports no minter; the store holds only an Exec/Query handle — no Begin, no ledger — pinned by an import-guard test). A per-workspace, model-sliceable read aggregate is built, and is now **served read-only** via the admin analytics endpoint `GET /v1/admin/worktier/distribution` (#235 `3396781`; `requireAdmin` → 401, **not** economy-gated; `workspace_id` required → 400, tenant-scoped; money-decoupled — see BUILD_STATE.md §A7). Complexity is the one softer axis (an evolving scorer, advisory).
 
@@ -82,7 +113,7 @@ The three touchpoints:
 
 Suite consumption: Track — spend/quality BY WORK TIER as the flagship analytics primitive; Docs/Code — tier-aware routing defaults per each product's characteristic traffic profile; frontend — tiers as the shared display vocabulary. SECONDARY: the volume-profile aggregate is a future Sybil-signal input (a fleet of workspaces with identical volume-profiles is a corroboration-fraud tell) — cross-ref the routing-pattern earning flip-on gate (d) in COORDINATION.md.
 
-## After Phase 2 — locked order (do not reorder)
+### After Phase 2 — locked order (do not reorder)
 1. Phases 3–5 (largely unscoped; Phase-3 reminder: evaluate enterprise/compliance infra).
 2. Full Talyvor suite — Track / Docs / Code + anything that surfaces, each to 100%. Large (~3× a single product backend minus reuse).
 3. Engine to 100% + API contract FROZEN/versioned = definition of done.
@@ -92,14 +123,14 @@ OPEN QUESTION (founder decides at the gate): the locked order freezes the API BE
 
 PRE-FREEZE GATE LINE ITEM (committed — see "WorkTier" above): the work_tier SCHEMA (the per-request axis-vector struct {size_bucket, cost, complexity (versioned), sensitivity}) enters the external API contract BEFORE the freeze, whichever side of the frontend the freeze lands on. Cheap now, expensive to retrofit after the suite builds against a contract without it; freeze the INTERFACE, not the implementation — the classifier behind it improves forever. This line exists next to the freeze-timing question precisely so the item cannot be missed at the gate.
 
-## Relative effort (stages & size, NOT dates)
+### Relative effort (stages & size, NOT dates)
 - Finish Phase 2: ~5–7 more stages of the shape already done. Near, well-scoped.
 - Phases 3–5: unscoped; an unknown multiple of Phase 2.
 - Full suite: large.
 - Frontend: major; plausibly comparable to a full product backend, spanning all products.
 - Honest gestalt: "near the end of the beginning." Phase 2 is the proof-of-discipline; suite+frontend is the company-build; the parked ideas (Phase 6, Phase 7, agent-settlement-rail) are committed future work, sequenced after the frontend — not optional R&D.
 
-## Parked ideas — APPROVED and COMMITTED future work (full reasoning in COORDINATION.md)
+### Parked ideas — APPROVED and COMMITTED future work (full reasoning in COORDINATION.md)
 Deferred, NOT optional: once the engine + suite + frontend are complete, the project returns to ALL approved parked items, in priority order set by the founder. 'Parked' means sequenced-later-and-certain, not 'maybe.' Phase 6, Phase 7, the agent-settlement-rail option, and any other founder-approved idea are committed future phases.
 
 1. Phase-6 specialized small model on Talyvor's own traffic — ML-research program, not a build task.
