@@ -91,11 +91,13 @@ type Store struct {
 // New builds a Store. rdb may be nil (no Redis copies to find or delete).
 func New(db *pgxpool.Pool, rdb *redis.Client) *Store { return &Store{db: db, rdb: rdb} }
 
+// The WHERE repeats the two FILTERs so each arm can use its partial index (migrations 0179 and 0180)
+// instead of the whole vector table being scanned.
 const countAnswersSQL = `SELECT
   count(*) FILTER (WHERE is_poolable AND contributor_workspace_id = $1),
   count(*) FILTER (WHERE NOT is_poolable AND workspace_id = $1)
 FROM prompt_embeddings
-WHERE contributor_workspace_id = $1 OR workspace_id = $1`
+WHERE (is_poolable AND contributor_workspace_id = $1) OR (NOT is_poolable AND workspace_id = $1)`
 
 const deleteSharedSQL = `DELETE FROM prompt_embeddings WHERE is_poolable AND contributor_workspace_id = $1`
 
