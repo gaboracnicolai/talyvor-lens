@@ -1643,6 +1643,14 @@ func run() error {
 	routingAdvisor.StartRefresh(ctx)
 	p.SetRoutingAdvisor(routingAdvisor)
 
+	// B27.23: every cost downgrade under automatic routing (cost-optimised routing, "auto", the
+	// auto-route header, the Advisor, the Routing Brain) stands only when the cheaper model's
+	// measured quality on the request's cohort (routing_patterns) is at or above the replaced
+	// model's. Not flag-gated: it can only keep the more capable model, never pick one.
+	qualityGate := routing.NewQualityGate(patternMiner, routing.Config{})
+	qualityGate.StartRefresh(ctx)
+	p.SetQualityGate(qualityGate)
+
 	// Proof-of-Improvement piece 3: the routing-prediction SCORER, behind an Inferer interface. PR-3c
 	// wires the REAL provider-backed Inferer (internal/inference) — it calls the SAME providers with the
 	// SAME credentials the gateway uses (p.Endpoints()), resolving model→provider via the catalog. Wiring
