@@ -109,7 +109,7 @@ func ConfigFor(name string, ep Endpoints) ProviderConfig {
 		return ProviderConfig{
 			name: "bedrock",
 			upstreamURLFn: func(model string) string {
-				id, ok := ModelToBedrockID(model)
+				id, ok := BedrockModelIDForRegion(model, bedCfg.Region)
 				if !ok {
 					id = model
 				}
