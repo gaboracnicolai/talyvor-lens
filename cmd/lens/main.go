@@ -2216,6 +2216,8 @@ func run() error {
 	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdminOrModerator(authManager, moderatorKeys, newMarketTakedownHandler(marketStore, marketRefunder)))
 	// B26.3 — the billed uses Stripe refused too often to keep retrying, with its reason. market_handler.go.
 	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
+	// B27.19 — an operator retries one: the global key or a moderator key, recorded under the operator's name.
+	r.Post("/v1/admin/marketplace/parked-uses/{useID}/retry", requireAdminOrModerator(authManager, moderatorKeys, newMarketParkedUseRetryHandler(marketStore)))
 	// KE-2 observability — every APPLIED drift haircut (default-on in closed-test). Reads the PRIMARY pool
 	// (non-money read of ledger metadata + keel_findings; keeps the U8/U9 ExactlySix replica-reader invariant
 	// unchanged).

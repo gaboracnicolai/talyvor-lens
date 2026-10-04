@@ -77,6 +77,7 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/marketplace/review":                               "B20.4: the marketplace's held and reported listings, with what reporters wrote about them. requireAdminOrModerator: the global key or a B20.13 moderator key, never the operator read key.",
 	"/v1/admin/marketplace/listings/{listingID}/approve":         "B20.4: releases a held listing to every buyer.",
 	"/v1/admin/marketplace/listings/{listingID}/takedown":        "B20.4: TAKES A LISTING DOWN AND REFUNDS ITS BUYERS. Moves money.",
+	"/v1/admin/marketplace/parked-uses/{useID}/retry":            "B27.19: puts a parked use back in the metering queue, onto its buyer's bill. Moves money.",
 
 	// ⚠ MEASURED, AND THE PROVISIONAL CLASSIFICATION WAS WRONG. The W1.3 groundwork report listed
 	// attest/{output_id} as provisionally READ because it is registered with r.Handle and reads
