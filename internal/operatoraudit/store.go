@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	// DefaultLimit is how many entries a list returns when it does not say.
-	DefaultLimit = 200
+	// defaultLimit is how many entries a list returns when it does not say.
+	defaultLimit = 200
 	// MaxLimit caps a list, and is the size of the CSV export.
 	MaxLimit = 50000
 
@@ -114,7 +114,7 @@ func (s *Store) Record(ctx context.Context, e Entry) (Entry, error) {
 // List returns the entries f selects, newest first.
 func (s *Store) List(ctx context.Context, f Filter) ([]Entry, error) {
 	if f.Limit <= 0 {
-		f.Limit = DefaultLimit
+		f.Limit = defaultLimit
 	}
 	if f.Limit > MaxLimit {
 		f.Limit = MaxLimit
