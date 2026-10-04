@@ -60,6 +60,7 @@ import (
 	"github.com/talyvor/lens/internal/routingbrain"
 	"github.com/talyvor/lens/internal/safehttp"
 	"github.com/talyvor/lens/internal/session"
+	"github.com/talyvor/lens/internal/tare"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/workspace"
 	"github.com/talyvor/lens/internal/worktier"
@@ -141,7 +142,10 @@ type Proxy struct {
 	routingAdvisor   *routing.Advisor
 	qualityGate      *routing.QualityGate // B27.23: a cost downgrade stands only on measured quality
 	workspaceManager *workspace.Manager
-	localRouter      *localrouter.LocalRouter
+	// tareModel is Tare phase 2a (internal/tare/kompress), run where phase 1 refuses for a workspace
+	// that opted in (GetTareModel). nil = this lens has no model; SetTareModel installs it.
+	tareModel   tare.Reduction
+	localRouter *localrouter.LocalRouter
 
 	// Node auto-route (blocker 6) — optional, flag-gated, nil-safe. When nodeAutoRouteEnabled AND
 	// nodeRouter has a healthy endpoint for the model, the gateway forwards to a registered node's
@@ -812,7 +816,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// paths; its zero value means Tare changed nothing.
 	var tareMeter alerts.TareMeter
 	if p.shouldTare(r, wsID) {
-		if nb, kind, tin, tout, ok := tareReduce(ctx, body); ok {
+		if nb, kind, tin, tout, ok := tareReduce(ctx, body, p.tareModelFor(wsID)); ok {
 			if _, np, perr := extractPrompt(nb); perr == nil {
 				body, prompt = nb, np
 				cachePrompt = prompt

@@ -64,6 +64,12 @@ const (
 	ReasonNotSmaller     = "the reduced form is not smaller than the input"
 	ReasonEmpty          = "empty content"
 	ReasonReencodeFailed = "the reduced form failed to re-encode"
+
+	// Phase 2a (internal/tare/kompress) — the model that runs only where every reducer above refused.
+	ReasonNotProse         = "content is code or JSON, which Tare only reduces losslessly"
+	ReasonTooLittleProse   = "too little prose for a model pass to pay"
+	ReasonModelUnavailable = "the compression model is not loaded"
+	ReasonModelBusy        = "the compression model is busy with other requests"
 )
 
 // EstimateTokens is the repo's existing convention, named for what it is.

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -121,6 +122,8 @@ import (
 	"github.com/talyvor/lens/internal/shadowmint"
 	"github.com/talyvor/lens/internal/status"
 	"github.com/talyvor/lens/internal/storedanswers"
+	"github.com/talyvor/lens/internal/tare"
+	"github.com/talyvor/lens/internal/tare/kompress"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/webpush"
@@ -614,6 +617,19 @@ func run() error {
 	go semanticCache.StartSweeper(ctx, cfg.SemanticCacheSweepInterval)
 
 	p := proxy.New(exactCache, semanticCache, openAIEmbedder, promptCompressor, modelRouter, piiDetector, alertManager, templateDetector, qualityScorer, branchTracker, wsManager, lr, injectionDetector, budgetEnforcer, batchRouter, sessionTracker, promptManager, fallbackRouter, keyPool, auditExporter, guardrailsEngine, cfg.OpenAIAPIKey, cfg.AnthropicAPIKey, cfg.GoogleAPIKey, l)
+
+	// B27.35 — Tare phase 2a: the kompress-small prose model, for workspaces that opt in
+	// (PUT /v1/workspaces/{ws}/tare-model). Loaded on first use, so a lens whose workspaces never opt in
+	// never reads the 279 MB of weights. The image carries them at kompress.DefaultDir.
+	tareModelDir := os.Getenv("LENS_TARE_MODEL_DIR")
+	if tareModelDir == "" {
+		tareModelDir = kompress.DefaultDir
+	}
+	tareModel := kompress.NewCompressor(tareModelDir)
+	p.SetTareModel(tareModel.Reduction(nil))
+	if _, err := os.Stat(filepath.Join(tareModelDir, kompress.WeightsFile)); err != nil {
+		logger.Warn("tare: phase 2a weights not found; opted-in workspaces' prose will go upstream unchanged", "dir", tareModelDir, "error", err)
+	}
 	// CONSUMER DISCOUNT on cross-tenant pooled cache hits (r). Wired HERE, unconditionally, and
 	// NOT beside the royalty minter below: a pooled hit CHARGES the consumer whether or not royalty
 	// minting is enabled (the mint is skipped, the bill is not), so gating the discount on the mint
@@ -2617,7 +2633,12 @@ func run() error {
 
 		// B11.4 — the Try-it previews, workspace-scoped: Tare on a paste, conversion on an upload. No model
 		// call, no charge, no token_events row.
-		mountPreviewRoutes(authed, &distill.ProcessIsolator{WorkerBin: cfg.DistillWorkerBin})
+		mountPreviewRoutes(authed, &distill.ProcessIsolator{WorkerBin: cfg.DistillWorkerBin}, func(wsID string) *tare.Reducer {
+			if !wsManager.GetTareModel(wsID) {
+				return nil
+			}
+			return &tare.Reducer{Kind: tare.KindProse, New: tareModel.Reduction}
+		})
 
 		// ADMIN-ONLY distill attribution read (S1 read-surface commitment).
 		// requireAdmin-gated: content_hash + counterparty workspace ids are
@@ -4250,6 +4271,29 @@ func run() error {
 			}
 			ws, _ := wsManager.GetWorkspace(wsID)
 			writeJSONOK(w, http.StatusOK, map[string]any{"ok": true, "tare_policy": ws.TarePolicy})
+		})
+
+		// B27.35 — Tare phase 2a, the prose compression model (migration 0184): {"enabled": true|false}.
+		// OFF unless the workspace turns it on here, because it drops words. It runs only where the Tare
+		// policy above lets Tare run, and only on prose every phase-1 reducer refused.
+		authed.Put("/v1/workspaces/{wsID}/tare-model", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				Enabled *bool `json:"enabled"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.Enabled == nil {
+				writeJSONErr(w, http.StatusBadRequest, `body must be {"enabled": true} or {"enabled": false}`)
+				return
+			}
+			if err := wsManager.SetTareModel(req.Context(), wsID, *in.Enabled); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]any{"ok": true, "tare_model": wsManager.GetTareModel(wsID)})
 		})
 
 		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.

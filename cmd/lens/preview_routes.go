@@ -19,8 +19,11 @@ const tarePreviewMaxBytes = 1 << 20
 // WITHOUT a model call and WITHOUT a charge — neither handler holds a ledger, a token_events writer or a
 // provider. Mounted inside the authed group, so the credential, the rate limit and
 // workspaceIsolationMiddleware's {wsID} binding all apply.
-func mountPreviewRoutes(r chi.Router, conv distillpreview.Converter) {
-	r.Post("/v1/workspaces/{wsID}/tare/preview", tarePreviewHandler)
+//
+// tareModel is Tare phase 2a for a workspace — nil when this lens has no model or the workspace has
+// not opted in — so the preview shows what that workspace's requests would get, prose included.
+func mountPreviewRoutes(r chi.Router, conv distillpreview.Converter, tareModel func(wsID string) *tare.Reducer) {
+	r.Post("/v1/workspaces/{wsID}/tare/preview", newTarePreviewHandler(tareModel))
 
 	// The admin preview's handler and converter, reached by the workspace's own credential:
 	// workspaceIsolationMiddleware has already refused any caller not bound to {wsID}.
@@ -28,9 +31,20 @@ func mountPreviewRoutes(r chi.Router, conv distillpreview.Converter) {
 	r.Post("/v1/workspaces/{wsID}/distill/preview", distill.ServeHTTP)
 }
 
-// tarePreviewHandler answers POST /v1/workspaces/{wsID}/tare/preview {content, kind, model?} with what
-// Tare would send upstream in place of content. Every token figure is an estimate and is named so.
-func tarePreviewHandler(w http.ResponseWriter, req *http.Request) {
+// newTarePreviewHandler answers POST /v1/workspaces/{wsID}/tare/preview {content, kind, model?} with
+// what Tare would send upstream in place of content. Every token figure is an estimate and is named so.
+// tare_model in the answer says whether phase 2a — the prose model — was in the run.
+func newTarePreviewHandler(tareModel func(wsID string) *tare.Reducer) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		var phase2 *tare.Reducer
+		if tareModel != nil {
+			phase2 = tareModel(chi.URLParam(req, "wsID"))
+		}
+		tarePreview(w, req, phase2)
+	}
+}
+
+func tarePreview(w http.ResponseWriter, req *http.Request, phase2 *tare.Reducer) {
 	var in struct {
 		Content string `json:"content"`
 		Kind    string `json:"kind"`
@@ -51,7 +65,7 @@ func tarePreviewHandler(w http.ResponseWriter, req *http.Request) {
 		writeJSONErr(w, http.StatusBadRequest, "kind must be one of json, code, log, prose, unknown, or empty")
 		return
 	}
-	res, err := tare.Preview(req.Context(), []byte(in.Content), kind)
+	res, err := tare.PreviewWith(req.Context(), []byte(in.Content), kind, phase2)
 	if err != nil {
 		writeJSONErr(w, http.StatusUnprocessableEntity, "tare could not run: "+err.Error())
 		return
@@ -64,6 +78,7 @@ func tarePreviewHandler(w http.ResponseWriter, req *http.Request) {
 		"tokens_in_estimated":    res.TokensIn,
 		"tokens_out_estimated":   res.TokensOut,
 		"tokens_saved_estimated": res.TokensIn - res.TokensOut,
+		"tare_model":             phase2 != nil,
 	}
 	if in.Model != "" {
 		// Priced like tare_delta_cost_usd on a real request: the removed tokens at the model's input rate.

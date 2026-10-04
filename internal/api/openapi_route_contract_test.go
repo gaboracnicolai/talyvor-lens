@@ -283,7 +283,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 //
 // 118 → 119 (B25.2): POST /v1/billing/webhook/test, Stripe test mode's webhook for test users, beside the
 // billing webhook it mirrors.
-const undocumentedNonAdminV1Routes = 119
+//
+// 119 → 120 (B27.35): PUT /v1/workspaces/{wsID}/tare-model, the opt-in for Tare phase 2a's prose model,
+// beside the undocumented PUT /v1/workspaces/{wsID}/tare it qualifies.
+const undocumentedNonAdminV1Routes = 120
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

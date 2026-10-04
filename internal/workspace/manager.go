@@ -99,10 +99,12 @@ type Workspace struct {
 	// DistillPolicy's.
 	CompressionPolicy CompressionPolicy `json:"compression_policy"`
 	// TarePolicy gates the Tare reduction layer (internal/tare). Unset ⇒ disabled.
-	TarePolicy          TarePolicy `json:"tare_policy"`
-	CachePoolable       bool       `json:"cache_poolable"`
-	CostOptimizeRouting bool       `json:"cost_optimize_routing"`
-	DistillPoolable     bool       `json:"distill_poolable"`
+	TarePolicy TarePolicy `json:"tare_policy"`
+	// TareModel opts the workspace in to Tare phase 2a, the lossy prose model. Default false.
+	TareModel           bool `json:"tare_model"`
+	CachePoolable       bool `json:"cache_poolable"`
+	CostOptimizeRouting bool `json:"cost_optimize_routing"`
+	DistillPoolable     bool `json:"distill_poolable"`
 	// Synthetic marks a B17.1 test workspace (synthetic.go). Set only by CreateSynthetic, never cleared.
 	Synthetic bool      `json:"synthetic"`
 	CreatedAt time.Time `json:"created_at"`
@@ -167,7 +169,7 @@ ON CONFLICT (id) DO UPDATE SET
   -- Preserving them here also guards a replica whose in-memory cache doesn't yet hold
   -- the row from writing a default over consent it never knew about.
   updated_at             = NOW()
-RETURNING cache_poolable, distill_poolable, cost_optimize_routing, distill_policy, tare_policy`
+RETURNING cache_poolable, distill_poolable, cost_optimize_routing, distill_policy, tare_policy, tare_model`
 
 const updateLoggingPolicySQL = `UPDATE workspaces
 SET logging_policy = $2, updated_at = NOW()
@@ -258,6 +260,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 		stored.CostOptimizeRouting = existing.CostOptimizeRouting
 		stored.DistillPolicy = existing.DistillPolicy
 		stored.TarePolicy = existing.TarePolicy
+		stored.TareModel = existing.TareModel
 		stored.Synthetic = existing.Synthetic
 	} else if o.cachePoolable != nil {
 		stored.CachePoolable = *o.cachePoolable
@@ -279,7 +282,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 		// re-registration on a replica whose cache didn't hold the row — which would otherwise write
 		// the body's values into memory — cannot change consent even transiently. The persisted
 		// boundary holds in memory too.
-		var dbPoolable, dbDistillPoolable, dbCostOptimizeRouting bool
+		var dbPoolable, dbDistillPoolable, dbCostOptimizeRouting, dbTareModel bool
 		var dbDistillPolicy, dbTarePolicy string
 		if err := m.pool.QueryRow(ctx, insertWorkspaceSQL,
 			stored.ID, stored.Name, stored.CachePrefix, stored.SpendLimitUSD,
@@ -287,14 +290,15 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 			stored.MaxOutputTokens, stored.MaxInputTokens, stored.Active, string(stored.LoggingPolicy),
 			string(stored.DistillPolicy), stored.CachePoolable, stored.DistillPoolable, stored.CostOptimizeRouting,
 			string(stored.CompressionPolicy), string(stored.TarePolicy),
-		).Scan(&dbPoolable, &dbDistillPoolable, &dbCostOptimizeRouting, &dbDistillPolicy, &dbTarePolicy); err != nil {
+		).Scan(&dbPoolable, &dbDistillPoolable, &dbCostOptimizeRouting, &dbDistillPolicy, &dbTarePolicy, &dbTareModel); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
 		}
 		if dbPoolable != stored.CachePoolable ||
 			dbDistillPoolable != stored.DistillPoolable ||
 			dbCostOptimizeRouting != stored.CostOptimizeRouting ||
 			DistillPolicy(dbDistillPolicy) != stored.DistillPolicy ||
-			TarePolicy(dbTarePolicy) != stored.TarePolicy {
+			TarePolicy(dbTarePolicy) != stored.TarePolicy ||
+			dbTareModel != stored.TareModel {
 			m.mu.Lock()
 			if cur, ok := m.workspaces[ws.ID]; ok {
 				cur.CachePoolable = dbPoolable
@@ -302,6 +306,7 @@ func (m *Manager) RegisterWorkspace(ctx context.Context, ws Workspace, opts ...R
 				cur.CostOptimizeRouting = dbCostOptimizeRouting
 				cur.DistillPolicy = DistillPolicy(dbDistillPolicy)
 				cur.TarePolicy = TarePolicy(dbTarePolicy)
+				cur.TareModel = dbTareModel
 			}
 			m.mu.Unlock()
 		}
@@ -514,7 +519,7 @@ func (m *Manager) ScopedCacheKey(wsID, baseKey string) string {
 
 const loadAllSQL = `SELECT id, name, cache_prefix, spend_limit_usd,
   allowed_models, allowed_providers, max_tokens_per_request,
-  max_output_tokens, max_input_tokens, active, logging_policy, distill_policy, cache_poolable, distill_poolable, cost_optimize_routing, compression_policy, tare_policy, synthetic, created_at
+  max_output_tokens, max_input_tokens, active, logging_policy, distill_policy, cache_poolable, distill_poolable, cost_optimize_routing, compression_policy, tare_policy, tare_model, synthetic, created_at
 FROM workspaces
 WHERE active = true`
 
@@ -546,7 +551,7 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 		if err := rows.Scan(
 			&ws.ID, &ws.Name, &ws.CachePrefix, &ws.SpendLimitUSD,
 			&ws.AllowedModels, &ws.AllowedProviders, &ws.MaxTokensPerRequest,
-			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &dpolicy, &ws.CachePoolable, &ws.DistillPoolable, &ws.CostOptimizeRouting, &cpolicy, &tpolicy, &ws.Synthetic, &ws.CreatedAt,
+			&ws.MaxOutputTokens, &ws.MaxInputTokens, &ws.Active, &policy, &dpolicy, &ws.CachePoolable, &ws.DistillPoolable, &ws.CostOptimizeRouting, &cpolicy, &tpolicy, &ws.TareModel, &ws.Synthetic, &ws.CreatedAt,
 		); err != nil {
 			return fmt.Errorf("workspace: scan: %w", err) // old map intact — no swap
 		}
