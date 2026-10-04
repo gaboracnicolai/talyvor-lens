@@ -15,7 +15,12 @@ func (dropAll) keep(_ context.Context, words []string) ([]bool, error) {
 	return make([]bool, len(words)), nil
 }
 
-func (dropAll) tokens(string) int { return 1 }
+func (dropAll) tokens(w string) int {
+	if len(w) > maxWordBytes {
+		panic("a word over maxWordBytes reached the tokenizer")
+	}
+	return 1
+}
 
 func reduceWith(t *testing.T, c *Compressor, content string) (string, []string) {
 	t.Helper()
@@ -37,7 +42,8 @@ const prose = "We looked at the failing deploy together this afternoon and agree
 // prose are kept whatever the model says.
 func TestReduce_CodeBlocksVerbatim_FactsAndNegationsKept(t *testing.T) {
 	code := "```go\nfunc main() {\n\tfmt.Println(\"keep me exactly\")\n}\n```\n"
-	in := prose + "\n" + code + "\nThe retry in internal/jobs/deploy.go uses runWithBackoff and waits 30 seconds, not 3.\n"
+	blob := strings.Repeat("A", 1<<20) // one 1 MiB "word": kept, and never tokenised
+	in := prose + "\n" + code + "\nThe retry in internal/jobs/deploy.go uses runWithBackoff and waits 30 seconds, not 3. " + blob + "\n"
 	out, reasons := reduceWith(t, newWithClassifier(dropAll{}), in)
 	if len(out) >= len(in) {
 		t.Fatalf("not reduced (reasons %v):\n%s", reasons, out)
@@ -45,7 +51,7 @@ func TestReduce_CodeBlocksVerbatim_FactsAndNegationsKept(t *testing.T) {
 	if !strings.Contains(out, code) {
 		t.Errorf("the fenced code block changed:\n%s", out)
 	}
-	for _, w := range []string{"internal/jobs/deploy.go", "runWithBackoff", "30", "not", "3."} {
+	for _, w := range []string{"internal/jobs/deploy.go", "runWithBackoff", "30", "not", "3.", blob} {
 		if !strings.Contains(out, w) {
 			t.Errorf("%q dropped:\n%s", w, out)
 		}

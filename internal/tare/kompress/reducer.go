@@ -33,6 +33,9 @@ const (
 	// request for seconds (measured: ~0.33 s per 512 tokens on 10 cores, ~0.8 s on 2). Prose past
 	// the budget goes upstream unchanged.
 	tokenBudget = 2048
+	// maxWordBytes: a longer whitespace-free run (a hash, a URL, base64) is always kept and never
+	// tokenised — byte-level BPE is quadratic in a word's length, so one huge "word" must not reach it.
+	maxWordBytes = 128
 	// maxConcurrent model passes in this process. A pass uses every CPU; a request that finds both
 	// slots taken is refused (sent unchanged) rather than queued behind them.
 	maxConcurrent = 2
@@ -182,8 +185,9 @@ func (r *reducer) Reduce(ctx context.Context, content []byte, kind tare.Kind) ([
 	return reduced, tare.EstimateTokens(content), tare.EstimateTokens(reduced), nil
 }
 
-// keepWords decides each word: the model's verdict, overruled to KEEP by mustKeep. used is the
-// number of model tokens spent; if the budget runs out mid-unit, the rest of the unit is kept.
+// keepWords decides each word: the model's verdict, overruled to KEEP by mustKeep. Words over
+// maxWordBytes are kept and never shown to the model. used is the number of model tokens spent; if
+// the budget runs out mid-unit, the rest of the unit is kept.
 func keepWords(ctx context.Context, cls classifier, words []string, budget int) ([]bool, int, error) {
 	keep := make([]bool, len(words))
 	inCode := false
@@ -205,22 +209,29 @@ func keepWords(ctx context.Context, cls classifier, words []string, budget int) 
 			lastNum = i
 		}
 	}
+	var shown []string
+	var at []int // at[k] is the index in words of shown[k]
 	used := 0
 	for i, w := range words {
+		if len(w) > maxWordBytes {
+			keep[i] = true
+			continue
+		}
 		if used += cls.tokens(w); used > budget {
 			for j := i; j < len(keep); j++ {
 				keep[j] = true
 			}
-			words, used = words[:i], budget
+			used = budget
 			break
 		}
+		shown, at = append(shown, w), append(at, i)
 	}
-	verdict, err := cls.keep(ctx, words)
+	verdict, err := cls.keep(ctx, shown)
 	if err != nil {
 		return nil, 0, err
 	}
-	for i, k := range verdict {
-		keep[i] = keep[i] || k
+	for k, v := range verdict {
+		keep[at[k]] = keep[at[k]] || v
 	}
 	return keep, used, nil
 }

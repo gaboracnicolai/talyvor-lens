@@ -40,8 +40,12 @@ type addedToken struct {
 // word from strings.Fields has none — so Go's RE2 (no lookahead) is enough.
 var preTokenize = regexp.MustCompile(`'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+`)
 
-// wordCacheMax bounds the per-word cache so untrusted text cannot grow it without limit.
-const wordCacheMax = 50000
+// The per-word cache is bounded in entries and in key length, so untrusted text cannot grow it
+// without limit or pin a request's buffer through a key.
+const (
+	wordCacheMax    = 50000
+	wordCacheKeyMax = 64
+)
 
 // LoadTokenizer reads a Hugging Face tokenizer.json.
 func LoadTokenizer(path string) (*Tokenizer, error) {
@@ -124,11 +128,14 @@ func (t *Tokenizer) EncodeWord(word string) []int {
 		return ids
 	}
 	ids = t.encodeWord(word)
+	if len(word) > wordCacheKeyMax {
+		return ids
+	}
 	t.mu.Lock()
 	if len(t.cache) >= wordCacheMax {
 		clear(t.cache)
 	}
-	t.cache[word] = ids
+	t.cache[strings.Clone(word)] = ids
 	t.mu.Unlock()
 	return ids
 }
