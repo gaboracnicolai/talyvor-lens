@@ -373,6 +373,23 @@ func (s *Store) ParkedUses(ctx context.Context) ([]ParkedUse, error) {
 	return parked, nil
 }
 
+// ErrNotParked: no parked use by that id still off its buyer's bill.
+var ErrNotParked = errors.New("market: no such parked use")
+
+// RetryParkedUse un-parks a use an operator has seen to, so the next MeterPending pass tries it at once.
+// Its refusals are kept: Stripe refusing it once more parks it again.
+func (s *Store) RetryParkedUse(ctx context.Context, useID string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE market_uses SET meter_parked_at = NULL, meter_retry_at = NULL
+		WHERE id = $1 AND meter_parked_at IS NOT NULL AND metered_at IS NULL`, useID)
+	if err != nil {
+		return fmt.Errorf("market: retry parked use: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotParked
+	}
+	return nil
+}
+
 // resolve reads the listing and the version the buyer may use, with its artifact. A held listing is its
 // owner's alone to use; a taken-down one is nobody's.
 func (s *Store) resolve(ctx context.Context, buyer, listingID string, version int) (Listing, map[string]any, int, error) {

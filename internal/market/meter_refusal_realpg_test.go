@@ -3,6 +3,7 @@ package market
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -135,5 +136,36 @@ func TestMeterPending_ARefusedUseIsSkippedThenParked(t *testing.T) {
 	if len(parked) != 1 || parked[0].ID != bad || parked[0].Reason != reason || parked[0].Refusals != MaxMeterRefusals ||
 		parked[0].BuyerWorkspaceID != buyer || parked[0].ListingID != l.ID || parked[0].PriceULXC != price {
 		t.Fatalf("parked uses = %+v; want only %s, refused %d times: %q", parked, bad, MaxMeterRefusals, reason)
+	}
+
+	// B27.19 — an operator retries it. Stripe refusing it once more parks it again at once; retried again
+	// after the operator fixed the buyer's customer, the next pass puts it on the buyer's bill.
+	if err := s.RetryParkedUse(ctx, bad); err != nil {
+		t.Fatal(err)
+	}
+	if r := read(bad); r.parked != nil || r.retryAt != nil {
+		t.Fatalf("retried use = %+v; want un-parked and due now", r)
+	}
+	if _, err := s.MeterPending(ctx, m, -time.Minute); err != nil || m.tried[bad] != MaxMeterRefusals+1 {
+		t.Fatalf("the pass after a retry tried the use %d times (%v); want once more", m.tried[bad], err)
+	}
+	if r := read(bad); r.parked == nil || r.refusals != MaxMeterRefusals+1 || r.metered != nil {
+		t.Fatalf("a retried use Stripe refused again = %+v; want parked again with %d refusals", r, MaxMeterRefusals+1)
+	}
+	if err := s.RetryParkedUse(ctx, bad); err != nil {
+		t.Fatal(err)
+	}
+	delete(m.refuse, bad)
+	if n, err := s.MeterPending(ctx, m, -time.Minute); err != nil || n != 1 {
+		t.Fatalf("MeterPending after the retry = %d, %v; want the retried use billed", n, err)
+	}
+	if r := read(bad); r.metered == nil || r.parked != nil {
+		t.Fatalf("retried use after Stripe accepted it = %+v; want metered", r)
+	}
+	if parked, err := s.ParkedUses(ctx); err != nil || len(parked) != 0 {
+		t.Fatalf("parked uses after the retry billed = %+v, %v; want none", parked, err)
+	}
+	if err := s.RetryParkedUse(ctx, bad); !errors.Is(err, ErrNotParked) {
+		t.Fatalf("retrying a metered use = %v; want ErrNotParked", err)
 	}
 }

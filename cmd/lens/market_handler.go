@@ -148,7 +148,7 @@ func writeMarketAdminErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, market.ErrInvalid):
 		writeJSONErr(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, market.ErrNotFound):
+	case errors.Is(err, market.ErrNotFound), errors.Is(err, market.ErrNotParked):
 		writeJSONErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, market.ErrTakenDown):
 		writeJSONErr(w, http.StatusConflict, err.Error())
@@ -186,6 +186,24 @@ func newMarketParkedUsesHandler(store parkedUseLister) http.Handler {
 			parked = []market.ParkedUse{}
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{"parked_uses": parked})
+	})
+}
+
+// parkedUseRetrier is the slice of *market.Store the retry needs.
+type parkedUseRetrier interface {
+	RetryParkedUse(ctx context.Context, useID string) error
+}
+
+// newMarketParkedUseRetryHandler answers POST /v1/admin/marketplace/parked-uses/{useID}/retry (B27.19): the
+// operator has seen to it, so the next metering pass tries it again.
+func newMarketParkedUseRetryHandler(store parkedUseRetrier) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		id := chi.URLParam(req, "useID")
+		if err := store.RetryParkedUse(req.Context(), id); err != nil {
+			writeMarketAdminErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"id": id, "retrying": true})
 	})
 }
 
