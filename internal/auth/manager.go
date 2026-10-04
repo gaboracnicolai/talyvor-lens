@@ -14,6 +14,7 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -135,6 +136,16 @@ var ErrInvalidAuth = errors.New("auth: invalid credentials")
 // ErrMissingCredentials is the "no Authorization header at all"
 // case. The caller decides whether to 401 or fall through.
 var ErrMissingCredentials = errors.New("auth: missing credentials")
+
+// ErrAuthUnavailable is "we could not check this credential", which is not "this credential is
+// wrong" (B27.5). It is returned when the credential's store failed to answer — a database
+// hiccup — so the middleware answers 503 with Retry-After instead of 401, and the browser Chat
+// retries rather than telling a signed-in person they are signed out. It reveals nothing about
+// the key: an unknown, expired or revoked key is still ErrInvalidAuth.
+var ErrAuthUnavailable = errors.New("auth: credential store unavailable")
+
+// AuthUnavailableRetryAfter is the Retry-After, in seconds, sent with an ErrAuthUnavailable 503.
+const AuthUnavailableRetryAfter = "2"
 
 // ─── types ───────────────────────────────────────
 
@@ -405,8 +416,14 @@ func (m *Manager) Authenticate(r *http.Request) (*AuthContext, error) {
 	// TestSessionKeyPrefixIsDisjointFromTheWorkspaceKeyPrefix is what keeps that true.
 	if m.sessionKeys != nil && strings.HasPrefix(raw, sessionkey.KeyPrefix) {
 		sk, err := m.sessionKeys.Validate(r.Context(), raw)
-		if err != nil {
+		if errors.Is(err, sessionkey.ErrInvalid) || errors.Is(err, sessionkey.ErrExpired) {
 			return nil, ErrInvalidAuth
+		}
+		if err != nil {
+			// B27.5 — the lookup itself failed. Refusing 401 here signed the person out of Chat
+			// for a database hiccup; the key may be perfectly good.
+			slog.Warn("auth: session key lookup failed", slog.String("err", err.Error()))
+			return nil, fmt.Errorf("%w: %v", ErrAuthUnavailable, err)
 		}
 		return &AuthContext{
 			WorkspaceID:  sk.WorkspaceID,
@@ -551,6 +568,13 @@ func (m *Manager) Middleware(
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authCtx, err := m.Authenticate(r)
+			if errors.Is(err, ErrAuthUnavailable) {
+				if onFailure != nil {
+					onFailure(err.Error(), r)
+				}
+				writeAuthUnavailable(w)
+				return
+			}
 			if err != nil {
 				if onFailure != nil {
 					onFailure(err.Error(), r)
