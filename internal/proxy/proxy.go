@@ -139,6 +139,7 @@ type Proxy struct {
 	attrStore        *attribution.Store
 	budgetService    budgetGate
 	routingAdvisor   *routing.Advisor
+	qualityGate      *routing.QualityGate // B27.23: a cost downgrade stands only on measured quality
 	workspaceManager *workspace.Manager
 	localRouter      *localrouter.LocalRouter
 
@@ -1367,6 +1368,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		var base router.RoutingDecision
 		if p.router != nil {
 			base = p.router.Route(ctx, cfg.ProviderName(), model, compressedPrompt)
+			// B27.23: a named model the router would downgrade stays the baseline unless the
+			// cheaper pick measures at or above it on this cohort ("auto" names no model, so passes).
+			if ok, why := p.downgradeKeepsQuality(feature, len(compressedPrompt)/4, cfg.ProviderName(), model, base.Model); !ok {
+				base = router.RoutingDecision{Model: model, Provider: base.Provider, Reason: why}
+			}
 		}
 		// Shape-1 work-tier gate: a request-local, PRE-SERVE decisionTier can
 		// only SUPPRESS the recommendation (sensitivity opt-out or downgrade
@@ -1375,6 +1381,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// total, no cost, never stored; see routing_decision_tier.go).
 		dt := newDecisionTier(len(compressedPrompt)/4, complexityScore, piiDetected, guardrailFired, loggingPolicy)
 		res := resolveAutoRoute(p.router, rec, base, dt)
+		// B27.23: a recommendation cheaper than the baseline stands only on measured quality.
+		if res.applied {
+			if ok, why := p.downgradeKeepsQuality(feature, len(compressedPrompt)/4, cfg.ProviderName(), base.Model, res.model); !ok {
+				res = autoRouteResult{model: base.Model, reason: "routing held at the default (" + why + "): " + base.Reason, gated: gateQualityFloor, fallback: true}
+			}
+		}
 		// Route-decision evidence (descriptive, mint-free): the pre-cohort baseline, the cohort dims, and
 		// whether the cohort recommendation was APPLIED (i.e. overrode the baseline). res.applied is exactly
 		// "cohort intelligence overrode the default"; res.model is baseline when not applied.
@@ -1407,11 +1419,18 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// base router can never silently downgrade it. The customer chose the model;
 		// quality is theirs to decide (the founder's rule). The capability redirect
 		// below is untouched — a correctness substitution, not a cost one.
+		// B27.23: the router's downgrade is a guess from the prompt's shape; it stands only
+		// when the cheaper model measures at or above the named one on this request's cohort.
 		decision := p.router.Route(ctx, cfg.ProviderName(), model, compressedPrompt)
 		if p.router.ShouldOverride(model, decision) {
-			upstreamModel = decision.Model
-			overrideModel = decision.Model
-			overrideReason = decision.Reason
+			if ok, why := p.downgradeKeepsQuality(feature, len(compressedPrompt)/4, cfg.ProviderName(), model, decision.Model); ok {
+				upstreamModel = decision.Model
+				overrideModel = decision.Model
+				overrideReason = decision.Reason
+				if why != "" {
+					overrideReason += "; " + why
+				}
+			}
 		}
 	}
 
@@ -1438,6 +1457,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 		bModel, bReason, bApplied, bSurfaced := p.applyRoutingBrain(
 			wsID, len(compressedPrompt)/4, router.AnalyseComplexity(compressedPrompt).Score(), upstreamModel, brainAllowed)
+		// B27.23: the brain's pick, when cheaper, is held to the same measured floor — held, it stays advisory.
+		if bApplied {
+			if ok, _ := p.downgradeKeepsQuality(feature, len(compressedPrompt)/4, cfg.ProviderName(), upstreamModel, bModel); !ok {
+				bApplied = false
+			}
+		}
 		if bSurfaced {
 			if bApplied {
 				upstreamModel = bModel
