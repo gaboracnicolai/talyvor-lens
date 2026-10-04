@@ -15,6 +15,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/learner"
+	"github.com/talyvor/lens/internal/reqtrack"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/workspace"
@@ -153,6 +154,8 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 // after a network blip. The initial `endpoint` event tells the client
 // where to send JSON-RPC traffic.
 func (s *Server) HandleSSE(w http.ResponseWriter, r *http.Request) {
+	// Meant to stay open, so it is never /healthz's slowest request nor logged as slow (B27.11).
+	reqtrack.MarkLongLived(r.Context())
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")

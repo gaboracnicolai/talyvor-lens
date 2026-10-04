@@ -53,6 +53,7 @@ import (
 	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/prompts"
 	"github.com/talyvor/lens/internal/quality"
+	"github.com/talyvor/lens/internal/reqtrack"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
@@ -353,7 +354,7 @@ func New(
 		auditExporter:     auditExporter,
 		guardrails:        guardrailsEngine,
 		retryConfig:       retry.DefaultConfig(),
-		httpClient:        &http.Client{Timeout: upstreamTimeout},
+		httpClient:        &http.Client{Timeout: upstreamTimeout, Transport: reqtrack.Transport(nil)}, // B27.11: waits on the provider read "upstream"
 		openAIKey:         openAIKey,
 		anthropicKey:      anthropicKey,
 		googleKey:         googleKey,

@@ -33,6 +33,14 @@ type HealthHandler struct {
 	version  string
 	started  time.Time
 	checkers map[string]HealthChecker
+	sections []healthSection
+}
+
+// healthSection is a top-level field of the response that reports state rather than pass/fail — the
+// database pool's counters, the requests in flight (B27.11). It never changes the status code.
+type healthSection struct {
+	name string
+	read func(ctx context.Context) any
 }
 
 func NewHealthHandler(version string, checkers map[string]HealthChecker) *HealthHandler {
@@ -41,6 +49,12 @@ func NewHealthHandler(version string, checkers map[string]HealthChecker) *Health
 		started:  time.Now(),
 		checkers: checkers,
 	}
+}
+
+// AddSection adds a top-level field, read on every request, to the response. Wire it before serving.
+func (h *HealthHandler) AddSection(name string, read func(ctx context.Context) any) *HealthHandler {
+	h.sections = append(h.sections, healthSection{name, read})
+	return h
 }
 
 // ServeHTTP runs every checker in parallel with a 100ms budget
@@ -107,14 +121,19 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusServiceUnavailable
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	body := map[string]any{
 		"status":         overall,
 		"version":        h.version,
 		"uptime_seconds": int64(time.Since(h.started).Seconds()),
 		"checks":         checks,
-	})
+	}
+	for _, s := range h.sections {
+		body[s.name] = s.read(r.Context())
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func statusString(healthy bool, detail string) string {
