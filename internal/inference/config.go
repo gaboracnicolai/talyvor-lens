@@ -125,6 +125,26 @@ func ConfigFor(name string, ep Endpoints) ProviderConfig {
 	return ProviderConfig{}
 }
 
+// ConfigForOwnKey is ConfigFor with a workspace's OWN provider key in place of the deployment's (B27.26,
+// BYOK). ok is false for a provider that does not authenticate with one API key (vllm, bedrock).
+func ConfigForOwnKey(name string, ep Endpoints, key string) (ProviderConfig, bool) {
+	switch name {
+	case "openai":
+		ep.OpenAIKey = key
+	case "anthropic":
+		ep.AnthropicKey = key
+	case "google":
+		ep.GoogleKey = key
+	case "mistral":
+		ep.MistralKey = key
+	case "groq":
+		ep.GroqKey = key
+	default:
+		return ProviderConfig{}, false
+	}
+	return ConfigFor(name, ep), true
+}
+
 // ConfigForKey returns ConfigFor(name, ep) with the auth (and, for google, the URL) closure rewritten to
 // use the supplied POOLED key instead of the configured one — moved VERBATIM from proxy.applyKey (PR-3c).
 // Only openai/anthropic/google are overridden; mistral/groq/vllm/bedrock pass through with their

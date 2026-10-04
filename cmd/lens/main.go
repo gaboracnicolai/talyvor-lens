@@ -46,6 +46,7 @@ import (
 	"github.com/talyvor/lens/internal/budget"
 	"github.com/talyvor/lens/internal/budgets"
 	"github.com/talyvor/lens/internal/buildverify"
+	"github.com/talyvor/lens/internal/byok"
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
@@ -1799,6 +1800,13 @@ func run() error {
 	if cfg.SubscriptionAllowanceULXC > 0 || (cfg.BillingEnabled && billRoute.sellsSubscriptions()) {
 		p.SetSubscriptionAllowance(billingSvc)
 	}
+	// B27.26 — BYOK: a workspace on the BYOK plan is served on its own provider keys, sealed under
+	// LENS_PROVIDER_SECRET_KEK. Without the KEK there is no custody: no key routes and no own-key serving.
+	var byokStore *byok.Store
+	if cfg.ProviderSecretsEnabled() {
+		byokStore = byok.New(pool, cfg.ProviderSecretKeyring)
+		p.SetOwnKeys(byokStore)
+	}
 	bill := billReg{on: cfg.BillingEnabled}
 	subs := billReg{on: cfg.BillingEnabled && billRoute.sellsSubscriptions()}
 	// Stage 2.4/2.5 shadow LXC spend — observational, post-serve, flag-gated
@@ -3389,6 +3397,13 @@ func run() error {
 			}
 		}))
 
+		// B27.26 — "Your provider keys" (provider_keys_routes.go), only while custody is armed.
+		if byokStore != nil {
+			authed.Get("/v1/workspaces/{wsID}/provider-keys", newProviderKeysListHandler(byokStore))
+			authed.Put("/v1/workspaces/{wsID}/provider-keys/{provider}", newProviderKeyPutHandler(byokStore))
+			authed.Delete("/v1/workspaces/{wsID}/provider-keys/{provider}", newProviderKeyDeleteHandler(byokStore))
+		}
+
 		// B1.6 — the subscriber's plan this period: the allowance, what has been used
 		// of it, and what the workspace's answers earned back (capped at the fee).
 		// {"allowance": null} when no period is granted.
@@ -3425,7 +3440,7 @@ func run() error {
 						status = http.StatusNotImplemented
 					case errors.Is(err, billing.ErrUnknownPlan):
 						status = http.StatusBadRequest
-					case errors.Is(err, billing.ErrNoLiveSubscription), errors.Is(err, billing.ErrSamePlan):
+					case errors.Is(err, billing.ErrNoLiveSubscription), errors.Is(err, billing.ErrSamePlan), errors.Is(err, billing.ErrBYOKPlanChange):
 						status = http.StatusConflict
 					}
 					writeJSONErr(w, status, err.Error())

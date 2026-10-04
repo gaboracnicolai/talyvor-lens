@@ -152,8 +152,48 @@ func (l *LiveStripe) CreateSubscriptionCheckoutSession(ctx context.Context, p Su
 	return sess.URL, sess.ID, nil
 }
 
-// PlanLookupKeys are the Stripe lookup keys B13.1 gave the plan Prices (talyvor-lens #548), by plan.
-var PlanLookupKeys = map[string]string{"plus": "talyvor_plus_monthly", "pro": "talyvor_pro_monthly", "max": "talyvor_max_monthly"}
+// PlanLookupKeys are the Stripe lookup keys B13.1 gave the plan Prices (talyvor-lens #548), by plan — and
+// BYOK's (B27.26).
+var PlanLookupKeys = map[string]string{"plus": "talyvor_plus_monthly", "pro": "talyvor_pro_monthly", "max": "talyvor_max_monthly",
+	BYOKPlan: BYOKLookupKey}
+
+// BYOK, the one subscription tier (B27.26): a workspace brings its own provider keys and pays the platform
+// fee instead of tokens. BYOKUSDCents is Nicolai's decision of 4 Oct 2026 — $199 a month — and is used only
+// to create the TEST-MODE Price when the account has none (EnsureBYOKPrice); a live Price is created in Stripe.
+const (
+	BYOKPlan      = "byok"
+	BYOKLookupKey = "talyvor_byok_monthly"
+	BYOKUSDCents  = 19900
+)
+
+// EnsureBYOKPrice creates the BYOK Price — $199 a month, lookup key talyvor_byok_monthly — in this key's
+// Stripe account when it has no active one. TEST-MODE keys only: a live key is refused, never billed from code.
+func (l *LiveStripe) EnsureBYOKPrice(ctx context.Context) error {
+	if LiveKey(l.key) {
+		return fmt.Errorf("billing: the BYOK Price is created from code only in Stripe test mode")
+	}
+	list := &stripe.PriceListParams{Active: stripe.Bool(true), LookupKeys: []*string{stripe.String(BYOKLookupKey)}}
+	list.Context = ctx
+	it := price.Client{B: l.backend(), Key: l.key}.List(list)
+	for it.Next() {
+		if it.Price().LookupKey == BYOKLookupKey {
+			return nil
+		}
+	}
+	if err := it.Err(); err != nil {
+		return err
+	}
+	params := &stripe.PriceParams{
+		Currency:    stripe.String(string(stripe.CurrencyUSD)),
+		UnitAmount:  stripe.Int64(BYOKUSDCents),
+		Recurring:   &stripe.PriceRecurringParams{Interval: stripe.String(string(stripe.PriceRecurringIntervalMonth))},
+		LookupKey:   stripe.String(BYOKLookupKey),
+		ProductData: &stripe.PriceProductDataParams{Name: stripe.String("Talyvor BYOK")},
+	}
+	params.Context = ctx
+	_, err := price.Client{B: l.backend(), Key: l.key}.New(params)
+	return err
+}
 
 // PlanPrices returns the plans this key's Stripe account holds under PlanLookupKeys: plan → the id of the active
 // Price with that lookup key (B17.21). Only the ids — every amount stays in Stripe.

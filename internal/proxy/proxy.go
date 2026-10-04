@@ -188,6 +188,8 @@ type Proxy struct {
 	lxcGatingEnabled func() bool
 	// B1.6 subscription allowance — drawn before prepaid LXC; nil = no allowance wired.
 	allowance subscriptionAllowance
+	// B27.26 BYOK — a workspace's own provider keys while it is on the BYOK plan; nil = BYOK not wired.
+	ownKeySrc ownKeySource
 
 	// F4-capstone step C.1 — the agent allocator (see agent_allocator.go). agentSpender debits the pre-serve
 	// LXC estimate against the per-scoped-key sub-budget; agentAllocEnabled gates it; agentDebitSalt
@@ -898,25 +900,33 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		return
 	}
 
+	// B27.26 — BYOK (byok.go): on the BYOK plan with its own key for this provider, the request goes upstream
+	// on that key and Talyvor charges it no tokens, so the token gates, holds and charges below pass it by.
+	own := p.ownKeys(ctx, wsID, cfg.ProviderName())
+	byok := own != nil
+	if byok {
+		w.Header().Set("X-Talyvor-BYOK", "own-key")
+	}
+
 	// LXC gating (Stage 2.4/2.5) — pre-serve block when the workspace can't
 	// afford the estimated LXC cost. Sits alongside the budget gate, BEFORE the
 	// upstream call. Inert unless LXCGatingEnabled AND shadow are both on; the
 	// estimate is input-only (under-blocks); a balance-read error fails open.
-	if p.lxcGateBlocks(ctx, wsID, model, prompt) {
+	if !byok && p.lxcGateBlocks(ctx, wsID, model, prompt) {
 		writeError(w, http.StatusPaymentRequired, "insufficient LXC balance for estimated request cost")
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "lxc_blocked").Inc()
 		return
 	}
 	// B1.6 — a subscriber whose plan allowance is used up continues on prepaid credit, and
 	// is refused when there is none. Inert for non-subscribers and agent keys (allowance.go).
-	if p.allowanceGateBlocks(ctx, wsID, model, prompt) {
+	if !byok && p.allowanceGateBlocks(ctx, wsID, model, prompt) {
 		writeError(w, http.StatusPaymentRequired, "this period's plan allowance is used up and prepaid credit does not cover the request — top up to continue")
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "allowance_blocked").Inc()
 		return
 	}
 	// B9.8 — a browser-chat request is charged, so it is admitted only when allowance + prepaid covers
 	// its conservative cost and its session is under its bound. Inert for every other credential.
-	if msg, blocked := p.chatAdmission(ctx, wsID, model, prompt, boundedMaxOut(extractMaxTokens(body), p.reservationMaxOut)); blocked {
+	if msg, blocked := p.chatAdmission(ctx, wsID, model, prompt, boundedMaxOut(extractMaxTokens(body), p.reservationMaxOut)); blocked && !byok {
 		writeError(w, http.StatusPaymentRequired, msg)
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "chat_blocked").Inc()
 		return
@@ -928,7 +938,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// routing work and physically cannot exceed its ceiling. Non-agent traffic (agentKeyID == "") skips this
 	// entirely and is unchanged. agentKeyID is reused below to pick the price-aware routing strategy.
 	agentKeyID := agentKeyIDFromContext(ctx)
-	if agentKeyID != "" {
+	// B27.26: a BYOK agent request is held or debited nothing, so its agent's rules are judged on their own.
+	if agentKeyID != "" && byok {
+		if err := p.byokAgentRules(withAgentCall(ctx, agentKeyID, model, cfg.ProviderName(), prompt, ""), agentKeyID); err != nil {
+			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), writeAgentRefusal(w, err)).Inc()
+			return
+		}
+	}
+	if agentKeyID != "" && !byok {
 		// B19.2 — the agent's spending rules are judged in its hold or debit; they need the model,
 		// provider and prompt, and a retry repeating its Idempotency-Key is charged once.
 		ctx = withAgentCall(ctx, agentKeyID, model, cfg.ProviderName(), prompt, r.Header.Get("Idempotency-Key"))
@@ -1207,8 +1224,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// B17.29 — a pooled answer this workspace has already paid for is its own earlier answer:
 			// priced and minted as an own-cache hit, free and nothing more to the contributor. chargedHit
 			// is pooledHit unless so; a thumbs-down still reaches the pooled entry through pooledHit.
+			// B27.26: a BYOK requester pays nothing for a pooled answer, so it funds — and mints — nothing.
 			chargedHit := pooledHit
-			if p.pooledPaidBefore(ctx, wsID, pooledHit, cached) {
+			if byok || p.pooledPaidBefore(ctx, wsID, pooledHit, cached) {
 				chargedHit = nil
 			}
 			price := p.pricePooledServe(chargedHit, prompt, cached)
@@ -1281,7 +1299,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// routing must never break the main request. Multimodal requests
 	// skip local entirely (the local text models can't serve images) and
 	// fall through to the capability-aware cloud path below.
-	if !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.ProviderName(), model, prompt, cachePrompt, reqFP, turn, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt, p.agentStrategy(agentKeyID)) {
+	if !byok && !modSet.Multimodal() && p.tryLocalRouting(w, ctx, cfg.ProviderName(), model, prompt, cachePrompt, reqFP, turn, wsID, team, sprint, feature, sessionID, requestID, piiDetected, redactedPrompt, p.agentStrategy(agentKeyID)) {
 		return
 	}
 
@@ -1584,7 +1602,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 		// B18.7: each provider streams through its OWN upstream and key — this was "OpenAI, else
 		// Anthropic", so every other provider's stream was sent to Anthropic's URL with its key.
-		ops, oerr := providerStreamOps(cfg, upstreamModel)
+		streamCfg := cfg
+		if byok {
+			streamCfg, _ = p.ownKeyConfig(own, cfg.ProviderName())
+			sc.byok = true
+		}
+		ops, oerr := providerStreamOps(streamCfg, upstreamModel)
 		if oerr != nil {
 			writeError(w, http.StatusBadRequest, oerr.Error())
 			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "stream_unsupported").Inc()
@@ -1634,7 +1657,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// which provider actually answered.
 	span.AddEvent("llm.forward.start")
 	upstreamBody, statusCode, fbResult, err := p.forwardWithFallback(
-		ctx, r, cfg.ProviderName(), upstreamModel, wsID, upstreamBodyOut, w,
+		ctx, r, cfg.ProviderName(), upstreamModel, wsID, upstreamBodyOut, w, own,
 	)
 	attempts := fbResult.Attempts
 	if err != nil {
@@ -1880,8 +1903,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// 0 when reservations are off (no settle) ⇒ the distill handoff writes a row the sweeper skips.
 		// B23.2: OUTSIDE the logging gate. The settle is the agent's bill, not a log: inside it, a
 		// LoggingNone workspace's hold was never settled and the stranded sweeper refunded it in full.
+		// B27.26: a BYOK request was answered on the workspace's own key and is charged nothing here.
 		settledChargeUSD := 0.0
-		if p.reservationActive() {
+		if byok {
+			// no hold was taken and no charge is made
+		} else if p.reservationActive() {
 			settledChargeUSD = p.settleReservationBasis(ctx, servedCostUSD, upstreamModel, servedPriceBasis)
 		} else {
 			// B23.13: reservations off, the pre-serve agent debit was the estimate — settle it to the delivered cost.
@@ -1893,7 +1919,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// B1.6: a subscriber's non-agent request draws the plan allowance on EITHER arm below —
 		// the session-key chat has no reservation, so the settle alone would charge it nothing.
 		// B9.8: a chat request is charged by chargeChatUsage (allowance, then prepaid) and nothing else.
-		subscriber := p.chargeChatUsage(ctx, wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
+		subscriber := byok || p.chargeChatUsage(ctx, wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
 		if !p.reservationActive() && !subscriber {
 			p.shadowSpendLXC(ctx, wsID, servedCostUSD)
 		}
@@ -2411,7 +2437,9 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	// hold for the sweeper to refund. B23.2: before the logging gate, as on the buffered seam — a
 	// LoggingNone workspace's agent is billed too.
 	settled := 0.0
-	if p.reservationActive() {
+	if sc.byok {
+		// B27.26: answered on the workspace's own key — no hold was taken and no charge is made, as buffered
+	} else if p.reservationActive() {
 		settled = p.settleReservation(ctx, servedCostUSD, sc.model)
 	} else {
 		p.settleAgentDebit(ctx, sc.wsID, servedCostUSD, sc.model, "") // B23.13, as on the buffered seam
@@ -2419,7 +2447,7 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	// The LXC charge, mutually exclusive with the settle above by the flag. B17.17: before the logging
 	// gate, as on the buffered seam — a LoggingNone workspace's chat is charged too.
 	// B1.6: the same allowance draw as the buffered seam (see there).
-	subscriber := p.chargeChatUsage(ctx, sc.wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
+	subscriber := sc.byok || p.chargeChatUsage(ctx, sc.wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
 	if !p.reservationActive() && !subscriber {
 		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
 	}
@@ -3211,6 +3239,7 @@ func (p *Proxy) forwardWithFallback(
 	provider, model, wsID string,
 	body []byte,
 	w http.ResponseWriter,
+	own map[string]string,
 ) ([]byte, int, fallback.FallbackResult, error) {
 	attempts := []fallbackAttempt{{provider: provider, model: model}}
 	if p.fallbackRouter != nil {
@@ -3237,6 +3266,15 @@ func (p *Proxy) forwardWithFallback(
 			// Unknown provider name in the chain — treat as a no-op and move on.
 			continue
 		}
+		// B27.26: a BYOK request goes only to providers the workspace holds a key for, on that key — never on
+		// Talyvor's, which it is not charged for.
+		if own != nil {
+			ownCfg, ok := p.ownKeyConfig(own, a.provider)
+			if !ok {
+				continue
+			}
+			cfg = ownCfg
+		}
 
 		// Key selection. When a pool is configured we pick a healthy key
 		// per attempt and override cfg's auth/url closures to use it; the
@@ -3244,7 +3282,7 @@ func (p *Proxy) forwardWithFallback(
 		// that just failed. When the pool is empty for this provider we
 		// silently fall back to the single configured key.
 		var poolKey *keypool.PoolKey
-		if p.keyPool != nil {
+		if p.keyPool != nil && own == nil {
 			if pk, perr := p.keyPool.Get(a.provider); perr == nil && pk != nil {
 				cfg = p.applyKey(cfg, pk.Key)
 				poolKey = pk

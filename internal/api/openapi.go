@@ -341,6 +341,36 @@ func openAPIPaths() map[string]any {
 				"responses": map[string]any{"200": map[string]any{"description": "revoked"}},
 			},
 		},
+		"/v1/workspaces/{wsID}/provider-keys": map[string]any{
+			"get": map[string]any{
+				"summary":     "List this workspace's own provider keys (BYOK) — the last four characters only",
+				"description": `{"byok": on the BYOK plan, "providers": the providers a key can be added for, "keys": [{"provider","last4","updated_at"}]}. The key itself is never returned. Present only when the deployment holds custody (LENS_PROVIDER_SECRET_KEK).`,
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{"200": map[string]any{"description": "byok, providers, keys"}},
+			},
+		},
+		"/v1/workspaces/{wsID}/provider-keys/{provider}": map[string]any{
+			"put": map[string]any{
+				"summary":     "Add or replace this workspace's own key for a provider (BYOK)",
+				"description": `Body {"key":"…"}. Requests to that provider are then sent on this key and charged no tokens. Refused (402) unless the workspace is on the BYOK plan; an unknown provider or a malformed key is refused (400). Answers with the provider and last four characters only.`,
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "provider", "in": "path", "required": true, "schema": map[string]any{"type": "string", "enum": []string{"anthropic", "google", "groq", "mistral", "openai"}}},
+				},
+				"responses": map[string]any{"200": map[string]any{"description": "provider, last4, updated_at"}},
+			},
+			"delete": map[string]any{
+				"summary":     "Remove this workspace's own key for a provider (BYOK)",
+				"description": "404 when no key is stored for that provider.",
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "provider", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{"204": map[string]any{"description": "removed"}},
+			},
+		},
 		"/v1/workspaces/{wsID}/spend/current-month": map[string]any{
 			"get": map[string]any{
 				"summary":   "Get current-month spend for a workspace",

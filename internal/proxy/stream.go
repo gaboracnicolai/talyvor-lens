@@ -56,6 +56,7 @@ type streamSpend struct {
 	reqFP                       string           // B15.1: the request fingerprint the cache write is keyed under
 	turn                        cache.Turn       // B16.1: the latest question + history hash the semantic write answers
 	post                        streamPostServe  // B15.3: what the buffered seam's post-flush records read
+	byok                        bool             // B27.26: sent on the workspace's own key, so charged nothing
 }
 
 // streamPostServe carries what the buffered path's post-flush records read and a stream would
@@ -350,7 +351,7 @@ func (s *StreamHandler) serve(
 	// The key pool, as forwardWithFallback uses it: a healthy pooled key for this provider when the
 	// operator configured any, else the deployment's single key. A transport failure counts against it.
 	var poolKey *keypool.PoolKey
-	if s.proxy.keyPool != nil {
+	if s.proxy.keyPool != nil && !sc.byok { // B27.26: a BYOK stream's ops already carry its own key
 		if pk, perr := s.proxy.keyPool.Get(provider); perr == nil && pk != nil {
 			poolKey = pk
 		}
