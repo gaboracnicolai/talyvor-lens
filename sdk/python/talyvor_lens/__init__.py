@@ -6,6 +6,7 @@ team, feature, and Git attribution headers the proxy needs.
 """
 
 from .agent_wallet import AgentWallet, AgentWalletError, PaymentRefused
+from .agents import Agents
 from .client import LensClient
 from .middleware import inject_lens_headers
 from .types import AttributionContext
@@ -16,6 +17,7 @@ __all__ = [
     "inject_lens_headers",
     "AttributionContext",
     "AgentWallet",
+    "Agents",
     "AgentWalletError",
     "PaymentRefused",
 ]

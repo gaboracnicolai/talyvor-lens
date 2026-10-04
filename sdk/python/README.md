@@ -1,6 +1,44 @@
 # Talyvor Lens Python SDK
 
-Drop-in OpenAI / Anthropic client that routes every request through Talyvor Lens — caching, routing, attribution, cost tracking — without changing your application code.
+Give every AI agent its own Talyvor wallet — a budget, spending rules, approvals and a live
+statement — and call models through Lens with the agent's own key, so Lens charges the agent's
+wallet and enforces its rules before the provider is called. The same client is a drop-in
+OpenAI / Anthropic client that adds caching, routing, attribution and cost tracking without
+changing your application code.
+
+## Quick start: an agent with its own wallet
+
+```python
+import os
+from talyvor_lens import LensClient
+
+lens_url = "https://lens.talyvor.com"
+owner = LensClient(lens_url=lens_url, api_key=os.environ["TALYVOR_OWNER_TOKEN"], workspace_id="acme")
+
+# 1. Create an agent. 2. Fund its wallet from the workspace (10 LXC = 10,000,000 µLXC).
+agent = owner.agents.create("researcher")
+owner.agents.fund(agent["id"], 10_000_000, idempotency_key="fund-researcher-oct")
+
+# 3. Issue the agent its own key (shown once).
+key = owner.agents.issue_key(agent["id"])["key"]
+
+# 4. The agent calls models through Lens with that key: each call is charged to its wallet.
+ai = LensClient(lens_url=lens_url, api_key=key, workspace_id="acme").openai
+ai.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "Hello"}])
+
+# 5. Read its statement, newest first: the model call, then the funding.
+owner.agents.statement(agent["id"])["lines"]
+# [{"kind": "spend", "amount_ulxc": -1500, "balance_after_ulxc": 9998500, ...},
+#  {"kind": "fund", "amount_ulxc": 10000000, "balance_after_ulxc": 10000000, ...}]
+```
+
+Every agent has a person as its owner, so create it signed in — with your own token, or on the
+Agent Wallets screen of the Talyvor app. Funding, `withdraw`, `issue_key`, `statement` and
+`list` also take a workspace key with the `keys` scope. A refusal raises `AgentWalletError`
+carrying Lens's status and reason (for example `409` when the workspace has too few LXC).
+
+The agent's key also reaches its wallet directly — balance, payments, approvals: see
+[The agent's side of its wallet](#the-agents-side-of-its-wallet).
 
 ## Installation
 
@@ -12,7 +50,7 @@ pip install "talyvor-lens[anthropic]"
 
 Requires Python 3.10+.
 
-## Quick start (3 lines)
+## Drop-in client (3 lines)
 
 ```python
 from talyvor_lens import LensClient
@@ -57,7 +95,7 @@ headers = inject_lens_headers(
 response = httpx.post("http://lens:8080/v1/proxy/openai/v1/chat/completions", headers=headers, json=body)
 ```
 
-## The agent wallet
+## The agent's side of its wallet
 
 With a key attached to an agent (`POST /v1/workspaces/{ws}/agents/{agent}/keys`), the agent
 uses its own account. Amounts are µLXC (1 LXC = 1,000,000 µLXC); every call is

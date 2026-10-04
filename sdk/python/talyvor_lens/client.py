@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from .agent_wallet import AgentWallet
+from .agents import Agents
 from .middleware import inject_lens_headers
 from .types import HEADER_BRANCH, HEADER_PR
 
@@ -106,6 +107,14 @@ class LensClient:
         account, within its spending rules, and Lens logs every one.
         """
         return AgentWallet(self.lens_url, self._headers)
+
+    @property
+    def agents(self) -> Agents:
+        """The workspace owner's side of Agent Wallets: create an agent, fund it, issue its key, read its statement.
+
+        For the owner's key, in this client's workspace.
+        """
+        return Agents(self.lens_url, self.workspace_id, self._headers)
 
     def get_headers(self) -> Dict[str, str]:
         """Return a copy of the headers Lens will add to every request.

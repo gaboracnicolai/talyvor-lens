@@ -8,6 +8,7 @@
  */
 
 import { AgentWallet } from "./agentWallet";
+import { Agents } from "./agents";
 import { injectLensHeaders } from "./middleware";
 import { HEADER_BRANCH, HEADER_PR } from "./types";
 
@@ -75,6 +76,15 @@ export class LensClient {
    */
   get wallet(): AgentWallet {
     return new AgentWallet(this.lensUrl, this.headers);
+  }
+
+  /**
+   * The workspace owner's side of Agent Wallets: create an agent, fund it,
+   * issue its key, read its statement. For the owner's key, in this
+   * client's workspace.
+   */
+  get agents(): Agents {
+    return new Agents(this.lensUrl, this.headers["X-Talyvor-Workspace"], this.headers);
   }
 
   /** Return a copy of the headers Lens will add to every request. */
