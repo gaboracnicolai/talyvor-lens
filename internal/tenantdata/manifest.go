@@ -218,6 +218,7 @@ var Manifest = map[string]Entry{
 	"uploaded_documents":           {Delete, "B18.13: documents a workspace uploaded for its chats to reference by id; the file itself is in content"},
 	"agent_portfolios":             {Delete, "B22.8: an agent's simulated portfolios; their orders cascade with them. Simulated cash only: no credits or money"},
 	"agent_pots":                   {Delete, "B22.7: an agent's pots — a goal, a budget or a reserve — and their locks; their money is in agent_postings"},
+	"agent_account_balances":       {Delete, "B28.297: each account's running balance, kept from agent_postings by a trigger (0185); the postings are the record"},
 	"agent_loans":                  {Delete, "B22.5: keys `lender_workspace_id`+`borrower_workspace_id`: a loan between two companies' agents, its terms and state; its money is in agent_transfers"},
 	"agent_escrows":                {Delete, "B22.6: keys `payer_workspace_id`+`payee_workspace_id`: credits one agent paid into escrow for another, and their state; its money is in agent_postings and lxc_ledger"},
 	"agent_debit_settlements":      {Delete, "B23.13: how each agent question's pre-serve estimate was settled to its delivered cost and what its limit wrote off; the credits' movements are in agent_postings and lxc_ledger"},

@@ -17,8 +17,9 @@ import (
 // lxc_balances and move the key's spent_lxc. A key attached to an agent account additionally posts
 // every one of those movements against its agent in the SAME transaction (agentMovement), and is bound
 // by the agent's balance instead of the per-key ceiling. Funding and withdrawing post between the
-// workspace and the agent. Balances are sums of postings (migration 0140), never stored; every entry
-// sums to zero, enforced at commit; postings are append-only.
+// workspace and the agent. A balance is the sum of its account's postings (migration 0140), kept as a
+// running total in agent_account_balances by a trigger in the posting's own transaction (0185, B28.297),
+// so reading one is a single row; every entry sums to zero, enforced at commit; postings are append-only.
 
 // ErrAgentNotFound: no such agent in this workspace.
 var ErrAgentNotFound = errors.New("economy: no such agent in this workspace")
@@ -86,17 +87,20 @@ func postEntry(ctx context.Context, tx pgx.Tx, workspaceID, kind, ref string, le
 	return nil
 }
 
+// balanceSQL reads an account's stored running balance (B28.297): one row, however many postings it has.
+// Every account but the shared 'workspace', 'spend' and 'cashed_out' sides is kept (0185).
+const balanceSQL = `SELECT COALESCE((SELECT balance_ulxc FROM agent_account_balances WHERE workspace_id = $1 AND account = $2), 0)::bigint`
+
 func accountBalance(ctx context.Context, tx pgx.Tx, workspaceID, account string) (int64, error) {
 	var bal int64
-	err := tx.QueryRow(ctx, `SELECT COALESCE(sum(amount_ulxc), 0)::bigint FROM agent_postings WHERE workspace_id = $1 AND account = $2`,
-		workspaceID, account).Scan(&bal)
+	err := tx.QueryRow(ctx, balanceSQL, workspaceID, account).Scan(&bal)
 	return bal, err
 }
 
-// allocatedSQL is what a workspace's agents hold: Σ their balances and their pots (B22.7). Read directly, not as
-// −(workspace side) − spend: a transfer between workspaces (B22.3) is an entry whose two postings are in
-// different workspaces.
-const allocatedSQL = `SELECT COALESCE(sum(amount_ulxc), 0)::bigint FROM agent_postings
+// allocatedSQL is what a workspace's agents hold: Σ their balances and their pots (B22.7), one stored row each.
+// Read directly, not as −(workspace side) − spend: a transfer between workspaces (B22.3) is an entry whose two
+// postings are in different workspaces.
+const allocatedSQL = `SELECT COALESCE(sum(balance_ulxc), 0)::bigint FROM agent_account_balances
   WHERE workspace_id = $1 AND (account LIKE 'agent:%' OR account LIKE 'pot:%')`
 
 // requireUnallocated refuses a debit of the workspace's OWN spending — anything not made with an agent's
@@ -380,12 +384,12 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT a.id, a.name, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id, COALESCE(a.handle, ''),
-		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id), 0)::bigint,
+		       COALESCE((SELECT b.balance_ulxc FROM agent_account_balances b WHERE b.workspace_id = a.workspace_id AND b.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
 		                   AND p.kind IN ('spend', 'hold', 'settle', 'release', 'card')), 0)::bigint,
 		       COALESCE((SELECT array_agg(k.scoped_key_id ORDER BY k.created_at) FROM agent_account_keys k WHERE k.agent_id = a.id), '{}'),
-		       COALESCE((SELECT sum(g.amount_ulxc) FROM agent_postings g JOIN agent_pots t ON g.account = 'pot:' || t.id
-		                  WHERE t.agent_id = a.id AND g.workspace_id = a.workspace_id), 0)::bigint
+		       COALESCE((SELECT sum(b.balance_ulxc) FROM agent_account_balances b JOIN agent_pots t ON b.account = 'pot:' || t.id
+		                  WHERE t.agent_id = a.id AND b.workspace_id = a.workspace_id), 0)::bigint
 		  FROM agent_accounts a WHERE a.workspace_id = $1 ORDER BY a.created_at, a.id`, workspaceID)
 	if err != nil {
 		return book, fmt.Errorf("economy: agents: %w", err)
