@@ -377,6 +377,16 @@ func openAPIPaths() map[string]any {
 				"responses": map[string]any{"200": map[string]any{"description": "spend snapshot"}},
 			},
 		},
+		"/v1/workspaces/{wsID}/savings/current-month": map[string]any{
+			"get": map[string]any{
+				"summary":     "Get this month's measured saving for a workspace",
+				"description": "Summed over the workspace's own requests this calendar month (UTC): what each would have cost at the model it asked for with no Talyvor cache (list_usd), minus what it was charged (charged_usd). Requests recorded without a measurement are counted in unmeasured_requests and left out of the sums.",
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{"200": map[string]any{"description": "month_start, saved_usd, list_usd, charged_usd, requests, unmeasured_requests"}},
+			},
+		},
 		"/v1/workspaces/{wsID}/stored-answers": map[string]any{
 			"get": map[string]any{
 				"summary": "Count this workspace's stored answers and document conversions, by scope",

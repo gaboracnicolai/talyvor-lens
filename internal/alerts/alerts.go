@@ -182,8 +182,9 @@ func providerForModel(model string) string {
 
 const insertTokenEventSQL = `INSERT INTO token_events
   (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method,
-   tare_kind, tare_tokens_in, tare_tokens_out, tare_delta_cost_usd, tare_work_item_id, auth_method)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`
+   tare_kind, tare_tokens_in, tare_tokens_out, tare_delta_cost_usd, tare_work_item_id, auth_method,
+   requested_model, list_cost_usd, charged_usd)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`
 
 // authMethodOf is the credential kind that made this request, recorded on every token_events row
 // (B9.3, migration 0129) so a serve is never again of unknown origin. ” when no credential reached ctx.
@@ -256,8 +257,10 @@ func (a *AlertManager) RecordCacheServe(ctx context.Context, workspaceID, team, 
 	if modality == "" {
 		modality = "text"
 	}
+	requested, list, charged := savingOf(ctx)
 	if _, err := a.pool.Exec(ctx, insertCacheServeSQL,
 		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, sessionID, requestID, modality, serveSource, authMethodOf(ctx),
+		requested, list, charged,
 	); err != nil {
 		return fmt.Errorf("alerts: insert cache-serve token_event: %w", err)
 	}
@@ -273,8 +276,9 @@ func (a *AlertManager) RecordCacheServe(ctx context.Context, workspaceID, team, 
 // TRUE (length-derived tokens), distill_method = ” (a cache serve distills nothing). Column
 // order mirrors insertTokenEventSQL with serve_source appended.
 const insertCacheServeSQL = `INSERT INTO token_events
-  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source, auth_method)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, TRUE, '', $12, $13)`
+  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source, auth_method,
+   requested_model, list_cost_usd, charged_usd)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, TRUE, '', $12, $13, $14, $15, $16)`
 
 // RecordNodeServe writes the token_events row for a request served by a REGISTERED INFERENCE NODE —
 // so it COUNTS in the cache hit-rate denominator as a MISS (no cache produced the bytes), closing the
@@ -291,8 +295,10 @@ func (a *AlertManager) RecordNodeServe(ctx context.Context, workspaceID, team, s
 	if modality == "" {
 		modality = "text"
 	}
+	requested, list, charged := savingOf(ctx)
 	if _, err := a.pool.Exec(ctx, insertNodeServeSQL,
 		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, costUSD, sessionID, requestID, modality, authMethodOf(ctx),
+		requested, list, charged,
 	); err != nil {
 		return fmt.Errorf("alerts: insert node-serve token_event: %w", err)
 	}
@@ -302,8 +308,9 @@ func (a *AlertManager) RecordNodeServe(ctx context.Context, workspaceID, team, s
 // insertNodeServeSQL is insertCacheServeSQL with the charge in cost_usd: no prompt persisted, length-
 // derived tokens (cost_estimated TRUE), serve_source 'node'.
 const insertNodeServeSQL = `INSERT INTO token_events
-  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source, auth_method)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', $10, $11, $12, TRUE, '', 'node', $13)`
+  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source, auth_method,
+   requested_model, list_cost_usd, charged_usd)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', $10, $11, $12, TRUE, '', 'node', $13, $14, $15, $16)`
 
 func (a *AlertManager) recordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string, tare TareMeter) error {
 	cost := costUSD(model, inputTokens, outputTokens)
@@ -311,10 +318,12 @@ func (a *AlertManager) recordSpend(ctx context.Context, workspaceID, team, sprin
 	if modality == "" {
 		modality = "text"
 	}
+	requested, list, charged := savingOf(ctx)
 
 	if _, err := a.pool.Exec(ctx, insertTokenEventSQL,
 		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, cost, prompt, sessionID, requestID, modality, estimated, distillMethod,
 		tare.Kind, tare.TokensIn, tare.TokensOut, tare.deltaCostUSD(model), tare.WorkItemID, authMethodOf(ctx),
+		requested, list, charged,
 	); err != nil {
 		return fmt.Errorf("alerts: insert token_event: %w", err)
 	}

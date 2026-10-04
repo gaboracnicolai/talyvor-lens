@@ -4091,6 +4091,18 @@ func run() error {
 			})
 		})
 
+		// B27.32: this month's MEASURED saving — the sum, over the workspace's own token_events rows, of what
+		// each request would have cost at the model it asked for with no Talyvor cache, minus what it was
+		// charged. Read straight from the rows (no cache), so it is exactly what they add up to.
+		authed.Get("/v1/workspaces/{wsID}/savings/current-month", func(w http.ResponseWriter, req *http.Request) {
+			saving, err := alertManager.MonthSaving(req.Context(), chi.URLParam(req, "wsID"), time.Now())
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, saving)
+		})
+
 		// ─── Git attribution ────────────────────────────────
 		// Per-request rollups served from request_attribution
 		// (migration 0017) — now the SOLE attribution source (the
