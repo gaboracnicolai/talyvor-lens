@@ -69,7 +69,9 @@ func requiredAPIErrorFields(t *testing.T) []string {
 	return out
 }
 
-// operationsDeclaringErrors returns "METHOD path -> status" for every published error response.
+// operationsDeclaringErrors returns "METHOD path -> status" for every published error response that
+// declares a body. One with a description only (the agent wallet routes' 402/403/404/409, B28.12)
+// promises the status, not a body shape, so it has nothing to check against the wire.
 func operationsDeclaringErrors(t *testing.T) []string {
 	t.Helper()
 	paths, _ := api.OpenAPISpec()["paths"].(map[string]any)
@@ -79,7 +81,10 @@ func operationsDeclaringErrors(t *testing.T) []string {
 		for m, o := range ops {
 			od, _ := o.(map[string]any)
 			resp, _ := od["responses"].(map[string]any)
-			for code := range resp {
+			for code, r := range resp {
+				if rd, _ := r.(map[string]any); rd["content"] == nil {
+					continue
+				}
 				if strings.HasPrefix(code, "4") || strings.HasPrefix(code, "5") {
 					out = append(out, strings.ToUpper(m)+" "+p+" -> "+code)
 				}

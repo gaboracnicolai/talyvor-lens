@@ -67,6 +67,17 @@ func TestPagePointsAtTheDetailedStatusPage(t *testing.T) {
 	}
 }
 
+// B28.12: the page says what Lens is for — Agent Wallets — and points at the API reference that lists them.
+func TestPageLeadsWithAgentWallets(t *testing.T) {
+	body := stripStyleAndScript(render(t))
+	if !strings.Contains(body, "Agent Wallets and the gateway that enforces them") {
+		t.Error("the page must describe Lens as Agent Wallets and the gateway that enforces them")
+	}
+	if !strings.Contains(body, `href="/openapi.json"`) {
+		t.Error("the page must link to /openapi.json, where the wallet routes are listed")
+	}
+}
+
 func TestPagePointsAtTheDashboardAndTheDocs(t *testing.T) {
 	body := render(t)
 	if !strings.Contains(body, "app.talyvor.com") {

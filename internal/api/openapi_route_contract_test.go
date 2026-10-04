@@ -62,25 +62,46 @@ func repoRootForAPI(t *testing.T) string {
 	return root
 }
 
+// lensRouteSource is the source of every non-test file in cmd/lens: main.go and the mount*Routes
+// files it calls. B28.12: the agent wallet routes are registered in agent_*_handler.go, not main.go,
+// so a parse of main.go alone reported every published wallet path as unregistered.
+func lensRouteSource(t *testing.T) string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(repoRootForAPI(t), "cmd", "lens", "*.go"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("list cmd/lens: %v (%d files)", err, len(files))
+	}
+	var b strings.Builder
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		b.Write(src)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 // registeredRoutes returns the set of "METHOD /normalised/path" the binary registers.
 //
-// ⚠ IT READS main.go's SOURCE, AND THE REASON IS RECORDED RATHER THAN GLOSSED. chi.Walk over the
+// ⚠ IT READS cmd/lens's SOURCE, AND THE REASON IS RECORDED RATHER THAN GLOSSED. chi.Walk over the
 // real router would be better — it would see what the process serves. It is not reachable: the
 // router is built inline inside run()'s full dependency graph, so there is no exported seam that
 // returns a mounted router. cmd/lens/admin_route_classification_test.go states the same limit and
 // this file inherits it rather than pretending otherwise.
 //
-// ⚠ MEASURED BEFORE RELYING ON IT: main.go contains no `.Route(` and no `.Mount(`, so every path
+// ⚠ MEASURED BEFORE RELYING ON IT: cmd/lens contains no `.Route(` and no `.Mount(`, so every path
 // literal at a registration site IS the served path. TestNoMountOrRouteHidesAPrefix asserts that,
 // because the day one appears every comparison here silently mis-attributes.
 func registeredRoutes(t *testing.T) map[string]bool {
 	t.Helper()
-	src, err := os.ReadFile(filepath.Join(repoRootForAPI(t), "cmd", "lens", "main.go"))
-	if err != nil {
-		t.Fatalf("read main.go: %v", err)
-	}
+	src := lensRouteSource(t)
 	out := map[string]bool{}
-	for _, m := range registration.FindAllStringSubmatch(string(src), -1) {
+	for _, m := range registration.FindAllStringSubmatch(src, -1) {
 		// ⚠ ASSERTED, NOT ASSUMED. Control W4 removed the leading `/` from the regex and NOTHING
 		// failed: the bogus entries it admits (`q.Get("model")` — url.Values.Get, not a route)
 		// never start with /v1, so every downstream filter silently dropped them and the comment
@@ -148,13 +169,10 @@ func TestEveryPublishedPathIsRegistered(t *testing.T) {
 // registration site is not the served path, and every result above becomes mis-attributed —
 // silently, and in both directions.
 func TestNoMountOrRouteHidesAPrefix(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(repoRootForAPI(t), "cmd", "lens", "main.go"))
-	if err != nil {
-		t.Fatalf("read main.go: %v", err)
-	}
+	src := lensRouteSource(t)
 	for _, bad := range []string{".Route(", ".Mount("} {
-		if strings.Contains(string(src), bad) {
-			t.Errorf("main.go now uses %s. Route registrations are no longer served at the literal "+
+		if strings.Contains(src, bad) {
+			t.Errorf("cmd/lens now uses %s. Route registrations are no longer served at the literal "+
 				"path written beside them, so registeredRoutes() mis-attributes every route under "+
 				"the prefix — resolve it before trusting anything in this file.", bad)
 		}
@@ -194,6 +212,7 @@ func TestNormalisationCollapsesChiWildcardsAndOpenAPIParams(t *testing.T) {
 // covers; a named surface with no published path is a claim the document does not keep, and it is
 // the kind a reader has no way to test short of reading every path.
 var declaredSurfaces = []struct{ name, match string }{
+	{"agent wallets", "/agents"},
 	{"proxy endpoints", "/v1/proxy/"},
 	{"key management", "/v1/api/keys"},
 	{"workspaces", "/v1/workspaces/"},
@@ -286,7 +305,11 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 //
 // 119 → 120 (B27.35): PUT /v1/workspaces/{wsID}/tare-model, the opt-in for Tare phase 2a's prose model,
 // beside the undocumented PUT /v1/workspaces/{wsID}/tare it qualifies.
-const undocumentedNonAdminV1Routes = 120
+//
+// 120 → 194 (B28.12): the parse now reads every cmd/lens file, not main.go alone, which finds 95 routes
+// registered by the mount*Routes files that were never counted (215); and 21 agent wallet operations are
+// now published (openapi_wallets.go).
+const undocumentedNonAdminV1Routes = 194
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

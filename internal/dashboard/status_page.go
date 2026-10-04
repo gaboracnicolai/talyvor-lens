@@ -88,7 +88,7 @@ footer{margin-top:12px; text-align:center; font-size:12px; color:var(--faint)}
       <span class="mark" aria-hidden="true"><i></i></span>
       <div class="title">
         <h1>Talyvor Lens</h1>
-        <p class="sub">Inference gateway</p>
+        <p class="sub">Agent Wallets and the gateway that enforces them</p>
       </div>
       <span class="ver">v{{VERSION}}</span>
     </div>
@@ -110,8 +110,10 @@ footer{margin-top:12px; text-align:center; font-size:12px; color:var(--faint)}
     </div>
 
     <div class="note">
-      <p>This host answers the Lens API. It is an API, not a user interface — there is
-         nothing to sign in to here.</p>
+      <p>Every AI agent gets a wallet — a balance, spending rules, approvals, a card and
+         a live statement — and this host is where its rules are enforced: Lens judges each
+         model call and payment against the agent's wallet before it happens.</p>
+      <p>It is an API, not a user interface — there is nothing to sign in to here.</p>
       <p>No account data appears on this page: it holds no credential, by design. Your
          workspace, usage and billing live in the app.</p>
     </div>
@@ -126,8 +128,16 @@ footer{margin-top:12px; text-align:center; font-size:12px; color:var(--faint)}
 
     <a class="row" href="https://app.talyvor.com">
       <div>
-        <div class="label">Dashboard</div>
-        <div class="hint">app.talyvor.com</div>
+        <div class="label">Wallet console</div>
+        <div class="hint">Your agents, their rules and statements — app.talyvor.com</div>
+      </div>
+      <span class="go" aria-hidden="true">&rsaquo;</span>
+    </a>
+
+    <a class="row" href="/openapi.json">
+      <div>
+        <div class="label">API reference</div>
+        <div class="hint">OpenAPI — the agent wallet routes first</div>
       </div>
       <span class="go" aria-hidden="true">&rsaquo;</span>
     </a>

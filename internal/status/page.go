@@ -545,7 +545,7 @@ func renderHTML(s *StatusResponse) string {
 <main>
 <header>
   <h1>TALYVOR <span class="accent">LENS</span> STATUS</h1>
-  <div class="subtitle">v%s · uptime %s</div>
+  <div class="subtitle">Agent Wallets and the gateway that enforces them · v%s · uptime %s</div>
 </header>
 
 <div class="banner %s">%s</div>
