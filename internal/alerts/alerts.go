@@ -278,27 +278,32 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, TRUE, '', $12, $13)
 
 // RecordNodeServe writes the token_events row for a request served by a REGISTERED INFERENCE NODE —
 // so it COUNTS in the cache hit-rate denominator as a MISS (no cache produced the bytes), closing the
-// node-serve denominator gap. It reuses the zero-provider-cost insert RecordCacheServe established
-// (insertCacheServeSQL), because a node serve — like a cache serve — costs Talyvor NOTHING upstream:
-// the node did the compute, not an API provider.
+// node-serve denominator gap. serve_source is always 'node' (the migration 0101 CHECK enum).
 //
-// ⚠ cost_usd = 0 IS TALYVOR'S PROVIDER COST. What the node may be OWED is a PoVI LENS mint in
-// lens_token_ledger — a DIFFERENT ledger and a DIFFERENT unit (LENS, not USD). Folding it into
-// cost_usd here would pollute every SUM(cost_usd) provider-spend total and mix units. serve_source is
-// always 'node' (the migration 0101 CHECK enum). The alert ladder is skipped for the same reason as a
-// cache serve — a zero-cost row cannot move a SUM(cost_usd) threshold window.
-func (a *AlertManager) RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string) error {
+// B27.2: cost_usd is what the question was CHARGED (costUSD — the served model's charge rate on the
+// Lens-measured tokens, the same figure the chat/subscriber charge and the agent settle book), because
+// budgets and the spending cap both read SUM(cost_usd) over token_events: at 0 a node-served question
+// was free to every budget the moment it next reconciled. It is still not a LENS figure — what the node
+// may be OWED is a PoVI mint in lens_token_ledger, a different ledger and unit. The alert ladder is not
+// run here; the next rule evaluation's SUM(cost_usd) window includes this row.
+func (a *AlertManager) RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string, costUSD float64) error {
 	provider := providerForModel(model)
 	if modality == "" {
 		modality = "text"
 	}
-	if _, err := a.pool.Exec(ctx, insertCacheServeSQL,
-		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, sessionID, requestID, modality, "node", authMethodOf(ctx),
+	if _, err := a.pool.Exec(ctx, insertNodeServeSQL,
+		workspaceID, provider, model, inputTokens, outputTokens, team, sprint, feature, costUSD, sessionID, requestID, modality, authMethodOf(ctx),
 	); err != nil {
 		return fmt.Errorf("alerts: insert node-serve token_event: %w", err)
 	}
 	return nil
 }
+
+// insertNodeServeSQL is insertCacheServeSQL with the charge in cost_usd: no prompt persisted, length-
+// derived tokens (cost_estimated TRUE), serve_source 'node'.
+const insertNodeServeSQL = `INSERT INTO token_events
+  (workspace_id, provider, model, input_tokens, output_tokens, team, sprint_id, feature, cost_usd, prompt_text, session_id, request_id, modality, cost_estimated, distill_method, serve_source, auth_method)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', $10, $11, $12, TRUE, '', 'node', $13)`
 
 func (a *AlertManager) recordSpend(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, prompt, sessionID, requestID, modality string, estimated bool, distillMethod string, tare TareMeter) error {
 	cost := costUSD(model, inputTokens, outputTokens)

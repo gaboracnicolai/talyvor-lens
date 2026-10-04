@@ -89,7 +89,7 @@ func (r *recordingAlertSink) RecordCacheServe(ctx context.Context, workspaceID, 
 	return nil
 }
 
-func (r *recordingAlertSink) RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string) error {
+func (r *recordingAlertSink) RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string, _ float64) error {
 	return r.RecordCacheServe(ctx, workspaceID, team, sprint, feature, model, inputTokens, outputTokens, sessionID, requestID, modality, "node")
 }
 

@@ -146,7 +146,7 @@ func TestExport_CachedReflectsTheServeThatActuallyHappened(t *testing.T) {
 	if err := am.RecordCacheServe(ctx, ws, "t", "s", "f", "gpt-4o", 100, 50, "sess", reqPooled, "text", "cache_hit_pooled_semantic"); err != nil {
 		t.Fatalf("RecordCacheServe (pooled semantic): %v", err)
 	}
-	if err := am.RecordNodeServe(ctx, ws, "t", "s", "f", "gpt-4o", 100, 50, "sess", reqNode, "text"); err != nil {
+	if err := am.RecordNodeServe(ctx, ws, "t", "s", "f", "gpt-4o", 100, 50, "sess", reqNode, "text", 0.001); err != nil {
 		t.Fatalf("RecordNodeServe: %v", err)
 	}
 
