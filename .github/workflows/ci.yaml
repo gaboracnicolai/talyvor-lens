@@ -136,6 +136,38 @@ jobs:
         # timed it out on three consecutive attempts at 29221e6 with no test at fault.
         run: go test -timeout 300s -race -count=1 -p 1 ./...
 
+  # B27.35 — Tare phase 2a against the REAL weights: the pure-Go port reproduces onnxruntime's logits
+  # (golden_test.go), and on real payloads the measured reduction and the known-answer scenarios hold
+  # (measured_test.go). The weights are 279 MB and not in git, so this fetches the SAME bytes the
+  # Dockerfile's kompress stage puts in the image — revision and sha256s read from the Dockerfile, the
+  # one place they are written. TARE_MODEL_REQUIRED=1 makes a missing model a failure; in the test job
+  # above those tests skip, because the weights are not there. No -race: the race detector makes a
+  # forward pass minutes long, and the reducer's concurrency is covered there by the weight-free tests.
+  tare-model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: fetch kompress-small at the Dockerfile's pinned revision
+        run: |
+          rev="$(sed -n 's/^ARG KOMPRESS_REV=//p' Dockerfile)"
+          test -n "$rev"
+          grep -oE '[0-9a-f]{64} [a-z_.]+' Dockerfile | sed 's/ /  /' > /tmp/kompress.sha256
+          test "$(wc -l < /tmp/kompress.sha256)" -eq 2
+          mkdir -p /tmp/kompress-small && cd /tmp/kompress-small
+          for f in model.safetensors tokenizer.json; do
+            curl -fsSL --retry 3 -o "$f" "https://huggingface.co/chopratejas/kompress-small/resolve/$rev/$f"
+          done
+          sha256sum -c /tmp/kompress.sha256
+      - name: Tare phase 2a model tests (real weights)
+        env:
+          LENS_TARE_MODEL_DIR: /tmp/kompress-small
+          TARE_MODEL_REQUIRED: "1"
+        run: go test -count=1 -v -run 'TestGoldenMatchesONNX|TestPhase2a_' ./internal/tare/kompress
+
   # Formal static-analysis gate: golangci-lint (errcheck, govet, ineffassign,
   # staticcheck, unused). Config in .golangci.yml. Blocking — a finding fails the
   # build. (go vet also runs in the test job; pinned here under the lint suite too.)

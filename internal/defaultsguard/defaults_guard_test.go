@@ -27,6 +27,7 @@ import (
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/ratelimit"
+	"github.com/talyvor/lens/internal/tare/kompress"
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -118,6 +119,7 @@ var shipped = map[string]recorded{
 	"workspace.DefaultCompressionPolicy":          {workspace.DefaultCompressionPolicy, workspace.CompressionDisabled, "compression default"},
 	"workspace.DefaultDistillPolicy":              {workspace.DefaultDistillPolicy, workspace.DistillAlways, "distill default"},
 	"workspace.DefaultTarePolicy":                 {workspace.DefaultTarePolicy, workspace.TareAlways, "tare default"},
+	"kompress.DefaultDir":                         {kompress.DefaultDir, "/models/kompress-small", "where the image carries the Tare phase 2a weights"},
 	// Prose, not a scalar — pinned by CONTENT HASH so a silent reword of a prompt
 	// sent to a PAID vision model is loud, without inlining 191 characters here.
 	"distill.DefaultVisionPrompt": {sha12(distill.DefaultVisionPrompt), "532be6cd7c36", "vision prompt, sha256[:12]"},

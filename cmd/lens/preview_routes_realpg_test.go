@@ -85,7 +85,7 @@ func previewRouter() http.Handler {
 	})
 	r.Group(func(authed chi.Router) {
 		authed.Use(workspaceIsolationMiddleware)
-		mountPreviewRoutes(authed, inProcessConverter{})
+		mountPreviewRoutes(authed, inProcessConverter{}, nil)
 	})
 	return r
 }

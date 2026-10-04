@@ -33,6 +33,16 @@ type PreviewResult struct {
 // a model call and without the request around it. kind "" tries every reducer; otherwise only those of
 // that kind.
 func Preview(ctx context.Context, content []byte, kind Kind) (PreviewResult, error) {
+	return PreviewWith(ctx, content, kind, nil)
+}
+
+// PreviewWith is Preview with phase 2a (internal/tare/kompress) tried after every phase-1 reducer, as
+// the serve path does for a workspace that opted in to the model. phase2 nil is Preview.
+func PreviewWith(ctx context.Context, content []byte, kind Kind, phase2 *Reducer) (PreviewResult, error) {
+	reducers := Phase1
+	if phase2 != nil {
+		reducers = append(reducers[:len(reducers):len(reducers)], *phase2)
+	}
 	var reasons []string
 	seen := map[string]bool{}
 	observe := func(r Refusal) {
@@ -41,7 +51,7 @@ func Preview(ctx context.Context, content []byte, kind Kind) (PreviewResult, err
 			reasons = append(reasons, r.Reason)
 		}
 	}
-	for _, r := range Phase1 {
+	for _, r := range reducers {
 		if kind != "" && r.Kind != kind {
 			continue
 		}
