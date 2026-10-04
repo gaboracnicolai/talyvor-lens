@@ -45,6 +45,7 @@ func agentHarness(t *testing.T) *DualTokenStore {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		// B19.13: the workspace's own spend reads what its agents hold.
 		`CREATE TABLE IF NOT EXISTS agent_postings (workspace_id TEXT NOT NULL, account TEXT NOT NULL, amount_ulxc BIGINT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS agent_account_balances (workspace_id TEXT NOT NULL, account TEXT NOT NULL, balance_ulxc BIGINT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS lxc_spend_claims (request_id TEXT PRIMARY KEY, scoped_key_id TEXT NOT NULL,
 			lxc_amount BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		// 0158: the LXC balance writer reads the workspace's open holds.
