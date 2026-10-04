@@ -2414,6 +2414,9 @@ func run() error {
 			}
 			writeJSONOK(w, http.StatusOK, hist)
 		})
+
+		// B28.439 — each plan's price and included usage, for a visitor: what a new subscriber is granted.
+		subs.get(pub, "/v1/billing/plans", newPlansHandler(billRoute))
 	})
 
 	// Public status page. /status content-negotiates between HTML and
