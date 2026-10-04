@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -59,6 +60,10 @@ func AuthMiddleware(ks *KeyStore, m *Manager) func(http.Handler) http.Handler {
 			// all four credential shapes.
 			if m != nil {
 				actx, err := m.Authenticate(r)
+				if errors.Is(err, ErrAuthUnavailable) {
+					writeAuthUnavailable(w)
+					return
+				}
 				if err == nil && actx.AuthMethod == MethodModeratorKey {
 					// B20.13: a moderator key reaches the marketplace review queue and nothing else.
 					writeAuthError(w, http.StatusForbidden, "a moderator key may only use the marketplace review queue")
@@ -115,6 +120,23 @@ func extractKey(r *http.Request) string {
 		}
 	}
 	return r.Header.Get("X-Talyvor-Key")
+}
+
+// authUnavailableCode is the machine-readable half of an ErrAuthUnavailable 503. The suite's Chat
+// keys on it to retry quietly, and it is what tells this 503 apart from a provider's
+// "not configured" 503 on the same route.
+const authUnavailableCode = "auth_unavailable"
+
+// writeAuthUnavailable answers B27.5's "we could not check your credential" — a 503 with
+// Retry-After, never a 401, so a client does not take a database hiccup for a sign-out.
+func writeAuthUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", AuthUnavailableRetryAfter)
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error": "your session could not be checked just now; try again",
+		"code":  authUnavailableCode,
+	})
 }
 
 func writeAuthError(w http.ResponseWriter, status int, msg string) {
