@@ -82,6 +82,7 @@ class AgentRules(TypedDict, total=False):
     daily_limit_ulxc: int
     weekly_limit_ulxc: int
     monthly_limit_ulxc: int
+    model_daily_limits_ulxc: dict[str, int]
     approval_above_ulxc: int
     allowed_models: list[str]
     allowed_providers: list[str]

@@ -192,7 +192,7 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	// (3) CEILING check — reject (rollback ⇒ no orphan claim) if this debit would exceed remaining.
 	// B19.1: a key attached to an agent account spends the agent's balance, posted in this transaction;
 	// the per-key ceiling binds only a key with no agent.
-	isAgent, err := agentMovement(ctx, tx, scopedKeyID, lxcAmount, "spend", requestID)
+	isAgent, err := agentMovement(ctx, tx, scopedKeyID, lxcAmount, "spend", requestID, meta.RequestedModel)
 	if err != nil {
 		return s.refusedMovement(ctx, tx, err)
 	}
@@ -302,7 +302,7 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 		return fmt.Errorf("economy: read sub-budget: %w", err)
 	}
 	// B19.1: an agent's key holds against the agent's balance (posted here), not the per-key ceiling.
-	isAgent, err := agentMovement(ctx, tx, scopedKeyID, heldLXC, "hold", reservationID)
+	isAgent, err := agentMovement(ctx, tx, scopedKeyID, heldLXC, "hold", reservationID, meta.RequestedModel)
 	if err != nil {
 		return s.refusedMovement(ctx, tx, err) // rollback ⇒ no orphan reservation
 	}
@@ -451,7 +451,7 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		return 0, 0, fmt.Errorf("economy: reclaim spent (settle): %w", err)
 	}
 	// B19.1: the part of the hold not charged goes back to the agent.
-	if _, err := agentMovement(ctx, tx, scopedKeyID, -refund, "settle", reservationID); err != nil {
+	if _, err := agentMovement(ctx, tx, scopedKeyID, -refund, "settle", reservationID, reqModel); err != nil {
 		return 0, 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -524,7 +524,7 @@ func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationI
 		return fmt.Errorf("economy: reclaim spent (release): %w", err)
 	}
 	// B19.1: a released hold goes back to the agent in full.
-	if _, err := agentMovement(ctx, tx, scopedKeyID, -heldLXC, "release", reservationID); err != nil {
+	if _, err := agentMovement(ctx, tx, scopedKeyID, -heldLXC, "release", reservationID, reqModel); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
