@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "talyvor-lens"
 version = "0.1.0"
-description = "Talyvor Lens SDK — AI token intelligence proxy"
+description = "Talyvor Lens SDK — give every AI agent its own wallet (budget, spending rules, approvals, statement) and call models through Lens with the agent's key"
 requires-python = ">=3.10"
 readme = "README.md"
 license = { text = "MIT" }

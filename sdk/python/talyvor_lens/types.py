@@ -128,3 +128,29 @@ class AgentReceipt(TypedDict, total=False):
     ref: str
     at: str
     postings: list[ReceiptPosting]
+
+
+# The owner's side (B28.437): what Lens's /v1/workspaces/{ws}/agents routes answer with.
+
+
+class AgentKey(TypedDict):
+    agent_id: str
+    key: str  # the raw key — shown once
+    id: str
+    prefix: str
+    warning: str
+
+
+class AgentStatementLine(TypedDict, total=False):
+    entry_id: str
+    kind: str  # fund | withdraw | spend | hold | settle | release | pay
+    amount_ulxc: int
+    counterparty: str  # workspace | spend | agent:<id>
+    ref: str
+    balance_after_ulxc: int
+    at: str
+
+
+class AgentStatement(TypedDict):
+    agent_id: str
+    lines: list[AgentStatementLine]

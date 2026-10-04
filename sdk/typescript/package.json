@@ -1,7 +1,7 @@
 {
   "name": "talyvor-lens",
   "version": "0.1.0",
-  "description": "Talyvor Lens SDK — AI token intelligence proxy",
+  "description": "Talyvor Lens SDK — give every AI agent its own wallet (budget, spending rules, approvals, statement) and call models through Lens with the agent's key",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

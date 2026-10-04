@@ -99,3 +99,31 @@ export interface AgentReceipt {
   at: string;
   postings: ReceiptPosting[];
 }
+
+// The owner's side (B28.437): what Lens's /v1/workspaces/{ws}/agents routes answer with.
+
+export interface AgentKey {
+  agent_id: string;
+  /** The raw key — shown once. */
+  key: string;
+  id: string;
+  prefix: string;
+  warning: string;
+}
+
+export interface AgentStatementLine {
+  entry_id: string;
+  /** fund | withdraw | spend | hold | settle | release | pay */
+  kind: string;
+  amount_ulxc: number;
+  /** workspace | spend | agent:<id> */
+  counterparty: string;
+  ref?: string;
+  balance_after_ulxc: number;
+  at: string;
+}
+
+export interface AgentStatement {
+  agent_id: string;
+  lines: AgentStatementLine[];
+}

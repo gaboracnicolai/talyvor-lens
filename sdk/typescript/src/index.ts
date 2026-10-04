@@ -8,12 +8,16 @@ export { injectLensHeaders } from "./middleware";
 export type { InjectHeadersOptions } from "./middleware";
 export type { AttributionContext } from "./types";
 export { AgentWallet, AgentWalletError, PaymentRefused } from "./agentWallet";
+export { Agents } from "./agents";
 export type {
   AgentAccount,
   AgentApproval,
   AgentBalance,
+  AgentKey,
   AgentPayment,
   AgentReceipt,
   AgentRules,
+  AgentStatement,
+  AgentStatementLine,
   ReceiptPosting,
 } from "./types";
