@@ -94,12 +94,14 @@ func TestSinglePartyPOI_ExaminedBeforeSettle(t *testing.T) {
 		t.Fatalf("velocity farm must be flagged, honest not (flagged=%v)", flaggedReq)
 	}
 
-	// The Phase-3 SettlementClearer + fail-closed FinalizeSweeper handle it.
+	// The Phase-3 SettlementClearer + fail-closed FinalizeSweeper handle it. The clearer clears only rows
+	// whose holdback has elapsed, so wait out the 1 ms window first — run straight after seeding, it left the
+	// last honest mint held for its next tick and only one of the two settled (B27.14).
+	time.Sleep(4 * time.Millisecond)
 	clearer := NewSettlementClearer(det, pool, table, func() bool { return true }, 24*time.Hour)
 	if _, err := clearer.RunOnce(ctx); err != nil {
 		t.Fatalf("clearer: %v", err)
 	}
-	time.Sleep(4 * time.Millisecond)
 	sw := NewFinalizeSweeper(pool, ledger, table)
 	sw.SetSettleStatus("cleared")
 	if _, err := sw.RunOnce(ctx); err != nil {

@@ -64,7 +64,10 @@ func TestSubscription_PlanChange_PlusToPro_ProratesAndMovesTheAllowance(t *testi
 		}
 	}
 	const ws, subID, secret = "ws-plan-change", "sub_plan_change", testWebhookSecret
-	start := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Second)
+	// One clock for the whole test: the proration is priced from the update event's own time, and a second
+	// of drift between two time.Now reads moves the allowance by ~109 µLXC (B27.14).
+	now := time.Now().UTC().Truncate(time.Second)
+	start := now.Add(-10 * 24 * time.Hour)
 	end := start.Add(30 * 24 * time.Hour)
 
 	fake := &stripeTestAPI{sub: planSub(subID, ws, "price_plus", 2000, start, end)}
@@ -98,8 +101,7 @@ func TestSubscription_PlanChange_PlusToPro_ProratesAndMovesTheAllowance(t *testi
 	}
 
 	// Stripe's update event records Pro and moves the allowance — once, though it is delivered twice.
-	changedAt := time.Now().UTC().Truncate(time.Second)
-	body, sig = signedAt(secret, "evt_plan_updated", "customer.subscription.updated", changedAt, planSub(subID, ws, "price_pro", 5000, start, end))
+	body, sig = signedAt(secret, "evt_plan_updated", "customer.subscription.updated", now,planSub(subID, ws, "price_pro", 5000, start, end))
 	for range 2 {
 		if code := postEvent(svc, body, sig); code != http.StatusOK {
 			t.Fatalf("updated = %d", code)

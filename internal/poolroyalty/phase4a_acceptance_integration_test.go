@@ -15,7 +15,9 @@ import (
 func TestPhase4a_LiveEconomy_Acceptance(t *testing.T) {
 	pool := linkageTestPool(t) // pool_royalty_mints + card/owner edge tables + balances(held) + ledger
 	ctx := context.Background()
-	// the extra tables the full economy needs
+	// the extra tables the full economy needs — fresh, or a second run finds its own pattern mints already
+	// claimed (ON CONFLICT DO NOTHING) and nothing mints
+	linkExec(t, pool, `DROP TABLE IF EXISTS pool_royalty_adjudications, traffic_mint_holds, routing_patterns, pattern_mine_credits`)
 	linkExec(t, pool, `CREATE TABLE IF NOT EXISTS pool_royalty_adjudications (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(), flag_type TEXT NOT NULL, resolution_label TEXT NOT NULL,
 		candidate_request_ids TEXT[] NOT NULL, revoked_request_ids TEXT[] NOT NULL, decided_by TEXT NOT NULL,
@@ -51,10 +53,10 @@ func TestPhase4a_LiveEconomy_Acceptance(t *testing.T) {
 	}
 	ringDet := NewRingDetector(pool, "pool_royalty_mints")
 	clearer := NewSettlementClearer(ringDet, pool, "pool_royalty_mints", failClosed, 24*time.Hour)
+	time.Sleep(4 * time.Millisecond) // the clearer clears only rows past their holdback (B27.14)
 	if _, err := clearer.RunOnce(ctx); err != nil { // examine (clean) → held→cleared
 		t.Fatalf("clearer: %v", err)
 	}
-	time.Sleep(4 * time.Millisecond)
 	sweeper := NewFinalizeSweeper(pool, ledger, "pool_royalty_mints")
 	sweeper.SetSettleStatus("cleared") // fail-closed: settle only cleared
 	if n, err := sweeper.RunOnce(ctx); err != nil || n != 1 {
@@ -106,10 +108,10 @@ func TestPhase4a_LiveEconomy_Acceptance(t *testing.T) {
 	_ = pm.RecordPattern(ctx, "ws_pat_hon", acceptancePattern(), true, "acc-pat-h2")
 	det := mining.NewSinglePartyConcentrationDetector(pool, mining.TypePatternMine, 5, 24*time.Hour)
 	pClearer := mining.NewTrafficSettlementClearer(det, pool, failClosed, 24*time.Hour)
+	time.Sleep(4 * time.Millisecond) // past the 1 ms holdback, or the last honest mint stays held (B27.14)
 	if _, err := pClearer.RunOnce(ctx); err != nil {
 		t.Fatalf("pattern clearer: %v", err)
 	}
-	time.Sleep(4 * time.Millisecond)
 	tsw := mining.NewTrafficMintSweeper(pool, ledger)
 	tsw.SetSettleStatus("cleared")
 	if _, err := tsw.RunOnce(ctx); err != nil {
