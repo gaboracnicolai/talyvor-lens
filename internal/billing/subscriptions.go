@@ -359,6 +359,7 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	periodFromItems(event.Data.Raw, &sub)
 	if sub.ID == "" {
 		s.log.Warn("billing webhook: subscription event with no subscription id", "event", event.ID)
 		w.WriteHeader(http.StatusOK)
@@ -732,13 +733,42 @@ func feeOf(sub *stripe.Subscription) int64 {
 // subscription off `inv.Parent.SubscriptionDetails`, which is a LATER API shape.
 // stripe-go v81.4.0 puts both on the parent object — `go build` said so immediately,
 // and the fix is recorded here because the two shapes are easy to confuse and the
-// wrong one compiles fine against a newer SDK.
+// wrong one compiles fine against a newer SDK. B17.42: a webhook event arrives in the
+// later shape all the same — periodFromItems copies its period up before this reads it.
 func periodEnd(sub *stripe.Subscription) *time.Time {
 	if sub.CurrentPeriodEnd == 0 {
 		return nil
 	}
 	t := time.Unix(sub.CurrentPeriodEnd, 0).UTC()
 	return &t
+}
+
+// periodFromItems gives a subscription that names no period of its own the period of its first item that
+// names one (B17.42). From Stripe API 2025-03-31 current_period_start and _end are on the ITEMS, and an event
+// is serialised at the webhook endpoint's API version, not stripe-go v81's — so every
+// customer.subscription.updated a cancel or resume provoked wrote the row's period end NULL, and Lens named no
+// day the plan ends; a .created in that shape granted no allowance at all.
+func periodFromItems(raw json.RawMessage, sub *stripe.Subscription) {
+	if sub.CurrentPeriodEnd != 0 {
+		return
+	}
+	var v struct {
+		Items struct {
+			Data []struct {
+				Start int64 `json:"current_period_start"`
+				End   int64 `json:"current_period_end"`
+			} `json:"data"`
+		} `json:"items"`
+	}
+	if json.Unmarshal(raw, &v) != nil {
+		return
+	}
+	for _, it := range v.Items.Data {
+		if it.End != 0 {
+			sub.CurrentPeriodStart, sub.CurrentPeriodEnd = it.Start, it.End
+			return
+		}
+	}
 }
 
 func invoiceSubscriptionID(inv *stripe.Invoice) string {
