@@ -10,6 +10,7 @@ import (
 
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/povi"
 	"github.com/talyvor/lens/internal/workspace"
@@ -42,8 +43,8 @@ func wireNode(t *testing.T, p *Proxy, model, nodeURL string, client *http.Client
 
 // THE HOLE, reproduced then closed: a node-served request currently writes NO token_events row
 // (tryNodeRouting records to the learner, not this table), so it is absent from the cache hit-rate
-// denominator. After the fix it writes exactly one row tagged serve_source='node' with cost_usd
-// EXACTLY zero — and the hit-rate query counts it as a MISS. Asserted on the row, never a status code.
+// denominator. After the fix it writes exactly one row tagged serve_source='node' with cost_usd the
+// question's charge (B27.2) — and the hit-rate query counts it as a MISS. Asserted on the row, never a status code.
 func TestNodeServeVisibility_RealPG_WritesNodeRow_CountsAsMiss(t *testing.T) {
 	pool := cacheVisPool(t)
 	p, _, _ := newLoggingProxy(t, workspace.LoggingMetadata) // registers ws-log (LoggingMetadata)
@@ -73,8 +74,9 @@ func TestNodeServeVisibility_RealPG_WritesNodeRow_CountsAsMiss(t *testing.T) {
 	if source != "node" {
 		t.Errorf("serve_source = %q, want 'node'", source)
 	}
-	if cost != 0 {
-		t.Errorf("cost_usd = %v, want EXACTLY 0 — Talyvor paid no provider for a node serve (any LENS owed is lens_token_ledger's number, a different ledger + unit)", cost)
+	// B27.2: the row carries what the question was charged, so budgets and the spending cap count it.
+	if want, _ := alerts.CostUSDResolved("node-model", catalog.PurposeCharge, inT, 0, 0, outT); cost != want {
+		t.Errorf("cost_usd = %v, want the charge %v — budgets and the spending cap sum this column", cost, want)
 	}
 	if inT <= 0 || outT <= 0 {
 		t.Errorf("tokens = %d/%d, want both > 0 (Lens-measured len/4)", inT, outT)

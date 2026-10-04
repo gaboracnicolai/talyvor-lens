@@ -72,7 +72,7 @@ func (nopAlertSink) RecordSpendWithTare(context.Context, string, string, string,
 func (nopAlertSink) RecordCacheServe(context.Context, string, string, string, string, string, int, int, string, string, string, string) error {
 	return nil
 }
-func (nopAlertSink) RecordNodeServe(context.Context, string, string, string, string, string, int, int, string, string, string) error {
+func (nopAlertSink) RecordNodeServe(context.Context, string, string, string, string, string, int, int, string, string, string, float64) error {
 	return nil
 }
 

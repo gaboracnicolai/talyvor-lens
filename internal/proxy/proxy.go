@@ -97,11 +97,11 @@ type alertSink interface {
 	// only by the cache serve points; upstream traffic keeps using RecordSpend.
 	RecordCacheServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality, serveSource string) error
 	// RecordNodeServe writes the token_events row for a request served by a
-	// REGISTERED INFERENCE NODE (serve_source='node', cost_usd=0 — Talyvor's
-	// provider cost; any LENS owed is lens_token_ledger's number). It makes a node
-	// serve countable as a MISS in the cache hit rate. Used only by the node-serve
-	// point (tryNodeRouting); upstream/cache traffic keeps its own recorders.
-	RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string) error
+	// REGISTERED INFERENCE NODE (serve_source='node', cost_usd = what the question
+	// was charged — B27.2; any LENS owed the node is lens_token_ledger's number). It
+	// makes a node serve countable as a MISS in the cache hit rate and in budgets. Used
+	// only by the node-serve point (tryNodeRouting); upstream/cache traffic keeps its own recorders.
+	RecordNodeServe(ctx context.Context, workspaceID, team, sprint, feature, model string, inputTokens, outputTokens int, sessionID, requestID, modality string, costUSD float64) error
 }
 
 // learnerRecorder is the minimal surface the proxy uses to feed the routing
@@ -2161,6 +2161,12 @@ func (p *Proxy) tryNodeRouting(
 	_, _ = w.Write(out) // JSON API response (application/json), mirrors tryLocalRouting
 	// B26.5: the agent's hold settles to what the node delivered, on the same len/4 measurement as the mint basis.
 	p.settleServedOffSeam(ctx, wsID, model, len(prompt)/4, len(nr.Text)/4)
+	// B27.2: and a chat or subscriber question pays the same, and counts toward budgets and limits. The node
+	// decides how long its answer is, so no more output is charged than chat admission's own output bound
+	// (the node is not sent max_tokens) — a floor, never an over-bill.
+	chargedOut := min(len(nr.Text)/4, boundedMaxOut(0, p.reservationMaxOut))
+	servedCostUSD, _ := alerts.CostUSDResolved(model, catalog.PurposeCharge, len(prompt)/4, 0, 0, chargedOut)
+	p.chargeServedOffSeam(ctx, wsID, team, sprint, servedCostUSD)
 
 	if !piiDetected {
 		p.storeAnswer(ctx, provider, model, cachePrompt, prompt, reqFP, turn, wsID, requestID, out)
@@ -2171,11 +2177,11 @@ func (p *Proxy) tryNodeRouting(
 	}
 	p.recordTokenEvent(ctx, provider, model, eventPrompt, out, 0, piiDetected, wsID) // learner store (pattern insights), NOT token_events — gated on the logging policy inside
 	// Node-serve spend visibility: the token_events row that makes THIS request countable in the cache
-	// hit rate as a MISS (serve_source='node', cost_usd=0 — Talyvor paid no provider; any LENS owed is
-	// lens_token_ledger's number). Without it a node serve is absent from the denominator and the rate
-	// reads HIGH. Output tokens use nr.Text (len/4), matching the mint-basis measurement above. Void,
-	// post-serve, best-effort — never affects the already-flushed response.
-	p.recordNodeServe(ctx, wsID, team, sprint, feature, model, eventPrompt, nr.Text, sessionID, requestID)
+	// hit rate as a MISS (serve_source='node') and, at cost_usd = its charge (B27.2), in budgets and the
+	// spending cap. Without it a node serve is absent from the denominator and the rate reads HIGH.
+	// Output tokens use nr.Text (len/4), matching the mint-basis measurement above. Void, post-serve,
+	// best-effort — never affects the already-flushed response.
+	p.recordNodeServe(ctx, wsID, team, sprint, feature, model, eventPrompt, nr.Text, sessionID, requestID, servedCostUSD)
 	// DESCRIPTIVE (P3 #6): capture the gateway-measured node latency into the per-(node,cohort) aggregate,
 	// off the serve path via the obsLimiter. Best-effort, void, mint-free — a capture failure never affects
 	// the already-flushed response. Pure additive observation before the early-return.
@@ -2200,6 +2206,22 @@ func nodeOpenAIEnvelope(model string, nr nodeInferResp) map[string]any {
 			"total_tokens":      nr.InputTokens + nr.OutputTokens,
 		},
 	}
+}
+
+// chargeServedOffSeam makes the money calls the upstream seams make (proxy.go's buffered seam and
+// recordStreamSpend) for a question answered by a node or by local routing — B27.2. Before it, a chat
+// or subscriber question served off the seams was free and invisible to budgets and spending limits.
+// The agent's own charge is settleServedOffSeam's; the calls below skip an agent exactly as they do on
+// the seams. Both paths sit ahead of the streaming split, so a streamed request is charged here too.
+func (p *Proxy) chargeServedOffSeam(ctx context.Context, wsID, team, sprint string, servedCostUSD float64) {
+	subscriber := p.chargeChatUsage(ctx, wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, wsID, servedCostUSD)
+	if !p.reservationActive() && !subscriber {
+		p.shadowSpendLXC(ctx, wsID, servedCostUSD)
+	}
+	if p.budgetService != nil {
+		p.budgetService.RecordSpend(ctx, wsID, team, sprint, servedCostUSD)
+	}
+	p.limits.recordSpend(ctx, wsID, servedCostUSD)
 }
 
 // tryLocalRouting attempts to serve the request from a locally-hosted
@@ -2253,6 +2275,9 @@ func (p *Proxy) tryLocalRouting(
 	_, _ = w.Write(formatted)
 	// B26.5: the agent's hold settles to what the local model delivered, on the token counts the spend row uses.
 	p.settleServedOffSeam(ctx, wsID, decision.Model, len(prompt)/4, len(formatted)/4)
+	// B27.2: a local run costs Talyvor nothing, so a chat or subscriber question is charged 0 — through the
+	// same calls as every other serve, and still recorded by the zero-cost spend row below.
+	p.chargeServedOffSeam(ctx, wsID, team, sprint, 0)
 
 	if !piiDetected {
 		p.storeAnswer(ctx, provider, model, cachePrompt, prompt, reqFP, turn, wsID, requestID, formatted)
@@ -2555,7 +2580,7 @@ func (p *Proxy) recordCacheServe(ctx context.Context, wsID, team, sprint, featur
 // policy is read the same way the request handler reads it (GetLoggingPolicy, default Metadata).
 // `served` is the node's output text (len/4 output tokens, matching the mint-basis measurement); the
 // prompt is used only for the input-token length — no prompt bytes are persisted (the insert stores ”).
-func (p *Proxy) recordNodeServe(ctx context.Context, wsID, team, sprint, feature, model, prompt, served, sessionID, requestID string) {
+func (p *Proxy) recordNodeServe(ctx context.Context, wsID, team, sprint, feature, model, prompt, served, sessionID, requestID string, costUSD float64) {
 	if p.alertManager == nil {
 		return
 	}
@@ -2567,7 +2592,7 @@ func (p *Proxy) recordNodeServe(ctx context.Context, wsID, team, sprint, feature
 		return
 	}
 	inT, outT := len(prompt)/4, len(served)/4
-	if err := p.alertManager.RecordNodeServe(ctx, wsID, team, sprint, feature, model, inT, outT, sessionID, requestID, "text"); err != nil {
+	if err := p.alertManager.RecordNodeServe(ctx, wsID, team, sprint, feature, model, inT, outT, sessionID, requestID, "text", costUSD); err != nil {
 		slog.Warn("alerts: RecordNodeServe failed", slog.String("request_id", requestID), slog.String("err", err.Error()))
 	}
 }
