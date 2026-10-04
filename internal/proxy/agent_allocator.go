@@ -321,6 +321,10 @@ func (p *Proxy) settleReservationBasis(ctx context.Context, deliveredUSD float64
 	if !ok || p.agentSpender == nil {
 		return 0 // no reservation on this request ⇒ the consumer was charged nothing (plain key / path off)
 	}
+	// B27.4: every settle runs after the answer is written, so a client that hangs up right then cancels
+	// r's context. Detach it (values kept), as the streamed seam's storeCtx does, or the settle aborts, the
+	// hold is swept and refunded, and the question is free. The same holds for every settle and release below.
+	ctx = context.WithoutCancel(ctx)
 	finalLXC := int64(0)
 	if deliveredUSD > 0 {
 		finalLXC = int64(math.Ceil(deliveredUSD / economy.LXCUSDValue * 1e6))
@@ -357,6 +361,7 @@ func (p *Proxy) settleAgentDebitULXC(ctx context.Context, wsID string, delivered
 	if !ok || p.agentSpender == nil {
 		return
 	}
+	ctx = context.WithoutCancel(ctx) // B27.4: see settleReservationBasis
 	meta.RequestedModel, meta.RequestID = d.requestedModel, d.requestID
 	s, err := p.agentSpender.SettleAgentDebit(ctx, wsID, d.debitKey, deliveredLXC, meta)
 	if err != nil {
@@ -411,6 +416,7 @@ func (p *Proxy) settleReservationPooled(ctx context.Context, chargedUSD float64,
 	if !ok || p.agentSpender == nil {
 		return 0 // no reservation ⇒ the consumer was charged nothing (plain key / path off)
 	}
+	ctx = context.WithoutCancel(ctx) // B27.4: see settleReservationBasis
 	settledLXC, cashBackedLXC, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, price.ChargedULXC,
 		economy.AgentDebitMeta{ServedModel: price.modelForRow, PriceBasis: price.PriceBasis,
 			PoolListULXC: price.ListULXC, PoolDiscountRate: price.Rate})
@@ -442,6 +448,7 @@ func (p *Proxy) releaseReservation(ctx context.Context, reason string) {
 	if !ok || p.agentSpender == nil {
 		return
 	}
+	ctx = context.WithoutCancel(ctx) // B27.4: see settleReservationBasis
 	if err := p.agentSpender.ReleaseLXCReservation(ctx, h.reservationID, reason); err != nil {
 		slog.Warn("economy: reservation release failed (hold will be swept/refunded)",
 			slog.String("reservation", h.reservationID), slog.String("err", err.Error()))
