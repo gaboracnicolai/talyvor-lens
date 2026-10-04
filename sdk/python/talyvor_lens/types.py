@@ -78,7 +78,9 @@ class AgentAccount(TypedDict, total=False):
 
 class AgentRules(TypedDict, total=False):
     max_per_request_ulxc: int
+    hourly_limit_ulxc: int
     daily_limit_ulxc: int
+    weekly_limit_ulxc: int
     monthly_limit_ulxc: int
     approval_above_ulxc: int
     allowed_models: list[str]

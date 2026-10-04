@@ -179,7 +179,7 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 }
 
 // agentAllowance is how much of want µLXC beyond a question's estimate the agent's limit still allows, with
-// the agent locked: its per-request, daily and monthly limits (B19.2), counted with the estimate already
+// the agent locked: its per-request and period limits (B19.2, B28.300), counted with the estimate already
 // spent, and its balance — topped up from its company's credit line where the spend path would draw it (B22.4).
 func agentAllowance(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, estimate, want int64, ref string) (int64, error) {
 	r, err := scanAgentRules(tx.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))

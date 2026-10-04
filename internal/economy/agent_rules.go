@@ -34,8 +34,12 @@ var ErrApprovalNotFound = errors.New("economy: no such pending approval in this 
 
 // AgentRules are one agent's spending rules. A zero amount, an empty list or an empty window is no rule.
 type AgentRules struct {
-	MaxPerRequestULXC int64    `json:"max_per_request_ulxc"`
+	MaxPerRequestULXC int64 `json:"max_per_request_ulxc"`
+	// HourlyLimitULXC and WeeklyLimitULXC (B28.300) count the clock hour and the week from Monday. Read, they
+	// are never nil; nil (absent from the JSON) saves the rules without changing them, like AllowedListings.
+	HourlyLimitULXC   *int64   `json:"hourly_limit_ulxc"`
 	DailyLimitULXC    int64    `json:"daily_limit_ulxc"`
+	WeeklyLimitULXC   *int64   `json:"weekly_limit_ulxc"`
 	MonthlyLimitULXC  int64    `json:"monthly_limit_ulxc"`
 	ApprovalAboveULXC int64    `json:"approval_above_ulxc"`
 	AllowedModels     []string `json:"allowed_models"`
@@ -137,8 +141,17 @@ func (r AgentRules) location() (*time.Location, error) {
 	return time.LoadLocation(r.Timezone)
 }
 
+// limitOf is a limit that may be absent: absent is no limit.
+func limitOf(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
 func (r AgentRules) validate() error {
-	for _, v := range []int64{r.MaxPerRequestULXC, r.DailyLimitULXC, r.MonthlyLimitULXC, r.ApprovalAboveULXC} {
+	for _, v := range []int64{r.MaxPerRequestULXC, limitOf(r.HourlyLimitULXC), r.DailyLimitULXC, limitOf(r.WeeklyLimitULXC),
+		r.MonthlyLimitULXC, r.ApprovalAboveULXC} {
 		if v < 0 {
 			return errors.New("a limit cannot be negative (0 means no limit)")
 		}
@@ -174,18 +187,21 @@ func nullIfZero(v int64) any {
 
 const agentRulesColumns = `COALESCE(max_per_request_ulxc, 0), COALESCE(daily_limit_ulxc, 0), COALESCE(monthly_limit_ulxc, 0),
 	COALESCE(approval_above_ulxc, 0), allowed_models, allowed_providers, COALESCE(active_from, ''), COALESCE(active_until, ''), timezone,
-	pause_on_unusual_spend, allowed_listings`
+	pause_on_unusual_spend, allowed_listings, COALESCE(hourly_limit_ulxc, 0), COALESCE(weekly_limit_ulxc, 0)`
 
 func scanAgentRules(row pgx.Row) (AgentRules, error) {
 	var r AgentRules
+	var hourly, weekly int64
 	err := row.Scan(&r.MaxPerRequestULXC, &r.DailyLimitULXC, &r.MonthlyLimitULXC, &r.ApprovalAboveULXC,
-		&r.AllowedModels, &r.AllowedProviders, &r.ActiveFrom, &r.ActiveUntil, &r.Timezone, &r.PauseOnUnusualSpend, &r.AllowedListings)
+		&r.AllowedModels, &r.AllowedProviders, &r.ActiveFrom, &r.ActiveUntil, &r.Timezone, &r.PauseOnUnusualSpend, &r.AllowedListings,
+		&hourly, &weekly)
+	r.HourlyLimitULXC, r.WeeklyLimitULXC = &hourly, &weekly
 	return r, err
 }
 
-// SetAgentRules replaces an agent's rules — all but AllowedListings when it is nil (absent from the JSON):
-// a client that predates it (B19.14) must not clear an agent's listings by saving its other rules. An
-// empty list clears them.
+// SetAgentRules replaces an agent's rules — all but AllowedListings, HourlyLimitULXC and WeeklyLimitULXC
+// when they are nil (absent from the JSON): a client that predates them (B19.14, B28.300) must not clear an
+// agent's listings or caps by saving its other rules. An empty list or a zero clears them.
 func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID string, r AgentRules) (AgentRules, error) {
 	if err := r.validate(); err != nil {
 		return r, fmt.Errorf("%w: %s", ErrAgentRule, err)
@@ -203,26 +219,33 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 	if r.ActiveFrom != "" {
 		from, until = r.ActiveFrom, r.ActiveUntil
 	}
-	tag, err := s.pool.Exec(ctx, `
+	// $14 and $15 are NULL when absent, which keeps the stored cap; a zero clears it.
+	var hourly, weekly int64
+	err := s.pool.QueryRow(ctx, `
 		INSERT INTO agent_rules (agent_id, workspace_id, max_per_request_ulxc, daily_limit_ulxc, monthly_limit_ulxc,
 		       approval_above_ulxc, allowed_models, allowed_providers, active_from, active_until, timezone, pause_on_unusual_spend,
-		       allowed_listings)
-		SELECT id, workspace_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13::text[], '{}') FROM agent_accounts WHERE id = $1 AND workspace_id = $2
+		       allowed_listings, hourly_limit_ulxc, weekly_limit_ulxc)
+		SELECT id, workspace_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13::text[], '{}'),
+		       NULLIF($14::bigint, 0), NULLIF($15::bigint, 0) FROM agent_accounts WHERE id = $1 AND workspace_id = $2
 		ON CONFLICT (agent_id) DO UPDATE SET max_per_request_ulxc = EXCLUDED.max_per_request_ulxc,
 		       daily_limit_ulxc = EXCLUDED.daily_limit_ulxc, monthly_limit_ulxc = EXCLUDED.monthly_limit_ulxc,
 		       approval_above_ulxc = EXCLUDED.approval_above_ulxc, allowed_models = EXCLUDED.allowed_models,
 		       allowed_providers = EXCLUDED.allowed_providers, active_from = EXCLUDED.active_from,
 		       active_until = EXCLUDED.active_until, timezone = EXCLUDED.timezone,
-		       pause_on_unusual_spend = EXCLUDED.pause_on_unusual_spend, allowed_listings = COALESCE($13::text[], agent_rules.allowed_listings), updated_at = now()`,
+		       pause_on_unusual_spend = EXCLUDED.pause_on_unusual_spend, allowed_listings = COALESCE($13::text[], agent_rules.allowed_listings),
+		       hourly_limit_ulxc = NULLIF(COALESCE($14::bigint, agent_rules.hourly_limit_ulxc), 0),
+		       weekly_limit_ulxc = NULLIF(COALESCE($15::bigint, agent_rules.weekly_limit_ulxc), 0), updated_at = now()
+		RETURNING COALESCE(hourly_limit_ulxc, 0), COALESCE(weekly_limit_ulxc, 0)`,
 		agentID, workspaceID, nullIfZero(r.MaxPerRequestULXC), nullIfZero(r.DailyLimitULXC), nullIfZero(r.MonthlyLimitULXC),
 		nullIfZero(r.ApprovalAboveULXC), r.AllowedModels, r.AllowedProviders, from, until, r.Timezone, r.PauseOnUnusualSpend,
-		r.AllowedListings)
+		r.AllowedListings, r.HourlyLimitULXC, r.WeeklyLimitULXC).Scan(&hourly, &weekly)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return r, ErrAgentNotFound
+	}
 	if err != nil {
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return r, ErrAgentNotFound
-	}
+	r.HourlyLimitULXC, r.WeeklyLimitULXC = &hourly, &weekly
 	return r, nil
 }
 
@@ -238,7 +261,9 @@ func (s *DualTokenStore) GetAgentRules(ctx context.Context, workspaceID, agentID
 	}
 	r, err := scanAgentRules(s.pool.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return AgentRules{AllowedModels: []string{}, AllowedProviders: []string{}, AllowedListings: []string{}, Timezone: "UTC"}, nil
+		var hourly, weekly int64
+		return AgentRules{HourlyLimitULXC: &hourly, WeeklyLimitULXC: &weekly, AllowedModels: []string{}, AllowedProviders: []string{},
+			AllowedListings: []string{}, Timezone: "UTC"}, nil
 	}
 	if err != nil {
 		return r, fmt.Errorf("economy: agent rules: %w", err)
@@ -253,15 +278,22 @@ type agentPeriodLimit struct {
 	name  string
 }
 
-// periodLimits are r's daily and monthly limits, their periods begun in loc as of now.
+// periodLimits are r's hourly, daily, weekly and monthly limits, their periods begun in loc as of now (in
+// loc): the clock hour, the day, the week from Monday and the month. The hour is counted back from now, not
+// rebuilt with time.Date: when the clocks go back an hour repeats, and time.Date may answer its other
+// occurrence — one in the future, which would count nothing spent.
 func (r AgentRules) periodLimits(now time.Time, loc *time.Location) []agentPeriodLimit {
+	monday := now.Day() - (int(now.Weekday())+6)%7
+	hour := now.Add(-(time.Duration(now.Minute())*time.Minute + time.Duration(now.Second())*time.Second + time.Duration(now.Nanosecond())))
 	return []agentPeriodLimit{
+		{limitOf(r.HourlyLimitULXC), hour, "hourly"},
 		{r.DailyLimitULXC, time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc), "daily"},
+		{limitOf(r.WeeklyLimitULXC), time.Date(now.Year(), now.Month(), monday, 0, 0, 0, 0, loc), "weekly"},
 		{r.MonthlyLimitULXC, time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc), "monthly"},
 	}
 }
 
-// agentSpentSince is what an agent has spent since `since`, as its daily and monthly limits count it.
+// agentSpentSince is what an agent has spent since `since`, as its period limits count it.
 func agentSpentSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, since time.Time) (int64, error) {
 	var spent int64
 	// What it paid other agents counts (B19.3), and its card purchases (B19.12); what they paid it does not raise its limit. What it

@@ -47,7 +47,9 @@ export interface AgentAccount {
 
 export interface AgentRules {
   max_per_request_ulxc: number;
+  hourly_limit_ulxc: number;
   daily_limit_ulxc: number;
+  weekly_limit_ulxc: number;
   monthly_limit_ulxc: number;
   approval_above_ulxc: number;
   allowed_models: string[];
