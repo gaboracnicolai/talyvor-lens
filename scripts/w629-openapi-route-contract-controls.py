@@ -46,14 +46,14 @@ CONTROLS = [
      'Head|Options)\\("(/[^"]*)"`)', 'Head|Options)\\("([^"]*)"`)',
      CNT, NORM, "counting q.Get(\"model\") as a route overstates coverage"),
 
-    ("W5 the main.go parse neutered", TEST,
-     '\tfor _, m := range registration.FindAllStringSubmatch(string(src), -1) {',
-     '\tfor _, m := range registration.FindAllStringSubmatch(string(src)[:0], -1) {',
+    ("W5 the cmd/lens parse neutered", TEST,
+     '\tfor _, m := range registration.FindAllStringSubmatch(src, -1) {',
+     '\tfor _, m := range registration.FindAllStringSubmatch(src[:0], -1) {',
      GHOST, NORM, "a broken parse hits the floor rather than reporting a clean contract"),
 
     ("W6 the header claims attribution again", SPEC,
-     "// COVERED — 12 paths, 15 operations: proxy endpoints, key management, workspaces, tenant config,",
-     "// COVERED — proxy endpoints, key management, workspaces, tenant config, attribution, A/B,",
+     "// COVERED: agent wallets (agents, keys, funding, rules, approvals, statements, transfers and cards —",
+     "// COVERED: attribution, A/B, agent wallets (agents, keys, funding, rules, approvals, statements, transfers and cards —",
      HEAD, GHOST, "re-claiming an uncovered surface before the NOT COVERED marker is caught"),
 
     ("W7 the NOT COVERED section deleted", SPEC,
@@ -67,7 +67,7 @@ CONTROLS = [
      HEAD, GHOST, "a named surface with nothing behind it is caught"),
 
     ("W9 the undocumented count drifts", TEST,
-     "const undocumentedNonAdminV1Routes = 120", "const undocumentedNonAdminV1Routes = 60",
+     "const undocumentedNonAdminV1Routes = 194", "const undocumentedNonAdminV1Routes = 60",
      CNT, GHOST, "the undocumented surface cannot change by fifty in silence"),
 
     ("W10 a Mount appears in main.go", TEST,
