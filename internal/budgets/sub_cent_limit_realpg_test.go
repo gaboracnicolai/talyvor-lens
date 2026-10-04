@@ -72,7 +72,8 @@ func TestSubCentLimit_RefusesTheNextRequest_OffLetsItThrough(t *testing.T) {
 	}
 
 	// What the Features switch sends through the BFF: the budget as it is, enforcement off.
-	if _, err := store.Update(ctx, ws, b.ID, Budget{Period: b.Period, LimitUSD: 0.000001, AlertThresholds: b.AlertThresholds, Enforcement: EnforcementOff}); err != nil {
+	subCent, off := 0.000001, EnforcementOff
+	if _, err := store.Update(ctx, ws, b.ID, Patch{LimitUSD: &subCent, AlertThresholds: &b.AlertThresholds, Enforcement: &off, Period: &b.Period}); err != nil {
 		t.Fatalf("switch off: %v", err)
 	}
 	if err := svc.Reload(ctx); err != nil {

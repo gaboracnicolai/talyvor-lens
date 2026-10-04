@@ -2,9 +2,11 @@ package budgets
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -45,9 +47,34 @@ var (
 	ErrInvalidPeriod      = errors.New("budgets: period must be one of monthly, weekly, total")
 	ErrScopeIDRequired    = errors.New("budgets: scope_id required for team/sprint scope")
 	ErrInvalidThreshold   = errors.New("budgets: alert thresholds must be in (0, 1]")
+	ErrWorkspaceRequired  = errors.New("budgets: workspace_id required")
+	ErrNegativeLimit      = errors.New("budgets: limit_usd must be >= 0")
 	ErrNotFound           = errors.New("budgets: not found")
+	ErrScopeTaken         = errors.New("budgets: a budget for this scope already exists")
 	ErrUnknownScope       = errors.New("budgets: unknown scope — refusing to sum spend without a scope predicate")
 )
+
+// IsInvalid reports whether err is a budget the caller sent that the store
+// refused — a message the caller can act on. Any other store error is the
+// server's, and its text (the database's own words) is not for the caller.
+func IsInvalid(err error) bool {
+	for _, e := range []error{ErrInvalidScope, ErrInvalidEnforcement, ErrInvalidPeriod, ErrScopeIDRequired,
+		ErrInvalidThreshold, ErrWorkspaceRequired, ErrNegativeLimit} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// pgCode is the SQLSTATE of a Postgres error, or "".
+func pgCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
 
 func validScope(s Scope) bool {
 	return s == ScopeWorkspace || s == ScopeTeam || s == ScopeSprint
@@ -66,7 +93,7 @@ func validPeriod(p string) bool {
 // only required for team/sprint here.
 func (b *Budget) Validate() error {
 	if strings.TrimSpace(b.WorkspaceID) == "" {
-		return errors.New("budgets: workspace_id required")
+		return ErrWorkspaceRequired
 	}
 	if !validScope(b.Scope) {
 		return ErrInvalidScope
@@ -87,7 +114,7 @@ func (b *Budget) Validate() error {
 		return ErrInvalidPeriod
 	}
 	if b.LimitUSD < 0 {
-		return errors.New("budgets: limit_usd must be >= 0")
+		return ErrNegativeLimit
 	}
 	for _, t := range b.AlertThresholds {
 		if t <= 0 || t > 1 {
@@ -124,6 +151,9 @@ func (s *Store) Create(ctx context.Context, b Budget) (*Budget, error) {
 		b.AlertThresholds, string(b.Enforcement), b.StartsAt, b.EndsAt,
 	)
 	if err := row.Scan(&b.ID, &b.SpentUSD, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		if pgCode(err) == "23505" { // unique_violation on idx_budgets_scope
+			return nil, ErrScopeTaken
+		}
 		return nil, fmt.Errorf("budgets: insert: %w", err)
 	}
 	return &b, nil
@@ -204,48 +234,93 @@ func (s *Store) queryBudgets(ctx context.Context, sql string, args ...any) ([]Bu
 	return out, rows.Err()
 }
 
+// Patch is the change a PATCH asks for. A field left out (nil, or an unset
+// EndsAt) keeps its stored value; an empty enforcement or period is treated as
+// left out.
+type Patch struct {
+	LimitUSD        *float64     `json:"limit_usd"`
+	AlertThresholds *[]float64   `json:"alert_thresholds"`
+	Enforcement     *Enforcement `json:"enforcement"`
+	Period          *string      `json:"period"`
+	EndsAt          OptionalTime `json:"ends_at"`
+}
+
+// OptionalTime tells a time left out of a PATCH (Set false: keep the stored
+// value) from an explicit null (Set true, Value nil: clear it).
+type OptionalTime struct {
+	Set   bool
+	Value *time.Time
+}
+
+func (o *OptionalTime) UnmarshalJSON(data []byte) error {
+	o.Set = true
+	o.Value = nil
+	if string(data) == "null" {
+		return nil
+	}
+	var t time.Time
+	if err := json.Unmarshal(data, &t); err != nil {
+		return err
+	}
+	o.Value = &t
+	return nil
+}
+
 const updateBudgetSQL = `
 UPDATE budgets SET
-    limit_usd        = $3,
-    alert_thresholds = $4,
-    enforcement      = $5,
-    period           = $6,
-    ends_at          = $7,
+    limit_usd        = COALESCE($3::double precision, limit_usd),
+    alert_thresholds = COALESCE($4::double precision[], alert_thresholds),
+    enforcement      = COALESCE($5::text, enforcement),
+    period           = COALESCE($6::text, period),
+    ends_at          = CASE WHEN $7::boolean THEN $8::timestamptz ELSE ends_at END,
     updated_at       = NOW()
 WHERE id = $1 AND workspace_id = $2
 RETURNING ` + budgetColumns
 
-// Update replaces a budget's mutable fields (limit, thresholds, enforcement,
-// period, ends_at). Scope/scope_id are immutable — create a new budget to
-// re-scope. Returns ErrNotFound when the (id, workspace) pair is missing.
-func (s *Store) Update(ctx context.Context, workspaceID, id string, b Budget) (*Budget, error) {
-	if b.Enforcement == "" {
-		b.Enforcement = EnforcementAlert
-	}
-	if !validEnforcement(b.Enforcement) {
-		return nil, ErrInvalidEnforcement
-	}
-	if b.Period == "" {
-		b.Period = "monthly"
-	}
-	if !validPeriod(b.Period) {
-		return nil, ErrInvalidPeriod
-	}
-	if b.LimitUSD < 0 {
-		return nil, errors.New("budgets: limit_usd must be >= 0")
-	}
-	for _, t := range b.AlertThresholds {
-		if t <= 0 || t > 1 {
-			return nil, ErrInvalidThreshold
+// Update applies a Patch to a budget's mutable fields (limit, thresholds,
+// enforcement, period, ends_at); a field the patch leaves out keeps its value.
+// Scope/scope_id are immutable — create a new budget to re-scope. Returns
+// ErrNotFound when the (id, workspace) pair is missing.
+func (s *Store) Update(ctx context.Context, workspaceID, id string, p Patch) (*Budget, error) {
+	var enforcement, period *string
+	if p.Enforcement != nil && *p.Enforcement != "" {
+		if !validEnforcement(*p.Enforcement) {
+			return nil, ErrInvalidEnforcement
 		}
+		e := string(*p.Enforcement)
+		enforcement = &e
+	}
+	if p.Period != nil && *p.Period != "" {
+		if !validPeriod(*p.Period) {
+			return nil, ErrInvalidPeriod
+		}
+		period = p.Period
+	}
+	if p.LimitUSD != nil && *p.LimitUSD < 0 {
+		return nil, ErrNegativeLimit
+	}
+	var thresholds any // untyped nil → SQL NULL → keep
+	if p.AlertThresholds != nil {
+		for _, t := range *p.AlertThresholds {
+			if t <= 0 || t > 1 {
+				return nil, ErrInvalidThreshold
+			}
+		}
+		th := *p.AlertThresholds
+		if th == nil {
+			th = []float64{}
+		}
+		thresholds = th
 	}
 	if s.pool == nil {
 		return nil, ErrNotFound
 	}
 	out, err := scanBudget(s.pool.QueryRow(ctx, updateBudgetSQL,
-		id, workspaceID, b.LimitUSD, b.AlertThresholds, string(b.Enforcement), b.Period, b.EndsAt,
+		id, workspaceID, p.LimitUSD, thresholds, enforcement, period, p.EndsAt.Set, p.EndsAt.Value,
 	))
-	if errors.Is(err, pgx.ErrNoRows) {
+	// A malformed id (invalid_text_representation for the uuid column) names
+	// no budget, the same as a well-formed id that matches none.
+	if errors.Is(err, pgx.ErrNoRows) || pgCode(err) == "22P02" {
 		return nil, ErrNotFound
 	}
 	if err != nil {

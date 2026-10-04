@@ -31,6 +31,23 @@ func writeBudgetReloadFailed(w http.ResponseWriter, err error, saved *budgets.Bu
 	writeJSONOK(w, http.StatusServiceUnavailable, body)
 }
 
+// writeBudgetWriteErr answers a create/update the store refused. A budget the
+// caller can fix says why; anything else is the server's fault and goes
+// through writeJSONErr's 5xx path, which logs the detail and answers plainly —
+// the database's own words never reach the caller.
+func writeBudgetWriteErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, budgets.ErrNotFound):
+		writeJSONErr(w, http.StatusNotFound, "budget not found")
+	case errors.Is(err, budgets.ErrScopeTaken):
+		writeJSONErr(w, http.StatusConflict, "a budget for this scope already exists; change that one instead")
+	case budgets.IsInvalid(err):
+		writeJSONErr(w, http.StatusBadRequest, err.Error())
+	default:
+		writeJSONErr(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
 func budgetCreateHandler(store *budgets.Store, reload func(context.Context) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		wsID := chi.URLParam(req, "wsID")
@@ -42,7 +59,7 @@ func budgetCreateHandler(store *budgets.Store, reload func(context.Context) erro
 		in.WorkspaceID = wsID
 		created, err := store.Create(req.Context(), in)
 		if err != nil {
-			writeJSONErr(w, http.StatusBadRequest, err.Error())
+			writeBudgetWriteErr(w, err)
 			return
 		}
 		if err := reload(req.Context()); err != nil {
@@ -57,18 +74,15 @@ func budgetUpdateHandler(store *budgets.Store, reload func(context.Context) erro
 	return func(w http.ResponseWriter, req *http.Request) {
 		wsID := chi.URLParam(req, "wsID")
 		id := chi.URLParam(req, "id")
-		var in budgets.Budget
+		// A field the body leaves out keeps its value.
+		var in budgets.Patch
 		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 			writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
 		}
 		updated, err := store.Update(req.Context(), wsID, id, in)
-		if errors.Is(err, budgets.ErrNotFound) {
-			writeJSONErr(w, http.StatusNotFound, "budget not found")
-			return
-		}
 		if err != nil {
-			writeJSONErr(w, http.StatusBadRequest, err.Error())
+			writeBudgetWriteErr(w, err)
 			return
 		}
 		if err := reload(req.Context()); err != nil {
