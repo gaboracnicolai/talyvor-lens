@@ -1,0 +1,322 @@
+package api
+
+// openapi_wallets.go — the Agent Wallets half of the served OpenAPI document (B28.12): an agent, its
+// balance and key, its rules, the approvals they file, its statement, its transfers and its card.
+// The handlers are cmd/lens/agent_accounts_handler.go, agent_transfers_handler.go and
+// agent_cards_handler.go; each path below is one they register.
+
+// walletTag groups every wallet operation, and is listed first so a generated client and a rendered
+// reference open on it.
+const walletTag = "Agent Wallets"
+
+func openAPIWalletTags() []map[string]any {
+	return []map[string]any{{
+		"name": walletTag,
+		"description": "Every AI agent gets a wallet — a balance, spending rules, approvals, a card and a live statement. " +
+			"The agent calls its models through Lens with a key of its own, and Lens judges each request and payment " +
+			"against its wallet before the provider or the payee sees it. Amounts are in µLXC: " +
+			"1 LXC = 1,000,000 µLXC = $0.10, so $1 is 10000000.",
+	}}
+}
+
+func openAPIWalletSchemas() map[string]any {
+	str := map[string]any{"type": "string"}
+	ulxc := map[string]any{"type": "integer", "format": "int64", "description": "µLXC (1 LXC = 1,000,000 µLXC = $0.10)"}
+	at := map[string]any{"type": "string", "format": "date-time"}
+	strs := map[string]any{"type": "array", "items": str}
+	return map[string]any{
+		"Agent": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id":            str,
+				"name":          str,
+				"balance_ulxc":  ulxc,
+				"spent_ulxc":    ulxc,
+				"pots_ulxc":     ulxc,
+				"keys":          map[string]any{"type": "array", "items": str, "description": "ids of the agent's own proxy keys"},
+				"created_at":    at,
+				"paused_at":     map[string]any{"type": "string", "format": "date-time", "nullable": true},
+				"paused_reason": str,
+				"owner_user_id": map[string]any{"type": "string", "description": "the person answerable for what it spends"},
+				"verified":      map[string]any{"type": "boolean"},
+				"handle":        map[string]any{"type": "string", "description": "its @handle, once its owner picks one"},
+			},
+		},
+		"AgentBook": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"workspace_balance_ulxc": ulxc,
+				"allocated_ulxc":         ulxc,
+				"unallocated_ulxc":       ulxc,
+				"spent_ulxc":             ulxc,
+				"agents":                 map[string]any{"type": "array", "items": map[string]any{"$ref": "#/components/schemas/Agent"}},
+				"all_paused_at":          map[string]any{"type": "string", "format": "date-time", "nullable": true},
+				"all_paused_reason":      str,
+			},
+		},
+		"AgentRules": map[string]any{
+			"type":                 "object",
+			"description":          "Zero or empty means no limit. A field this schema does not name is refused (400), so a misspelt rule is never silently no rule.",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"max_per_request_ulxc":   ulxc,
+				"daily_limit_ulxc":       ulxc,
+				"monthly_limit_ulxc":     ulxc,
+				"approval_above_ulxc":    map[string]any{"type": "integer", "format": "int64", "description": "a request that could cost more waits for a person's approval"},
+				"allowed_models":         strs,
+				"allowed_providers":      strs,
+				"allowed_listings":       map[string]any{"type": "array", "items": str, "description": "marketplace listings it may use; empty allows any"},
+				"active_from":            map[string]any{"type": "string", "example": "09:00", "description": "HH:MM in timezone; with active_until, the hours it may spend"},
+				"active_until":           map[string]any{"type": "string", "example": "18:00", "description": "exclusive; earlier than active_from crosses midnight"},
+				"timezone":               map[string]any{"type": "string", "example": "Europe/Berlin", "description": "IANA name; UTC when empty"},
+				"pause_on_unusual_spend": map[string]any{"type": "boolean"},
+			},
+		},
+		"AgentApproval": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id":          str,
+				"agent_id":    str,
+				"amount_ulxc": ulxc,
+				"model":       str,
+				"reason":      str,
+				"payee": map[string]any{
+					"type":     "object",
+					"nullable": true,
+					"properties": map[string]any{
+						"kind": map[string]any{"type": "string", "enum": []string{"agent", "listing", "company", "merchant"}},
+						"id":   str,
+						"name": str,
+					},
+				},
+				"memo":       str,
+				"status":     map[string]any{"type": "string", "enum": []string{"pending", "approved", "denied", "used"}},
+				"created_at": at,
+				"decided_at": map[string]any{"type": "string", "format": "date-time", "nullable": true},
+			},
+		},
+		"AgentStatementLine": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"entry_id":           str,
+				"kind":               map[string]any{"type": "string", "enum": []string{"fund", "withdraw", "spend", "hold", "settle", "release", "pay"}},
+				"amount_ulxc":        ulxc,
+				"counterparty":       map[string]any{"type": "string", "description": "workspace | spend | agent:<id>"},
+				"ref":                map[string]any{"type": "string", "description": "a payment's memo, or the request it paid for"},
+				"balance_after_ulxc": ulxc,
+				"at":                 at,
+			},
+		},
+		"AgentTransfer": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id":                str,
+				"entry_id":          str,
+				"from_workspace_id": str,
+				"from_agent_id":     str,
+				"to_workspace_id":   str,
+				"to_agent_id":       str,
+				"amount_ulxc":       ulxc,
+				"memo":              str,
+				"class":             str,
+				"request_id":        str,
+				"schedule_id":       str,
+				"refund_of":         str,
+				"created_at":        at,
+			},
+		},
+	}
+}
+
+func openAPIWalletPaths() map[string]any {
+	ref := func(schema string) map[string]any {
+		return map[string]any{"$ref": "#/components/schemas/" + schema}
+	}
+	ok := func(desc string, schema map[string]any) map[string]any {
+		return map[string]any{
+			"description": desc,
+			"content":     map[string]any{"application/json": map[string]any{"schema": schema}},
+		}
+	}
+	body := func(schema map[string]any) map[string]any {
+		return map[string]any{
+			"required": true,
+			"content":  map[string]any{"application/json": map[string]any{"schema": schema}},
+		}
+	}
+	optional := func(schema map[string]any) map[string]any {
+		b := body(schema)
+		b["required"] = false
+		return b
+	}
+	obj := func(required []string, props map[string]any) map[string]any {
+		o := map[string]any{"type": "object", "properties": props}
+		if len(required) > 0 {
+			o["required"] = required
+		}
+		return o
+	}
+	listOf := func(field, schema string) map[string]any {
+		return obj(nil, map[string]any{field: map[string]any{"type": "array", "items": ref(schema)}})
+	}
+	param := func(name, in string) map[string]any {
+		return map[string]any{"name": name, "in": in, "required": in == "path", "schema": map[string]any{"type": "string"}}
+	}
+	ws, agent, approval := param("wsID", "path"), param("agentID", "path"), param("approvalID", "path")
+	str := map[string]any{"type": "string"}
+	ulxc := map[string]any{"type": "integer", "format": "int64", "minimum": 1}
+	balance := ok("the agent's balance after the move", obj(nil, map[string]any{"agent_id": str, "balance_ulxc": ulxc}))
+	idempotency := map[string]any{"name": "Idempotency-Key", "in": "header", "required": false,
+		"description": "sent again with the same key, the move lands once (at most 128 characters)",
+		"schema":      map[string]any{"type": "string", "maxLength": 128}}
+	// op builds one wallet operation; every one carries the wallet tag.
+	op := func(summary, description string, params []map[string]any, responses map[string]any) map[string]any {
+		o := map[string]any{"tags": []string{walletTag}, "summary": summary, "parameters": params, "responses": responses}
+		if description != "" {
+			o["description"] = description
+		}
+		return o
+	}
+	withBody := func(o, b map[string]any) map[string]any {
+		o["requestBody"] = b
+		return o
+	}
+	periodParams := []map[string]any{
+		ws,
+		{"name": "from", "in": "query", "required": false, "description": "RFC 3339 time or YYYY-MM-DD (midnight UTC); defaults to the start of this month", "schema": str},
+		{"name": "to", "in": "query", "required": false, "description": "exclusive; RFC 3339 time or YYYY-MM-DD; defaults to now", "schema": str},
+		{"name": "format", "in": "query", "required": false, "schema": map[string]any{"type": "string", "enum": []string{"json", "csv"}}},
+	}
+
+	return map[string]any{
+		"/v1/workspaces/{wsID}/agents": map[string]any{
+			"get": op("List the workspace's agents and their wallets",
+				"Each agent's balance and spend, reconciled with the workspace's own balance.",
+				[]map[string]any{ws},
+				map[string]any{"200": ok("the agents and the workspace's totals", ref("AgentBook"))}),
+			"post": withBody(op("Create an agent",
+				"Owner or admin. The signed-in person owns the agent; an admin credential names the owner in owner_user_id.",
+				[]map[string]any{ws},
+				map[string]any{"201": ok("the new agent, balance zero", ref("Agent")), "400": map[string]any{"description": "no name, or no owner"}}),
+				body(obj([]string{"name"}, map[string]any{"name": str, "owner_user_id": str}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/keys": map[string]any{
+			"post": withBody(op("Issue the agent a proxy key of its own",
+				"Owner or admin. The agent calls its models through /v1/proxy/… with this key, and every request on it is judged against the agent's wallet. The raw key is shown once.",
+				[]map[string]any{ws, agent},
+				map[string]any{
+					"201": ok("the key, shown once", obj(nil, map[string]any{"agent_id": str, "key": str, "id": str, "prefix": str, "warning": str})),
+					"404": map[string]any{"description": "no such agent in this workspace"},
+				}),
+				optional(obj(nil, map[string]any{"name": map[string]any{"type": "string", "description": "defaults to the agent's id"}}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/fund": map[string]any{
+			"post": withBody(op("Fund the agent from the workspace's credit",
+				"Owner or admin.",
+				[]map[string]any{ws, agent, idempotency},
+				map[string]any{"200": balance, "404": map[string]any{"description": "no such agent"}, "409": map[string]any{"description": "the workspace cannot cover it, or the agent has no owner"}}),
+				body(obj([]string{"amount_ulxc"}, map[string]any{"amount_ulxc": ulxc}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/withdraw": map[string]any{
+			"post": withBody(op("Move credit from the agent back to the workspace",
+				"Owner or admin.",
+				[]map[string]any{ws, agent, idempotency},
+				map[string]any{"200": balance, "404": map[string]any{"description": "no such agent"}, "409": map[string]any{"description": "the agent's balance cannot cover it"}}),
+				body(obj([]string{"amount_ulxc"}, map[string]any{"amount_ulxc": ulxc}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/rules": map[string]any{
+			"get": op("Read the agent's spending rules", "",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the rules", ref("AgentRules")), "404": map[string]any{"description": "no such agent"}}),
+			"put": withBody(op("Replace the agent's spending rules",
+				"Owner or admin. Lens judges every model call, payment and card purchase of the agent against these before it happens: a request a rule refuses is answered 403 naming the rule and never reaches the provider.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the rules as stored", ref("AgentRules")), "400": map[string]any{"description": "an unknown field or an invalid rule"}, "404": map[string]any{"description": "no such agent"}}),
+				body(ref("AgentRules"))),
+		},
+		"/v1/workspaces/{wsID}/agents/approvals": map[string]any{
+			"get": op("List the requests the agents' rules sent to a person",
+				"Newest first. A payment's approval names its payee and memo.",
+				[]map[string]any{ws},
+				map[string]any{"200": ok("the approvals", listOf("approvals", "AgentApproval"))}),
+		},
+		"/v1/workspaces/{wsID}/agents/approvals/{approvalID}/approve": map[string]any{
+			"post": op("Approve a request, once",
+				`Owner or admin. The agent's retry of the same request then goes through. Once the workspace has a passkey, the body is {"assertion": {credential_id, client_data_json, authenticator_data, signature}} over the approval's challenge.`,
+				[]map[string]any{ws, approval},
+				map[string]any{"200": ok("the approval, approved", ref("AgentApproval")), "403": map[string]any{"description": "a passkey assertion is required, or it is invalid"}, "404": map[string]any{"description": "no such approval"}}),
+		},
+		"/v1/workspaces/{wsID}/agents/approvals/{approvalID}/deny": map[string]any{
+			"post": op("Deny a request",
+				"Owner or admin; signed with a passkey the same way as approve.",
+				[]map[string]any{ws, approval},
+				map[string]any{"200": ok("the approval, denied", ref("AgentApproval")), "403": map[string]any{"description": "a passkey assertion is required, or it is invalid"}, "404": map[string]any{"description": "no such approval"}}),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/statement": map[string]any{
+			"get": op("Read the agent's statement",
+				"With none of from, to or format: the agent's account, newest first (limit, default 100, at most 1000). With any of them: the statement for the period [from, to), as JSON or CSV.",
+				append([]map[string]any{agent, {"name": "limit", "in": "query", "required": false, "schema": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}}}, periodParams...),
+				map[string]any{
+					"200": ok("the agent's lines", obj(nil, map[string]any{"agent_id": str, "lines": map[string]any{"type": "array", "items": ref("AgentStatementLine")}})),
+					"404": map[string]any{"description": "no such agent"},
+				}),
+		},
+		"/v1/workspaces/{wsID}/agents/statement": map[string]any{
+			"get": op("Read the statement of every agent wallet in the workspace",
+				"For the period [from, to), as JSON or CSV — the statement an auditor can open.",
+				periodParams,
+				map[string]any{"200": map[string]any{"description": "the period statement"}}),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/pause": map[string]any{
+			"post": withBody(op("Pause the agent",
+				"Owner or admin. Every movement of the agent is refused until it is resumed, effective on its next request, buffered or streamed.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": map[string]any{"description": "paused"}}),
+				optional(obj(nil, map[string]any{"reason": str}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/resume": map[string]any{
+			"post": op("Resume a paused agent", "Owner or admin.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": map[string]any{"description": "resumed"}}),
+		},
+		"/v1/workspaces/{wsID}/agents/pause-all": map[string]any{
+			"post": withBody(op("Pause every agent in the workspace",
+				"Owner or admin. Those created later included, until resume-all.",
+				[]map[string]any{ws},
+				map[string]any{"200": map[string]any{"description": "paused"}}),
+				optional(obj(nil, map[string]any{"reason": str}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/send": map[string]any{
+			"post": withBody(op("Send credits to any agent on Talyvor",
+				"By the agent's own key, the workspace's owner or an admin. The agent's rules judge it like any other spend.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the transfer", ref("AgentTransfer")), "403": map[string]any{"description": "not the agent's key, the owner or an admin — or a rule refused it"}, "409": map[string]any{"description": "the agent's balance cannot cover it"}}),
+				body(obj([]string{"to", "amount_ulxc"}, map[string]any{"to": map[string]any{"type": "string", "description": "a wallet id or @handle"}, "amount_ulxc": ulxc, "memo": str}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/transfers": map[string]any{
+			"get": op("List what the agent sent and received", "",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the transfers", listOf("transfers", "AgentTransfer"))}),
+		},
+		"/v1/wallets/{address}": map[string]any{
+			"get": op("Look up a wallet before sending to it",
+				"Who a wallet id or @handle is.",
+				[]map[string]any{param("address", "path")},
+				map[string]any{"200": map[string]any{"description": "the wallet's agent and company"}, "404": map[string]any{"description": "no such wallet"}}),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/card": map[string]any{
+			"get": op("Read the agent's card and its authorisations",
+				"Newest first, approved and declined; each authorisation was decided by the agent's rules and balance.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": map[string]any{"description": "the card and its authorisations"}}),
+			"post": withBody(op("Issue the agent a virtual card — test mode",
+				"Owner or admin; the agent's owner is the cardholder. Test mode only: with a live Stripe key it is 409 and nothing is issued.",
+				[]map[string]any{ws, agent},
+				map[string]any{"201": map[string]any{"description": "the card"}, "409": map[string]any{"description": "a live Stripe key, or the agent already has a card — no card is issued"}}),
+				body(obj(nil, map[string]any{
+					"first_name": str, "last_name": str, "email": str, "phone_number": str,
+					"line1": str, "line2": str, "city": str, "postal_code": str, "country": str,
+				}))),
+		},
+	}
+}

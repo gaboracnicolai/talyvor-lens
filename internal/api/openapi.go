@@ -1,12 +1,13 @@
 package api
 
-// openapi.go — hand-written OpenAPI 3.0 spec served at GET /openapi.json. Lens has too many routes
-// to spec every single one, so this file covers a subset. Returns a valid JSON document when
-// marshalled.
+// openapi.go — hand-written OpenAPI 3.0 spec served at GET /openapi.json: Agent Wallets and the
+// gateway that enforces them. Lens has too many routes to spec every single one, so this file covers
+// a subset. Returns a valid JSON document when marshalled.
 //
-// COVERED — 12 paths, 15 operations: proxy endpoints, key management, workspaces, tenant config,
-// and the local-endpoint registry. Every one is registered by the binary; that is guarded, not
-// assumed (openapi_route_contract_test.go).
+// COVERED: agent wallets (agents, keys, funding, rules, approvals, statements, transfers and cards —
+// openapi_wallets.go, listed first under the "Agent Wallets" tag), proxy endpoints, key management,
+// workspaces, tenant config, and the local-endpoint registry. Every path is registered by the binary;
+// that is guarded, not assumed (openapi_route_contract_test.go).
 //
 // ⚠ NOT COVERED, AND THIS PARAGRAPH IS WHY W6.29 EXISTS. This header used to name `attribution`
 // and `A/B` among the surfaces it covers. Measured against the served document: ZERO published
@@ -35,12 +36,15 @@ import (
 // the package doesn't grow a dependency on a typed OpenAPI
 // schema library. The shape is intentionally hand-rolled.
 func OpenAPISpec() map[string]any {
-	return map[string]any{
+	spec := map[string]any{
 		"openapi": "3.0.3",
 		"info": map[string]any{
-			"title":       "Talyvor Lens API",
-			"version":     APIVersion,
-			"description": "Production AI proxy/gateway. Multi-provider routing with cost tracking, quality scoring, attribution, and tenant isolation.",
+			"title":   "Talyvor Lens API",
+			"version": APIVersion,
+			"description": "Agent Wallets and the gateway that enforces them. Every AI agent gets a wallet — a balance, " +
+				"spending rules, approvals, a card and a live statement — and Lens judges each model call and payment " +
+				"against that wallet before it reaches the provider or the payee. Underneath: multi-provider routing " +
+				"with cost tracking, quality scoring and tenant isolation.",
 			"contact": map[string]any{
 				"name": "Talyvor",
 				"url":  "https://talyvor.com",
@@ -49,6 +53,7 @@ func OpenAPISpec() map[string]any {
 		"servers": []map[string]any{
 			{"url": "/", "description": "current deployment"},
 		},
+		"tags": openAPIWalletTags(),
 		"components": map[string]any{
 			"securitySchemes": map[string]any{
 				"ApiKeyAuth": map[string]any{
@@ -176,6 +181,15 @@ func OpenAPISpec() map[string]any {
 		"security": []map[string]any{{"ApiKeyAuth": []string{}}},
 		"paths":    openAPIPaths(),
 	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	for name, schema := range openAPIWalletSchemas() {
+		schemas[name] = schema
+	}
+	paths := spec["paths"].(map[string]any)
+	for p, item := range openAPIWalletPaths() {
+		paths[p] = item
+	}
+	return spec
 }
 
 func openAPIPaths() map[string]any {
