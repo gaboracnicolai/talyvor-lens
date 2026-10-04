@@ -24,6 +24,9 @@ type AgentDebitSettlement struct {
 	SettledULXC int64
 	// WrittenOffULXC is the part of the delivered cost the agent's limit did not allow.
 	WrittenOffULXC int64
+	// CashBackedULXC is the part of the question's whole charge (the estimate plus SettledULXC) that may fund
+	// a royalty — what SettleLXCReservation's cash-backed figure is on the reservation path (B27.6).
+	CashBackedULXC int64
 }
 
 // SettleAgentDebit settles the pre-serve debit booked under debitKey to deliveredLXC, exactly once per
@@ -148,6 +151,21 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 				leg{agentAccount(agentID), -out.SettledULXC}, leg{"spend", out.SettledULXC}); err != nil {
 				return out, err
 			}
+		}
+	}
+	// B27.6: the pre-serve debit, like a hold, did not touch backing, so the whole charge consumes it here, as a
+	// settled reservation does, against the balance with the charge undone — and reports the royalty basis.
+	if charged := estimate + out.SettledULXC; charged > 0 {
+		bal, _, _, err := readLXCBalance(ctx, tx, workspaceID)
+		if err != nil {
+			return out, err
+		}
+		fromCash, err := consumeCashBacked(ctx, tx, workspaceID, bal+charged, charged)
+		if err != nil {
+			return out, err
+		}
+		if out.CashBackedULXC, err = royaltyBacked(ctx, tx, workspaceID, charged, fromCash); err != nil {
+			return out, err
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE agent_debit_settlements SET agent_id = $2, settled_ulxc = $3, written_off_ulxc = $4

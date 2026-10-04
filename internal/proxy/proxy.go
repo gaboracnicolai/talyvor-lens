@@ -3479,16 +3479,19 @@ func (p *Proxy) pricePooledServe(pooledHit *poolroyalty.ServedHit, prompt string
 //
 // B26.9 — WITH RESERVATIONS OFF there is no hold: the agent was debited its pre-serve estimate, so this
 // settles that debit to the serve's real price as B23.13 settles a model serve — an own-cache hit to
-// nothing, a pooled hit to its discounted price, never past the owner's limit. It still returns 0: that
-// path does not say which part of the charge real money paid for, so it funds no royalty.
+// nothing, a pooled hit to its discounted price, never past the owner's limit. B27.6: that settle reports
+// the cash-backed part of the charge, and this returns it, so the mint is funded exactly as above.
 //
 // The LIST price and the rate ride onto the ledger row so the customer's evidence is the row itself.
 // The SAVING is not passed — the row derives it from what was actually debited, because the settle
 // clamps to the hold and a passed-in saving could then contradict the amount charged.
 func (p *Proxy) settlePooledServe(ctx context.Context, wsID string, price pooledPrice) float64 {
 	if !p.reservationActive() {
-		p.settleAgentDebitULXC(ctx, wsID, price.ChargedULXC, economy.AgentDebitMeta{ServedModel: price.modelForRow,
+		cashBacked, debited := p.settleAgentDebitULXC(ctx, wsID, price.ChargedULXC, economy.AgentDebitMeta{ServedModel: price.modelForRow,
 			PriceBasis: price.PriceBasis, PoolListULXC: price.ListULXC, PoolDiscountRate: price.Rate})
+		if debited { // an own-cache hit settled to nothing, so it returns 0
+			return float64(cashBacked) * economy.LXCUSDValue / 1e6
+		}
 	}
 	if !price.Pooled {
 		p.releaseReservation(ctx, "own cache hit")

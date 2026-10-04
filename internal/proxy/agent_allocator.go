@@ -356,10 +356,12 @@ func (p *Proxy) settleAgentDebit(ctx context.Context, wsID string, deliveredUSD 
 
 // settleAgentDebitULXC is settleAgentDebit for a cost already in µLXC — a cache serve's price (B26.9). meta
 // carries what the settling row says about the serve; the requested model and the question come from the debit.
-func (p *Proxy) settleAgentDebitULXC(ctx context.Context, wsID string, deliveredLXC int64, meta economy.AgentDebitMeta) {
+// It returns the cash-backed part of the question's charge (0 on a settle error) and whether an agent debit
+// was booked for this request at all (B27.6).
+func (p *Proxy) settleAgentDebitULXC(ctx context.Context, wsID string, deliveredLXC int64, meta economy.AgentDebitMeta) (cashBackedULXC int64, debited bool) {
 	d, ok := ctx.Value(agentDebitedCtxKey{}).(agentDebit)
 	if !ok || p.agentSpender == nil {
-		return
+		return 0, false
 	}
 	ctx = context.WithoutCancel(ctx) // B27.4: see settleReservationBasis
 	meta.RequestedModel, meta.RequestID = d.requestedModel, d.requestID
@@ -368,12 +370,13 @@ func (p *Proxy) settleAgentDebitULXC(ctx context.Context, wsID string, delivered
 		// Logged-and-swallowed — the response is already served; the question stays charged its estimate.
 		slog.Warn("economy: agent debit settle failed (charged the pre-serve estimate)",
 			slog.String("request_id", d.requestID), slog.String("err", err.Error()))
-		return
+		return 0, true
 	}
 	if s.WrittenOffULXC > 0 {
 		slog.Info("economy: agent's limit cut a question's charge short; the rest is written off",
 			slog.String("request_id", d.requestID), slog.Int64("written_off_ulxc", s.WrittenOffULXC))
 	}
+	return s.CashBackedULXC, true
 }
 
 // settleServedOffSeam settles an agent's question answered OFF the upstream seams — by a registered node or
