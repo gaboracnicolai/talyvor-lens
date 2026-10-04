@@ -1249,7 +1249,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					// Cache-serve spend visibility (0100): the served request
 					// becomes a zero-provider-cost token_events row tagged with
 					// its layer, so hit rate is countable next to every miss.
-					p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
+					p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer, price)
 					p.rememberServed(ctx, wsID, requestID, layer, hitIDs, hitHashes, hitContributor(pooledHit), cached)
 					span.SetAttributes(
 						attribute.Bool("lens.cached", true),
@@ -1281,7 +1281,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 				p.mintPooledRoyalty(ctx, chargedHit, prompt, cached, funded, loggingPolicy)
 				p.markPooledPaid(ctx, wsID, chargedHit, cached)
 				// Cache-serve spend visibility (0100): see recordCacheServe.
-				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer)
+				p.recordCacheServe(ctx, wsID, team, sprint, feature, model, prompt, cached, modSet, sessionID, requestID, loggingPolicy, layer, price)
 				p.rememberServed(ctx, wsID, requestID, layer, hitIDs, hitHashes, hitContributor(pooledHit), cached)
 				span.SetAttributes(
 					attribute.Bool("lens.cached", true),
@@ -1588,7 +1588,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		}
 		sc := streamSpend{
 			wsID: wsID, team: team, sprint: sprint, feature: feature,
-			model: upstreamModel, requestID: requestID, sessionID: sessionID,
+			model: upstreamModel, asked: model, requestID: requestID, sessionID: sessionID,
 			modality: modSet.Label(), logging: loggingPolicy, estInputTokens: estIn,
 			tare: tareMeter, distillMethod: distillMethod, visionOCR: visionOCR, reqFP: reqFP, turn: turn,
 			post: streamPostServe{
@@ -1868,10 +1868,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// scopes `u`, and the capture runs after the response is flushed. ProviderReported=false until proven
 		// otherwise, so a request with no usage report is labelled flat rather than assumed measured.
 		rdTokens := routeTokens{UncachedInput: len(compressedPrompt) / 4, Output: outT}
+		// B27.32: the input classes servedCostUSD is priced on, so the list price is priced on the same ones.
+		var listUncached, listCached, listWrite int
 		if u, ok := cfg.ExtractUsage(upstreamBody); ok {
 			inT, outT = u.InputTokens, u.OutputTokens
 			costEstimated = false
 			spendSource = "provider_usage"
+			listUncached, listCached, listWrite = u.UncachedInputTokens, u.CachedInputTokens, u.CacheWriteInputTokens
 			var prov catalog.Provenance
 			servedCostUSD, prov = alerts.CostUSDResolved(upstreamModel, catalog.PurposeCharge,
 				u.UncachedInputTokens, u.CachedInputTokens, u.CacheWriteInputTokens, u.OutputTokens)
@@ -1890,6 +1893,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// through the resolver so an unknown model still cannot come out at zero.
 			var prov catalog.Provenance
 			servedCostUSD, prov = alerts.CostUSDResolved(upstreamModel, catalog.PurposeCharge, inT, 0, 0, outT)
+			listUncached = inT
 			if prov == catalog.ProvenanceFallback {
 				servedPriceBasis = prov.String()
 			}
@@ -1932,13 +1936,17 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// rides along too (migration 0040): "convert" for a distilled request
 			// (the saving is IMPLICIT in this row's lower count), "" otherwise.
 			metrics.SpendRecord(spendSource)
+			// B27.32: the row carries what this request would have cost at the model it asked for, and what
+			// it was charged — the request's measured saving. On this one write only (sctx), never the OCR row.
+			sctx := alerts.WithSaving(ctx, alerts.Saving{RequestedModel: model, ChargedUSD: servedCostUSD,
+				ListUSD: alerts.ListCostUSD(model, upstreamModel, servedCostUSD, listUncached, listCached, listWrite, outT)})
 			var recErr error
 			if tareMeter.Kind != "" {
-				recErr = p.alertManager.RecordSpendWithTare(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated, distillMethod, tareMeter)
+				recErr = p.alertManager.RecordSpendWithTare(sctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated, distillMethod, tareMeter)
 			} else if distillMethod != "" {
-				recErr = p.alertManager.RecordSpendWithDistill(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated, distillMethod)
+				recErr = p.alertManager.RecordSpendWithDistill(sctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated, distillMethod)
 			} else {
-				recErr = p.alertManager.RecordSpend(ctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated)
+				recErr = p.alertManager.RecordSpend(sctx, wsID, team, sprint, feature, upstreamModel, inT, outT, spendPrompt, sessionID, requestID, modSet.Label(), costEstimated)
 			}
 			if recErr != nil {
 				slog.Warn("alerts: RecordSpend failed",
@@ -2459,15 +2467,17 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 		source = "provider_usage"
 	}
 	metrics.SpendRecord(source)
+	// B27.32: the request's measured saving on its own row, as on the buffered seam — never the OCR row.
+	sctx := alerts.WithSaving(ctx, streamSaving(sc, u, inT, outT, servedCostUSD))
 	var recErr error
 	// B7.3 — the same three writers, in the same order, as the buffered seam: a distilled streamed
 	// request tags its row 'convert', and its OCR sub-call gets its own 'vision_ocr' row.
 	if sc.tare.Kind != "" {
-		recErr = p.alertManager.RecordSpendWithTare(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated, sc.distillMethod, sc.tare)
+		recErr = p.alertManager.RecordSpendWithTare(sctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated, sc.distillMethod, sc.tare)
 	} else if sc.distillMethod != "" {
-		recErr = p.alertManager.RecordSpendWithDistill(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated, sc.distillMethod)
+		recErr = p.alertManager.RecordSpendWithDistill(sctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated, sc.distillMethod)
 	} else {
-		recErr = p.alertManager.RecordSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated)
+		recErr = p.alertManager.RecordSpend(sctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.model, inT, outT, "", sc.sessionID, sc.requestID, sc.modality, estimated)
 	}
 	if recErr != nil {
 		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", recErr.Error()))
@@ -2501,6 +2511,20 @@ func streamServedCost(sc streamSpend, u streamUsage, outputText string) (inT, ou
 	inT, outT = sc.estInputTokens, len(outputText)/4
 	costUSD, _ = alerts.CostUSDResolved(sc.model, catalog.PurposeCharge, inT, 0, 0, outT)
 	return inT, outT, true, costUSD
+}
+
+// streamSaving is a streamed request's measured saving, priced on the same token classes as
+// streamServedCost: the provider's breakdown when it reported one, the flat estimate otherwise.
+func streamSaving(sc streamSpend, u streamUsage, inT, outT int, chargedUSD float64) alerts.Saving {
+	asked := sc.asked
+	if asked == "" { // a direct StreamHandler call names only the model it sent
+		asked = sc.model
+	}
+	list := alerts.ListCostUSD(asked, sc.model, chargedUSD, inT, 0, 0, outT)
+	if u.present {
+		list = alerts.ListCostUSD(asked, sc.model, chargedUSD, u.uncachedInputTokens, u.cachedInputTokens, u.cacheWriteInputTokens, u.outputTokens)
+	}
+	return alerts.Saving{RequestedModel: asked, ListUSD: list, ChargedUSD: chargedUSD}
 }
 
 // recordVisionOCRSpend books a distilled request's vision-OCR sub-call as its OWN 'vision_ocr'
@@ -2609,7 +2633,10 @@ func (p *Proxy) trySemanticPooled(ctx context.Context, provider, model string, t
 // out via LoggingNone (symmetric with recordStreamSpend and the buffered-path seam). Token counts
 // are the same length-derived estimators the miss path uses when a provider reports no usage —
 // a cache serve never has provider usage, so the row is always cost_estimated.
-func (p *Proxy) recordCacheServe(ctx context.Context, wsID, team, sprint, feature, model, prompt string, served []byte, modSet modality.ModalitySet, sessionID, requestID string, loggingPolicy workspace.LoggingPolicy, layer string) {
+//
+// B27.32: the row also carries the serve's measured saving — the live call it replaced, at the model asked
+// for, against what the hit was priced at (price: nothing for an own hit, the discounted price for a pooled one).
+func (p *Proxy) recordCacheServe(ctx context.Context, wsID, team, sprint, feature, model, prompt string, served []byte, modSet modality.ModalitySet, sessionID, requestID string, loggingPolicy workspace.LoggingPolicy, layer string, price pooledPrice) {
 	if p.alertManager == nil || loggingPolicy == workspace.LoggingNone {
 		return
 	}
@@ -2617,6 +2644,9 @@ func (p *Proxy) recordCacheServe(ctx context.Context, wsID, team, sprint, featur
 	if modSet.Multimodal() {
 		inT = modSet.EstimateInputTokens()
 	}
+	charged := float64(price.ChargedULXC) * economy.LXCUSDValue / 1e6
+	ctx = alerts.WithSaving(ctx, alerts.Saving{RequestedModel: model, ChargedUSD: charged,
+		ListUSD: alerts.ListCostUSD(model, model, charged, inT, 0, 0, outT)})
 	if err := p.alertManager.RecordCacheServe(ctx, wsID, team, sprint, feature, model, inT, outT, sessionID, requestID, modSet.Label(), layer); err != nil {
 		slog.Warn("alerts: RecordCacheServe failed",
 			slog.String("layer", layer),
@@ -2646,6 +2676,9 @@ func (p *Proxy) recordNodeServe(ctx context.Context, wsID, team, sprint, feature
 		return
 	}
 	inT, outT := len(prompt)/4, len(served)/4
+	// B27.32: a node answers at the model asked for, so its saving is only output it was not charged for.
+	ctx = alerts.WithSaving(ctx, alerts.Saving{RequestedModel: model, ChargedUSD: costUSD,
+		ListUSD: alerts.ListCostUSD(model, model, costUSD, inT, 0, 0, outT)})
 	if err := p.alertManager.RecordNodeServe(ctx, wsID, team, sprint, feature, model, inT, outT, sessionID, requestID, "text", costUSD); err != nil {
 		slog.Warn("alerts: RecordNodeServe failed", slog.String("request_id", requestID), slog.String("err", err.Error()))
 	}

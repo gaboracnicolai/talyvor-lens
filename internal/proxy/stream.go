@@ -46,6 +46,7 @@ type streamUsage struct {
 type streamSpend struct {
 	wsID, team, sprint, feature string
 	model                       string
+	asked                       string // B27.32: the model the request asked for; "" = the model sent
 	requestID, sessionID        string
 	modality                    string
 	logging                     workspace.LoggingPolicy

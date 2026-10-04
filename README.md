@@ -71,7 +71,22 @@ model, we under-state it, so a savings figure derived from this basis errs low.
 
 ### Measuring it on your own traffic
 
-The routing path records a per-request counterfactual: what the call cost, and what the model you
+**Your workspace's saving is measured, request by request.** Every spend row records what that
+request would have cost at the model it asked for with no Talyvor cache — priced on the cache
+breakdown the provider actually reported, so the discount above stays in the baseline — and what it
+was charged. This month's sum of the difference is
+
+```
+GET /v1/workspaces/{wsID}/savings/current-month
+```
+
+and the app's Spend screen shows it as "Saved this month". It is those rows added up and nothing
+else: no rate is multiplied and nothing is projected. A request served at the model it asked for saves
+exactly zero; a cache hit saves the call it replaced, less what the hit was charged (priced flat on
+the token estimate the hit itself is priced on — no provider call means no cache breakdown); a routed
+request saves the price difference on the same tokens.
+
+The routing path also records a per-request counterfactual: what the call cost, and what the model you
 originally asked for would have cost. Admins can read the aggregate:
 
 ```
@@ -87,9 +102,9 @@ modelled, not billed. Treat it as the shape of the effect on your traffic, not a
 total leaves synthetic test workspaces out; add `?synthetic=only` to any of them to read the test
 harness's traffic alone.
 
-A measured, published figure — against an already-optimised baseline, on real customer workloads
-— is intended. It is not in this README because it does not exist yet, and the point of this
-section is that a number nobody computed should not be the first thing you read.
+A published figure across customers — against an already-optimised baseline, on real workloads —
+is intended. It is not in this README because it does not exist yet, and the point of this section
+is that a number nobody computed should not be the first thing you read. Your own is the one above.
 
 ## Quick start (2 commands)
 
