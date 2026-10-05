@@ -87,7 +87,7 @@ func (p *Proxy) chatAdmission(ctx context.Context, workspaceID, model, prompt st
 		slog.Warn("billing: chat balance read failed (failing open)", slog.String("workspace", workspaceID), slog.String("err", err.Error()))
 		return "", false
 	}
-	if covered+balance < est {
+	if balance < p.withPlatformFee(ctx, workspaceID, est-covered) { // B32.11: past the allowance, with its fee
 		return "not enough credit for this request — top up to continue", true
 	}
 	return "", false

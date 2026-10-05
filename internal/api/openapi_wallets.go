@@ -145,12 +145,13 @@ func openAPIWalletSchemas() map[string]any {
 			"type": "object",
 			"properties": map[string]any{
 				"entry_id":           str,
-				"kind":               map[string]any{"type": "string", "enum": []string{"fund", "withdraw", "spend", "hold", "settle", "release", "pay"}},
+				"kind":               map[string]any{"type": "string", "enum": []string{"fund", "withdraw", "spend", "hold", "settle", "release", "pay", "platform_fee"}},
 				"amount_ulxc":        ulxc,
 				"counterparty":       map[string]any{"type": "string", "description": "workspace | spend | agent:<id>"},
 				"ref":                map[string]any{"type": "string", "description": "a payment's memo, or the request it paid for"},
 				"balance_after_ulxc": ulxc,
 				"at":                 at,
+				"label":              map[string]any{"type": "string", "description": "on a platform_fee line, the fee and its rate: \"Platform fee 3%\""},
 			},
 		},
 		"AgentTransfer": map[string]any{

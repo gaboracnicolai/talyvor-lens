@@ -46,6 +46,7 @@ func reservationHarness(t *testing.T) *DualTokenStore {
 			workspace_id TEXT NOT NULL, held_ulxc BIGINT NOT NULL, settled_ulxc BIGINT,
 			status TEXT NOT NULL DEFAULT 'held' CHECK (status IN ('held','settled','released')),
 			requested_model TEXT, request_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_at TIMESTAMPTZ)`,
+		`ALTER TABLE lxc_reservations ADD COLUMN IF NOT EXISTS platform_fee_bps INTEGER NOT NULL DEFAULT 0`, // 0197 (B32.11)
 		`TRUNCATE lxc_balances, lxc_ledger, agent_lxc_subbudgets, lxc_reservations`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {

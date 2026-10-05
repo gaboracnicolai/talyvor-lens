@@ -426,11 +426,11 @@ func (r AgentRules) periodLimits(now time.Time, loc *time.Location) []agentPerio
 func agentSpentSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, since time.Time) (int64, error) {
 	var spent int64
 	// What it paid other agents counts (B19.3), and its card purchases (B19.12); what they paid it does not raise its limit. What it
-	// used of paid marketplace listings counts too (B20.2), though it is billed to its company.
+	// used of paid marketplace listings counts too (B20.2), though it is billed to its company. Its questions' platform fees count (B32.11).
 	err := tx.QueryRow(ctx, `SELECT (
 		(SELECT COALESCE(-sum(amount_ulxc), 0) FROM agent_postings
 		 WHERE workspace_id = $1 AND account = $2 AND created_at >= $3
-		   AND (kind IN ('spend', 'hold', 'settle', 'release', 'card') OR (kind = 'pay' AND amount_ulxc < 0)))
+		   AND (kind IN ('spend', 'hold', 'settle', 'release', 'card', 'platform_fee') OR (kind = 'pay' AND amount_ulxc < 0)))
 		+ (SELECT COALESCE(sum(price_ulxc), 0) FROM market_uses
 		   WHERE buyer_workspace_id = $1 AND agent_id = $4 AND charge = 'billed' AND used_at >= $3))::bigint`,
 		workspaceID, agentAccount(agentID), since, agentID).Scan(&spent)
@@ -443,11 +443,12 @@ func (r AgentRules) modelDailyLimit(model string, now time.Time, loc *time.Locat
 }
 
 // agentModelSpentSince is what an agent has spent on model since `since`: its questions to it, held or debited,
-// net of what their settles and releases gave back — the postings that name the model (B28.301).
+// net of what their settles and releases gave back, with their platform fees (B32.11) — the postings that name
+// the model (B28.301).
 func agentModelSpentSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID, model string, since time.Time) (int64, error) {
 	var spent int64
 	err := tx.QueryRow(ctx, `SELECT COALESCE(-sum(amount_ulxc), 0)::bigint FROM agent_postings
-		WHERE workspace_id = $1 AND account = $2 AND model = $3 AND created_at >= $4 AND kind IN ('spend', 'hold', 'settle', 'release')`,
+		WHERE workspace_id = $1 AND account = $2 AND model = $3 AND created_at >= $4 AND kind IN ('spend', 'hold', 'settle', 'release', 'platform_fee')`,
 		workspaceID, agentAccount(agentID), modelCapKey(model), since).Scan(&spent)
 	return spent, err
 }

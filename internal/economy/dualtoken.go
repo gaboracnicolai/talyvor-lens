@@ -336,6 +336,8 @@ type DualTokenStore struct {
 	companyPayments CompanyPayments
 	// B22.1: whether Lens's Stripe key is live, which makes a Stripe bill real money.
 	liveStripe bool
+	// B32.11: the platform fee's rate on a workspace's AI spend; nil, no fee.
+	platformFee PlatformFeeResolver
 }
 
 // NewDualTokenStore wraps a real pool.
@@ -461,11 +463,17 @@ func (s *DualTokenStore) SpendLXCMeta(ctx context.Context, workspaceID string, l
 	if err != nil {
 		return 0, err
 	}
-	if bal < lxcAmount {
+	// B32.11: every caller of this is a model call, so it carries the plan's platform fee, in this transaction.
+	bps, err := s.platformFeeBPS(ctx, tx, workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	fee := PlatformFee(lxcAmount, bps)
+	if bal < lxcAmount+fee {
 		return 0, ErrInsufficientLXC
 	}
 	// B19.13: every caller of this is the workspace's own spending, so it cannot use what its agents hold.
-	if err := requireUnallocated(ctx, tx, workspaceID, bal, lxcAmount); err != nil {
+	if err := requireUnallocated(ctx, tx, workspaceID, bal, lxcAmount+fee); err != nil {
 		return 0, err
 	}
 	newBal := bal - lxcAmount // exact integer µLXC
@@ -473,7 +481,10 @@ func (s *DualTokenStore) SpendLXCMeta(ctx context.Context, workspaceID string, l
 		LXCTypeSpend, description, metadata); err != nil {
 		return 0, err
 	}
-	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, spent+lxcAmount); err != nil {
+	if err := insertPlatformFee(ctx, tx, workspaceID, fee, newBal-fee, bps, lxcAmount, chargeRequestFrom(ctx)); err != nil {
+		return 0, err
+	}
+	if err := writeLXCBalance(ctx, tx, workspaceID, newBal-fee, minted, spent+lxcAmount+fee); err != nil {
 		return 0, err
 	}
 	// A direct spend consumes backing exactly as a settled reservation does. Without this the
@@ -481,6 +492,10 @@ func (s *DualTokenStore) SpendLXCMeta(ctx context.Context, workspaceID string, l
 	// already used. `bal` is the pre-spend balance and carries no hold on this path.
 	fromCash, err := consumeCashBacked(ctx, tx, workspaceID, bal, lxcAmount)
 	if err != nil {
+		return 0, err
+	}
+	// The fee consumes backing too, after the spend; only the spend's part may fund a royalty.
+	if _, err := consumeCashBacked(ctx, tx, workspaceID, newBal, fee); err != nil {
 		return 0, err
 	}
 	return fromCash, tx.Commit(ctx)

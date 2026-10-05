@@ -140,6 +140,29 @@ func reserveEstimateLXC(model, prompt string, maxOutTokens int) int64 {
 	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
 }
 
+// platformFeeReader is the platform fee a charge of an amount would carry (B32.11). *economy.DualTokenStore
+// satisfies it.
+type platformFeeReader interface {
+	PlatformFeeOn(ctx context.Context, workspaceID string, amount int64) (int64, error)
+}
+
+// withPlatformFee is est plus the platform fee workspaceID's charge of it would carry — the price every pre-call
+// check of a charge to credits compares with what the workspace has (B32.11). A read error adds nothing: the
+// gates fail open, and the charge itself still takes the fee or is refused.
+func (p *Proxy) withPlatformFee(ctx context.Context, workspaceID string, est int64) int64 {
+	r, ok := p.lxcGate.(platformFeeReader)
+	if !ok || est <= 0 {
+		return est
+	}
+	fee, err := r.PlatformFeeOn(ctx, workspaceID, est)
+	if err != nil {
+		slog.Warn("billing: platform fee read failed (pre-call check without it)",
+			slog.String("workspace", workspaceID), slog.String("err", err.Error()))
+		return est
+	}
+	return est + fee
+}
+
 // lxcGateBlocks reports whether the request should be BLOCKED (true) for
 // insufficient LXC. The caller (after the budget gate, before the upstream
 // call) does writeError(402)+return on true, so "upstream never called" is
@@ -163,6 +186,7 @@ func (p *Proxy) lxcGateBlocks(ctx context.Context, workspaceID, model, prompt st
 		// return is ABOVE the balance read, so no balance can ever refuse them. Both pinned.
 		return false
 	}
+	estLXC = p.withPlatformFee(ctx, workspaceID, estLXC)
 	read := p.lxcGate.GetUnallocatedLXC // B19.13: the workspace's own request cannot use its agents' LXC
 	if agentKeyIDFromContext(ctx) != "" {
 		read = p.lxcGate.GetLXCBalance

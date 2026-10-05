@@ -27,6 +27,9 @@ type AgentDebitSettlement struct {
 	// CashBackedULXC is the part of the question's whole charge (the estimate plus SettledULXC) that may fund
 	// a royalty — what SettleLXCReservation's cash-backed figure is on the reservation path (B27.6).
 	CashBackedULXC int64
+	// SettledFeeULXC is the platform fee's settling row (B32.11): the fee on the charge settled to, less the fee
+	// the estimate was debited — > 0 charged, < 0 refunded.
+	SettledFeeULXC int64
 }
 
 // SettleAgentDebit settles the pre-serve debit booked under debitKey to deliveredLXC, exactly once per
@@ -51,10 +54,11 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// The pre-serve debit's claim is the estimate that was charged — from the row, not from the caller.
+	// So is the platform fee's rate (B32.11): the estimate was debited its fee at it.
 	var scopedKeyID string
-	var estimate int64
-	err = tx.QueryRow(ctx, `SELECT scoped_key_id, lxc_amount FROM lxc_spend_claims WHERE request_id = $1`, debitKey).
-		Scan(&scopedKeyID, &estimate)
+	var estimate, bps int64
+	err = tx.QueryRow(ctx, `SELECT scoped_key_id, lxc_amount, platform_fee_bps FROM lxc_spend_claims WHERE request_id = $1`, debitKey).
+		Scan(&scopedKeyID, &estimate, &bps)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return out, fmt.Errorf("economy: settle of an agent debit never booked (%q)", debitKey)
 	}
@@ -92,11 +96,15 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 		}
 	}
 
-	diff := deliveredLXC - estimate
-	if diff > 0 {
+	// B32.11: the limit and the balance judge the whole price, the charge and its platform fee. The estimate was
+	// debited estimate + estFee; the question costs delivered + its fee; settle the difference within what the
+	// limit allows, then split the whole price that fits back into a charge and the fee on it.
+	estFee := PlatformFee(estimate, bps)
+	charge := deliveredLXC
+	if diff := deliveredLXC + PlatformFee(deliveredLXC, bps) - estimate - estFee; diff > 0 {
 		allowed := diff
 		if agentID != "" {
-			if allowed, err = agentAllowance(ctx, tx, workspaceID, agentID, estimate, diff, debitKey, meta.RequestedModel); err != nil {
+			if allowed, err = agentAllowance(ctx, tx, workspaceID, agentID, estimate+estFee, diff, debitKey, meta.RequestedModel); err != nil {
 				return out, err
 			}
 		} else {
@@ -113,36 +121,43 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 			}
 			bal -= allocated
 		}
-		out.SettledULXC = min(allowed, max(bal, 0))
-		out.WrittenOffULXC = diff - out.SettledULXC
-	} else {
-		out.SettledULXC = diff // ≤ 0: the estimate over-charged, refund it
+		charge = min(deliveredLXC, spendWithin(estimate+estFee+min(allowed, max(bal, 0)), bps))
 	}
+	out.SettledULXC = charge - estimate // ≤ 0: the estimate over-charged, refund it
+	out.WrittenOffULXC = deliveredLXC - charge
+	out.SettledFeeULXC = PlatformFee(charge, bps) - estFee
 
-	if out.SettledULXC != 0 {
+	if out.SettledULXC != 0 || out.SettledFeeULXC != 0 {
 		bal, minted, wsSpent, err := readLXCBalance(ctx, tx, workspaceID)
 		if err != nil {
 			return out, err
 		}
 		newBal := bal - out.SettledULXC
-		desc := "agent debit settle: delivered cost above the estimate"
-		if out.SettledULXC < 0 {
-			desc = "agent debit settle: estimate above the delivered cost, refunded"
+		if out.SettledULXC != 0 {
+			desc := "agent debit settle: delivered cost above the estimate"
+			if out.SettledULXC < 0 {
+				desc = "agent debit settle: estimate above the delivered cost, refunded"
+			}
+			// A pooled cache serve's row says what the question would have cost and what it saved (B26.9).
+			if err := insertLXCLedger(ctx, tx, workspaceID, -out.SettledULXC, newBal, LXCTypeSpend, desc,
+				meta.toSpendMap(charge)); err != nil {
+				return out, err
+			}
 		}
-		// A pooled cache serve's row says what the question would have cost and what it saved (B26.9).
-		if err := insertLXCLedger(ctx, tx, workspaceID, -out.SettledULXC, newBal, LXCTypeSpend, desc,
-			meta.toSpendMap(estimate+out.SettledULXC)); err != nil {
+		if err := insertPlatformFee(ctx, tx, workspaceID, out.SettledFeeULXC, newBal-out.SettledFeeULXC, bps, charge, meta.RequestID); err != nil {
 			return out, err
 		}
-		if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, wsSpent+out.SettledULXC); err != nil {
+		newBal -= out.SettledFeeULXC
+		settled := out.SettledULXC + out.SettledFeeULXC
+		if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, wsSpent+settled); err != nil {
 			return out, err
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE agent_lxc_subbudgets SET spent_lxc = spent_lxc + $2, updated_at = now() WHERE scoped_key_id = $1`,
-			scopedKeyID, out.SettledULXC); err != nil {
+			scopedKeyID, settled); err != nil {
 			return out, fmt.Errorf("economy: bump spent (settle): %w", err)
 		}
-		if agentID != "" {
+		if agentID != "" && out.SettledULXC != 0 {
 			kind := "spend"
 			if out.SettledULXC < 0 {
 				kind = "settle"
@@ -152,19 +167,29 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 				return out, err
 			}
 		}
+		if agentID != "" && out.SettledFeeULXC != 0 {
+			if err := postFeeEntry(ctx, tx, workspaceID, agentID, out.SettledFeeULXC, bps, debitKey, meta.RequestedModel); err != nil {
+				return out, err
+			}
+		}
 	}
 	// B27.6: the pre-serve debit, like a hold, did not touch backing, so the whole charge consumes it here, as a
-	// settled reservation does, against the balance with the charge undone — and reports the royalty basis.
-	if charged := estimate + out.SettledULXC; charged > 0 {
+	// settled reservation does, against the balance with the charge undone — and reports the royalty basis. Its
+	// platform fee consumes backing after it, and funds no royalty.
+	if charge > 0 {
 		bal, _, _, err := readLXCBalance(ctx, tx, workspaceID)
 		if err != nil {
 			return out, err
 		}
-		fromCash, err := consumeCashBacked(ctx, tx, workspaceID, bal+charged, charged)
+		fee := estFee + out.SettledFeeULXC
+		fromCash, err := consumeCashBacked(ctx, tx, workspaceID, bal+charge+fee, charge)
 		if err != nil {
 			return out, err
 		}
-		if out.CashBackedULXC, err = royaltyBacked(ctx, tx, workspaceID, charged, fromCash); err != nil {
+		if _, err := consumeCashBacked(ctx, tx, workspaceID, bal+fee, fee); err != nil {
+			return out, err
+		}
+		if out.CashBackedULXC, err = royaltyBacked(ctx, tx, workspaceID, charge, fromCash); err != nil {
 			return out, err
 		}
 	}

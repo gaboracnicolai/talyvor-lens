@@ -66,7 +66,7 @@ func (p *Proxy) allowanceGateBlocks(ctx context.Context, workspaceID, model, pro
 			slog.String("workspace", workspaceID), slog.String("err", err.Error()))
 		return false
 	}
-	return remaining+balance < est
+	return balance < p.withPlatformFee(ctx, workspaceID, est-remaining) // B32.11: past the allowance, with its fee
 }
 
 // chargeSubscriberUsage books a served non-agent request against the workspace's

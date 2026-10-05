@@ -193,12 +193,14 @@ func payAgentTx(ctx context.Context, tx pgx.Tx, workspaceID string, pay AgentPay
 // it left.
 type AgentStatementLine struct {
 	EntryID          string    `json:"entry_id"`
-	Kind             string    `json:"kind"` // fund | withdraw | spend | hold | settle | release | pay
+	Kind             string    `json:"kind"` // fund | withdraw | spend | hold | settle | release | pay | platform_fee
 	AmountULXC       int64     `json:"amount_ulxc"`
 	Counterparty     string    `json:"counterparty"`  // workspace | spend | agent:<id>
 	Ref              string    `json:"ref,omitempty"` // a payment's memo, or the request it paid for
 	BalanceAfterULXC int64     `json:"balance_after_ulxc"`
 	At               time.Time `json:"at"`
+	// Label names a platform fee line, with its rate: "Platform fee 3%" (B32.11). Empty on every other kind.
+	Label string `json:"label,omitempty"`
 }
 
 // AgentStatement reads an agent's account, newest first, at most limit lines.
@@ -212,8 +214,8 @@ func (s *DualTokenStore) AgentStatement(ctx context.Context, workspaceID, agentI
 		return nil, ErrAgentNotFound
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT entry_id::text, kind, amount_ulxc, counterparty, ref, balance_after, created_at FROM (
-		  SELECT p.id, p.entry_id, p.kind, p.amount_ulxc, p.ref, p.created_at,
+		SELECT entry_id::text, kind, amount_ulxc, counterparty, ref, balance_after, created_at, fee_bps FROM (
+		  SELECT p.id, p.entry_id, p.kind, p.amount_ulxc, p.ref, p.created_at, p.fee_bps,
 		         COALESCE((SELECT o.account FROM agent_postings o WHERE o.entry_id = p.entry_id AND o.id <> p.id LIMIT 1), '') AS counterparty,
 		         sum(p.amount_ulxc) OVER (ORDER BY p.id)::bigint AS balance_after
 		    FROM agent_postings p WHERE p.workspace_id = $1 AND p.account = $2) lines
@@ -225,8 +227,12 @@ func (s *DualTokenStore) AgentStatement(ctx context.Context, workspaceID, agentI
 	out := []AgentStatementLine{}
 	for rows.Next() {
 		var l AgentStatementLine
-		if err := rows.Scan(&l.EntryID, &l.Kind, &l.AmountULXC, &l.Counterparty, &l.Ref, &l.BalanceAfterULXC, &l.At); err != nil {
+		var feeBPS *int64
+		if err := rows.Scan(&l.EntryID, &l.Kind, &l.AmountULXC, &l.Counterparty, &l.Ref, &l.BalanceAfterULXC, &l.At, &feeBPS); err != nil {
 			return nil, err
+		}
+		if l.Kind == LXCTypePlatformFee && feeBPS != nil {
+			l.Label = FeeLabel(*feeBPS)
 		}
 		out = append(out, l)
 	}

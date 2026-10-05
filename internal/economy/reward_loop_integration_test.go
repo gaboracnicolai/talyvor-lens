@@ -215,6 +215,7 @@ func rewardLoopSchema(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
 			workspace_id TEXT NOT NULL, held_ulxc BIGINT NOT NULL, settled_ulxc BIGINT,
 			status TEXT NOT NULL DEFAULT 'held' CHECK (status IN ('held','settled','released')),
 			requested_model TEXT, request_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_at TIMESTAMPTZ)`,
+		`ALTER TABLE lxc_reservations ADD COLUMN IF NOT EXISTS platform_fee_bps INTEGER NOT NULL DEFAULT 0`, // 0197 (B32.11)
 		`CREATE TABLE conversion_rate_history (
 			id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			rate          DOUBLE PRECISION NOT NULL,

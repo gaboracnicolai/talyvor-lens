@@ -26,11 +26,13 @@ type StatementLine struct {
 	EntryID          string    `json:"entry_id"`
 	At               time.Time `json:"at"`
 	Account          string    `json:"account"` // workspace | spend | agent:<id>
-	Kind             string    `json:"kind"`    // fund | withdraw | spend | hold | settle | release | pay | card
+	Kind             string    `json:"kind"`    // fund | withdraw | spend | hold | settle | release | pay | card | platform_fee
 	AmountULXC       int64     `json:"amount_ulxc"`
 	Counterparty     string    `json:"counterparty"`
 	Ref              string    `json:"ref,omitempty"`
 	BalanceAfterULXC int64     `json:"balance_after_ulxc"`
+	// Label names a platform fee line, with its rate: "Platform fee 3%" (B32.11). Empty on every other kind.
+	Label string `json:"label,omitempty"`
 }
 
 // StatementAccount is one account's totals over the period: Opening + In − Out = Closing.
@@ -181,7 +183,7 @@ func (s *DualTokenStore) periodStatement(ctx context.Context, workspaceID, accou
 		SELECT p.id, p.entry_id::text, p.created_at, p.account, p.kind, p.amount_ulxc,
 		       COALESCE((SELECT o.account FROM agent_postings o WHERE o.entry_id = p.entry_id AND o.id <> p.id ORDER BY o.id LIMIT 1), ''),
 		       p.ref,
-		       sum(p.amount_ulxc) OVER (PARTITION BY p.account ORDER BY p.created_at, p.id)::bigint
+		       sum(p.amount_ulxc) OVER (PARTITION BY p.account ORDER BY p.created_at, p.id)::bigint, p.fee_bps
 		  FROM agent_postings p
 		 WHERE p.workspace_id = $1 AND ($2 = '' OR p.account = $2) AND p.created_at >= $3 AND p.created_at < $4
 		 ORDER BY p.created_at, p.id`, workspaceID, account, from, to)
@@ -192,8 +194,12 @@ func (s *DualTokenStore) periodStatement(ctx context.Context, workspaceID, accou
 	for rows.Next() {
 		var l StatementLine
 		var running int64
-		if err := rows.Scan(&l.PostingID, &l.EntryID, &l.At, &l.Account, &l.Kind, &l.AmountULXC, &l.Counterparty, &l.Ref, &running); err != nil {
+		var feeBPS *int64
+		if err := rows.Scan(&l.PostingID, &l.EntryID, &l.At, &l.Account, &l.Kind, &l.AmountULXC, &l.Counterparty, &l.Ref, &running, &feeBPS); err != nil {
 			return st, err
+		}
+		if l.Kind == LXCTypePlatformFee && feeBPS != nil {
+			l.Label = FeeLabel(*feeBPS)
 		}
 		l.At = l.At.UTC()
 		l.BalanceAfterULXC = opening[l.Account] + running

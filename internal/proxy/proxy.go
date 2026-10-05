@@ -724,6 +724,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		requestID = uuid.NewString()
 	}
 	w.Header().Set("X-Talyvor-Request-ID", requestID)
+	// B32.11: a charge's platform fee row names the request; on r too, for the streamed seam's context.
+	ctx = economy.WithChargeRequest(ctx, requestID)
+	r = r.WithContext(ctx)
 
 	// Per-workspace logging policy. Decided once per request and applied
 	// at each observability write below. Default (metadata) preserves

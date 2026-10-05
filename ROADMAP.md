@@ -23,11 +23,12 @@ This is the parked "agent-settlement-rail" option at the bottom of this file, pr
 
 ## How Talyvor earns
 
-Four lines. A customer's saving is not one of them — every bill reduction from caching, routing, distillation or compression is entirely the customer's (COORDINATION.md, "Product narrative (v4)").
+Five lines. A customer's saving is not one of them — every bill reduction from caching, routing, distillation or compression is entirely the customer's (COORDINATION.md, "Product narrative (v4)").
 1. **Plans** — Plus, Pro and Max subscriptions (`billing.PlanLookupKeys`; prices live in Stripe).
 2. **BYOK** — bring your own provider keys and pay a **$199 a month** platform fee instead of tokens (Nicolai's decision, 4 Oct 2026; `billing.BYOKUSDCents`).
 3. **The marketplace fee** — Talyvor keeps 15% of every listing sale from the first dollar, and the seller keeps 85% (`market.SellerShare`, `LENS_MARKET_TAKE_BPS` in `internal/fees`).
-4. **The pool margin** — on a cross-tenant pooled cache hit Talyvor keeps `(1−s)` of the `avoided_COGS` the requester is billed; the contributor is minted `s` (0.5 by default).
+4. **The platform fee on AI spend** — every model call charged to credits carries its plan's fee: Free 5.5%, Team 3% (Plus, Pro, Max and BYOK too), Business 1%, Enterprise its contract's (`LENS_PLATFORM_FEE_BPS` in `internal/fees`; its own `platform_fee` row on the ledger, B32.11). A call on the workspace's own provider keys, and usage drawn from a chat plan's included allowance, carries none.
+5. **The pool margin** — on a cross-tenant pooled cache hit Talyvor keeps `(1−s)` of the `avoided_COGS` the requester is billed; the contributor is minted `s` (0.5 by default).
 
 ## History — the token-economy build (kept for the record)
 
