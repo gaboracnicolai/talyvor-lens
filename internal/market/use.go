@@ -225,12 +225,16 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 }
 
 // chargeFor says what one use of l costs buyer: nothing for their own or a free listing, nothing for a
-// seller they share a card or an owner with (a wash trade), else its price.
+// seller they share a card or an owner with (a wash trade), else the price of its per_use commercial offer (B32.18).
 func (s *Store) chargeFor(ctx context.Context, l Listing, buyer string) (string, int64, error) {
-	switch {
-	case l.WorkspaceID == buyer:
+	if l.WorkspaceID == buyer {
 		return ChargeOwn, 0, nil
-	case l.PricePerUseULXC == 0:
+	}
+	price, err := perUsePrice(ctx, s.pool, l.ID)
+	if err != nil {
+		return "", 0, err
+	}
+	if price == 0 {
 		return ChargeFree, 0, nil
 	}
 	if err := workspace.CheckMoneyWall(ctx, s.pool, buyer, l.WorkspaceID); err != nil {
@@ -243,7 +247,7 @@ func (s *Store) chargeFor(ctx context.Context, l Listing, buyer string) (string,
 	if linked {
 		return ChargeLinked, 0, nil
 	}
-	return ChargeBilled, l.PricePerUseULXC, nil
+	return ChargeBilled, price, nil
 }
 
 // A use Stripe refuses waits MeterRefusalBackoff before it is tried again, three times longer after each

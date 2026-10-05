@@ -73,6 +73,8 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, market.ErrTakenDown):
 			writeJSONErr(w, http.StatusGone, err.Error())
+		case errors.Is(err, market.ErrNotSoldPerUse):
+			writeJSONErr(w, http.StatusConflict, err.Error())
 		case errors.Is(err, market.ErrInvalid), errors.Is(err, market.ErrNoModel):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, market.ErrNotRunnable):

@@ -26,67 +26,75 @@ func lxc(ulxc int64) string { return strconv.FormatFloat(float64(ulxc)/1e6, 'f',
 // ListingPrice is what one use of listingID costs buyerWorkspaceID, or a refusal saying why a schedule of
 // that workspace cannot pay it.
 func (s *Store) ListingPrice(ctx context.Context, buyerWorkspaceID, listingID string) (int64, string, error) {
-	l, refusal, err := s.payable(ctx, s.pool, buyerWorkspaceID, listingID)
+	_, price, refusal, err := s.payable(ctx, s.pool, buyerWorkspaceID, listingID)
 	if err != nil || refusal != "" {
 		return 0, refusal, err
 	}
-	return l.PricePerUseULXC, "", nil
+	return price, "", nil
 }
 
 // ChargeScheduledListing records, in tx, one billed use of listingID by agentID at the tick at, once judge
 // lets its price through and never above maxULXC.
 func (s *Store) ChargeScheduledListing(ctx context.Context, tx pgx.Tx, buyerWorkspaceID, agentID, listingID string, maxULXC int64,
 	at time.Time, judge func(price int64) error) (string, string, error) {
-	l, refusal, err := s.payable(ctx, tx, buyerWorkspaceID, listingID)
+	l, price, refusal, err := s.payable(ctx, tx, buyerWorkspaceID, listingID)
 	if err != nil || refusal != "" {
 		return "", refusal, err
 	}
-	if l.PricePerUseULXC > maxULXC {
-		return "", fmt.Sprintf("the listing now costs %s LXC a use, more than this schedule pays (%s LXC)", lxc(l.PricePerUseULXC), lxc(maxULXC)), nil
+	if price > maxULXC {
+		return "", fmt.Sprintf("the listing now costs %s LXC a use, more than this schedule pays (%s LXC)", lxc(price), lxc(maxULXC)), nil
 	}
-	if err := judge(l.PricePerUseULXC); err != nil {
+	if err := judge(price); err != nil {
 		return "", "", err
 	}
 	id := "use_" + uuid.NewString()
 	if _, err := tx.Exec(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge, used_at, ran_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'billed', $8, $8)`,
-		id, l.ID, l.LatestVersion, l.WorkspaceID, buyerWorkspaceID, agentID, l.PricePerUseULXC, at); err != nil {
+		id, l.ID, l.LatestVersion, l.WorkspaceID, buyerWorkspaceID, agentID, price, at); err != nil {
 		return "", "", fmt.Errorf("market: record scheduled use: %w", err)
 	}
 	return id, "", nil
 }
 
-// payable reads a listing a schedule of buyerWorkspaceID may pay, or says why it may not.
+// payable reads a listing a schedule of buyerWorkspaceID may pay and the price of one use of it (its per_use
+// commercial offer's, B32.18), or says why it may not.
 func (s *Store) payable(ctx context.Context, q interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}, buyer, listingID string) (Listing, string, error) {
+	querier
+}, buyer, listingID string) (Listing, int64, string, error) {
 	l, err := scanListing(q.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, listingID))
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, buyer)) {
-		return l, "there is no such listing", nil
+		return l, 0, "there is no such listing", nil
 	}
 	if err != nil {
-		return l, "", fmt.Errorf("market: listing: %w", err)
+		return l, 0, "", fmt.Errorf("market: listing: %w", err)
 	}
 	if l.ReviewStatus == ReviewTakenDown {
-		return l, "the listing was taken down", nil
+		return l, 0, "the listing was taken down", nil
 	}
+	if l.WorkspaceID == buyer {
+		return l, 0, "a schedule cannot pay the workspace's own listing", nil
+	}
+	price, err := perUsePrice(ctx, q, l.ID)
 	switch {
-	case l.WorkspaceID == buyer:
-		return l, "a schedule cannot pay the workspace's own listing", nil
-	case l.PricePerUseULXC == 0:
-		return l, "the listing is free, so there is nothing to pay", nil
+	case errors.Is(err, ErrNotSoldPerUse):
+		return l, 0, "the listing is sold by licence, not per use, so a schedule cannot pay it", nil
+	case err != nil:
+		return l, 0, "", err
+	case price == 0:
+		return l, 0, "the listing is free, so there is nothing to pay", nil
 	}
 	if err := workspace.CheckMoneyWall(ctx, q, buyer, l.WorkspaceID); errors.Is(err, workspace.ErrMoneyWall) {
-		return l, err.Error(), nil
+		return l, 0, err.Error(), nil
 	} else if err != nil {
-		return l, "", err
+		return l, 0, "", err
 	}
 	linked, err := s.linked(ctx, l.WorkspaceID, buyer)
 	if err != nil {
-		return l, "", err
+		return l, 0, "", err
 	}
 	if linked {
-		return l, "the workspace and the listing's seller share a card or an owner, and a seller cannot pay themselves", nil
+		return l, 0, "the workspace and the listing's seller share a card or an owner, and a seller cannot pay themselves", nil
 	}
-	return l, "", nil
+	return l, price, "", nil
 }

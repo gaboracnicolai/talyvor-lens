@@ -63,6 +63,7 @@ type Listing struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 	ReviewStatus    string    `json:"review_status"`           // approved | held | taken_down (review.go)
 	ReviewReason    string    `json:"review_reason,omitempty"` // why it is held or was taken down
+	Offers          []Offer   `json:"offers"`                  // how it is sold (offers.go); none: it is free
 	Versions        []Version `json:"versions,omitempty"`
 }
 
@@ -114,15 +115,37 @@ func needsOf(kind string, raw []byte) Needs {
 	return n
 }
 
-// Draft is what a publish carries.
+// Draft is what a publish carries. Offers say how the listing is sold (offers.go); without them, a price per use
+// is one per_use commercial offer at that price.
 type Draft struct {
 	Kind            string          `json:"kind"`
 	Title           string          `json:"title"`
 	Description     string          `json:"description"`
 	PricePerUseULXC int64           `json:"price_per_use_ulxc"`
+	Offers          []Offer         `json:"offers"`
 	Visibility      string          `json:"visibility"`
 	Artifact        json.RawMessage `json:"artifact"`
 	Changelog       string          `json:"changelog"`
+}
+
+// draftOffers is the set of offers a draft publishes, its price per use folded in.
+func draftOffers(d Draft) ([]Offer, error) {
+	if d.PricePerUseULXC%ulxcPerUSDMicro != 0 {
+		return nil, invalid("the price per use must be a whole number of µUSD (a multiple of %d µLXC)", ulxcPerUSDMicro)
+	}
+	if len(d.Offers) == 0 {
+		if d.PricePerUseULXC == 0 {
+			return nil, nil
+		}
+		return []Offer{{Kind: OfferPerUse, Licence: LicenceCommercial, PriceUSDMicros: d.PricePerUseULXC / ulxcPerUSDMicro}}, nil
+	}
+	if err := checkOffers(d.Offers); err != nil {
+		return nil, err
+	}
+	if price, _ := perUseULXC(d.Offers); d.PricePerUseULXC != 0 && d.PricePerUseULXC != price {
+		return nil, invalid("price_per_use_ulxc says one price and the per_use commercial offer another: give the offer alone")
+	}
+	return d.Offers, nil
 }
 
 // Store reads and writes the catalog.
@@ -220,6 +243,11 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if d.PricePerUseULXC < 0 {
 		return Listing{}, invalid("the price per use cannot be negative (0 is free)")
 	}
+	offers, err := draftOffers(d)
+	if err != nil {
+		return Listing{}, err
+	}
+	d.PricePerUseULXC, _ = perUseULXC(offers)
 	if d.Visibility == "" {
 		d.Visibility = "public"
 	}
@@ -256,6 +284,9 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if err := tx.QueryRow(ctx, `INSERT INTO market_listing_versions (listing_id, version, artifact, artifact_sha256, changelog, scan)
 		VALUES ($1, 1, $2, $3, $4, $5) RETURNING created_at`, l.ID, string(artifact), sum, d.Changelog, string(scanJSON)).Scan(&v.CreatedAt); err != nil {
 		return Listing{}, fmt.Errorf("market: publish: %w", err)
+	}
+	if l.Offers, err = writeOffers(ctx, tx, l.ID, offers); err != nil {
+		return Listing{}, err
 	}
 	l.Versions = []Version{v}
 	return l, tx.Commit(ctx)
@@ -321,14 +352,35 @@ func (s *Store) list(ctx context.Context, where string, args ...any) ([]Listing,
 	}
 	defer rows.Close()
 	out := []Listing{}
+	ids := []string{}
 	for rows.Next() {
 		l, err := scanListing(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, l)
+		ids = append(ids, l.ID)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	offers, err := activeOffers(ctx, s.pool, ids...)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Offers = orNone(offers[out[i].ID])
+	}
+	return out, nil
+}
+
+// orNone answers a listing's offers as a list, empty when it has none.
+func orNone(offers []Offer) []Offer {
+	if offers == nil {
+		return []Offer{}
+	}
+	return offers
 }
 
 // OwnListings reads workspaceID's listings, whatever their visibility.
@@ -360,6 +412,11 @@ func (s *Store) Get(ctx context.Context, viewerWorkspace, listingID string) (Lis
 		return Listing{}, fmt.Errorf("market: listing: %w", err)
 	}
 	owner := l.WorkspaceID == viewerWorkspace
+	offers, err := activeOffers(ctx, s.pool, listingID)
+	if err != nil {
+		return Listing{}, err
+	}
+	l.Offers = orNone(offers[listingID])
 	rows, err := s.pool.Query(ctx, `SELECT version, artifact_sha256, changelog, scan, created_at, artifact FROM market_listing_versions
 		WHERE listing_id = $1 ORDER BY version`, listingID)
 	if err != nil {
