@@ -26,6 +26,9 @@ import (
 //   - A buyer's refund or chargeback reverses the earnings of the uses it paid for (a market_refunds row
 //     each). Inside the holdback, the earning never becomes available; after it, the balance falls by it,
 //     and a balance that falls below zero is owed and recovered from the seller's future earnings.
+//   - An earning an open hold names (a dispute, an IP claim: escrow.go) stays in the holdback past its 14 days.
+//   - Every payout is journalled with its row (B32.17): a Stripe payout moves it from the seller's available to
+//     stripe:clearing (the net) and stripe:connect_fees (Stripe's fees); credits move it to credits:issued.
 
 const (
 	// PayoutMinimumUSDMicros: a seller is paid in money once their available balance reaches US$25.
@@ -112,14 +115,17 @@ type queryRower interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// sellerBalance reads a seller's earnings past the holdback and still inside it (neither counting what a
-// refund reversed), and everything paid out.
+// heldSQL is true of an earning e whose use an open hold names: it stays in the holdback (B32.17).
+const heldSQL = `EXISTS (SELECT 1 FROM market_holds h WHERE h.use_id = e.use_id AND h.released_at IS NULL)`
+
+// sellerBalance reads a seller's earnings past the holdback and still inside it — or kept in it by a hold —
+// (neither counting what a refund reversed), and everything paid out.
 func sellerBalance(ctx context.Context, q queryRower, workspaceID string, now time.Time) (released, inHoldback, paid int64, err error) {
 	err = q.QueryRow(ctx, `SELECT
 		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e
-			WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2 AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
+			WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2 AND NOT `+heldSQL+` AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
 		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e
-			WHERE e.seller_workspace_id = $1 AND e.payable_at > $2 AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
+			WHERE e.seller_workspace_id = $1 AND (e.payable_at > $2 OR `+heldSQL+`) AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
 		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1), 0)::bigint`,
 		workspaceID, now).Scan(&released, &inHoldback, &paid)
 	return released, inHoldback, paid, err
@@ -132,9 +138,9 @@ func sellerBalance(ctx context.Context, q queryRower, workspaceID string, now ti
 func sellerFunds(ctx context.Context, q queryRower, workspaceID string, now time.Time) (testLeft, liveLeft int64, err error) {
 	var testReleased, liveReleased, testPaid, livePaid, credits int64
 	err = q.QueryRow(ctx, `SELECT
-		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2
+		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2 AND NOT `+heldSQL+`
 			AND (NOT e.livemode OR e.test) AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
-		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2
+		COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.seller_workspace_id = $1 AND e.payable_at <= $2 AND NOT `+heldSQL+`
 			AND e.livemode AND NOT e.test AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = e.use_id)), 0)::bigint,
 		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND NOT livemode), 0)::bigint,
 		COALESCE((SELECT sum(gross_usd_micros) FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND livemode), 0)::bigint,
@@ -270,8 +276,8 @@ func (s *Store) SellerPayouts(ctx context.Context, api ConnectStripe, workspaceI
 	return p, nil
 }
 
-// TakeAsCredits pays the seller's whole available balance as Talyvor credits, 1:1: one market_payouts row
-// and one lxc_ledger row, in one transaction.
+// TakeAsCredits pays the seller's whole available balance as Talyvor credits, 1:1: one market_payouts row,
+// one lxc_ledger row and its journal entry, in one transaction.
 func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceID string, now time.Time) (Payout, error) {
 	var p Payout
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -292,13 +298,25 @@ func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceI
 		}
 		p = Payout{ID: "mpo_" + uuid.NewString(), Method: PayoutCredits, Month: monthOf(now), GrossUSDMicros: gross, NetUSDMicros: gross,
 			CreditsULXC: gross * ulxcPerUSDMicro}
+		var test bool
 		if err := tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, gross_usd_micros, net_usd_micros, credits_ulxc, paid_at, created_at)
-			VALUES ($1, $2, 'credits', $3, $4, $4, $5, $6, $6) RETURNING paid_at, created_at`,
-			p.ID, workspaceID, p.Month, gross, p.CreditsULXC, now).Scan(&p.PaidAt, &p.CreatedAt); err != nil {
+			VALUES ($1, $2, 'credits', $3, $4, $4, $5, $6, $6) RETURNING paid_at, created_at, test`,
+			p.ID, workspaceID, p.Month, gross, p.CreditsULXC, now).Scan(&p.PaidAt, &p.CreatedAt, &test); err != nil {
 			return err
 		}
-		// B22.1: credits taken from test earnings are test-funded credits.
-		testULXC := min(testLeft, gross) * ulxcPerUSDMicro
+		// B22.1: credits taken from test earnings are test-funded credits — all of them, for a test workspace (B25.1).
+		testPart := min(testLeft, gross)
+		if test {
+			testPart = gross
+		}
+		if _, err := PostJournalTx(ctx, tx, JournalCredits, p.ID, "test", now,
+			Posting{Account: SellerAvailable(workspaceID), AmountUSDMicros: testPart, Funding: "test"},
+			Posting{Account: AccountCreditsIssued, AmountUSDMicros: -testPart, Funding: "test"},
+			Posting{Account: SellerAvailable(workspaceID), AmountUSDMicros: gross - testPart, Funding: "live"},
+			Posting{Account: AccountCreditsIssued, AmountUSDMicros: -(gross - testPart), Funding: "live"}); err != nil {
+			return err
+		}
+		testULXC := testPart * ulxcPerUSDMicro
 		funding := "test and live"
 		switch testULXC {
 		case 0:
@@ -395,11 +413,25 @@ func (s *Store) payOut(ctx context.Context, api ConnectStripe, now time.Time, te
 			}
 			gross := due / usdMicrosPerCent
 			accountFee, payoutFee, net := PayoutFees(gross)
-			_, err = tx.Exec(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, gross_usd_micros, account_fee_usd_micros, payout_fee_usd_micros,
+			id := "mpo_" + uuid.NewString()
+			var test bool
+			err = tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, gross_usd_micros, account_fee_usd_micros, payout_fee_usd_micros,
 				net_usd_micros, stripe_account_id, created_at, livemode)
-				VALUES ($1, $2, 'stripe', $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (workspace_id, month) WHERE method = 'stripe' DO NOTHING`,
-				"mpo_"+uuid.NewString(), x.ws, monthOf(now), gross*usdMicrosPerCent, accountFee*usdMicrosPerCent, payoutFee*usdMicrosPerCent,
-				net*usdMicrosPerCent, x.account, now, live)
+				VALUES ($1, $2, 'stripe', $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (workspace_id, month) WHERE method = 'stripe' DO NOTHING
+				RETURNING test`,
+				id, x.ws, monthOf(now), gross*usdMicrosPerCent, accountFee*usdMicrosPerCent, payoutFee*usdMicrosPerCent,
+				net*usdMicrosPerCent, x.account, now, live).Scan(&test)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // paid this month already
+			}
+			if err != nil {
+				return err
+			}
+			// B32.17: the payout leaves the seller's available balance — the net to Stripe, Stripe's fees at cost.
+			_, err = PostJournalTx(ctx, tx, JournalPayout, id, funding(live, test), now,
+				Posting{Account: SellerAvailable(x.ws), AmountUSDMicros: gross * usdMicrosPerCent},
+				Posting{Account: AccountStripeClearing, AmountUSDMicros: -net * usdMicrosPerCent},
+				Posting{Account: AccountConnectFees, AmountUSDMicros: -(accountFee + payoutFee) * usdMicrosPerCent})
 			return err
 		})
 		if err != nil {

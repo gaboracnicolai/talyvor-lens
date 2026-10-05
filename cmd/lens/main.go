@@ -200,6 +200,14 @@ func main() {
 		}
 		return
 	}
+	// `lens market journal-check` (B32.17): each seller's marketplace journal reconciled with their earnings and payouts.
+	if len(os.Args) > 1 && os.Args[1] == "market" {
+		if err := runMarket(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	// `lens synthetic-crossings` (B26.15): the money that crossed between a test workspace and a real one before
 	// the wall, and --reverse to give each back.
 	if len(os.Args) > 1 && os.Args[1] == "synthetic-crossings" {
@@ -1822,6 +1830,10 @@ func run() error {
 	})
 	go haComps.leader.Run(ctx, "market-refund-pending", 30*time.Second, func(lctx context.Context) {
 		refundTakenDownMarketUses(lctx, marketStore, stripeKinds)
+	})
+	// B32.17: an earning leaves the holdback for the seller's available balance once its 14 days are over.
+	go haComps.leader.Run(ctx, "market-release-holdback", 30*time.Second, func(lctx context.Context) {
+		releaseMarketHoldbacks(lctx, marketStore)
 	})
 	if cfg.BillingEnabled {
 		go haComps.leader.Run(ctx, "market-payouts", 30*time.Second, func(lctx context.Context) {
