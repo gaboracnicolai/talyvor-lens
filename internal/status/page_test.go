@@ -207,6 +207,35 @@ func TestServeHTTP_ReturnsHTMLByDefault(t *testing.T) {
 	}
 }
 
+// TestServeHTTP_RendersTheBrand: /status wears brand v4 — the Obsidian/Teal
+// palette in both themes, Space Grotesk and IBM Plex Mono named over the system
+// stack with no font fetched, and the flat mark beside the name — and none of
+// the amber it wore before.
+func TestServeHTTP_RendersTheBrand(t *testing.T) {
+	sp := newTestPage(t, &fakePinger{})
+	sp.UpdateCache(sp.Check(context.Background()))
+	w := httptest.NewRecorder()
+	sp.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := w.Body.String()
+
+	for _, want := range []string{
+		"#060A12", "#081220", "#E6EEF7", "#3AD6C0", // dark: canvas, surface, ink, accent
+		"#F4F7FB", "#0F7A6C", // light: canvas, accent
+		"#45C77F", "#D6A93C", "#F0685C", // positive, caution, critical
+		`"Space Grotesk"`, `"IBM Plex Mono"`,
+		`aria-label="Talyvor mark"`, `class="tv-mark"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/status is missing the brand's %s", want)
+		}
+	}
+	for _, old := range []string{"#f0a030", "#0c0e12", "#13161c", "#d4d8e2", "#8892a4", "#5ac17d", "#e35d6a", "@font-face", "googleapis"} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(old)) {
+			t.Errorf("/status still carries %s", old)
+		}
+	}
+}
+
 func TestServeHTTP_ReturnsJSONWhenAcceptIsApplicationJSON(t *testing.T) {
 	sp := newTestPage(t, &fakePinger{})
 	sp.UpdateCache(sp.Check(context.Background()))

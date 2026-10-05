@@ -242,10 +242,10 @@ func TestHTML_UnmeasuredLatencyIsNotRenderedAsZero(t *testing.T) {
 			{Name: "Redis", Status: StatusOperational, Latency: 0, Measured: true},
 		},
 	})
-	if strings.Count(html, "<td>0ms</td>") != 1 {
+	if strings.Count(html, `<td class="num">0ms</td>`) != 1 {
 		t.Errorf("expected exactly one real 0ms cell (the measured Redis), got:\n%s", html)
 	}
-	if !strings.Contains(html, "<td>—</td>") {
+	if !strings.Contains(html, `<td class="num">—</td>`) {
 		t.Error("the unmeasured row must render a dash, not a fabricated 0ms")
 	}
 }

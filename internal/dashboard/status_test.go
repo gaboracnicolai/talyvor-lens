@@ -175,35 +175,52 @@ func TestPageHardcodesNoMoneyConstants(t *testing.T) {
 
 /* ── How it must look ─────────────────────────────────────────────────────── */
 
-// TestPageUsesTheSuiteTokens pins the page to the design system's SHIPPED values
-// (talyvor-suite packages/ui/src/theme.css), not to an approximation. Drift here
-// means the API host stops looking like the product.
-func TestPageUsesTheSuiteTokens(t *testing.T) {
+// TestPageUsesTheBrandTokens pins the page to brand v4 (the 4 Oct 2026 board,
+// brand-v4/tokens/tokens.css), not to an approximation: the palette in both
+// themes, the type stack, and the flat mark beside the name. Drift here means the
+// API host stops looking like the product.
+func TestPageUsesTheBrandTokens(t *testing.T) {
 	body := render(t)
-	shipped := map[string]string{
-		"--canvas light":  "#F4F5F6",
-		"--surface light": "#FFFFFF",
-		"--ink light":     "#1B1D1F",
-		"--muted light":   "#6B6E73",
-		"--accent light":  "#0B7A85",
-		"--canvas dark":   "#141618",
-		"--surface dark":  "#1D2023",
-		"--ink dark":      "#EDEFF1",
-		"--accent dark":   "#3ABDC9",
+	brandHex := map[string]string{
+		"canvas dark":   "#060A12",
+		"surface dark":  "#081220",
+		"ink dark":      "#E6EEF7",
+		"muted dark":    "#7E93AB",
+		"accent dark":   "#3AD6C0",
+		"canvas light":  "#F4F7FB",
+		"ink light":     "#060A12",
+		"muted light":   "#46586E",
+		"accent light":  "#0F7A6C",
+		"positive dark": "#45C77F",
 	}
-	for name, hex := range shipped {
+	for name, hex := range brandHex {
 		if !strings.Contains(body, hex) {
-			t.Errorf("%s: %s missing — tokens must come from the suite's shipped theme.css", name, hex)
+			t.Errorf("%s: %s missing — tokens must come from brand-v4/tokens/tokens.css", name, hex)
 		}
 	}
-	if !strings.Contains(body, "-apple-system") {
-		t.Error("the system font stack from the suite must be used (macOS System Settings reference)")
+	for _, font := range []string{`"Space Grotesk"`, `"IBM Plex Mono"`} {
+		if !strings.Contains(body, font) {
+			t.Errorf("the brand type stack must name %s", font)
+		}
+	}
+	if strings.Contains(body, "@font-face") {
+		t.Error("the page must not request a font — the brand faces are named over the system stack")
+	}
+	if !strings.Contains(body, `aria-label="Talyvor mark"`) || !strings.Contains(body, `class="tv-mark"`) {
+		t.Error("the brand's flat mark must sit beside the name, inlined")
+	}
+	// The colours this page wore before the brand: the suite's old teal and its
+	// tokens, and the amber of the old Lens pages. None may come back.
+	for _, old := range []string{"#0B7A85", "#3ABDC9", "#f0a030", "#F4F5F6", "#141618", "#1D2023", "Inter,"} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(old)) {
+			t.Errorf("the pre-brand value %s is still on the page", old)
+		}
 	}
 	if !strings.Contains(body, "prefers-color-scheme") {
-		t.Error("the page must honour the viewer's light/dark preference, as the suite does")
+		t.Error("the page must honour the viewer's light/dark preference")
 	}
 	if !strings.Contains(body, "prefers-reduced-motion") {
-		t.Error("the suite's reduced-motion floor must be honoured")
+		t.Error("the reduced-motion floor must be honoured")
 	}
 }
 
