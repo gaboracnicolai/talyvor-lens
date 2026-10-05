@@ -36,6 +36,10 @@ import (
 //	POST /v1/workspaces/{wsID}/agents/{id}/rules/simulate {"amount_ulxc", "model"?, "provider"?, "payee"?, "at"?}
 //	                                                           B28.306: would the rules let it through? allowed,
 //	                                                           refused or approval_required, and why; moves nothing
+//	GET  /v1/workspaces/{wsID}/agents/{id}/rules/history      B28.307: every version of the rules, newest first,
+//	                                                           with who changed them and how
+//	POST /v1/workspaces/{wsID}/agents/{id}/rules/rollback {"version"}   put the rules back exactly as they were
+//	                                                           then; the rollback is a new version
 //	GET  /v1/workspaces/{wsID}/agents/approvals                requests that needed approval, newest first;
 //	                                                           a payment's names its payee and memo (B23.5)
 //	POST /v1/workspaces/{wsID}/agents/approvals/{id}/approve   let that request through, once
@@ -127,6 +131,8 @@ type agentBank interface {
 	SetAgentRules(ctx context.Context, workspaceID, agentID string, r economy.AgentRules) (economy.AgentRules, error)
 	GetAgentRules(ctx context.Context, workspaceID, agentID string) (economy.AgentRules, error)
 	SimulateAgentRules(ctx context.Context, workspaceID, agentID string, in economy.SimulatedRequest) (economy.RuleSimulation, error)
+	AgentRulesHistory(ctx context.Context, workspaceID, agentID string) ([]economy.AgentRulesVersion, error)
+	RollbackAgentRules(ctx context.Context, workspaceID, agentID string, version int) (economy.AgentRules, error)
 	ListAgentApprovals(ctx context.Context, workspaceID string) ([]economy.AgentApproval, error)
 	DecideAgentApproval(ctx context.Context, workspaceID, approvalID string, approve bool) (economy.AgentApproval, error)
 	PayAgent(ctx context.Context, workspaceID, fromAgentID, toAgentID string, amount int64, memo string) (economy.AgentPayment, error)
@@ -210,7 +216,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONOK(w, http.StatusCreated, a)
 			return
 		}
-		rules, err := bank.SetAgentRules(req.Context(), chi.URLParam(req, "wsID"), a.ID, tmpl.Rules)
+		rules, err := bank.SetAgentRules(rulesChange(req, "template "+tmpl.ID), chi.URLParam(req, "wsID"), a.ID, tmpl.Rules)
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, fmt.Sprintf("agent %s was created, but the %s template's rules were not saved: %v", a.ID, tmpl.ID, err))
 			return
@@ -337,7 +343,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 
 	writeRules := func(w http.ResponseWriter, rules economy.AgentRules, err error) {
 		switch {
-		case errors.Is(err, economy.ErrAgentNotFound):
+		case errors.Is(err, economy.ErrAgentNotFound), errors.Is(err, economy.ErrRulesVersionNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, economy.ErrAgentRule):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
@@ -359,7 +365,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusBadRequest, "body must be the agent's rules: "+err.Error())
 			return
 		}
-		rules, err := bank.SetAgentRules(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in)
+		rules, err := bank.SetAgentRules(rulesChange(req, "set"), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in)
 		writeRules(w, rules, err)
 	}))
 	// B28.306: simulating moves nothing, so any of the workspace's credentials may ask, as any may read the rules.
@@ -396,7 +402,30 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusBadRequest, unknownRuleTemplate(in.Template))
 			return
 		}
-		rules, err := bank.SetAgentRules(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), tmpl.Rules)
+		rules, err := bank.SetAgentRules(rulesChange(req, "template "+tmpl.ID), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), tmpl.Rules)
+		writeRules(w, rules, err)
+	}))
+	// B28.307: every change to an agent's rules is a version; any credential may read them, as any may read the rules.
+	r.Get("/v1/workspaces/{wsID}/agents/{agentID}/rules/history", func(w http.ResponseWriter, req *http.Request) {
+		versions, err := bank.AgentRulesHistory(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"))
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, map[string]any{"versions": versions})
+		}
+	})
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/rules/rollback", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Version int `json:"version"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || in.Version <= 0 {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"version": <the version to roll back to>}`)
+			return
+		}
+		rules, err := bank.RollbackAgentRules(rulesChange(req, ""), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in.Version)
 		writeRules(w, rules, err)
 	}))
 	r.Get("/v1/workspaces/{wsID}/agents/approvals", func(w http.ResponseWriter, req *http.Request) {
@@ -826,6 +855,13 @@ func unknownRuleTemplate(id string) string {
 }
 
 // ownerOnly admits the workspace's owner or an admin — the rule stored-answer deletion uses.
+// rulesChange is req's context naming who changes an agent's rules with it, and how (B28.307): the version the
+// change makes records them.
+func rulesChange(req *http.Request, what string) context.Context {
+	who, _ := storedanswers.OwnerOrAdmin(req.Context())
+	return economy.WithRulesChange(req.Context(), who, what)
+}
+
 func ownerOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if _, ok := storedanswers.OwnerOrAdmin(req.Context()); !ok {

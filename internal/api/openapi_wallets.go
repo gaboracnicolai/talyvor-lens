@@ -116,6 +116,16 @@ func openAPIWalletSchemas() map[string]any {
 				"decided_at": map[string]any{"type": "string", "format": "date-time", "nullable": true},
 			},
 		},
+		"AgentRulesVersion": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"version":    map[string]any{"type": "integer", "minimum": 1},
+				"rules":      map[string]any{"$ref": "#/components/schemas/AgentRules"},
+				"changed_by": map[string]any{"type": "string", "description": "the credential that changed them: operator, or its method, user and key (jwt:user:…); empty when unknown"},
+				"change":     map[string]any{"type": "string", "description": "set, template <id>, rollback to <n>, or before history for rules set before versions were kept"},
+				"created_at": at,
+			},
+		},
 		"AgentStatementLine": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -305,6 +315,19 @@ func openAPIWalletPaths() map[string]any {
 				[]map[string]any{ws, agent},
 				map[string]any{"200": ok("the rules as stored", ref("AgentRules")), "400": map[string]any{"description": "an unknown field or an invalid rule"}, "404": map[string]any{"description": "no such agent"}}),
 				body(ref("AgentRules"))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/rules/history": map[string]any{
+			"get": op("List the versions of the agent's rules",
+				"Newest first: the first is the rules in force. Every change that alters the rules — a save, a template, a rollback — is a version, with who made it.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the versions", listOf("versions", "AgentRulesVersion")), "404": map[string]any{"description": "no such agent"}}),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/rules/rollback": map[string]any{
+			"post": withBody(op("Roll the agent's rules back to an earlier version",
+				"Owner or admin. The rules become exactly what they were at version — a rule added since keeps its value — and the rollback is itself a new version, recording who made it.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the rules now in force", ref("AgentRules")), "400": map[string]any{"description": "no version given"}, "404": map[string]any{"description": "no such agent, or no such version"}}),
+				body(obj([]string{"version"}, map[string]any{"version": map[string]any{"type": "integer", "minimum": 1}}))),
 		},
 		"/v1/workspaces/{wsID}/agents/approvals": map[string]any{
 			"get": op("List the requests the agents' rules sent to a person",

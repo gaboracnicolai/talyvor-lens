@@ -299,7 +299,8 @@ func capsJSON(limits map[string]int64, key func(string) string) (*string, error)
 // SetAgentRules replaces an agent's rules — all but AllowedListings, HourlyLimitULXC, WeeklyLimitULXC,
 // ModelDailyLimitsULXC, RequestsPerMinute, AllowedPayees, BlockedPayees and PayeeDailyLimitsULXC when they are nil
 // (absent from the JSON): a client that predates them (B19.14, B28.300, B28.301, B28.302, B28.303, B28.304) must not
-// clear an agent's listings, caps or payees by saving its other rules. An empty list or a zero clears them.
+// clear an agent's listings, caps or payees by saving its other rules. An empty list or a zero clears them. A save
+// that changes them is their next version (B28.307), recorded with who ctx names (WithRulesChange).
 func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID string, r AgentRules) (AgentRules, error) {
 	if err := r.validate(); err != nil {
 		return r, fmt.Errorf("%w: %s", ErrAgentRule, err)
@@ -325,9 +326,14 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 	if err != nil {
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return r, fmt.Errorf("economy: set agent rules: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	// $14 to $20 are NULL when absent, which keeps the stored caps and payees; a zero or an empty list clears one.
 	var hourly, weekly, rpm int64
-	err = s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO agent_rules (agent_id, workspace_id, max_per_request_ulxc, daily_limit_ulxc, monthly_limit_ulxc,
 		       approval_above_ulxc, allowed_models, allowed_providers, active_from, active_until, timezone, pause_on_unusual_spend,
 		       allowed_listings, hourly_limit_ulxc, weekly_limit_ulxc, model_daily_limits_ulxc, requests_per_minute,
@@ -359,6 +365,12 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 		return r, ErrAgentNotFound
 	}
 	if err != nil {
+		return r, fmt.Errorf("economy: set agent rules: %w", err)
+	}
+	if err := recordRulesVersion(ctx, tx, agentID, rulesChangeFrom(ctx)); err != nil {
+		return r, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
 	r.HourlyLimitULXC, r.WeeklyLimitULXC, r.RequestsPerMinute = &hourly, &weekly, &rpm
