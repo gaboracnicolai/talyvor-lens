@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -28,6 +29,10 @@ import (
 
 // ErrAgentRule wraps every refusal by an agent's rules except the approval amount's.
 var ErrAgentRule = errors.New("economy: the agent's spending rules refuse this request")
+
+// ErrAgentRequestRate is the requests-per-minute rule's refusal (B28.302): an ErrAgentRule, which the proxy answers
+// 429 rather than 403, because the same request goes through once the minute has room again.
+var ErrAgentRequestRate = fmt.Errorf("%w", ErrAgentRule)
 
 // ErrApprovalRequired is the approval amount's refusal; *ApprovalNeededError carries the approval.
 var ErrApprovalRequired = errors.New("economy: this request needs a person's approval")
@@ -57,6 +62,9 @@ type AgentRules struct {
 	// Read, it is never nil; nil (absent from the JSON) saves the rules without changing it. Saved, it replaces
 	// the stored caps whole: a model left out, or capped at zero, has no cap.
 	ModelDailyLimitsULXC map[string]int64 `json:"model_daily_limits_ulxc"`
+	// RequestsPerMinute (B28.302) caps the questions the agent asks in any sixty seconds. Read, it is never nil;
+	// nil (absent from the JSON) saves the rules without changing it.
+	RequestsPerMinute *int64 `json:"requests_per_minute"`
 }
 
 // AgentRequest is what the rules judge about a request besides its amount.
@@ -158,7 +166,7 @@ func limitOf(v *int64) int64 {
 
 func (r AgentRules) validate() error {
 	for _, v := range []int64{r.MaxPerRequestULXC, limitOf(r.HourlyLimitULXC), r.DailyLimitULXC, limitOf(r.WeeklyLimitULXC),
-		r.MonthlyLimitULXC, r.ApprovalAboveULXC} {
+		r.MonthlyLimitULXC, r.ApprovalAboveULXC, limitOf(r.RequestsPerMinute)} {
 		if v < 0 {
 			return errors.New("a limit cannot be negative (0 means no limit)")
 		}
@@ -176,6 +184,9 @@ func (r AgentRules) validate() error {
 			return fmt.Errorf("%q and %q are the same model; give it one daily limit", other, model)
 		}
 		named[key] = model
+	}
+	if limitOf(r.RequestsPerMinute) > math.MaxInt32 {
+		return errors.New("requests_per_minute is too large")
 	}
 	if (r.ActiveFrom == "") != (r.ActiveUntil == "") {
 		return errors.New("active_from and active_until go together")
@@ -208,15 +219,16 @@ func nullIfZero(v int64) any {
 
 const agentRulesColumns = `COALESCE(max_per_request_ulxc, 0), COALESCE(daily_limit_ulxc, 0), COALESCE(monthly_limit_ulxc, 0),
 	COALESCE(approval_above_ulxc, 0), allowed_models, allowed_providers, COALESCE(active_from, ''), COALESCE(active_until, ''), timezone,
-	pause_on_unusual_spend, allowed_listings, COALESCE(hourly_limit_ulxc, 0), COALESCE(weekly_limit_ulxc, 0), model_daily_limits_ulxc`
+	pause_on_unusual_spend, allowed_listings, COALESCE(hourly_limit_ulxc, 0), COALESCE(weekly_limit_ulxc, 0), model_daily_limits_ulxc,
+	COALESCE(requests_per_minute, 0)`
 
 func scanAgentRules(row pgx.Row) (AgentRules, error) {
 	var r AgentRules
-	var hourly, weekly int64
+	var hourly, weekly, rpm int64
 	err := row.Scan(&r.MaxPerRequestULXC, &r.DailyLimitULXC, &r.MonthlyLimitULXC, &r.ApprovalAboveULXC,
 		&r.AllowedModels, &r.AllowedProviders, &r.ActiveFrom, &r.ActiveUntil, &r.Timezone, &r.PauseOnUnusualSpend, &r.AllowedListings,
-		&hourly, &weekly, &r.ModelDailyLimitsULXC)
-	r.HourlyLimitULXC, r.WeeklyLimitULXC = &hourly, &weekly
+		&hourly, &weekly, &r.ModelDailyLimitsULXC, &rpm)
+	r.HourlyLimitULXC, r.WeeklyLimitULXC, r.RequestsPerMinute = &hourly, &weekly, &rpm
 	return r, err
 }
 
@@ -250,9 +262,10 @@ func modelLimitsJSON(limits map[string]int64) (*string, error) {
 	return &out, nil
 }
 
-// SetAgentRules replaces an agent's rules — all but AllowedListings, HourlyLimitULXC, WeeklyLimitULXC and
-// ModelDailyLimitsULXC when they are nil (absent from the JSON): a client that predates them (B19.14, B28.300,
-// B28.301) must not clear an agent's listings or caps by saving its other rules. An empty list or a zero clears them.
+// SetAgentRules replaces an agent's rules — all but AllowedListings, HourlyLimitULXC, WeeklyLimitULXC,
+// ModelDailyLimitsULXC and RequestsPerMinute when they are nil (absent from the JSON): a client that predates them
+// (B19.14, B28.300, B28.301, B28.302) must not clear an agent's listings or caps by saving its other rules. An empty
+// list or a zero clears them.
 func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID string, r AgentRules) (AgentRules, error) {
 	if err := r.validate(); err != nil {
 		return r, fmt.Errorf("%w: %s", ErrAgentRule, err)
@@ -274,14 +287,14 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 	if err != nil {
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
-	// $14, $15 and $16 are NULL when absent, which keeps the stored caps; a zero clears one.
-	var hourly, weekly int64
+	// $14, $15, $16 and $17 are NULL when absent, which keeps the stored caps; a zero clears one.
+	var hourly, weekly, rpm int64
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO agent_rules (agent_id, workspace_id, max_per_request_ulxc, daily_limit_ulxc, monthly_limit_ulxc,
 		       approval_above_ulxc, allowed_models, allowed_providers, active_from, active_until, timezone, pause_on_unusual_spend,
-		       allowed_listings, hourly_limit_ulxc, weekly_limit_ulxc, model_daily_limits_ulxc)
+		       allowed_listings, hourly_limit_ulxc, weekly_limit_ulxc, model_daily_limits_ulxc, requests_per_minute)
 		SELECT id, workspace_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13::text[], '{}'),
-		       NULLIF($14::bigint, 0), NULLIF($15::bigint, 0), COALESCE($16::text::jsonb, '{}')
+		       NULLIF($14::bigint, 0), NULLIF($15::bigint, 0), COALESCE($16::text::jsonb, '{}'), NULLIF($17::integer, 0)
 		  FROM agent_accounts WHERE id = $1 AND workspace_id = $2
 		ON CONFLICT (agent_id) DO UPDATE SET max_per_request_ulxc = EXCLUDED.max_per_request_ulxc,
 		       daily_limit_ulxc = EXCLUDED.daily_limit_ulxc, monthly_limit_ulxc = EXCLUDED.monthly_limit_ulxc,
@@ -291,18 +304,19 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 		       pause_on_unusual_spend = EXCLUDED.pause_on_unusual_spend, allowed_listings = COALESCE($13::text[], agent_rules.allowed_listings),
 		       hourly_limit_ulxc = NULLIF(COALESCE($14::bigint, agent_rules.hourly_limit_ulxc), 0),
 		       weekly_limit_ulxc = NULLIF(COALESCE($15::bigint, agent_rules.weekly_limit_ulxc), 0),
-		       model_daily_limits_ulxc = COALESCE($16::text::jsonb, agent_rules.model_daily_limits_ulxc), updated_at = now()
-		RETURNING COALESCE(hourly_limit_ulxc, 0), COALESCE(weekly_limit_ulxc, 0), model_daily_limits_ulxc`,
+		       model_daily_limits_ulxc = COALESCE($16::text::jsonb, agent_rules.model_daily_limits_ulxc),
+		       requests_per_minute = NULLIF(COALESCE($17::integer, agent_rules.requests_per_minute), 0), updated_at = now()
+		RETURNING COALESCE(hourly_limit_ulxc, 0), COALESCE(weekly_limit_ulxc, 0), model_daily_limits_ulxc, COALESCE(requests_per_minute, 0)`,
 		agentID, workspaceID, nullIfZero(r.MaxPerRequestULXC), nullIfZero(r.DailyLimitULXC), nullIfZero(r.MonthlyLimitULXC),
 		nullIfZero(r.ApprovalAboveULXC), r.AllowedModels, r.AllowedProviders, from, until, r.Timezone, r.PauseOnUnusualSpend,
-		r.AllowedListings, r.HourlyLimitULXC, r.WeeklyLimitULXC, models).Scan(&hourly, &weekly, &r.ModelDailyLimitsULXC)
+		r.AllowedListings, r.HourlyLimitULXC, r.WeeklyLimitULXC, models, r.RequestsPerMinute).Scan(&hourly, &weekly, &r.ModelDailyLimitsULXC, &rpm)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, ErrAgentNotFound
 	}
 	if err != nil {
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
-	r.HourlyLimitULXC, r.WeeklyLimitULXC = &hourly, &weekly
+	r.HourlyLimitULXC, r.WeeklyLimitULXC, r.RequestsPerMinute = &hourly, &weekly, &rpm
 	return r, nil
 }
 
@@ -318,8 +332,8 @@ func (s *DualTokenStore) GetAgentRules(ctx context.Context, workspaceID, agentID
 	}
 	r, err := scanAgentRules(s.pool.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		var hourly, weekly int64
-		return AgentRules{HourlyLimitULXC: &hourly, WeeklyLimitULXC: &weekly, ModelDailyLimitsULXC: map[string]int64{},
+		var hourly, weekly, rpm int64
+		return AgentRules{HourlyLimitULXC: &hourly, WeeklyLimitULXC: &weekly, RequestsPerMinute: &rpm, ModelDailyLimitsULXC: map[string]int64{},
 			AllowedModels: []string{}, AllowedProviders: []string{}, AllowedListings: []string{}, Timezone: "UTC"}, nil
 	}
 	if err != nil {
@@ -378,6 +392,18 @@ func agentModelSpentSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID, 
 		WHERE workspace_id = $1 AND account = $2 AND model = $3 AND created_at >= $4 AND kind IN ('spend', 'hold', 'settle', 'release')`,
 		workspaceID, agentAccount(agentID), modelCapKey(model), since).Scan(&spent)
 	return spent, err
+}
+
+// agentRequestsSince is how many questions an agent has held or debited since `since` (B28.302): one per
+// reservation or claim, counted by its first posting — a debit's later under-charge settle is a 'spend' of the
+// same ref, not another question. A settle is looked for no further back than an hour.
+func agentRequestsSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, since time.Time) (int64, error) {
+	var n int64
+	err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT ref FROM agent_postings
+		WHERE workspace_id = $1 AND account = $2 AND kind IN ('hold', 'spend') AND created_at > $3::timestamptz - interval '1 hour'
+		GROUP BY ref HAVING min(created_at) > $3) AS questions`,
+		workspaceID, agentAccount(agentID), since).Scan(&n)
+	return n, err
 }
 
 // CheckAgentRules judges an agent key's request that moves no LXC — one answered on its workspace's own
@@ -448,6 +474,16 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 	}
 	if len(r.AllowedListings) > 0 && req.Listing != "" && !slices.Contains(r.AllowedListings, req.Listing) {
 		return ruleRefusal("the agent may not use the marketplace listing %q", req.Listing)
+	}
+	if rpm := limitOf(r.RequestsPerMinute); rpm > 0 && !req.Payment {
+		asked, err := agentRequestsSince(ctx, tx, workspaceID, agentID, req.At.Add(-time.Minute))
+		if err != nil {
+			return fmt.Errorf("economy: agent requests so far: %w", err)
+		}
+		if asked >= rpm {
+			return fmt.Errorf("%w: the agent may make %d requests a minute and has made %d in the last minute; try again shortly",
+				ErrAgentRequestRate, rpm, asked)
+		}
 	}
 	if r.MaxPerRequestULXC > 0 && amount > r.MaxPerRequestULXC {
 		return ruleRefusal("this %s would cost up to %s LXC; the agent's limit per request is %s LXC",

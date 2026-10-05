@@ -91,6 +91,9 @@ func TestB192_EachAgentRuleRefusesBeforeTheProvider_AndARetryIsChargedOnce(t *te
 		if r.ModelDailyLimitsULXC == nil {
 			r.ModelDailyLimitsULXC = map[string]int64{}
 		}
+		if r.RequestsPerMinute == nil {
+			r.RequestsPerMinute = &none
+		}
 		if _, err := store.SetAgentRules(ctx, ws, agent.ID, r); err != nil {
 			t.Fatalf("set rules %+v: %v", r, err)
 		}

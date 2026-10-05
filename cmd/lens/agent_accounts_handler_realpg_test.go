@@ -289,7 +289,7 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 	}
 	for _, bad := range []string{`{"daily_limit":5}`, `{"active_from":"09:00"}`, `{"timezone":"Mars/Olympus"}`, `{"daily_limit_ulxc":-1}`, `{"hourly_limit_ulxc":-1}`,
 		`{"model_daily_limits_ulxc":{"claude-opus-4-1":-1}}`, `{"model_daily_limits_ulxc":{"":5}}`,
-		`{"model_daily_limits_ulxc":{"claude-opus-4-1":1,"Claude-Opus-4-1-20250805":2}}`} {
+		`{"model_daily_limits_ulxc":{"claude-opus-4-1":1,"Claude-Opus-4-1-20250805":2}}`, `{"requests_per_minute":-1}`, `{"requests_per_minute":3000000000}`} {
 		if code, body := call(owner, http.MethodPut, rules, bad); code != http.StatusBadRequest {
 			t.Errorf("PUT %s = %d %s, want 400", bad, code, body)
 		}
@@ -321,6 +321,19 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 		{`{"model_daily_limits_ulxc":{"claude-opus-4-1":5000000,"claude-haiku-4-5":0}}`, `"model_daily_limits_ulxc":{"claude-opus-4-1":5000000}`},
 		{`{"daily_limit_ulxc":10000000}`, `"model_daily_limits_ulxc":{"claude-opus-4-1":5000000}`},
 		{`{"model_daily_limits_ulxc":{}}`, `"model_daily_limits_ulxc":{}`},
+	} {
+		if code, body := call(owner, http.MethodPut, rules, tc.put); code != http.StatusOK || !strings.Contains(body, tc.want) {
+			t.Errorf("PUT %s = %d %s, want %s", tc.put, code, body, tc.want)
+		}
+		if _, body := call(proxyKey, http.MethodGet, rules, ""); !strings.Contains(body, tc.want) {
+			t.Errorf("after PUT %s, GET = %s, want %s", tc.put, body, tc.want)
+		}
+	}
+	// B28.302: the owner caps the agent's requests a minute; rules saved without the field keep it, and a zero clears it.
+	for _, tc := range []struct{ put, want string }{
+		{`{"requests_per_minute":60}`, `"requests_per_minute":60`},
+		{`{"daily_limit_ulxc":10000000}`, `"requests_per_minute":60`},
+		{`{"requests_per_minute":0}`, `"requests_per_minute":0`},
 	} {
 		if code, body := call(owner, http.MethodPut, rules, tc.put); code != http.StatusOK || !strings.Contains(body, tc.want) {
 			t.Errorf("PUT %s = %d %s, want %s", tc.put, code, body, tc.want)
