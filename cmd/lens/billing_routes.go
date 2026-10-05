@@ -37,6 +37,12 @@ func (b billReg) post(r chi.Router, pattern string, h http.HandlerFunc) {
 	}
 }
 
+func (b billReg) delete(r chi.Router, pattern string, h http.HandlerFunc) {
+	if b.on {
+		r.Delete(pattern, h)
+	}
+}
+
 // purchaseLister is the read surface the admin purchases handler needs (satisfied
 // by *billing.Service). Extracted to package level so the admin gate is provable
 // over HTTP, per the #153 testability pattern.
@@ -85,6 +91,39 @@ func newSubscriptionCancelHandler(svc subscriptionCanceller, cancel bool) http.H
 			return
 		}
 		writeJSONOK(w, http.StatusOK, st)
+	}
+}
+
+// newBYOKAddonHandler — POST (on) and DELETE (off) /v1/workspaces/{wsID}/billing/subscription/byok: BYOK, Team's
+// add-on (B32.10), as a second item of the live Team subscription. Neither writes the subscriptions row — the
+// webhook that follows sets byok.
+func newBYOKAddonHandler(svc *billing.Service, on bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		st, err := svc.SetBYOKAddon(req.Context(), chi.URLParam(req, "wsID"), on)
+		if err != nil {
+			status := http.StatusInternalServerError
+			switch {
+			case errors.Is(err, billing.ErrNoSubscriptionPrice):
+				status = http.StatusNotImplemented
+			case errors.Is(err, billing.ErrNoLiveSubscription), errors.Is(err, billing.ErrBYOKAddon), errors.Is(err, billing.ErrBYOKAddonUnchanged):
+				status = http.StatusConflict
+			}
+			writeJSONErr(w, status, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, st)
+	}
+}
+
+// backfillPlans names the plan of the subscriptions recorded before B32.10, from the Prices svc sells.
+func backfillPlans(ctx context.Context, svc *billing.Service, which string) {
+	n, err := svc.BackfillPlans(ctx)
+	if err != nil {
+		slog.Error("billing: the "+which+" subscriptions' plans could not be backfilled", "err", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("billing: named the plan of "+which+" subscriptions recorded before B32.10", "subscriptions", n)
 	}
 }
 

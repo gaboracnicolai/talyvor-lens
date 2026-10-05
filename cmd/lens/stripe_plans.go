@@ -18,6 +18,11 @@ type byokPriceEnsurer interface {
 	EnsureBYOKPrice(ctx context.Context) error
 }
 
+// planPriceEnsurer creates the Team and Business test-mode Prices when the account lacks them (B32.10).
+type planPriceEnsurer interface {
+	EnsurePlanPrices(ctx context.Context) error
+}
+
 // sellablePlans is the named plans a Service with this Stripe key sells (B17.21): the configured ones, or — on
 // a Stripe TEST-MODE key with none configured — the plan Prices its account holds under the lookup keys B13.1
 // gave them (billing.PlanLookupKeys), so a test user can subscribe on a deployment whose env names no plan. A
@@ -33,6 +38,12 @@ func sellablePlans(ctx context.Context, configured map[string]string, key string
 	if e, ok := s.(byokPriceEnsurer); ok {
 		if err := e.EnsureBYOKPrice(ctx); err != nil {
 			slog.Warn("billing: the BYOK test-mode Price could not be created — BYOK is not sold", "err", err)
+		}
+	}
+	// B32.10: and Team's $49 and Business's $299, so the company plans are on sale in test mode too.
+	if e, ok := s.(planPriceEnsurer); ok {
+		if err := e.EnsurePlanPrices(ctx); err != nil {
+			slog.Warn("billing: the Team and Business test-mode Prices could not be created — they are not sold", "err", err)
 		}
 	}
 	found, err := s.PlanPrices(ctx)
