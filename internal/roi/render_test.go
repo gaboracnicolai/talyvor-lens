@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/talyvor/lens/internal/brand"
 	"github.com/talyvor/lens/internal/budgets"
 )
 
@@ -35,6 +36,26 @@ func TestRenderHTML_SelfContainedAndComplete(t *testing.T) {
 	// Statistical-flag framing carried through.
 	if !strings.Contains(html, "not verdicts") && !strings.Contains(html, "not a judgment") {
 		t.Error("HTML should frame anomalies as flags, not judgments")
+	}
+}
+
+// The report wears brand v4: the tokens, the light theme on paper, and the
+// flat mark — and none of the colours it wore before.
+func TestRenderHTML_WearsTheBrand(t *testing.T) {
+	rep, _ := newReporter(fullMock(), Config{}).GenerateReport(context.Background(), "ws1", "monthly")
+	html, err := RenderHTML(rep)
+	if err != nil {
+		t.Fatalf("RenderHTML: %v", err)
+	}
+	for name, want := range map[string]string{"tokens": brand.TokensCSS, "print theme": brand.PrintCSS, "mark": brand.Mark} {
+		if !strings.Contains(html, want) {
+			t.Errorf("HTML missing the brand %s", name)
+		}
+	}
+	for _, old := range []string{"#1a1a2e", "#e0e0ea", "#137333", "#a06000", "#c5221f", "#f0d000", "#fef7e0"} {
+		if strings.Contains(html, old) {
+			t.Errorf("HTML still carries the pre-brand colour %s", old)
+		}
 	}
 }
 
