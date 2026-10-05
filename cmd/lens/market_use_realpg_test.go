@@ -256,6 +256,11 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 		len(e.Earnings) != 1 || e.Earnings[0].FeeUSDMicros != 150_000 {
 		t.Errorf("the seller's earnings = %+v, want 850,000 µUSD payable, all of it in the holdback, Talyvor's 150,000 named, and the second use still pending", e)
 	}
+	// B32.17: the seller reads the same 850,000 µUSD in holdback on the journal, and it reconciles.
+	if _, body := call(person(seller), "seller-jwt", http.MethodGet, "/v1/workspaces/"+seller+"/marketplace/journal", ""); body !=
+		`{"available_usd_micros":0,"due_for_release_usd_micros":0,"holdback_usd_micros":850000,"reconciled":true}`+"\n" {
+		t.Errorf("the seller's journal = %s; want 850,000 µUSD in holdback, nothing available, reconciled", body)
+	}
 
 	// A buyer's agent: its rules judge the use, and its charge goes on its company's bill.
 	agent, err := bank.CreateAgent(ctx, buyer, "researcher", "owner-"+buyer)

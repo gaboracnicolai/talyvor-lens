@@ -22,9 +22,9 @@ import (
 //     seller:<ws>:holdback. ClearInvoice posts it beside the earning.
 //   - reversal: a refund or chargeback of a cleared use posts the exact mirror of its clear entry. A trigger on
 //     market_refunds posts it in the transaction that writes the refund, so every writer of one —
-//     ReverseInvoice, refundUses, a test-money crossing's reversal — is journalled without being touched.
-//
-// Releases, payouts, credits and Stripe's rounding post to the same journal (B32.17).
+//     ReverseInvoice, refundUses, a test-money crossing's reversal — is journalled without being touched. Once
+//     the earning was released, the seller's share comes back out of available instead (migration 0200).
+//   - release, payout, credits: the holdback's escrow and what leaves it (B32.17, escrow.go and payout.go).
 
 // The journal's accounts. A seller has two: SellerHoldback and SellerAvailable.
 const (
@@ -39,6 +39,9 @@ const (
 const (
 	JournalClear    = "clear"
 	JournalReversal = "reversal"
+	JournalRelease  = "release"
+	JournalPayout   = "payout"
+	JournalCredits  = "credits"
 )
 
 // SellerHoldback is the seller's account for earnings still inside the 14-day holdback.
@@ -52,6 +55,7 @@ type Posting struct {
 	Account         string `json:"account"`
 	AmountUSDMicros int64  `json:"amount_usd_micros"` // a debit is positive, a credit negative
 	Currency        string `json:"currency"`          // "" is USD
+	Funding         string `json:"funding"`           // test or live; "" when posting: the entry's
 }
 
 // funding is test or live as the money was (B22.1): live only when a live-mode invoice paid a real workspace.
@@ -63,9 +67,9 @@ func funding(livemode, test bool) string {
 }
 
 // PostJournalTx writes one entry of kind for ref, and its postings, on tx — the caller's transaction, so the
-// entry commits or rolls back with the rows it explains. A posting of zero is left out, and an entry of none is
-// not written: it answers "" then, and the new entry's id otherwise. An entry that does not balance is refused
-// when tx commits.
+// entry commits or rolls back with the rows it explains. Each posting is funded by fundedBy unless it names its
+// own funding. A posting of zero is left out, and an entry of none is not written: it answers "" then, and the new
+// entry's id otherwise. An entry that does not balance is refused when tx commits.
 func PostJournalTx(ctx context.Context, tx pgx.Tx, kind, ref, fundedBy string, at time.Time, postings ...Posting) (string, error) {
 	var sql strings.Builder
 	args := []any{}
@@ -76,15 +80,18 @@ func PostJournalTx(ctx context.Context, tx pgx.Tx, kind, ref, fundedBy string, a
 		if p.Currency == "" {
 			p.Currency = "USD"
 		}
+		if p.Funding == "" {
+			p.Funding = fundedBy
+		}
 		if len(args) == 0 {
-			args = append(args, "mje_"+uuid.NewString(), fundedBy)
+			args = append(args, "mje_"+uuid.NewString())
 			sql.WriteString(`INSERT INTO market_journal_postings (entry_id, line, account, amount_usd_micros, currency, funding) VALUES `)
 		} else {
 			sql.WriteString(", ")
 		}
 		n := len(args)
-		fmt.Fprintf(&sql, "($1, %d, $%d, $%d, $%d, $2)", (n-2)/3+1, n+1, n+2, n+3)
-		args = append(args, p.Account, p.AmountUSDMicros, p.Currency)
+		fmt.Fprintf(&sql, "($1, %d, $%d, $%d, $%d, $%d)", (n-1)/4+1, n+1, n+2, n+3, n+4)
+		args = append(args, p.Account, p.AmountUSDMicros, p.Currency, p.Funding)
 	}
 	if len(args) == 0 {
 		return "", nil
@@ -128,7 +135,7 @@ type JournalEntry struct {
 	ID        string    `json:"id"`
 	Kind      string    `json:"kind"`
 	Ref       string    `json:"ref"`
-	Funding   string    `json:"funding"`
+	Funding   string    `json:"funding"` // test, live, or "test and live" (earnings taken as credits can be both)
 	CreatedAt time.Time `json:"created_at"`
 	Postings  []Posting `json:"postings"`
 }
@@ -147,11 +154,14 @@ func (s *Store) JournalFor(ctx context.Context, ref string) ([]JournalEntry, err
 	for rows.Next() {
 		var e JournalEntry
 		var p Posting
-		if err := rows.Scan(&e.ID, &e.Kind, &e.Ref, &e.CreatedAt, &e.Funding, &p.Account, &p.AmountUSDMicros, &p.Currency); err != nil {
+		if err := rows.Scan(&e.ID, &e.Kind, &e.Ref, &e.CreatedAt, &p.Funding, &p.Account, &p.AmountUSDMicros, &p.Currency); err != nil {
 			return nil, fmt.Errorf("market: journal of %s: %w", ref, err)
 		}
+		e.Funding = p.Funding
 		if len(out) == 0 || out[len(out)-1].ID != e.ID {
 			out = append(out, e)
+		} else if out[len(out)-1].Funding != p.Funding {
+			out[len(out)-1].Funding = "test and live"
 		}
 		out[len(out)-1].Postings = append(out[len(out)-1].Postings, p)
 	}

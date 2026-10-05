@@ -23,6 +23,7 @@ import (
 //
 //	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/use   {version, model, input, variables}
 //	GET  /v1/workspaces/{wsID}/marketplace/earnings            the seller's payable, in holdback and available (µUSD)
+//	GET  /v1/workspaces/{wsID}/marketplace/journal             the seller's holdback and available on the journal, and whether they reconcile (B32.17)
 //	GET  /v1/workspaces/{wsID}/marketplace/bill?month=2026-09  the buyer's billed uses in a month
 //
 // A use runs the listing through Lens's own proxy with the caller's credential, so the models it calls are
@@ -111,6 +112,22 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 		}
 		writeJSONOK(w, http.StatusOK, e)
 	})
+	r.Get("/v1/workspaces/{wsID}/marketplace/journal", func(w http.ResponseWriter, req *http.Request) {
+		j, err := store.JournalCheck(req.Context(), chi.URLParam(req, "wsID"))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// What the seller is owed on the journal (available below zero: they owe it back), what of the holdback is
+		// already due for release, and whether it all agrees with their earnings and payouts. Why it does not is
+		// the operator's to read, with `lens market journal-check`.
+		writeJSONOK(w, http.StatusOK, map[string]any{
+			"holdback_usd_micros":        j.JournalHoldbackUSDMicros,
+			"available_usd_micros":       j.JournalAvailableUSDMicros,
+			"due_for_release_usd_micros": j.PendingReleaseUSDMicros,
+			"reconciled":                 j.OK(),
+		})
+	})
 	r.Get("/v1/workspaces/{wsID}/marketplace/bill", func(w http.ResponseWriter, req *http.Request) {
 		month := time.Now().UTC()
 		if m := req.URL.Query().Get("month"); m != "" {
@@ -168,6 +185,25 @@ func meterPendingMarketUses(ctx context.Context, store *market.Store, meter mark
 				slog.Warn("market: billing pending uses", "billed", n, "err", err)
 			} else if n > 0 {
 				slog.Info("market: billed pending uses", "billed", n)
+			}
+		}
+	}
+}
+
+// releaseMarketHoldbacks moves, every few minutes, each earning past its 14-day holdback to its seller's available
+// balance on the marketplace journal (B32.17), unless a hold keeps it in escrow.
+func releaseMarketHoldbacks(ctx context.Context, store *market.Store) {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n, err := store.ReleaseDue(ctx, time.Now()); err != nil {
+				slog.Warn("market: releasing earnings past their holdback", "released", n, "err", err)
+			} else if n > 0 {
+				slog.Info("market: released earnings past their holdback", "released", n)
 			}
 		}
 	}

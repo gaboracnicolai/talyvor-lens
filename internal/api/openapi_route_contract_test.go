@@ -309,7 +309,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 // 120 → 194 (B28.12): the parse now reads every cmd/lens file, not main.go alone, which finds 95 routes
 // registered by the mount*Routes files that were never counted (215); and 21 agent wallet operations are
 // now published (openapi_wallets.go).
-const undocumentedNonAdminV1Routes = 194
+//
+// 194 → 195 (B32.17): GET /v1/workspaces/{wsID}/marketplace/journal, a seller's journal and whether it reconciles,
+// beside the undocumented GET /v1/workspaces/{wsID}/marketplace/earnings it is reconciled with.
+const undocumentedNonAdminV1Routes = 195
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

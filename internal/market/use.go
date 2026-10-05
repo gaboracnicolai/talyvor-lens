@@ -622,6 +622,7 @@ type Earning struct {
 	PayableAt      time.Time  `json:"payable_at"`
 	RefundedAt     *time.Time `json:"refunded_at,omitempty"`    // its share was reversed: the listing was taken down
 	PayeeAgentID   string     `json:"payee_agent_id,omitempty"` // a payment to this company's agent, not a use of a listing (B19.15)
+	HeldFor        string     `json:"held_for,omitempty"`       // dispute or ip_claim: kept in the holdback until the hold is released (B32.17)
 }
 
 // SellerEarnings reads a seller's earnings: the totals and the latest 100. An earning a refund or chargeback
@@ -655,7 +656,8 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 	}
 	e.PendingUSDMicros = SellerShare(usesULXC/ulxcPerUSDMicro, takeBPS(false)) + SellerShare(paymentsULXC/ulxcPerUSDMicro, takeBPS(true))
 	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.fee_usd_micros, e.invoice_id, e.cleared_at, e.payable_at, r.refunded_at,
-		       COALESCE(u.payee_agent_id, '')
+		       COALESCE(u.payee_agent_id, ''),
+		       COALESCE((SELECT h.reason FROM market_holds h WHERE h.use_id = e.use_id AND h.released_at IS NULL ORDER BY h.opened_at LIMIT 1), '')
 		FROM market_earnings e LEFT JOIN market_uses u ON u.id = e.use_id LEFT JOIN market_refunds r ON r.use_id = e.use_id
 		WHERE e.seller_workspace_id = $1 ORDER BY e.cleared_at DESC, e.use_id LIMIT 100`, sellerWorkspaceID)
 	if err != nil {
@@ -665,7 +667,7 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 	for rows.Next() {
 		var x Earning
 		if err := rows.Scan(&x.UseID, &x.ListingID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.FeeUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt, &x.RefundedAt,
-			&x.PayeeAgentID); err != nil {
+			&x.PayeeAgentID, &x.HeldFor); err != nil {
 			return e, err
 		}
 		e.Earnings = append(e.Earnings, x)

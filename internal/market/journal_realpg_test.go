@@ -48,9 +48,9 @@ func TestJournal_AClearedUseAndItsRefundMirrorEachOther(t *testing.T) {
 		t.Fatalf("clear = %d, %v", n, err)
 	}
 	cleared := []Posting{
-		{AccountStripeClearing, 1_000_000, "USD"},
-		{AccountMarketFee, -150_000, "USD"},
-		{SellerHoldback(seller), -850_000, "USD"},
+		{AccountStripeClearing, 1_000_000, "USD", "live"},
+		{AccountMarketFee, -150_000, "USD", "live"},
+		{SellerHoldback(seller), -850_000, "USD", "live"},
 	}
 	j, err := s.JournalFor(ctx, "use_b3216")
 	if err != nil {
@@ -71,9 +71,9 @@ func TestJournal_AClearedUseAndItsRefundMirrorEachOther(t *testing.T) {
 		t.Fatal(err)
 	}
 	mirror := []Posting{
-		{AccountStripeClearing, -1_000_000, "USD"},
-		{AccountMarketFee, 150_000, "USD"},
-		{SellerHoldback(seller), 850_000, "USD"},
+		{AccountStripeClearing, -1_000_000, "USD", "live"},
+		{AccountMarketFee, 150_000, "USD", "live"},
+		{SellerHoldback(seller), 850_000, "USD", "live"},
 	}
 	if len(j) != 2 || j[1].Kind != JournalReversal || j[1].Funding != "live" || !reflect.DeepEqual(j[1].Postings, mirror) {
 		t.Fatalf("the refunded use's journal = %+v; want its clear and then the reversal %v", j, mirror)
@@ -159,8 +159,8 @@ func TestJournal_TheMigrationJournalsEarningsAlreadyCleared(t *testing.T) {
 	}
 	at := time.Now().Add(-48 * time.Hour)
 	if _, err := mc.Exec(ctx, `INSERT INTO market_earnings (use_id, seller_workspace_id, gross_usd_micros, share_usd_micros, fee_usd_micros, invoice_id,
-		cleared_at, payable_at, livemode) VALUES ('use_old_kept', 'ws-old', 2000000, 1700000, 300000, 'in_old', $1, $1, false),
-		('use_old_refunded', 'ws-old', 1000000, 850000, 150000, 'in_old', $1, $1, false)`, at); err != nil {
+		cleared_at, payable_at, livemode) VALUES ('use_old_kept', 'ws-old', 2000000, 1700000, 300000, 'in_old', $1, $2, false),
+		('use_old_refunded', 'ws-old', 1000000, 850000, 150000, 'in_old', $1, $2, false)`, at, at.Add(Holdback)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := mc.Exec(ctx, `INSERT INTO market_refunds (use_id, listing_id, buyer_workspace_id, seller_workspace_id, price_ulxc, gross_usd_micros,
