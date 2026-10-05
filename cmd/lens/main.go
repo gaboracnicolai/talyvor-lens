@@ -73,6 +73,7 @@ import (
 	"github.com/talyvor/lens/internal/embedder"
 	"github.com/talyvor/lens/internal/eval"
 	"github.com/talyvor/lens/internal/fallback"
+	"github.com/talyvor/lens/internal/fees"
 	"github.com/talyvor/lens/internal/forecast"
 	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/haircutobs"
@@ -351,6 +352,9 @@ func runMigrate() error {
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
+		return err
+	}
+	if err := fees.Check(); err != nil {
 		return err
 	}
 
@@ -2418,6 +2422,9 @@ func run() error {
 
 		// B28.439 — each plan's price and included usage, for a visitor: what a new subscriber is granted.
 		subs.get(pub, "/v1/billing/plans", newPlansHandler(billRoute))
+
+		// B32.8 — every fee Talyvor charges, for /pricing.
+		pub.Get("/v1/public/fees", publicFeesHandler)
 	})
 
 	// Public status page. /status content-negotiates between HTML and

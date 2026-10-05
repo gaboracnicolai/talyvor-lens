@@ -225,7 +225,8 @@ func TestB256_ATestUsersBillPayoutsAndCardsStayInStripeTestModeAfterTheLiveSwitc
 		return
 	}
 
-	// Each seller lists a $30 prompt; each buyer uses the one of its own kind, on its own bill.
+	// Each seller lists a $30 prompt; each buyer uses the one of its own kind, on its own bill. The seller keeps
+	// $25.50 of it, Talyvor 15% (B32.8).
 	sell := func(seller string) market.Listing {
 		var l market.Listing
 		do(seller, http.MethodPost, "/v1/workspaces/"+seller+"/marketplace/listings",
@@ -312,9 +313,9 @@ func TestB256_ATestUsersBillPayoutsAndCardsStayInStripeTestModeAfterTheLiveSwitc
 		var livemode, rowTest bool
 		var transfer string
 		if err := pool.QueryRow(ctx, `SELECT livemode, test, stripe_transfer_id FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe'
-			AND gross_usd_micros = 30000000 AND paid_at IS NOT NULL`, ws).Scan(&livemode, &rowTest, &transfer); err != nil ||
+			AND gross_usd_micros = 25500000 AND paid_at IS NOT NULL`, ws).Scan(&livemode, &rowTest, &transfer); err != nil ||
 			livemode != want[0] || rowTest != want[1] || transfer == "" {
-			t.Fatalf("%s's payout: livemode=%v test=%v transfer=%q (%v); want $30 paid with livemode=%v test=%v", ws, livemode, rowTest, transfer, err, want[0], want[1])
+			t.Fatalf("%s's payout: livemode=%v test=%v transfer=%q (%v); want $25.50 paid with livemode=%v test=%v", ws, livemode, rowTest, transfer, err, want[0], want[1])
 		}
 	}
 

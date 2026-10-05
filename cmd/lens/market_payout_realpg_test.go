@@ -147,7 +147,8 @@ func TestMarketPayouts_OnboardEarnPaidOutAfterHoldbackAndRefundsReverse(t *testi
 	}
 
 	// The seller earns: a $10 prompt the buyer uses on three bills — A (three uses, paid 20 days ago, past
-	// the holdback), B (two uses, paid today) and, later, C.
+	// the holdback), B (two uses, paid today) and, later, C. The seller keeps $8.50 of each; Talyvor keeps 15%
+	// (B32.8).
 	code, out = call(seller, http.MethodPost, "/v1/workspaces/"+seller+"/marketplace/listings",
 		`{"kind":"prompt","title":"Contract review","price_per_use_ulxc":100000000,"artifact":{"template":"Review {{text}}","model":"m"}}`)
 	var listing market.Listing
@@ -182,8 +183,8 @@ func TestMarketPayouts_OnboardEarnPaidOutAfterHoldbackAndRefundsReverse(t *testi
 	payInvoice("in_a", now.AddDate(0, 0, -25), now.AddDate(0, 0, -20))
 	useOn(2, now)
 	payInvoice("in_b", now, now)
-	if p := payouts(); p.AvailableUSDMicros != 30_000_000 || p.InHoldbackUSDMicros != 20_000_000 {
-		t.Fatalf("after two paid bills the balance = %+v, want $30 available and $20 in the holdback", p)
+	if p := payouts(); p.AvailableUSDMicros != 25_500_000 || p.InHoldbackUSDMicros != 17_000_000 {
+		t.Fatalf("after two paid bills the balance = %+v, want $25.50 available and $17 in the holdback", p)
 	}
 
 	// The buyer is refunded bill B, inside the holdback: its two earnings are reversed, and nobody is credited
@@ -212,17 +213,17 @@ func TestMarketPayouts_OnboardEarnPaidOutAfterHoldbackAndRefundsReverse(t *testi
 		}
 		return out
 	}
-	if got := reversals(); len(got) != 2 || got[0].cause != "buyer_refund" || got[0].ref != "ch_b" || got[0].share != 10_000_000 || got[1].share != 10_000_000 {
-		t.Fatalf("after the refund of bill B the reversals = %+v, want its two $10 earnings reversed for ch_b", got)
+	if got := reversals(); len(got) != 2 || got[0].cause != "buyer_refund" || got[0].ref != "ch_b" || got[0].share != 8_500_000 || got[1].share != 8_500_000 {
+		t.Fatalf("after the refund of bill B the reversals = %+v, want its two $8.50 earnings reversed for ch_b", got)
 	}
 	if _, credited, err := store.RefundTakenDown(ctx, svc); err != nil || credited != 0 || len(billFake.credits) != 0 {
 		t.Fatalf("a refunded bill was credited again on the next: %d credits (%v), Stripe asked for %+v", credited, err, billFake.credits)
 	}
-	if p := payouts(); p.AvailableUSDMicros != 30_000_000 || p.InHoldbackUSDMicros != 0 {
-		t.Fatalf("after the refund the balance = %+v, want $30 available and nothing in the holdback", p)
+	if p := payouts(); p.AvailableUSDMicros != 25_500_000 || p.InHoldbackUSDMicros != 0 {
+		t.Fatalf("after the refund the balance = %+v, want $25.50 available and nothing in the holdback", p)
 	}
 
-	// The monthly run pays the seller the $30 past the holdback: one transfer of it less Stripe's fees at cost
+	// The monthly run pays the seller the $25.50 past the holdback: one transfer of it less Stripe's fees at cost
 	// ($2 for the account this month, 0.25% + $0.25 for the payout) — and only one this month.
 	if n, err := store.PayOut(ctx, connect, now); err != nil || n != 1 {
 		t.Fatalf("payout run = %d, %v; want one transfer", n, err)
@@ -235,49 +236,49 @@ func TestMarketPayouts_OnboardEarnPaidOutAfterHoldbackAndRefundsReverse(t *testi
 		Scan(&id, &account, &transfer, &gross, &accountFee, &payoutFee, &net, &paid); err != nil {
 		t.Fatal(err)
 	}
-	if gross != 30_000_000 || accountFee != 2_000_000 || payoutFee != 320_000 || net != 27_680_000 || !paid || account != "acct_"+seller || transfer != "tr_1" {
-		t.Fatalf("the payout = %s gross %d fees %d+%d net %d paid %v to %s by %s; want $30.00 − $2.00 − $0.32 = $27.68 by tr_1",
+	if gross != 25_500_000 || accountFee != 2_000_000 || payoutFee != 310_000 || net != 23_190_000 || !paid || account != "acct_"+seller || transfer != "tr_1" {
+		t.Fatalf("the payout = %s gross %d fees %d+%d net %d paid %v to %s by %s; want $25.50 − $2.00 − $0.31 = $23.19 by tr_1",
 			id, gross, accountFee, payoutFee, net, paid, account, transfer)
 	}
-	if len(connect.transfers) != 1 || connect.transfers[0] != (connectTransfer{"acct_" + seller, id, seller, 2768}) {
-		t.Fatalf("Stripe transfers = %+v, want one of 2768¢ to the seller's account for %s", connect.transfers, id)
+	if len(connect.transfers) != 1 || connect.transfers[0] != (connectTransfer{"acct_" + seller, id, seller, 2319}) {
+		t.Fatalf("Stripe transfers = %+v, want one of 2319¢ to the seller's account for %s", connect.transfers, id)
 	}
 	if n, err := store.PayOut(ctx, connect, now); err != nil || n != 0 || len(connect.transfers) != 1 {
 		t.Fatalf("a second run this month = %d, %v, %d transfers; want nothing more", n, err, len(connect.transfers))
 	}
-	if p := payouts(); p.AvailableUSDMicros != 0 || p.PaidOutUSDMicros != 30_000_000 || !p.PaidThisMonth || len(p.Payouts) != 1 || p.Payouts[0].PayoutFeeUSDMicros != 320_000 {
-		t.Fatalf("after the payout the page = %+v, want nothing available, $30 paid out with its fees shown", p)
+	if p := payouts(); p.AvailableUSDMicros != 0 || p.PaidOutUSDMicros != 25_500_000 || !p.PaidThisMonth || len(p.Payouts) != 1 || p.Payouts[0].PayoutFeeUSDMicros != 310_000 {
+		t.Fatalf("after the payout the page = %+v, want nothing available, $25.50 paid out with its fees shown", p)
 	}
 
-	// A chargeback of one $10 use on bill A, after the holdback and the payout: the earning is reversed and
+	// A chargeback of one $10 use on bill A, after the holdback and the payout: its $8.50 earning is reversed and
 	// the seller owes it; there is nothing to take as credits.
 	connect.charges["ch_a"] = connectCharge{invoice: "in_a", cents: 3000}
 	event("charge.dispute.created", "evt_dp_a", map[string]any{"id": "dp_a", "object": "dispute", "amount": 1000, "charge": "ch_a"})
-	if got := reversals(); len(got) != 3 || got[2] != (reversal{billA[0], "chargeback", "dp_a", 10_000_000}) {
+	if got := reversals(); len(got) != 3 || got[2] != (reversal{billA[0], "chargeback", "dp_a", 8_500_000}) {
 		t.Fatalf("after the chargeback the reversals = %+v, want bill A's first use reversed for dp_a", got)
 	}
-	if p := payouts(); p.OwedUSDMicros != 10_000_000 || p.AvailableUSDMicros != 0 {
-		t.Fatalf("after the chargeback the balance = %+v, want $10 owed", p)
+	if p := payouts(); p.OwedUSDMicros != 8_500_000 || p.AvailableUSDMicros != 0 {
+		t.Fatalf("after the chargeback the balance = %+v, want $8.50 owed", p)
 	}
 	if code, out := call(seller, http.MethodPost, "/v1/workspaces/"+seller+"/marketplace/payouts/credits", ""); code != http.StatusConflict {
 		t.Fatalf("credits while owing = %d %s, want 409", code, out)
 	}
 
-	// Bill C's $20 past the holdback recovers the $10 owed; the seller takes the other $10 as credits, 1:1.
+	// Bill C's $17 earned past the holdback recovers the $8.50 owed; the seller takes the other $8.50 as credits, 1:1.
 	useOn(2, now.AddDate(0, 0, -24))
 	payInvoice("in_c", now.AddDate(0, 0, -24), now.AddDate(0, 0, -20))
 	code, out = call(seller, http.MethodPost, "/v1/workspaces/"+seller+"/marketplace/payouts/credits", "")
 	var credits market.Payout
-	if _ = json.Unmarshal([]byte(out), &credits); code != http.StatusCreated || credits.GrossUSDMicros != 10_000_000 || credits.CreditsULXC != 100_000_000 {
-		t.Fatalf("credits = %d %s, want $10 as 100 LXC", code, out)
+	if _ = json.Unmarshal([]byte(out), &credits); code != http.StatusCreated || credits.GrossUSDMicros != 8_500_000 || credits.CreditsULXC != 85_000_000 {
+		t.Fatalf("credits = %d %s, want $8.50 as 85 LXC", code, out)
 	}
 	var amount int64
 	var typ, payoutID string
 	if err := pool.QueryRow(ctx, `SELECT amount, type, metadata->>'market_payout_id' FROM lxc_ledger WHERE workspace_id = $1`, seller).
-		Scan(&amount, &typ, &payoutID); err != nil || amount != 100_000_000 || typ != economy.LXCTypePurchase || payoutID != credits.ID {
-		t.Fatalf("the seller's lxc_ledger row = %d %s %s (%v), want 100 LXC for %s", amount, typ, payoutID, err, credits.ID)
+		Scan(&amount, &typ, &payoutID); err != nil || amount != 85_000_000 || typ != economy.LXCTypePurchase || payoutID != credits.ID {
+		t.Fatalf("the seller's lxc_ledger row = %d %s %s (%v), want 85 LXC for %s", amount, typ, payoutID, err, credits.ID)
 	}
-	if p := payouts(); p.AvailableUSDMicros != 0 || p.OwedUSDMicros != 0 || p.PaidOutUSDMicros != 40_000_000 {
-		t.Fatalf("at the end the balance = %+v, want nothing available or owed and $40 paid out", p)
+	if p := payouts(); p.AvailableUSDMicros != 0 || p.OwedUSDMicros != 0 || p.PaidOutUSDMicros != 34_000_000 {
+		t.Fatalf("at the end the balance = %+v, want nothing available or owed and $34 paid out", p)
 	}
 }

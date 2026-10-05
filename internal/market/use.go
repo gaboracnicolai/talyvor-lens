@@ -15,6 +15,7 @@ import (
 	stripe "github.com/stripe/stripe-go/v81"
 
 	"github.com/talyvor/lens/internal/economy"
+	"github.com/talyvor/lens/internal/fees"
 	"github.com/talyvor/lens/internal/workspace"
 )
 
@@ -24,18 +25,12 @@ import (
 // calls are billed to the buyer as usual). A paid listing's price is then METERED onto the buyer's monthly
 // marketplace bill (a Stripe usage-based subscription, internal/billing/market_bill.go) — never taken from
 // prepaid credits. When the invoice carrying the use is paid, the use clears and the seller earns their
-// share in USD: 100% of the first US$1M they earn, then 85%; each earning is payable after a 14-day
-// holdback (B20.5 pays it out). A seller using their own listing, or a buyer linked to the seller by a
+// share in USD: the price less Talyvor's take (internal/fees, B32.8) from the first dollar; each earning is
+// payable after a 14-day holdback (B20.5 pays it out). A seller using their own listing, or a buyer linked to the seller by a
 // card or an owner (the single-party detector), is charged nothing and earns the seller nothing.
 
 // Holdback is how long an earning waits after its use clears before it can be paid out.
 const Holdback = 14 * 24 * time.Hour
-
-// FullShareUpToUSDMicros is the lifetime gross a seller keeps in full (US$1M); past it they keep 85%.
-const (
-	FullShareUpToUSDMicros = 1_000_000 * 1_000_000
-	reducedSharePercent    = 85
-)
 
 // ulxcPerUSDMicro is how many µLXC make one µUSD at the LXC peg (10 at $0.10).
 var ulxcPerUSDMicro = int64(math.Round(1 / economy.LXCUSDValue))
@@ -522,7 +517,7 @@ func run(ctx context.Context, r Runner, calls []call, model string, u *Use) erro
 func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time, livemode bool) (int, error) {
 	n := 0
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, seller_workspace_id, price_ulxc FROM market_uses
+		rows, err := tx.Query(ctx, `SELECT id, seller_workspace_id, price_ulxc, COALESCE(payee_agent_id, '') <> '' FROM market_uses
 			WHERE buyer_workspace_id = $1 AND charge = 'billed' AND metered_at IS NOT NULL AND cleared_at IS NULL
 			  AND used_at >= $2 AND used_at < $3
 			ORDER BY used_at, id FOR UPDATE`, buyerWorkspaceID, periodStart, periodEnd)
@@ -532,11 +527,12 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 		type cleared struct {
 			id, seller string
 			ulxc       int64
+			payment    bool // a payment to another company's agent, not a use of a listing
 		}
 		var uses []cleared
 		for rows.Next() {
 			var c cleared
-			if err := rows.Scan(&c.id, &c.seller, &c.ulxc); err != nil {
+			if err := rows.Scan(&c.id, &c.seller, &c.ulxc, &c.payment); err != nil {
 				rows.Close()
 				return err
 			}
@@ -557,19 +553,11 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 			if refunded {
 				continue
 			}
-			// One seller's lifetime is read and extended one use at a time, whoever's invoice clears.
-			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('market_seller:' || $1, 0))`, c.seller); err != nil {
-				return err
-			}
-			var lifetime int64
-			if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(gross_usd_micros), 0)::bigint FROM market_earnings WHERE seller_workspace_id = $1`,
-				c.seller).Scan(&lifetime); err != nil {
-				return err
-			}
 			gross := c.ulxc / ulxcPerUSDMicro
-			share := SellerShare(lifetime, gross)
-			if _, err := tx.Exec(ctx, `INSERT INTO market_earnings (use_id, seller_workspace_id, gross_usd_micros, share_usd_micros, invoice_id, cleared_at, payable_at,
-				livemode) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, c.id, c.seller, gross, share, invoiceID, paidAt, paidAt.Add(Holdback), livemode); err != nil {
+			share := SellerShare(gross, takeBPS(c.payment))
+			if _, err := tx.Exec(ctx, `INSERT INTO market_earnings (use_id, seller_workspace_id, gross_usd_micros, share_usd_micros, fee_usd_micros, invoice_id,
+				cleared_at, payable_at, livemode) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, c.id, c.seller, gross, share, gross-share, invoiceID, paidAt,
+				paidAt.Add(Holdback), livemode); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE market_uses SET cleared_invoice_id = $2, cleared_at = $3 WHERE id = $1`, c.id, invoiceID, paidAt); err != nil {
@@ -585,11 +573,20 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 	return n, nil
 }
 
-// SellerShare is what a seller keeps of gross, having already earned lifetime (both µUSD): all of it up to
-// US$1M lifetime, 85% of whatever lies past it.
-func SellerShare(lifetime, gross int64) int64 {
-	full := max(0, min(gross, FullShareUpToUSDMicros-lifetime))
-	return full + (gross-full)*reducedSharePercent/100
+// SellerShare is what a seller keeps of gross (µUSD, the price before tax) when Talyvor takes takeBPS of it,
+// from the first dollar: gross × (10,000 − takeBPS) ÷ 10,000, rounded down. Talyvor's fee is gross − share, so
+// rounding never pays out more than the sale.
+func SellerShare(gross, takeBPS int64) int64 {
+	keep := fees.BPSDenominator - takeBPS
+	return gross/fees.BPSDenominator*keep + gross%fees.BPSDenominator*keep/fees.BPSDenominator
+}
+
+// takeBPS is Talyvor's take on a use of a listing, or on a payment to another company's agent (a service).
+func takeBPS(payment bool) int64 {
+	if payment {
+		return fees.Current().ServicesTakeBPS
+	}
+	return fees.Current().MarketTakeBPS
 }
 
 // Earnings is a seller's marketplace earnings, in µUSD.
@@ -614,6 +611,7 @@ type Earning struct {
 	ListingID      string     `json:"listing_id"`
 	GrossUSDMicros int64      `json:"gross_usd_micros"`
 	ShareUSDMicros int64      `json:"share_usd_micros"`
+	FeeUSDMicros   int64      `json:"fee_usd_micros"` // Talyvor's take: gross − share (0 on an earning cleared before B32.8)
 	InvoiceID      string     `json:"invoice_id"`
 	ClearedAt      time.Time  `json:"cleared_at"`
 	PayableAt      time.Time  `json:"payable_at"`
@@ -640,15 +638,18 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 	e.InHoldbackUSDMicros, e.PaidOutUSDMicros = inHoldback, paid
 	e.AvailableUSDMicros, e.OwedUSDMicros = max(released-paid, 0), max(paid-released, 0)
 	e.PayableUSDMicros = max(inHoldback+released-paid, 0)
-	var pendingULXC int64
-	if err := s.pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(price_ulxc), 0)::bigint FROM market_uses u
+	var usesULXC, paymentsULXC int64
+	if err := s.pool.QueryRow(ctx, `SELECT count(*),
+		       COALESCE(sum(price_ulxc) FILTER (WHERE COALESCE(payee_agent_id, '') = ''), 0)::bigint,
+		       COALESCE(sum(price_ulxc) FILTER (WHERE COALESCE(payee_agent_id, '') <> ''), 0)::bigint
+		FROM market_uses u
 		WHERE seller_workspace_id = $1 AND charge = 'billed' AND ran_at IS NOT NULL AND cleared_at IS NULL
 		  AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = u.id)`,
-		sellerWorkspaceID).Scan(&e.PendingUses, &pendingULXC); err != nil {
+		sellerWorkspaceID).Scan(&e.PendingUses, &usesULXC, &paymentsULXC); err != nil {
 		return e, fmt.Errorf("market: pending earnings: %w", err)
 	}
-	e.PendingUSDMicros = SellerShare(e.LifetimeGrossMicros, pendingULXC/ulxcPerUSDMicro)
-	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.invoice_id, e.cleared_at, e.payable_at, r.refunded_at,
+	e.PendingUSDMicros = SellerShare(usesULXC/ulxcPerUSDMicro, takeBPS(false)) + SellerShare(paymentsULXC/ulxcPerUSDMicro, takeBPS(true))
+	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.fee_usd_micros, e.invoice_id, e.cleared_at, e.payable_at, r.refunded_at,
 		       COALESCE(u.payee_agent_id, '')
 		FROM market_earnings e LEFT JOIN market_uses u ON u.id = e.use_id LEFT JOIN market_refunds r ON r.use_id = e.use_id
 		WHERE e.seller_workspace_id = $1 ORDER BY e.cleared_at DESC, e.use_id LIMIT 100`, sellerWorkspaceID)
@@ -658,7 +659,7 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 	defer rows.Close()
 	for rows.Next() {
 		var x Earning
-		if err := rows.Scan(&x.UseID, &x.ListingID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt, &x.RefundedAt,
+		if err := rows.Scan(&x.UseID, &x.ListingID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.FeeUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt, &x.RefundedAt,
 			&x.PayeeAgentID); err != nil {
 			return e, err
 		}

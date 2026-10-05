@@ -262,7 +262,8 @@ func TestMoneyWall_AFullTestRunLeavesEveryRealFigureAsItWas(t *testing.T) {
 		}
 	}
 
-	// Payouts due: a live run pays the real seller exactly its $50 of live earnings, and the test seller — whose $90
+	// Payouts due: a live run pays the real seller exactly its live earnings — its 85% of $50 of sales, $42.50 —
+	// and the test seller — whose $90
 	// was paid on a live invoice too — nothing.
 	live := &connectLive{live: true}
 	if _, err := s.PayOut(ctx, live, time.Now()); err != nil {
@@ -281,8 +282,8 @@ func TestMoneyWall_AFullTestRunLeavesEveryRealFigureAsItWas(t *testing.T) {
 		}
 		payouts[ws] = gross
 	}
-	if rows.Err() != nil || !reflect.DeepEqual(payouts, map[string]int64{realSeller: 50_000_000}) || len(live.transfers) != 1 {
-		t.Fatalf("the live payout run paid %v (%d transfers, %v); want the real seller's $50 and nothing to the test seller",
+	if rows.Err() != nil || !reflect.DeepEqual(payouts, map[string]int64{realSeller: 42_500_000}) || len(live.transfers) != 1 {
+		t.Fatalf("the live payout run paid %v (%d transfers, %v); want the real seller's $42.50 and nothing to the test seller",
 			payouts, len(live.transfers), rows.Err())
 	}
 }

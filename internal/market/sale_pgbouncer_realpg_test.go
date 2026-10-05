@@ -76,7 +76,7 @@ func TestMarketplaceSale_OverPgBouncerSimpleProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if share := price / ulxcPerUSDMicro; earned.PendingUses != earned0.PendingUses+1 || earned.PendingUSDMicros != earned0.PendingUSDMicros+share {
+	if share := SellerShare(price/ulxcPerUSDMicro, 1500); earned.PendingUses != earned0.PendingUses+1 || earned.PendingUSDMicros != earned0.PendingUSDMicros+share {
 		t.Errorf("the seller's pending went %d → %d uses, %d → %d µUSD; want +1 and +%d", earned0.PendingUses, earned.PendingUses,
 			earned0.PendingUSDMicros, earned.PendingUSDMicros, share)
 	}
