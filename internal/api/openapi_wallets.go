@@ -83,6 +83,16 @@ func openAPIWalletSchemas() map[string]any {
 				"pause_on_unusual_spend": map[string]any{"type": "boolean"},
 			},
 		},
+		"RuleTemplate": map[string]any{
+			"type":        "object",
+			"description": "Rules an agent can start from. They name every rule, so applying them replaces the agent's rules whole.",
+			"properties": map[string]any{
+				"id":      map[string]any{"type": "string", "example": "support-bot"},
+				"name":    str,
+				"summary": map[string]any{"type": "string", "description": "the agent it suits and what its rules do"},
+				"rules":   map[string]any{"$ref": "#/components/schemas/AgentRules"},
+			},
+		},
 		"AgentApproval": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -206,10 +216,24 @@ func openAPIWalletPaths() map[string]any {
 				[]map[string]any{ws},
 				map[string]any{"200": ok("the agents and the workspace's totals", ref("AgentBook"))}),
 			"post": withBody(op("Create an agent",
-				"Owner or admin. The signed-in person owns the agent; an admin credential names the owner in owner_user_id.",
+				"Owner or admin. The signed-in person owns the agent; an admin credential names the owner in owner_user_id. With template, the agent starts with exactly that rule template's rules, and the answer carries template and rules too.",
 				[]map[string]any{ws},
-				map[string]any{"201": ok("the new agent, balance zero", ref("Agent")), "400": map[string]any{"description": "no name, or no owner"}}),
-				body(obj([]string{"name"}, map[string]any{"name": str, "owner_user_id": str}))),
+				map[string]any{"201": ok("the new agent, balance zero", ref("Agent")), "400": map[string]any{"description": "no name, no owner, or no such template"}}),
+				body(obj([]string{"name"}, map[string]any{"name": str, "owner_user_id": str,
+					"template": map[string]any{"type": "string", "example": "support-bot", "description": "the id of a rule template to start from"}}))),
+		},
+		"/v1/workspaces/{wsID}/agents/rule-templates": map[string]any{
+			"get": op("List the rule templates an agent can start from",
+				"Support bot, Researcher and Coder: each names every rule, so applying one replaces an agent's rules whole.",
+				[]map[string]any{ws},
+				map[string]any{"200": ok("the templates", listOf("templates", "RuleTemplate"))}),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/rules/template": map[string]any{
+			"post": withBody(op("Apply a rule template to the agent",
+				"Owner or admin. Replaces every one of the agent's rules with the template's: the agent then holds exactly the template, nothing kept from before.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the rules as stored", ref("AgentRules")), "400": map[string]any{"description": "no such template"}, "404": map[string]any{"description": "no such agent"}}),
+				body(obj([]string{"template"}, map[string]any{"template": map[string]any{"type": "string", "example": "researcher"}}))),
 		},
 		"/v1/workspaces/{wsID}/agents/{agentID}": map[string]any{
 			"patch": withBody(op("Rename or describe the agent",

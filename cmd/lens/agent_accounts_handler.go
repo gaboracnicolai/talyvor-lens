@@ -95,6 +95,13 @@ import (
 //
 //	POST /v1/workspaces/{wsID}/agents/{id}/claim             the signed-in person becomes its owner
 //
+// B28.29 — rule templates a new agent can start from (internal/economy/agent_rule_templates.go). Each names
+// every rule, so applying one replaces the agent's rules whole and it then holds exactly the template:
+//
+//	GET  /v1/workspaces/{wsID}/agents/rule-templates                 support-bot, researcher, coder
+//	POST /v1/workspaces/{wsID}/agents/{id}/rules/template {"template"}   apply one; returns the rules
+//	POST /v1/workspaces/{wsID}/agents  {"name", "template"}          create an agent that starts from one
+//
 // B28.298 — an agent's lifecycle (internal/economy/agent_lifecycle.go):
 //
 //	PATCH /v1/workspaces/{wsID}/agents/{id}   {"name"?, "description"?}   rename it, describe it; returns the agent
@@ -167,9 +174,16 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		var in struct {
 			Name  string `json:"name"`
 			Owner string `json:"owner_user_id"` // an admin credential names the person; anyone else owns what they create
+			// B28.29: the rule template it starts from; the agent is created with exactly its rules.
+			Template string `json:"template"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || in.Name == "" {
 			writeJSONErr(w, http.StatusBadRequest, `body must be {"name": "<agent name>"}`)
+			return
+		}
+		tmpl, ok := economy.RuleTemplateByID(in.Template)
+		if in.Template != "" && !ok {
+			writeJSONErr(w, http.StatusBadRequest, unknownRuleTemplate(in.Template))
 			return
 		}
 		owner := ""
@@ -188,8 +202,24 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSONOK(w, http.StatusCreated, a)
+		if in.Template == "" {
+			writeJSONOK(w, http.StatusCreated, a)
+			return
+		}
+		rules, err := bank.SetAgentRules(req.Context(), chi.URLParam(req, "wsID"), a.ID, tmpl.Rules)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, fmt.Sprintf("agent %s was created, but the %s template's rules were not saved: %v", a.ID, tmpl.ID, err))
+			return
+		}
+		writeJSONOK(w, http.StatusCreated, struct {
+			economy.Agent
+			Template string             `json:"template"`
+			Rules    economy.AgentRules `json:"rules"`
+		}{a, tmpl.ID, rules})
 	}))
+	r.Get("/v1/workspaces/{wsID}/agents/rule-templates", func(w http.ResponseWriter, req *http.Request) {
+		writeJSONOK(w, http.StatusOK, map[string]any{"templates": economy.RuleTemplates()})
+	})
 	r.Patch("/v1/workspaces/{wsID}/agents/{agentID}", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
 		var in struct {
 			Name        *string `json:"name"`
@@ -326,6 +356,22 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			return
 		}
 		rules, err := bank.SetAgentRules(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in)
+		writeRules(w, rules, err)
+	}))
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/rules/template", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Template string `json:"template"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil || in.Template == "" {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"template": "<template id>"}`)
+			return
+		}
+		tmpl, ok := economy.RuleTemplateByID(in.Template)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, unknownRuleTemplate(in.Template))
+			return
+		}
+		rules, err := bank.SetAgentRules(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), tmpl.Rules)
 		writeRules(w, rules, err)
 	}))
 	r.Get("/v1/workspaces/{wsID}/agents/approvals", func(w http.ResponseWriter, req *http.Request) {
@@ -743,6 +789,15 @@ func writePaused(w http.ResponseWriter, agentID string, paused bool, err error) 
 	default:
 		writeJSONOK(w, http.StatusOK, map[string]any{"agent_id": agentID, "paused": paused})
 	}
+}
+
+// unknownRuleTemplate is the refusal of a template id Lens does not have; it names the ones it has.
+func unknownRuleTemplate(id string) string {
+	var ids []string
+	for _, t := range economy.RuleTemplates() {
+		ids = append(ids, t.ID)
+	}
+	return fmt.Sprintf("there is no rule template %q; the templates are %s", id, strings.Join(ids, ", "))
 }
 
 // ownerOnly admits the workspace's owner or an admin — the rule stored-answer deletion uses.
