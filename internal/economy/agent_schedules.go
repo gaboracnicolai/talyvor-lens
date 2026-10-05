@@ -340,7 +340,11 @@ func (s *DualTokenStore) runScheduleTick(ctx context.Context, now time.Time) (st
 	if err != nil {
 		return "", fmt.Errorf("economy: due schedule: %w", err)
 	}
-	payCtx := WithAgentRequest(ctx, AgentRequest{Payment: true, At: now, Listing: sc.ToListingID,
+	payee := Payee{Kind: "agent", ID: sc.ToAgentID} // the payer's payee lists judge a scheduled payment too (B28.303)
+	if sc.ToListingID != "" {
+		payee = Payee{Kind: "listing", ID: sc.ToListingID}
+	}
+	payCtx := WithAgentRequest(ctx, AgentRequest{Payment: true, At: now, Listing: sc.ToListingID, Payee: payee,
 		Fingerprint: "schedule:" + sc.ID + ":" + sc.NextRunAt.UTC().Format(time.RFC3339)})
 	// The payment in a savepoint: a refusal is undone and recorded, and the tick still counts as run.
 	sp, err := tx.Begin(ctx)

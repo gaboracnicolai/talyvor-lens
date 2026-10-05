@@ -56,6 +56,8 @@ export interface AgentRules {
   approval_above_ulxc: number;
   allowed_models: string[];
   allowed_providers: string[];
+  allowed_payees: string[];
+  blocked_payees: string[];
   active_from: string;
   active_until: string;
   timezone: string;

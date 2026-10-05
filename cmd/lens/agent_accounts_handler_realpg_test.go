@@ -289,7 +289,8 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 	}
 	for _, bad := range []string{`{"daily_limit":5}`, `{"active_from":"09:00"}`, `{"timezone":"Mars/Olympus"}`, `{"daily_limit_ulxc":-1}`, `{"hourly_limit_ulxc":-1}`,
 		`{"model_daily_limits_ulxc":{"claude-opus-4-1":-1}}`, `{"model_daily_limits_ulxc":{"":5}}`,
-		`{"model_daily_limits_ulxc":{"claude-opus-4-1":1,"Claude-Opus-4-1-20250805":2}}`, `{"requests_per_minute":-1}`, `{"requests_per_minute":3000000000}`} {
+		`{"model_daily_limits_ulxc":{"claude-opus-4-1":1,"Claude-Opus-4-1-20250805":2}}`, `{"requests_per_minute":-1}`, `{"requests_per_minute":3000000000}`,
+		`{"blocked_payees":[""]}`, `{"allowed_payees":[" agt_x"]}`} {
 		if code, body := call(owner, http.MethodPut, rules, bad); code != http.StatusBadRequest {
 			t.Errorf("PUT %s = %d %s, want 400", bad, code, body)
 		}

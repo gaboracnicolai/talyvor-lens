@@ -87,6 +87,8 @@ class AgentRules(TypedDict, total=False):
     approval_above_ulxc: int
     allowed_models: list[str]
     allowed_providers: list[str]
+    allowed_payees: list[str]
+    blocked_payees: list[str]
     active_from: str
     active_until: str
     timezone: str
