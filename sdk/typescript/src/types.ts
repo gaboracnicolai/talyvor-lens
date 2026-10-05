@@ -51,6 +51,7 @@ export interface AgentRules {
   daily_limit_ulxc: number;
   weekly_limit_ulxc: number;
   monthly_limit_ulxc: number;
+  model_daily_limits_ulxc: Record<string, number>;
   approval_above_ulxc: number;
   allowed_models: string[];
   allowed_providers: string[];

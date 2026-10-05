@@ -96,7 +96,7 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 	if diff > 0 {
 		allowed := diff
 		if agentID != "" {
-			if allowed, err = agentAllowance(ctx, tx, workspaceID, agentID, estimate, diff, debitKey); err != nil {
+			if allowed, err = agentAllowance(ctx, tx, workspaceID, agentID, estimate, diff, debitKey, meta.RequestedModel); err != nil {
 				return out, err
 			}
 		} else {
@@ -147,7 +147,7 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 			if out.SettledULXC < 0 {
 				kind = "settle"
 			}
-			if err := postEntry(ctx, tx, workspaceID, kind, debitKey,
+			if err := postModelEntry(ctx, tx, workspaceID, kind, debitKey, meta.RequestedModel,
 				leg{agentAccount(agentID), -out.SettledULXC}, leg{"spend", out.SettledULXC}); err != nil {
 				return out, err
 			}
@@ -179,9 +179,10 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 }
 
 // agentAllowance is how much of want µLXC beyond a question's estimate the agent's limit still allows, with
-// the agent locked: its per-request and period limits (B19.2, B28.300), counted with the estimate already
-// spent, and its balance — topped up from its company's credit line where the spend path would draw it (B22.4).
-func agentAllowance(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, estimate, want int64, ref string) (int64, error) {
+// the agent locked: its per-request and period limits (B19.2, B28.300) and its daily cap on the question's
+// model (B28.301), counted with the estimate already spent, and its balance — topped up from its company's
+// credit line where the spend path would draw it (B22.4).
+func agentAllowance(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, estimate, want int64, ref, model string) (int64, error) {
 	r, err := scanAgentRules(tx.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("economy: agent rules: %w", err)
@@ -193,7 +194,15 @@ func agentAllowance(ctx context.Context, tx pgx.Tx, workspaceID, agentID string,
 	if err != nil {
 		loc = time.UTC
 	}
-	for _, limit := range r.periodLimits(time.Now().In(loc), loc) {
+	now := time.Now().In(loc)
+	if limit, since := r.modelDailyLimit(model, now, loc); limit > 0 {
+		spent, err := agentModelSpentSince(ctx, tx, workspaceID, agentID, model, since)
+		if err != nil {
+			return 0, fmt.Errorf("economy: agent spend on the model so far: %w", err)
+		}
+		want = min(want, max(limit-spent, 0))
+	}
+	for _, limit := range r.periodLimits(now, loc) {
 		if limit.ulxc == 0 {
 			continue
 		}

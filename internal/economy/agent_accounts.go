@@ -91,6 +91,23 @@ func postEntry(ctx context.Context, tx pgx.Tx, workspaceID, kind, ref string, le
 	return nil
 }
 
+// postModelEntry is postEntry for a question to a model: its postings name the model as its caps know it
+// (modelCapKey), which is what an agent's per-model daily caps count (B28.301). An empty model names none.
+func postModelEntry(ctx context.Context, tx pgx.Tx, workspaceID, kind, ref, model string, legs ...leg) error {
+	if model = modelCapKey(model); model == "" {
+		return postEntry(ctx, tx, workspaceID, kind, ref, legs...)
+	}
+	entry := uuid.New()
+	for _, l := range legs {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO agent_postings (entry_id, workspace_id, account, amount_ulxc, kind, ref, model) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			entry, workspaceID, l.account, l.amount, kind, ref, model); err != nil {
+			return fmt.Errorf("economy: post %s: %w", kind, err)
+		}
+	}
+	return nil
+}
+
 // balanceSQL reads an account's stored running balance (B28.297): one row, however many postings it has.
 // Every account but the shared 'workspace', 'spend' and 'cashed_out' sides is kept (0185).
 const balanceSQL = `SELECT COALESCE((SELECT balance_ulxc FROM agent_account_balances WHERE workspace_id = $1 AND account = $2), 0)::bigint`
@@ -320,8 +337,9 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 // agentMovement posts delta µLXC of an agent key's spending against its agent, inside the caller's
 // spend transaction: delta > 0 (a spend or a hold) moves agent → spend and is refused, as a sub-budget
 // refusal, beyond the agent's balance; delta < 0 (a settle's refund or a release) moves it back.
-// isAgent is false for a key attached to no agent, which keeps its per-key ceiling and posts nothing.
-func agentMovement(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta int64, kind, ref string) (isAgent bool, err error) {
+// isAgent is false for a key attached to no agent, which keeps its per-key ceiling and posts nothing. model is
+// the model the question asked for, which the postings name (B28.301): a refund names its hold's or debit's.
+func agentMovement(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta int64, kind, ref, model string) (isAgent bool, err error) {
 	var agentID, workspaceID string
 	err = tx.QueryRow(ctx,
 		`SELECT a.id, a.workspace_id FROM agent_account_keys k JOIN agent_accounts a ON a.id = k.agent_id
@@ -360,7 +378,7 @@ func agentMovement(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta int
 			return true, err
 		}
 	}
-	return true, postEntry(ctx, tx, workspaceID, kind, ref, leg{agentAccount(agentID), -delta}, leg{"spend", delta})
+	return true, postModelEntry(ctx, tx, workspaceID, kind, ref, model, leg{agentAccount(agentID), -delta}, leg{"spend", delta})
 }
 
 // AgentBook reads a workspace's agents and reconciles them with its LXC balance.

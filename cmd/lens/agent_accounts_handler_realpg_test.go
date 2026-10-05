@@ -287,7 +287,9 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 	if code, _ := call(proxyKey, http.MethodPut, rules, set); code != http.StatusForbidden {
 		t.Errorf("a proxy key set an agent's rules: %d, want 403", code)
 	}
-	for _, bad := range []string{`{"daily_limit":5}`, `{"active_from":"09:00"}`, `{"timezone":"Mars/Olympus"}`, `{"daily_limit_ulxc":-1}`, `{"hourly_limit_ulxc":-1}`} {
+	for _, bad := range []string{`{"daily_limit":5}`, `{"active_from":"09:00"}`, `{"timezone":"Mars/Olympus"}`, `{"daily_limit_ulxc":-1}`, `{"hourly_limit_ulxc":-1}`,
+		`{"model_daily_limits_ulxc":{"claude-opus-4-1":-1}}`, `{"model_daily_limits_ulxc":{"":5}}`,
+		`{"model_daily_limits_ulxc":{"claude-opus-4-1":1,"Claude-Opus-4-1-20250805":2}}`} {
 		if code, body := call(owner, http.MethodPut, rules, bad); code != http.StatusBadRequest {
 			t.Errorf("PUT %s = %d %s, want 400", bad, code, body)
 		}
@@ -312,6 +314,19 @@ func TestAgentRoutes_TheOwnerSetsAnAgentsRulesAndDecidesItsApprovals(t *testing.
 		}
 		if _, body := call(owner, http.MethodGet, rules, ""); !strings.Contains(body, tc.hourly) || !strings.Contains(body, tc.weekly) {
 			t.Errorf("after PUT %s, GET = %s, want %s and %s", tc.put, body, tc.hourly, tc.weekly)
+		}
+	}
+	// B28.301: a model's daily cap is saved and read back; rules saved without the field keep it, and {} clears it.
+	for _, tc := range []struct{ put, want string }{
+		{`{"model_daily_limits_ulxc":{"claude-opus-4-1":5000000,"claude-haiku-4-5":0}}`, `"model_daily_limits_ulxc":{"claude-opus-4-1":5000000}`},
+		{`{"daily_limit_ulxc":10000000}`, `"model_daily_limits_ulxc":{"claude-opus-4-1":5000000}`},
+		{`{"model_daily_limits_ulxc":{}}`, `"model_daily_limits_ulxc":{}`},
+	} {
+		if code, body := call(owner, http.MethodPut, rules, tc.put); code != http.StatusOK || !strings.Contains(body, tc.want) {
+			t.Errorf("PUT %s = %d %s, want %s", tc.put, code, body, tc.want)
+		}
+		if _, body := call(proxyKey, http.MethodGet, rules, ""); !strings.Contains(body, tc.want) {
+			t.Errorf("after PUT %s, GET = %s, want %s", tc.put, body, tc.want)
 		}
 	}
 	if code, _ := call(owner, http.MethodPut, "/v1/workspaces/"+ws+"/agents/agt_nobody/rules", set); code != http.StatusNotFound {
