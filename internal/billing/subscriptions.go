@@ -140,6 +140,8 @@ type SubscriptionStatus struct {
 	SubscriptionID    string     `json:"subscription_id,omitempty"`
 	Livemode          bool       `json:"livemode"`
 	BYOK              bool       `json:"byok"` // B27.26: the BYOK plan — own provider keys, no tokens charged
+	// B32.10: the plan PlanOf answers — free with no paying subscription, enterprise on an operator's contract.
+	Plan string `json:"plan"`
 }
 
 // GetSubscription answers "is this workspace paying". `Subscribed` is TRUE only for
@@ -161,15 +163,17 @@ func (s *Service) GetSubscription(ctx context.Context, workspaceID string) (*Sub
 		FROM subscriptions
 		WHERE workspace_id = $1 AND status IN ('trialing','active','past_due','unpaid')`, workspaceID).
 		Scan(&st.SubscriptionID, &status, &periodEnd, &st.CancelAtPeriodEnd, &st.Livemode, &st.BYOK)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return &SubscriptionStatus{Subscribed: false}, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("billing: subscription read: %w", err)
 	}
-	st.Status = status
-	st.CurrentPeriodEnd = periodEnd
-	st.Subscribed = status == "trialing" || status == "active" || status == "past_due"
+	if err == nil {
+		st.Status = status
+		st.CurrentPeriodEnd = periodEnd
+		st.Subscribed = status == "trialing" || status == "active" || status == "past_due"
+	}
+	if st.Plan, err = PlanOf(ctx, s.pool, workspaceID); err != nil {
+		return nil, err
+	}
 	return &st, nil
 }
 
@@ -210,7 +214,16 @@ func (s *Service) SetCancelAtPeriodEnd(ctx context.Context, workspaceID string, 
 	if err != nil {
 		return nil, fmt.Errorf("billing: update subscription %s: %w", subID, err)
 	}
+	return s.statusOf(sub), nil
+}
+
+// statusOf is the read model of Stripe's answer to an update: what the webhook it provokes will record.
+func (s *Service) statusOf(sub *stripe.Subscription) *SubscriptionStatus {
 	status := string(sub.Status)
+	plan, _, byok := s.subscriptionPlan(sub)
+	if plan == "" {
+		plan = FreePlan
+	}
 	return &SubscriptionStatus{
 		Subscribed:        status == "trialing" || status == "active" || status == "past_due",
 		Status:            status,
@@ -218,7 +231,9 @@ func (s *Service) SetCancelAtPeriodEnd(ctx context.Context, workspaceID string, 
 		CancelAtPeriodEnd: sub.CancelAtPeriodEnd,
 		SubscriptionID:    sub.ID,
 		Livemode:          sub.Livemode,
-	}, nil
+		BYOK:              byok,
+		Plan:              plan,
+	}
 }
 
 // ErrSamePlan is a plan change to the plan the workspace is already on.
@@ -226,6 +241,18 @@ var ErrSamePlan = errors.New("billing: the workspace is already on that plan")
 
 // ErrBYOKPlanChange is a plan change to or from BYOK (B27.26): cancel, then subscribe to the other plan.
 var ErrBYOKPlanChange = errors.New("billing: BYOK is not changed to or from another plan — cancel, then subscribe")
+
+// ErrPlanKindChange is a plan change between a company plan and a personal one (B32.10): a personal plan's fee
+// includes usage and a company plan's does not, so there is no allowance to prorate — cancel, then subscribe.
+var ErrPlanKindChange = errors.New("billing: a company plan (Team, Business) and a personal plan (Plus, Pro, Max) are not changed one into the other — cancel, then subscribe")
+
+// companyPlans are the plans a company buys for its workspace (B32.10). Their fee buys no tokens, so a period
+// of one grants no allowance.
+var companyPlans = map[string]bool{TeamPlan: true, BusinessPlan: true}
+
+// subscriptionPlans are the plans a subscriptions row may name (migration 0196's CHECK).
+var subscriptionPlans = map[string]bool{"plus": true, "pro": true, "max": true, BYOKPlan: true,
+	TeamPlan: true, BusinessPlan: true, EnterprisePlan: true}
 
 // planChangeAPI is the Stripe call that moves a subscription to another price (B18.14). Optional, as
 // subscriptionAPI is kept apart from stripeAPI: a test double without it still builds a Service.
@@ -249,10 +276,10 @@ func (s *Service) ChangePlan(ctx context.Context, workspaceID, plan string) (*Su
 	if price == "" {
 		return nil, fmt.Errorf("%w %q", ErrUnknownPlan, plan)
 	}
-	var subID, current string
+	var subID, current, currentPlan string
 	err := s.pool.QueryRow(ctx, `
-		SELECT stripe_subscription_id, COALESCE(price_id, '') FROM subscriptions
-		WHERE workspace_id = $1 AND status IN ('trialing','active','past_due','unpaid')`, workspaceID).Scan(&subID, &current)
+		SELECT stripe_subscription_id, COALESCE(price_id, ''), COALESCE(plan, '') FROM subscriptions
+		WHERE workspace_id = $1 AND status IN ('trialing','active','past_due','unpaid')`, workspaceID).Scan(&subID, &current, &currentPlan)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoLiveSubscription
 	}
@@ -264,22 +291,96 @@ func (s *Service) ChangePlan(ctx context.Context, workspaceID, plan string) (*Su
 	}
 	// B27.26: BYOK carries no allowance and the others carry one, so a prorated move between them has no
 	// allowance to move — it is a cancel and a new subscription.
-	if plan == BYOKPlan || current == s.subPlans[BYOKPlan] {
+	if plan == BYOKPlan || current == s.subPlans[BYOKPlan] || currentPlan == BYOKPlan {
 		return nil, ErrBYOKPlanChange
+	}
+	// B32.10: Team and Business change into each other (a move to Business drops Team's BYOK add-on, which
+	// Business includes), and Plus, Pro and Max into each other — never one kind into the other.
+	if companyPlans[plan] != companyPlans[currentPlan] {
+		return nil, ErrPlanKindChange
 	}
 	sub, err := api.ChangeSubscriptionPrice(ctx, subID, price)
 	if err != nil {
 		return nil, fmt.Errorf("billing: change plan of %s: %w", subID, err)
 	}
-	status := string(sub.Status)
-	return &SubscriptionStatus{
-		Subscribed:        status == "trialing" || status == "active" || status == "past_due",
-		Status:            status,
-		CurrentPeriodEnd:  periodEnd(sub),
-		CancelAtPeriodEnd: sub.CancelAtPeriodEnd,
-		SubscriptionID:    sub.ID,
-		Livemode:          sub.Livemode,
-	}, nil
+	return s.statusOf(sub), nil
+}
+
+// ErrBYOKAddon is the BYOK add-on asked of a subscription other than Team (B32.10): Business includes BYOK,
+// and the personal plans and BYOK itself do not take it.
+var ErrBYOKAddon = errors.New("billing: the BYOK add-on is Team's")
+
+// ErrBYOKAddonUnchanged is adding the add-on to a Team subscription that has it, or removing it from one that
+// does not.
+var ErrBYOKAddonUnchanged = errors.New("billing: the Team subscription already is as asked")
+
+// addonAPI adds and removes a subscription's further items (B32.10). Optional, like planChangeAPI.
+type addonAPI interface {
+	AddSubscriptionItem(ctx context.Context, subscriptionID, priceID, idempotencyKey string) (*stripe.Subscription, error)
+	RemoveSubscriptionItem(ctx context.Context, subscriptionID, priceID string) (*stripe.Subscription, error)
+}
+
+// SetBYOKAddon adds (on) or removes BYOK, Team's add-on, as a second item of the workspace's live Team
+// subscription, with proration (B32.10). Like a plan change it writes nothing: the
+// customer.subscription.updated Stripe sends records byok.
+func (s *Service) SetBYOKAddon(ctx context.Context, workspaceID string, on bool) (*SubscriptionStatus, error) {
+	api, ok := s.subStripe.(addonAPI)
+	byokPrice := s.subPlans[BYOKPlan]
+	if !ok || byokPrice == "" {
+		return nil, ErrNoSubscriptionPrice
+	}
+	var (
+		subID, plan string
+		byok        bool
+		lastEvent   time.Time
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT stripe_subscription_id, COALESCE(plan, ''), byok, last_event_at FROM subscriptions
+		WHERE workspace_id = $1 AND status IN ('trialing','active','past_due','unpaid')`, workspaceID).
+		Scan(&subID, &plan, &byok, &lastEvent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNoLiveSubscription
+	}
+	if err != nil {
+		return nil, fmt.Errorf("billing: live subscription lookup: %w", err)
+	}
+	if plan != TeamPlan {
+		if plan == "" {
+			plan = "an unnamed plan"
+		}
+		return nil, fmt.Errorf("%w — this workspace is on %s", ErrBYOKAddon, plan)
+	}
+	if byok == on {
+		return nil, ErrBYOKAddonUnchanged
+	}
+	var sub *stripe.Subscription
+	if on {
+		// One add per recorded state: a second click before the webhook lands is the same request to Stripe.
+		sub, err = api.AddSubscriptionItem(ctx, subID, byokPrice, fmt.Sprintf("byok-addon-%s-%d", subID, lastEvent.UnixNano()))
+	} else {
+		sub, err = api.RemoveSubscriptionItem(ctx, subID, byokPrice)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("billing: BYOK add-on on %s: %w", subID, err)
+	}
+	return s.statusOf(sub), nil
+}
+
+// BackfillPlans names the plan of every subscription recorded before subscriptions.plan existed (B32.10),
+// from the Price it bills: each Price this Service sells under a plan's name. Migration 0196 names BYOK's.
+func (s *Service) BackfillPlans(ctx context.Context) (int64, error) {
+	var n int64
+	for plan, priceID := range s.subPlans {
+		if !subscriptionPlans[plan] || priceID == "" {
+			continue
+		}
+		ct, err := s.pool.Exec(ctx, `UPDATE subscriptions SET plan = $1 WHERE plan IS NULL AND price_id = $2`, plan, priceID)
+		if err != nil {
+			return n, fmt.Errorf("billing: backfill the %s plan: %w", plan, err)
+		}
+		n += ct.RowsAffected()
+	}
+	return n, nil
 }
 
 // applyPlanChange moves an already-granted period's allowance to the plan the subscription is now on
@@ -437,6 +538,7 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 		return
 	}
 
+	plan, priceID, byok := s.subscriptionPlan(&sub)
 	if applied {
 		if haveRow {
 			if _, err := tx.Exec(ctx, `
@@ -444,9 +546,10 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 				SET status = $1, current_period_end = $2, cancel_at_period_end = $3,
 				    price_id = COALESCE(NULLIF($4, ''), price_id),
 				    byok = CASE WHEN $4 = '' THEN byok ELSE $7 END,
+				    plan = CASE WHEN $4 = '' THEN plan ELSE NULLIF($8::text, '') END,
 				    last_event_at = $5, updated_at = NOW()
 				WHERE stripe_subscription_id = $6`,
-				status, periodEnd(&sub), sub.CancelAtPeriodEnd, priceOf(&sub), eventAt, sub.ID, s.isBYOK(&sub)); err != nil {
+				status, periodEnd(&sub), sub.CancelAtPeriodEnd, priceID, eventAt, sub.ID, byok, plan); err != nil {
 				s.fail(w, "subscription update", event.ID, err)
 				return
 			}
@@ -476,10 +579,10 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 			_, err = sp.Exec(ctx, `
 				INSERT INTO subscriptions
 					(workspace_id, stripe_subscription_id, stripe_customer_id, price_id,
-					 status, current_period_end, cancel_at_period_end, livemode, last_event_at, byok)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-				wsID, sub.ID, customerOf(&sub), priceOf(&sub), status, periodEnd(&sub),
-				sub.CancelAtPeriodEnd, event.Livemode, eventAt, s.isBYOK(&sub))
+					 status, current_period_end, cancel_at_period_end, livemode, last_event_at, byok, plan)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11::text, ''))`,
+				wsID, sub.ID, customerOf(&sub), priceID, status, periodEnd(&sub),
+				sub.CancelAtPeriodEnd, event.Livemode, eventAt, byok, plan)
 			if isUniqueViolation(err) {
 				_ = sp.Rollback(ctx)
 				s.log.Warn("billing webhook: workspace already has a live subscription — NOT applied",
@@ -545,8 +648,9 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 	// ⚠ ONLY WHEN THE EVENT WAS APPLIED and the subscription is actually live. A
 	// stale or refused event must not hand out an allowance — that would be the
 	// out-of-order bug wearing a different hat, and an expensive one.
-	// B27.26: BYOK is a platform fee, not tokens — its period grants no allowance.
-	if applied && (status == "active" || status == "trialing") && !s.isBYOK(&sub) {
+	// B27.26: BYOK is a platform fee, not tokens — its period grants no allowance; nor, B32.10, does a company
+	// plan's.
+	if applied && (status == "active" || status == "trialing") && plan != BYOKPlan && !companyPlans[plan] {
 		if end := periodEnd(&sub); end != nil {
 			start := periodStart(&sub)
 			created, err := s.grantPeriod(ctx, wsID, sub.ID, start, *end, feeOf(&sub))
@@ -559,7 +663,7 @@ func (s *Service) handleSubscription(w http.ResponseWriter, ctx context.Context,
 			}
 			// B18.14 — a period already granted whose price changed: a plan change moves its allowance.
 			if err == nil && !created {
-				if err := s.applyPlanChange(ctx, event.ID, wsID, sub.ID, priceOf(&sub), start, *end, feeOf(&sub), eventAt); err != nil {
+				if err := s.applyPlanChange(ctx, event.ID, wsID, sub.ID, priceID, start, *end, feeOf(&sub), eventAt); err != nil {
 					s.log.Error("billing: plan change allowance failed (subscription state IS recorded)",
 						"event", event.ID, "workspace", wsID, "subscription", sub.ID, "err", err)
 				}
@@ -689,25 +793,50 @@ func customerOf(sub *stripe.Subscription) string {
 	return sub.Customer.ID
 }
 
-// isBYOK reports whether sub bills the BYOK Price (B27.26): by its lookup key, or as the Price this Service
-// sells as BYOK.
-func (s *Service) isBYOK(sub *stripe.Subscription) bool {
-	if sub.Items == nil || len(sub.Items.Data) == 0 || sub.Items.Data[0] == nil || sub.Items.Data[0].Price == nil {
-		return false
+// subscriptionPlan reads what sub bills from its items' Prices (B32.10). plan is the plan of its first item
+// that is not the BYOK Price — or byok, when that is all it bills — and "" when that Price is no plan's;
+// priceID is that item's Price. byok is whether it bills the BYOK Price at all (B27.26, and Team's add-on), or
+// is Business, which includes it. All three are empty for a payload with no items.
+func (s *Service) subscriptionPlan(sub *stripe.Subscription) (plan, priceID string, byok bool) {
+	if sub.Items == nil {
+		return "", "", false
 	}
-	pr := sub.Items.Data[0].Price
-	return pr.LookupKey == BYOKLookupKey || (pr.ID != "" && pr.ID == s.subPlans[BYOKPlan])
+	byokPrice := ""
+	for _, it := range sub.Items.Data {
+		if it == nil || it.Price == nil {
+			continue
+		}
+		p := s.planOfPrice(it.Price)
+		switch {
+		case p == BYOKPlan:
+			byok = true
+			if byokPrice == "" {
+				byokPrice = it.Price.ID
+			}
+		case priceID == "":
+			plan, priceID = p, it.Price.ID
+		}
+	}
+	if priceID == "" && byok {
+		plan, priceID = BYOKPlan, byokPrice
+	}
+	return plan, priceID, byok || plan == BusinessPlan
 }
 
-func priceOf(sub *stripe.Subscription) string {
-	if sub.Items == nil || len(sub.Items.Data) == 0 {
-		return ""
+// planOfPrice names the plan a Price is: by its lookup key, or as the Price this Service sells under that
+// plan's name. "" for a Price that is no plan's.
+func (s *Service) planOfPrice(pr *stripe.Price) string {
+	for plan, key := range PlanLookupKeys {
+		if pr.LookupKey == key {
+			return plan
+		}
 	}
-	it := sub.Items.Data[0]
-	if it == nil || it.Price == nil {
-		return ""
+	for plan, id := range s.subPlans {
+		if pr.ID != "" && pr.ID == id && subscriptionPlans[plan] {
+			return plan
+		}
 	}
-	return it.Price.ID
+	return ""
 }
 
 // feeOf is what one period of this subscription is billed at, in US cents: the

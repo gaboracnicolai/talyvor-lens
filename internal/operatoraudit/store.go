@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -70,6 +71,18 @@ func invalid(format string, a ...any) error {
 // Record appends e and returns it as stored. Actor and action are required; a zero OccurredAt means now,
 // and a set one must fall within the last 24 hours.
 func (s *Store) Record(ctx context.Context, e Entry) (Entry, error) {
+	e, err := validate(e)
+	if err != nil {
+		return Entry{}, err
+	}
+	if s.pool == nil {
+		return Entry{}, errors.New("operatoraudit: no database configured")
+	}
+	return insert(ctx, s.pool, e)
+}
+
+// validate trims e and refuses an entry the trail will not take.
+func validate(e Entry) (Entry, error) {
 	e.Actor = strings.TrimSpace(e.Actor)
 	e.Action = strings.TrimSpace(e.Action)
 	e.Target = strings.TrimSpace(e.Target)
@@ -92,14 +105,31 @@ func (s *Store) Record(ctx context.Context, e Entry) (Entry, error) {
 	case !e.OccurredAt.IsZero() && e.OccurredAt.Before(time.Now().Add(-maxBackdate)):
 		return Entry{}, invalid("at is more than 24 hours ago; record an action when it happens")
 	}
-	if s.pool == nil {
-		return Entry{}, errors.New("operatoraudit: no database configured")
+	return e, nil
+}
+
+// queryRower is a pool or a transaction.
+type queryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// RecordIn is Record inside the caller's transaction (B32.10): an operator's change and its row in the trail
+// commit together, or neither does.
+func RecordIn(ctx context.Context, tx pgx.Tx, e Entry) (Entry, error) {
+	e.OccurredAt = time.Time{}
+	e, err := validate(e)
+	if err != nil {
+		return Entry{}, err
 	}
+	return insert(ctx, tx, e)
+}
+
+func insert(ctx context.Context, q queryRower, e Entry) (Entry, error) {
 	var at any
 	if !e.OccurredAt.IsZero() {
 		at = e.OccurredAt
 	}
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO operator_audit (actor, action, target, detail, occurred_at)
 		VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, now()))
 		RETURNING id, occurred_at, recorded_at`,

@@ -1,0 +1,153 @@
+package billing
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/fees"
+	"github.com/talyvor/lens/internal/operatoraudit"
+)
+
+// workspace_plan.go — B32.10: which plan a workspace is on, for every feature that charges or gates by plan.
+// A plan is bought through Stripe (subscriptions.plan, set by the webhook from the Price), or — Enterprise —
+// contracted and invoiced by the operator, who records it here with the contract's own fees.
+
+// PlanQuerier is a pool or a transaction.
+type PlanQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// PlanOf answers which plan workspaceID is on: enterprise while the operator has it on a contract; else the
+// plan its paying subscription bills (trialing, active or past_due — unpaid is Stripe having given up); else
+// free. A subscription whose Price is no plan's answers free too: there is no plan to charge or gate it by.
+func PlanOf(ctx context.Context, db PlanQuerier, workspaceID string) (string, error) {
+	var plan string
+	err := db.QueryRow(ctx, `
+		SELECT COALESCE(
+			(SELECT plan FROM workspace_contracts WHERE workspace_id = $1),
+			(SELECT plan FROM subscriptions
+			 WHERE workspace_id = $1 AND status IN ('trialing','active','past_due')),
+			$2)`, workspaceID, FreePlan).Scan(&plan)
+	if err != nil {
+		return "", fmt.Errorf("billing: the plan of %s: %w", workspaceID, err)
+	}
+	return plan, nil
+}
+
+// Contract is an Enterprise contract as the operator records it: the contract's own platform fee and FX
+// margin, in basis points, where it agreed one (nil follows the enterprise figure in internal/fees).
+type Contract struct {
+	WorkspaceID    string    `json:"workspace_id"`
+	Plan           string    `json:"plan"`
+	PlatformFeeBPS *int64    `json:"platform_fee_bps"`
+	FXMarginBPS    *int64    `json:"fx_margin_bps"`
+	Reference      string    `json:"reference"`
+	SetBy          string    `json:"set_by"`
+	SetAt          time.Time `json:"set_at"`
+}
+
+// ErrInvalidContract is a contract the operator cannot record; the message says why.
+var ErrInvalidContract = errors.New("billing: invalid contract")
+
+// ErrNoContract is ending a contract a workspace does not have.
+var ErrNoContract = errors.New("billing: the workspace has no contract")
+
+// ContractOf is workspaceID's contract, or nil.
+func ContractOf(ctx context.Context, db PlanQuerier, workspaceID string) (*Contract, error) {
+	c := Contract{WorkspaceID: workspaceID}
+	err := db.QueryRow(ctx, `
+		SELECT plan, platform_fee_bps, fx_margin_bps, reference, set_by, set_at
+		FROM workspace_contracts WHERE workspace_id = $1`, workspaceID).
+		Scan(&c.Plan, &c.PlatformFeeBPS, &c.FXMarginBPS, &c.Reference, &c.SetBy, &c.SetAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("billing: the contract of %s: %w", workspaceID, err)
+	}
+	return &c, nil
+}
+
+// SetContract puts c.WorkspaceID on an Enterprise contract, or replaces its terms, and records the operator who
+// did it in the operator audit trail — in one transaction.
+func SetContract(ctx context.Context, pool *pgxpool.Pool, c Contract, actor string) (*Contract, error) {
+	c.WorkspaceID, c.Reference, actor = strings.TrimSpace(c.WorkspaceID), strings.TrimSpace(c.Reference), strings.TrimSpace(actor)
+	if c.Plan == "" {
+		c.Plan = EnterprisePlan
+	}
+	switch {
+	case c.Plan != EnterprisePlan:
+		return nil, fmt.Errorf("%w: the operator contracts only %s; %q is bought through Stripe", ErrInvalidContract, EnterprisePlan, c.Plan)
+	case c.WorkspaceID == "":
+		return nil, fmt.Errorf("%w: no workspace", ErrInvalidContract)
+	case actor == "":
+		return nil, fmt.Errorf("%w: no operator named — X-Talyvor-Operator or the body's actor", ErrInvalidContract)
+	}
+	for name, v := range map[string]*int64{"platform_fee_bps": c.PlatformFeeBPS, "fx_margin_bps": c.FXMarginBPS} {
+		if v != nil && (*v < 0 || *v > fees.BPSDenominator) {
+			return nil, fmt.Errorf("%w: %s is %d, outside 0–%d basis points", ErrInvalidContract, name, *v, fees.BPSDenominator)
+		}
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM workspaces WHERE id = $1)`, c.WorkspaceID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: no workspace %q", ErrInvalidContract, c.WorkspaceID)
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO workspace_contracts (workspace_id, plan, platform_fee_bps, fx_margin_bps, reference, set_by)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (workspace_id) DO UPDATE SET plan = EXCLUDED.plan, platform_fee_bps = EXCLUDED.platform_fee_bps,
+			fx_margin_bps = EXCLUDED.fx_margin_bps, reference = EXCLUDED.reference, set_by = EXCLUDED.set_by, set_at = NOW()
+		RETURNING set_by, set_at`,
+		c.WorkspaceID, c.Plan, c.PlatformFeeBPS, c.FXMarginBPS, c.Reference, actor).Scan(&c.SetBy, &c.SetAt); err != nil {
+		return nil, fmt.Errorf("billing: record the contract: %w", err)
+	}
+	detail, _ := json.Marshal(c)
+	if _, err := operatoraudit.RecordIn(ctx, tx, operatoraudit.Entry{Actor: actor, Action: "workspace.contract.set",
+		Target: "workspace:" + c.WorkspaceID, Detail: string(detail)}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// EndContract takes workspaceID off its contract, back to the plan its subscription bills (or free), and records
+// the operator who did it in the operator audit trail — in one transaction.
+func EndContract(ctx context.Context, pool *pgxpool.Pool, workspaceID, actor string) error {
+	if actor = strings.TrimSpace(actor); actor == "" {
+		return fmt.Errorf("%w: no operator named — X-Talyvor-Operator or the body's actor", ErrInvalidContract)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	ct, err := tx.Exec(ctx, `DELETE FROM workspace_contracts WHERE workspace_id = $1`, workspaceID)
+	if err != nil {
+		return fmt.Errorf("billing: end the contract: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNoContract
+	}
+	if _, err := operatoraudit.RecordIn(ctx, tx, operatoraudit.Entry{Actor: actor, Action: "workspace.contract.end",
+		Target: "workspace:" + workspaceID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

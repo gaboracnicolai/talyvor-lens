@@ -153,9 +153,25 @@ func (l *LiveStripe) CreateSubscriptionCheckoutSession(ctx context.Context, p Su
 }
 
 // PlanLookupKeys are the Stripe lookup keys B13.1 gave the plan Prices (talyvor-lens #548), by plan — and
-// BYOK's (B27.26).
+// BYOK's (B27.26), Team's and Business's (B32.10).
 var PlanLookupKeys = map[string]string{"plus": "talyvor_plus_monthly", "pro": "talyvor_pro_monthly", "max": "talyvor_max_monthly",
-	BYOKPlan: BYOKLookupKey}
+	BYOKPlan: BYOKLookupKey, TeamPlan: TeamLookupKey, BusinessPlan: BusinessLookupKey}
+
+// Team and Business, the company plans, per workspace: Nicolai's decision of 5 Oct 2026 — Team $49 and
+// Business $299 a month; BYOK is Team's add-on and is included in Business; Enterprise is contracted and
+// invoiced by the operator, from $2,500 a month, and is never a Stripe Price. Like BYOKUSDCents, the amounts
+// are used only to create the TEST-MODE Prices when the account has none (EnsurePlanPrices); the live Prices
+// are created in Stripe, with these lookup keys.
+const (
+	TeamPlan          = "team"
+	TeamLookupKey     = "talyvor_team_monthly"
+	TeamUSDCents      = 4900
+	BusinessPlan      = "business"
+	BusinessLookupKey = "talyvor_business_monthly"
+	BusinessUSDCents  = 29900
+	EnterprisePlan    = "enterprise"
+	FreePlan          = "free"
+)
 
 // BYOK, the one subscription tier (B27.26): a workspace brings its own provider keys and pays the platform
 // fee instead of tokens. BYOKUSDCents is Nicolai's decision of 4 Oct 2026 — $199 a month — and is used only
@@ -172,11 +188,30 @@ func (l *LiveStripe) EnsureBYOKPrice(ctx context.Context) error {
 	if LiveKey(l.key) {
 		return fmt.Errorf("billing: the BYOK Price is created from code only in Stripe test mode")
 	}
-	list := &stripe.PriceListParams{Active: stripe.Bool(true), LookupKeys: []*string{stripe.String(BYOKLookupKey)}}
+	return l.ensureMonthlyPrice(ctx, BYOKLookupKey, BYOKUSDCents, "Talyvor BYOK")
+}
+
+// EnsurePlanPrices creates the Team Price ($49 a month, talyvor_team_monthly) and the Business Price ($299 a
+// month, talyvor_business_monthly) in this key's Stripe account, each only when it has no active one (B32.10).
+// TEST-MODE keys only: a live key is refused before Stripe is called.
+func (l *LiveStripe) EnsurePlanPrices(ctx context.Context) error {
+	if LiveKey(l.key) {
+		return fmt.Errorf("billing: the Team and Business Prices are created from code only in Stripe test mode")
+	}
+	if err := l.ensureMonthlyPrice(ctx, TeamLookupKey, TeamUSDCents, "Talyvor Team"); err != nil {
+		return err
+	}
+	return l.ensureMonthlyPrice(ctx, BusinessLookupKey, BusinessUSDCents, "Talyvor Business")
+}
+
+// ensureMonthlyPrice creates a monthly USD Price of cents under lookupKey, with a product of that name, unless
+// the account already has an active Price with that lookup key.
+func (l *LiveStripe) ensureMonthlyPrice(ctx context.Context, lookupKey string, cents int64, product string) error {
+	list := &stripe.PriceListParams{Active: stripe.Bool(true), LookupKeys: []*string{stripe.String(lookupKey)}}
 	list.Context = ctx
 	it := price.Client{B: l.backend(), Key: l.key}.List(list)
 	for it.Next() {
-		if it.Price().LookupKey == BYOKLookupKey {
+		if it.Price().LookupKey == lookupKey {
 			return nil
 		}
 	}
@@ -185,10 +220,10 @@ func (l *LiveStripe) EnsureBYOKPrice(ctx context.Context) error {
 	}
 	params := &stripe.PriceParams{
 		Currency:    stripe.String(string(stripe.CurrencyUSD)),
-		UnitAmount:  stripe.Int64(BYOKUSDCents),
+		UnitAmount:  stripe.Int64(cents),
 		Recurring:   &stripe.PriceRecurringParams{Interval: stripe.String(string(stripe.PriceRecurringIntervalMonth))},
-		LookupKey:   stripe.String(BYOKLookupKey),
-		ProductData: &stripe.PriceProductDataParams{Name: stripe.String("Talyvor BYOK")},
+		LookupKey:   stripe.String(lookupKey),
+		ProductData: &stripe.PriceProductDataParams{Name: stripe.String(product)},
 	}
 	params.Context = ctx
 	_, err := price.Client{B: l.backend(), Key: l.key}.New(params)
@@ -261,12 +296,75 @@ func (l *LiveStripe) ChangeSubscriptionPrice(ctx context.Context, subscriptionID
 	if err != nil {
 		return nil, err
 	}
-	if cur.Items == nil || len(cur.Items.Data) == 0 || cur.Items.Data[0] == nil {
+	// B32.10: the plan's item, never Team's BYOK add-on — and a move to Business, which includes BYOK, drops
+	// the add-on in the same update, so it is never billed twice.
+	var plan *stripe.SubscriptionItem
+	var addons []*stripe.SubscriptionItem
+	if cur.Items != nil {
+		for _, it := range cur.Items.Data {
+			switch {
+			case it == nil:
+			case it.Price != nil && it.Price.LookupKey == BYOKLookupKey:
+				addons = append(addons, it)
+			case plan == nil:
+				plan = it
+			}
+		}
+	}
+	if plan == nil {
 		return nil, fmt.Errorf("subscription %s has no item to change", subscriptionID)
 	}
 	params := &stripe.SubscriptionParams{
-		Items:             []*stripe.SubscriptionItemsParams{{ID: stripe.String(cur.Items.Data[0].ID), Price: stripe.String(priceID)}},
+		Items:             []*stripe.SubscriptionItemsParams{{ID: stripe.String(plan.ID), Price: stripe.String(priceID)}},
 		ProrationBehavior: stripe.String("create_prorations"),
+	}
+	if len(addons) > 0 {
+		get := &stripe.PriceParams{}
+		get.Context = ctx
+		to, err := price.Client{B: l.backend(), Key: l.key}.Get(priceID, get)
+		if err != nil {
+			return nil, err
+		}
+		if to.LookupKey == BusinessLookupKey {
+			for _, it := range addons {
+				params.Items = append(params.Items, &stripe.SubscriptionItemsParams{ID: stripe.String(it.ID), Deleted: stripe.Bool(true)})
+			}
+		}
+	}
+	params.Context = ctx
+	return subscription.Client{B: l.backend(), Key: l.key}.Update(subscriptionID, params)
+}
+
+// AddSubscriptionItem adds priceID to the subscription as a further item, with proration (B32.10: Team's BYOK
+// add-on), idempotent on idempotencyKey. Stripe sends customer.subscription.updated, which records it.
+func (l *LiveStripe) AddSubscriptionItem(ctx context.Context, subscriptionID, priceID, idempotencyKey string) (*stripe.Subscription, error) {
+	params := &stripe.SubscriptionParams{
+		Items:             []*stripe.SubscriptionItemsParams{{Price: stripe.String(priceID)}},
+		ProrationBehavior: stripe.String("create_prorations"),
+	}
+	params.Context = ctx
+	params.SetIdempotencyKey(idempotencyKey)
+	return subscription.Client{B: l.backend(), Key: l.key}.Update(subscriptionID, params)
+}
+
+// RemoveSubscriptionItem removes the subscription's items billed at priceID, with proration (B32.10).
+func (l *LiveStripe) RemoveSubscriptionItem(ctx context.Context, subscriptionID, priceID string) (*stripe.Subscription, error) {
+	get := &stripe.SubscriptionParams{}
+	get.Context = ctx
+	cur, err := subscription.Client{B: l.backend(), Key: l.key}.Get(subscriptionID, get)
+	if err != nil {
+		return nil, err
+	}
+	params := &stripe.SubscriptionParams{ProrationBehavior: stripe.String("create_prorations")}
+	if cur.Items != nil {
+		for _, it := range cur.Items.Data {
+			if it != nil && it.Price != nil && it.Price.ID == priceID {
+				params.Items = append(params.Items, &stripe.SubscriptionItemsParams{ID: stripe.String(it.ID), Deleted: stripe.Bool(true)})
+			}
+		}
+	}
+	if len(params.Items) == 0 {
+		return cur, nil
 	}
 	params.Context = ctx
 	return subscription.Client{B: l.backend(), Key: l.key}.Update(subscriptionID, params)

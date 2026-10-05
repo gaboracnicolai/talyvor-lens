@@ -54,7 +54,9 @@ func (s *b2726Stripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "url": "/v1/prices", "has_more": false, "data": data})
 	case r.URL.Path == "/v1/prices":
-		p := map[string]any{"id": "price_test_byok", "object": "price", "active": true, "lookup_key": form.Get("lookup_key"),
+		// B32.10: Lens creates Team's and Business's beside BYOK's; each is named for its plan.
+		id := "price_test_" + strings.TrimSuffix(strings.TrimPrefix(form.Get("lookup_key"), "talyvor_"), "_monthly")
+		p := map[string]any{"id": id, "object": "price", "active": true, "lookup_key": form.Get("lookup_key"),
 			"currency": form.Get("currency"), "unit_amount": json.Number(form.Get("unit_amount"))}
 		s.prices = append(s.prices, p)
 		_ = json.NewEncoder(w).Encode(p)
@@ -120,12 +122,12 @@ func TestB2726_ATestUserSubscribesToBYOKAt199AndAddsTheirKey(t *testing.T) {
 		t.Fatalf("the BYOK Price Lens created = %v on key %q; want $199 (19900 usd cents) a month under %s on %s",
 			created.form, created.key, billing.BYOKLookupKey, key)
 	}
-	if plans["byok"] != "price_test_byok" || len(plans) != 4 {
-		t.Fatalf("the test-mode account's plans = %v; want plus, pro, max and byok", plans)
+	if plans["byok"] != "price_test_byok" || len(plans) != 6 {
+		t.Fatalf("the test-mode account's plans = %v; want plus, pro, max, byok, team and business", plans)
 	}
 	// The next boot finds it and creates no second one.
 	sellablePlans(ctx, nil, key, liveStripe, "LENS_BILLING_SUBSCRIPTION_PLANS")
-	if n := len(fake.prices); n != 4 {
+	if n := len(fake.prices); n != 6 {
 		t.Fatalf("after a second boot the account holds %d Prices; want the BYOK Price created once", n)
 	}
 

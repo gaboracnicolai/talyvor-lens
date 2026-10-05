@@ -1734,6 +1734,7 @@ func run() error {
 	}
 	if len(livePlans) > 0 {
 		billingSvc = billingSvc.WithPlans(liveStripe, livePlans)
+		backfillPlans(ctx, billingSvc, "live")
 	}
 	sellsSubscriptions := cfg.BillingSubscriptionPriceID != "" || len(livePlans) > 0
 	// B13.2 — a subscriber's final royalty earnings come off their next renewal invoice (capped at the fee).
@@ -1778,6 +1779,7 @@ func run() error {
 			ForTestWorkspaces(true).WithAllowance(cfg.SubscriptionAllowanceULXC)
 		if plans := sellablePlans(ctx, cfg.StripeTestSubscriptionPlans, cfg.StripeTestSecretKey, testStripe, "LENS_STRIPE_TEST_SUBSCRIPTION_PLANS"); len(plans) > 0 {
 			testBillingSvc = testBillingSvc.WithPlans(testStripe, plans)
+			backfillPlans(ctx, testBillingSvc, "test-mode")
 		}
 		billingSvc = billingSvc.ForTestWorkspaces(false)
 		// B25.6 — its marketplace bill is metered, refunded and cleared, its seller account made and paid, and its
@@ -2256,6 +2258,11 @@ func run() error {
 	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
 	// B27.19 — an operator retries one: the global key or a moderator key, recorded under the operator's name.
 	r.Post("/v1/admin/marketplace/parked-uses/{useID}/retry", requireAdminOrModerator(authManager, moderatorKeys, newMarketParkedUseRetryHandler(marketStore)))
+	// B32.10 — the operator puts a workspace on an Enterprise contract, with its fees, or ends one; each is
+	// recorded in the operator audit trail in the same transaction.
+	r.Get("/v1/admin/workspaces/{wsID}/contract", requireAdmin(authManager, newContractGetHandler(pool)))
+	r.Put("/v1/admin/workspaces/{wsID}/contract", requireAdmin(authManager, newContractPutHandler(pool)))
+	r.Delete("/v1/admin/workspaces/{wsID}/contract", requireAdmin(authManager, newContractDeleteHandler(pool)))
 	// B27.28 — the operator audit trail: the web app records each operator action on its moderator key
 	// (naming the operator), operators read it back filtered or as CSV. Append-only in the database (0182).
 	// operator_audit_handler.go.
@@ -3480,7 +3487,8 @@ func run() error {
 						status = http.StatusNotImplemented
 					case errors.Is(err, billing.ErrUnknownPlan):
 						status = http.StatusBadRequest
-					case errors.Is(err, billing.ErrNoLiveSubscription), errors.Is(err, billing.ErrSamePlan), errors.Is(err, billing.ErrBYOKPlanChange):
+					case errors.Is(err, billing.ErrNoLiveSubscription), errors.Is(err, billing.ErrSamePlan), errors.Is(err, billing.ErrBYOKPlanChange),
+						errors.Is(err, billing.ErrPlanKindChange):
 						status = http.StatusConflict
 					}
 					writeJSONErr(w, status, err.Error())
@@ -3488,6 +3496,15 @@ func run() error {
 				}
 				writeJSONOK(w, http.StatusOK, st)
 			}
+		}))
+
+		// B32.10 — BYOK, Team's add-on: POST adds it to the live Team subscription as a second item, DELETE
+		// removes it, each prorated. Like a plan change it writes no row — the webhook that follows records byok.
+		subs.post(authed, "/v1/workspaces/{wsID}/billing/subscription/byok", billRoute.onSubscriptions(true, func(svc *billing.Service) http.HandlerFunc {
+			return newBYOKAddonHandler(svc, true)
+		}))
+		subs.delete(authed, "/v1/workspaces/{wsID}/billing/subscription/byok", billRoute.onSubscriptions(true, func(svc *billing.Service) http.HandlerFunc {
+			return newBYOKAddonHandler(svc, false)
 		}))
 
 		// B1.5 — cancel and resume (billing_routes.go). Cancel is AT PERIOD END.
