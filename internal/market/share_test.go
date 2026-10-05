@@ -2,19 +2,22 @@ package market
 
 import "testing"
 
-// B20.2 — a seller keeps all of what they earn up to US$1M lifetime, and 85% of whatever lies past it.
-func TestSellerShare_FullUpToAMillionThen85Percent(t *testing.T) {
-	const million = FullShareUpToUSDMicros
+// B32.8 — Talyvor takes its fee from the first dollar: the seller keeps gross × (10,000 − take) ÷ 10,000,
+// rounded down, so the fee rounds up and the two never sum to more than the sale.
+func TestSellerShare_TakeFromTheFirstDollar(t *testing.T) {
 	for _, c := range []struct {
-		lifetime, gross, want int64
+		gross, takeBPS, want int64
 	}{
-		{0, 5_000, 5_000},                       // well under: all of it
-		{million - 1_000, 5_000, 1_000 + 3_400}, // straddling: 1,000 in full, 85% of the other 4,000
-		{million, 5_000, 4_250},                 // at the line: 85%
-		{3 * million, 100, 85},
+		{1_000_000, 1500, 850_000}, // a $1.00 listing sale: 85% to the seller
+		{1_000_000, 500, 950_000},  // a $1.00 payment to another company's agent: 95%
+		{1, 1500, 0},               // one µUSD: the fee rounds up, never the share
+		{7, 1500, 5},               // 5.95 → 5
+		{5_000_000_000_000, 1500, 4_250_000_000_000}, // past the old US$1M line: still 85%
+		{1 << 62, 1500, 3_919_933_115_663_279_718},   // ⌊2⁶² × 0.85⌋: no overflow on the multiply
+		{1_000_000, 0, 1_000_000},                    // no take: all of it
 	} {
-		if got := SellerShare(c.lifetime, c.gross); got != c.want {
-			t.Errorf("SellerShare(lifetime %d, gross %d) = %d, want %d", c.lifetime, c.gross, got, c.want)
+		if got := SellerShare(c.gross, c.takeBPS); got != c.want {
+			t.Errorf("SellerShare(gross %d, take %d bps) = %d, want %d", c.gross, c.takeBPS, got, c.want)
 		}
 	}
 }

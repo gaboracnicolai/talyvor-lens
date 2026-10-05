@@ -150,8 +150,8 @@ func TestMarketSafety_HeldAtReviewReportedTakenDownAndRefunded(t *testing.T) {
 	}
 	payInvoice("in_old", now.AddDate(0, 0, -30), now.AddDate(0, 0, -20))
 	payInvoice("in_recent", now.AddDate(0, 0, -10), now)
-	if e, err := store.SellerEarnings(ctx, seller, time.Now()); err != nil || e.PayableUSDMicros != 10_000 || e.InHoldbackUSDMicros != 5_000 {
-		t.Fatalf("before the takedown the seller's earnings = %+v (%v), want two of 5,000 µUSD, one in the holdback", e, err)
+	if e, err := store.SellerEarnings(ctx, seller, time.Now()); err != nil || e.PayableUSDMicros != 8_500 || e.InHoldbackUSDMicros != 4_250 {
+		t.Fatalf("before the takedown the seller's earnings = %+v (%v), want two shares of 4,250 µUSD (85%% of 5,000), one in the holdback", e, err)
 	}
 
 	// Someone reports it; reporting again changes nothing; it joins the admin's queue.
@@ -206,8 +206,8 @@ func TestMarketSafety_HeldAtReviewReportedTakenDownAndRefunded(t *testing.T) {
 	if _, ok := refunds[old]; ok || len(refunds) != 3 {
 		t.Fatalf("refunds = %+v; want three, and none for the use whose earning left the holdback", refunds)
 	}
-	if got := refunds[recent]; got.gross != 5_000 || got.reversed != 5_000 || !got.credited || got.credit == "" {
-		t.Errorf("the cleared use's refund = %+v, want 5,000 µUSD back to the buyer and the seller's 5,000 reversed, credited", got)
+	if got := refunds[recent]; got.gross != 5_000 || got.reversed != 4_250 || !got.credited || got.credit == "" {
+		t.Errorf("the cleared use's refund = %+v, want 5,000 µUSD back to the buyer and the seller's 4,250 reversed, credited", got)
 	}
 	if got := refunds[unpaid]; got.gross != 5_000 || got.reversed != 0 || !got.credited {
 		t.Errorf("the unpaid use's refund = %+v, want 5,000 µUSD back and nothing to reverse, credited", got)
@@ -231,9 +231,9 @@ func TestMarketSafety_HeldAtReviewReportedTakenDownAndRefunded(t *testing.T) {
 	if _, err := store.MeterPending(ctx, svc, -time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if e, err := store.SellerEarnings(ctx, seller, time.Now()); err != nil || e.PayableUSDMicros != 5_000 || e.InHoldbackUSDMicros != 0 ||
-		e.RefundedUSDMicros != 5_000 || e.PendingUses != 0 {
-		t.Errorf("after the takedown the seller's earnings = %+v (%v); want 5,000 payable, 5,000 refunded, nothing pending", e, err)
+	if e, err := store.SellerEarnings(ctx, seller, time.Now()); err != nil || e.PayableUSDMicros != 4_250 || e.InHoldbackUSDMicros != 0 ||
+		e.RefundedUSDMicros != 4_250 || e.PendingUses != 0 {
+		t.Errorf("after the takedown the seller's earnings = %+v (%v); want 4,250 payable, 4,250 refunded, nothing pending", e, err)
 	}
 	var unpaidEarned int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM market_earnings WHERE use_id = $1`, unpaid).Scan(&unpaidEarned); err != nil || unpaidEarned != 0 {

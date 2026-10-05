@@ -118,7 +118,7 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 		return &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "owner-" + ws, Scopes: []string{auth.ScopeKeys}}
 	}
 	code, body := call(person(seller), "seller-jwt", http.MethodPost, "/v1/workspaces/"+seller+"/marketplace/listings",
-		`{"kind":"prompt","title":"Summariser","price_per_use_ulxc":50000,"artifact":{"template":"Summarise {{text}} in three bullets.","model":"gpt-5-mini"}}`)
+		`{"kind":"prompt","title":"Summariser","price_per_use_ulxc":10000000,"artifact":{"template":"Summarise {{text}} in three bullets.","model":"gpt-5-mini"}}`)
 	if code != http.StatusCreated {
 		t.Fatalf("publish = %d %s", code, body)
 	}
@@ -162,15 +162,15 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 	if len(ranAs) != 1 || ranAs[0] != "/v1/proxy/openai/v1/chat/completions Bearer buyer-jwt gpt-5-mini" {
 		t.Errorf("the listing ran as %q, want once through the proxy with the buyer's credential", ranAs)
 	}
-	if got := row(first.ID); got != (useRow{charge: "billed", price: 50_000, ran: true, metered: true}) {
+	if got := row(first.ID); got != (useRow{charge: "billed", price: 10_000_000, ran: true, metered: true}) {
 		t.Errorf("the use's row = %+v", got)
 	}
-	want := meterEvent{"talyvor_marketplace_use", "cus_" + buyer, first.ID, 50_000}
+	want := meterEvent{"talyvor_marketplace_use", "cus_" + buyer, first.ID, 10_000_000}
 	if len(stripeFake.events) != 1 || stripeFake.events[0] != want || len(stripeFake.subs) != 1 {
 		t.Fatalf("Stripe got events %+v and subscriptions %v, want one event %+v on one subscription", stripeFake.events, stripeFake.subs, want)
 	}
-	if e := earnings(); e.PayableUSDMicros != 0 || e.PendingUses != 1 || e.PendingUSDMicros != 5_000 {
-		t.Fatalf("before the buyer paid, the seller's earnings = %+v; want nothing payable and one use of 5,000 µUSD pending", e)
+	if e := earnings(); e.PayableUSDMicros != 0 || e.PendingUses != 1 || e.PendingUSDMicros != 850_000 {
+		t.Fatalf("before the buyer paid, the seller's earnings = %+v; want nothing payable and one use pending, the seller's 850,000 µUSD of it", e)
 	}
 
 	// A second use, after the period the first invoice covers (Stripe's periods are whole seconds); and Stripe
@@ -211,8 +211,9 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 		t.Errorf("Stripe has %d meter events, want only the buyer's two", len(stripeFake.events))
 	}
 
-	// The buyer pays the invoice covering the first use only: that use clears and the seller earns 5,000 µUSD
-	// (0.05 LXC = $0.005, all of it under the first US$1M). A replay changes nothing.
+	// The buyer pays the invoice covering the first use only: that use clears — 10 LXC = $1.00, the seller's
+	// first sale — and Talyvor keeps 15% of it from the first dollar (B32.8): the seller earns 850,000 µUSD and
+	// the fee is 150,000. A replay changes nothing.
 	paid := func(invoiceID, subscription string, end time.Time) int {
 		t.Helper()
 		obj := map[string]any{"id": invoiceID, "object": "invoice", "subscription": subscription,
@@ -238,21 +239,22 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 		}
 	}
 	var n int
-	var gross, share int64
+	var gross, share, fee int64
 	var payableAt, clearedAt time.Time
-	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(gross_usd_micros), 0), COALESCE(sum(share_usd_micros), 0), max(payable_at), max(cleared_at)
-		FROM market_earnings WHERE seller_workspace_id = $1`, seller).Scan(&n, &gross, &share, &payableAt, &clearedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(gross_usd_micros), 0), COALESCE(sum(share_usd_micros), 0), COALESCE(sum(fee_usd_micros), 0),
+		max(payable_at), max(cleared_at) FROM market_earnings WHERE seller_workspace_id = $1`, seller).Scan(&n, &gross, &share, &fee, &payableAt, &clearedAt); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || gross != 5_000 || share != 5_000 || !payableAt.Equal(clearedAt.Add(market.Holdback)) {
-		t.Fatalf("earnings = %d rows, gross %d, share %d, payable %v after clearing %v; want one of 5,000 µUSD payable after 14 days",
-			n, gross, share, payableAt, clearedAt)
+	if n != 1 || gross != 1_000_000 || share != 850_000 || fee != 150_000 || !payableAt.Equal(clearedAt.Add(market.Holdback)) {
+		t.Fatalf("earnings = %d rows, gross %d, share %d, fee %d, payable %v after clearing %v; want one of gross 1,000,000, share 850,000 and fee 150,000 µUSD payable after 14 days",
+			n, gross, share, fee, payableAt, clearedAt)
 	}
 	if !row(first.ID).cleared || row(second.ID).cleared {
 		t.Errorf("cleared: first %v, second %v; want only the use the paid invoice carried", row(first.ID).cleared, row(second.ID).cleared)
 	}
-	if e := earnings(); e.PayableUSDMicros != 5_000 || e.InHoldbackUSDMicros != 5_000 || e.AvailableUSDMicros != 0 || e.PendingUses != 1 {
-		t.Errorf("the seller's earnings = %+v, want 5,000 µUSD payable, all of it in the holdback, and the second use still pending", e)
+	if e := earnings(); e.PayableUSDMicros != 850_000 || e.InHoldbackUSDMicros != 850_000 || e.AvailableUSDMicros != 0 || e.PendingUses != 1 ||
+		len(e.Earnings) != 1 || e.Earnings[0].FeeUSDMicros != 150_000 {
+		t.Errorf("the seller's earnings = %+v, want 850,000 µUSD payable, all of it in the holdback, Talyvor's 150,000 named, and the second use still pending", e)
 	}
 
 	// A buyer's agent: its rules judge the use, and its charge goes on its company's bill.
@@ -264,13 +266,13 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 		t.Fatal(err)
 	}
 	agentKey := &auth.AuthContext{WorkspaceID: buyer, AuthMethod: auth.MethodWorkspaceKey, APIKeyID: "key-researcher", Scopes: []string{auth.ScopeProxy}}
-	if _, err := bank.SetAgentRules(ctx, buyer, agent.ID, economy.AgentRules{MaxPerRequestULXC: 40_000}); err != nil {
+	if _, err := bank.SetAgentRules(ctx, buyer, agent.ID, economy.AgentRules{MaxPerRequestULXC: 8_000_000}); err != nil {
 		t.Fatal(err)
 	}
 	if code, _, body := use(agentKey, "tlv_agent", buyer); code != http.StatusForbidden || !strings.Contains(body, "limit per request") {
 		t.Errorf("an agent's use beyond its limit per request = %d %s, want 403", code, body)
 	}
-	if _, err := bank.SetAgentRules(ctx, buyer, agent.ID, economy.AgentRules{MaxPerRequestULXC: 100_000, ApprovalAboveULXC: 10_000}); err != nil {
+	if _, err := bank.SetAgentRules(ctx, buyer, agent.ID, economy.AgentRules{MaxPerRequestULXC: 20_000_000, ApprovalAboveULXC: 2_000_000}); err != nil {
 		t.Fatal(err)
 	}
 	code, _, body = use(agentKey, "tlv_agent", buyer)
@@ -284,7 +286,7 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, byAgent, body := use(agentKey, "tlv_agent", buyer)
-	if code != http.StatusOK || row(byAgent.ID) != (useRow{charge: "billed", agent: agent.ID, price: 50_000, ran: true, metered: true}) {
+	if code != http.StatusOK || row(byAgent.ID) != (useRow{charge: "billed", agent: agent.ID, price: 10_000_000, ran: true, metered: true}) {
 		t.Fatalf("the agent's approved use = %d %s, row %+v", code, body, row(byAgent.ID))
 	}
 	if last := stripeFake.events[len(stripeFake.events)-1]; len(stripeFake.events) != 3 || last.customer != "cus_"+buyer || last.identifier != byAgent.ID {
@@ -300,7 +302,7 @@ func TestMarketUse_PayPerUseMeteredThenClearedAndTheSellerEarns(t *testing.T) {
 	// This month's bill lists each billed use once: the buyer's two and their agent's one.
 	_, body = call(person(buyer), "buyer-jwt", http.MethodGet, "/v1/workspaces/"+buyer+"/marketplace/bill", "")
 	var bill market.Bill
-	if _ = json.Unmarshal([]byte(body), &bill); len(bill.Lines) != 3 || bill.TotalULXC != 150_000 || bill.Lines[0].Title != "Summariser" {
-		t.Errorf("the buyer's bill = %s, want three uses of 50,000 µLXC", body)
+	if _ = json.Unmarshal([]byte(body), &bill); len(bill.Lines) != 3 || bill.TotalULXC != 30_000_000 || bill.Lines[0].Title != "Summariser" {
+		t.Errorf("the buyer's bill = %s, want three uses of 10,000,000 µLXC", body)
 	}
 }

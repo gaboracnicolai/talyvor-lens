@@ -385,6 +385,14 @@ func openAPIPaths() map[string]any {
 				"responses": map[string]any{"204": map[string]any{"description": "removed"}},
 			},
 		},
+		"/v1/public/fees": map[string]any{
+			"get": map[string]any{
+				"summary":     "Get every fee Talyvor charges",
+				"description": "No key needed. Basis points (100 = 1%) unless named minor units: market_take_bps (listing sales; the seller keeps the rest), services_take_bps, compute_take_bps, lending_fee_bps, merchant_fee_bps, merchant_a2a_fee_bps, and by plan platform_fee_bps and fx_margin_bps; intl_payment_fee_minor by currency.",
+				"security":    []map[string]any{},
+				"responses":   map[string]any{"200": map[string]any{"description": "every fee setting"}},
+			},
+		},
 		"/v1/workspaces/{wsID}/spend/current-month": map[string]any{
 			"get": map[string]any{
 				"summary":   "Get current-month spend for a workspace",

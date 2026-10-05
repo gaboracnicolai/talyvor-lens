@@ -124,7 +124,7 @@ func TestPayOut_ALiveKeyPaysOutOnlyLiveEarnings(t *testing.T) {
 		t.Fatalf("a live key paid %d payouts and sent %v out of test earnings; want nothing", livePayouts, live.transfers)
 	}
 
-	// $50 of uses on a LIVE invoice: a live key pays out exactly those $50.
+	// $50 of uses on a LIVE invoice: a live key pays out exactly the seller's 85% of them, $42.50 (B32.8).
 	use("use_live", 500_000_000, paid.Add(-1*time.Hour))
 	if n, err := s.ClearInvoice(ctx, buyer, "in_live", paid.Add(-2*time.Hour), paid, paid, true); err != nil || n != 1 {
 		t.Fatalf("clear the live invoice = %d, %v", n, err)
@@ -137,8 +137,8 @@ func TestPayOut_ALiveKeyPaysOutOnlyLiveEarnings(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT id, gross_usd_micros FROM market_payouts WHERE workspace_id = $1 AND livemode`, seller).Scan(&id, &gross); err != nil {
 		t.Fatalf("the live payout: %v", err)
 	}
-	if gross != 50_000_000 || len(live.transfers) != 1 || live.transfers[0] != id {
-		t.Fatalf("the live payout is $%d.%02d with transfers %v; want $50.00, sent once as %s", gross/1_000_000, gross/10_000%100, live.transfers, id)
+	if gross != 42_500_000 || len(live.transfers) != 1 || live.transfers[0] != id {
+		t.Fatalf("the live payout is $%d.%02d with transfers %v; want $42.50, sent once as %s", gross/1_000_000, gross/10_000%100, live.transfers, id)
 	}
 	var unsent bool
 	if err := pool.QueryRow(ctx, `SELECT paid_at IS NULL FROM market_payouts WHERE id = 'mpo_test_unsent'`).Scan(&unsent); err != nil || !unsent {

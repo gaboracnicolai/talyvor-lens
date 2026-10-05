@@ -85,13 +85,13 @@ func TestAgentPayment_AnotherCompanysAgentIsPaidThroughTheMarketplace(t *testing
 		return out
 	}
 
-	// Procurement pays the other company's translator 20 LXC: through the marketplace, onto its company's bill.
-	code, body := pay(translator, 20_000_000)
+	// Procurement pays the other company's translator 10 LXC ($1.00): through the marketplace, onto its company's bill.
+	code, body := pay(translator, 10_000_000)
 	var paid economy.AgentPayment
 	if _ = json.Unmarshal([]byte(body), &paid); code != http.StatusOK || paid.Via != "marketplace" || paid.ToWorkspaceID != payeeCo {
 		t.Fatalf("the payment = %d %s, want it through the marketplace to %s", code, body, payeeCo)
 	}
-	want := payerCo + " " + payeeCo + " " + translator + " 20000000 billed "
+	want := payerCo + " " + payeeCo + " " + translator + " 10000000 billed "
 	if got := payments(); len(got) != 1 || got[0] != want {
 		t.Fatalf("market_uses = %q, want one billed payment %q", got, want)
 	}
@@ -100,8 +100,8 @@ func TestAgentPayment_AnotherCompanysAgentIsPaidThroughTheMarketplace(t *testing
 		t.Fatalf("agent_postings = %d (%v), want none: the company's bill carries it, not the agents' balances", postings, err)
 	}
 
-	// Within the paying agent's rules: another 15 LXC today would pass its 30 LXC daily limit.
-	if code, body := pay(translator, 15_000_000); code != http.StatusForbidden || !strings.Contains(body, "daily") || len(payments()) != 1 {
+	// Within the paying agent's rules: another 25 LXC today would pass its 30 LXC daily limit.
+	if code, body := pay(translator, 25_000_000); code != http.StatusForbidden || !strings.Contains(body, "daily") || len(payments()) != 1 {
 		t.Fatalf("a payment past the daily limit = %d %s, %d payments; want 403 and nothing recorded", code, body, len(payments()))
 	}
 	// A company that shares a card with the payer is the same party: refused, nothing recorded.
@@ -120,17 +120,18 @@ func TestAgentPayment_AnotherCompanysAgentIsPaidThroughTheMarketplace(t *testing
 			t.Fatal(err)
 		}
 	}
-	if len(billFake.events) != 1 || billFake.events[0].value != 20_000_000 || billFake.events[0].identifier != paid.EntryID || billFake.events[0].customer != "cus_"+payerCo {
+	if len(billFake.events) != 1 || billFake.events[0].value != 10_000_000 || billFake.events[0].identifier != paid.EntryID || billFake.events[0].customer != "cus_"+payerCo {
 		t.Fatalf("meter events = %+v, want the payment once on %s's bill", billFake.events, payerCo)
 	}
 	code, body = call(payerCo, http.MethodGet, "/v1/workspaces/"+payerCo+"/marketplace/bill", "")
 	var bill market.Bill
-	if _ = json.Unmarshal([]byte(body), &bill); code != http.StatusOK || bill.TotalULXC != 20_000_000 || len(bill.Lines) != 1 ||
+	if _ = json.Unmarshal([]byte(body), &bill); code != http.StatusOK || bill.TotalULXC != 10_000_000 || len(bill.Lines) != 1 ||
 		bill.Lines[0].Title != "Payment to translator" || bill.Lines[0].PayeeAgentID != translator || bill.Lines[0].Memo != "translation of the Q3 report" {
 		t.Fatalf("the payer's bill = %d %s", code, body)
 	}
 
-	// The payer's company pays that bill today: the payee's company earns the $2, payable after the holdback.
+	// The payer's company pays that bill today: the payee's company earns the $1.00 less Talyvor's 5% on a payment
+	// to another company's agent (LENS_SERVICES_TAKE_BPS, B32.8), payable after the holdback.
 	now := time.Now()
 	obj := map[string]any{"id": "in_payer_1", "object": "invoice", "subscription": "sub_market_1",
 		"status_transitions": map[string]any{"paid_at": now.Unix()},
@@ -144,17 +145,19 @@ func TestAgentPayment_AnotherCompanysAgentIsPaidThroughTheMarketplace(t *testing
 	if r.ServeHTTP(w, req); w.Code != http.StatusOK {
 		t.Fatalf("invoice.paid = %d %s", w.Code, w.Body.String())
 	}
-	var share int64
+	var gross, share, fee int64
 	var payableAt time.Time
-	if err := pool.QueryRow(ctx, `SELECT share_usd_micros, payable_at FROM market_earnings WHERE use_id = $1 AND seller_workspace_id = $2`,
-		paid.EntryID, payeeCo).Scan(&share, &payableAt); err != nil || share != 2_000_000 || payableAt.Before(now.Add(market.Holdback-time.Minute)) {
-		t.Fatalf("the payee's earning = %d payable %v (%v), want $2 payable 14 days after the bill was paid", share, payableAt, err)
+	if err := pool.QueryRow(ctx, `SELECT gross_usd_micros, share_usd_micros, fee_usd_micros, payable_at FROM market_earnings WHERE use_id = $1 AND seller_workspace_id = $2`,
+		paid.EntryID, payeeCo).Scan(&gross, &share, &fee, &payableAt); err != nil || gross != 1_000_000 || share != 950_000 || fee != 50_000 ||
+		payableAt.Before(now.Add(market.Holdback-time.Minute)) {
+		t.Fatalf("the payee's earning = gross %d share %d fee %d payable %v (%v), want 1,000,000 → share 950,000 and fee 50,000 µUSD, payable 14 days after the bill was paid",
+			gross, share, fee, payableAt, err)
 	}
-	if e, err := store.SellerEarnings(ctx, payeeCo, now); err != nil || e.InHoldbackUSDMicros != 2_000_000 || e.AvailableUSDMicros != 0 ||
+	if e, err := store.SellerEarnings(ctx, payeeCo, now); err != nil || e.InHoldbackUSDMicros != 950_000 || e.AvailableUSDMicros != 0 ||
 		len(e.Earnings) != 1 || e.Earnings[0].PayeeAgentID != translator {
-		t.Fatalf("today the payee's earnings = %+v (%v), want $2 in the holdback, earned by the translator", e, err)
+		t.Fatalf("today the payee's earnings = %+v (%v), want $0.95 in the holdback, earned by the translator", e, err)
 	}
-	if e, err := store.SellerEarnings(ctx, payeeCo, now.Add(market.Holdback+time.Hour)); err != nil || e.AvailableUSDMicros != 2_000_000 {
-		t.Fatalf("after the holdback the payee's earnings = %+v (%v), want $2 available", e, err)
+	if e, err := store.SellerEarnings(ctx, payeeCo, now.Add(market.Holdback+time.Hour)); err != nil || e.AvailableUSDMicros != 950_000 {
+		t.Fatalf("after the holdback the payee's earnings = %+v (%v), want $0.95 available", e, err)
 	}
 }

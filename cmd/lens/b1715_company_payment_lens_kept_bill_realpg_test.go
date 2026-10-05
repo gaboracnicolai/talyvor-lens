@@ -75,9 +75,9 @@ func TestB1715_ATestCompanysAgentPaysAnotherCompanysAgentOnALensKeptBill(t *test
 		t.Fatalf("the payer's bill = %d %s, want one unpaid 0.7 LXC line \"Payment to Supplier\"", code, body)
 	}
 	now := time.Now()
-	if e, err := store.SellerEarnings(ctx, tPayee, now); err != nil || e.PendingUses != 1 || e.PendingUSDMicros != 70_000 ||
+	if e, err := store.SellerEarnings(ctx, tPayee, now); err != nil || e.PendingUses != 1 || e.PendingUSDMicros != 66_500 ||
 		e.PayableUSDMicros != 0 || e.AvailableUSDMicros != 0 {
-		t.Fatalf("before the bill is paid the payee's earnings = %+v (%v), want $0.07 pending and nothing payable", e, err)
+		t.Fatalf("before the bill is paid the payee's earnings = %+v (%v), want $0.07 less Talyvor's 5%% (B32.8) pending and nothing payable", e, err)
 	}
 
 	// The metering pass puts it on the Lens-kept bill; the synthetic bill-pay pays it, past the holdback.
@@ -87,8 +87,8 @@ func TestB1715_ATestCompanysAgentPaysAnotherCompanysAgentOnALensKeptBill(t *test
 	if _, n, err := store.PayTestBill(ctx, tPayer, now); err != nil || n != 1 {
 		t.Fatalf("paying the test bill cleared %d use(s) (%v), want 1", n, err)
 	}
-	if e, err := store.SellerEarnings(ctx, tPayee, now); err != nil || e.PendingUses != 0 || e.AvailableUSDMicros != 70_000 {
-		t.Fatalf("after the bill is paid the payee's earnings = %+v (%v), want $0.07 available", e, err)
+	if e, err := store.SellerEarnings(ctx, tPayee, now); err != nil || e.PendingUses != 0 || e.AvailableUSDMicros != 66_500 {
+		t.Fatalf("after the bill is paid the payee's earnings = %+v (%v), want $0.0665 available", e, err)
 	}
 
 	// A real company on this Lens has no bill: refused, and nothing is recorded.
