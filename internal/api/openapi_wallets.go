@@ -68,6 +68,8 @@ func openAPIWalletSchemas() map[string]any {
 				"monthly_limit_ulxc":   ulxc,
 				"model_daily_limits_ulxc": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "integer", "format": "int64"},
 					"description": "a model, named as the agent asks for it, to what the agent may spend on it in a day, in timezone; absent keeps the stored caps"},
+				"payee_daily_limits_ulxc": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "integer", "format": "int64"},
+					"description": "µLXC it may pay one payee in a day, by the payee's id as the payee lists name it (a company's counts its agents and listings); a payment past it is refused and posts nothing. Absent keeps the stored caps; saved, it replaces them whole"},
 				"requests_per_minute":    map[string]any{"type": "integer", "description": "the requests to models it may make in any sixty seconds; one more is refused 429 and holds nothing. Absent keeps the stored cap"},
 				"approval_above_ulxc":    map[string]any{"type": "integer", "format": "int64", "description": "a request that could cost more waits for a person's approval"},
 				"allowed_models":         strs,

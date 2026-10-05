@@ -89,6 +89,7 @@ class AgentRules(TypedDict, total=False):
     allowed_providers: list[str]
     allowed_payees: list[str]
     blocked_payees: list[str]
+    payee_daily_limits_ulxc: dict[str, int]
     active_from: str
     active_until: str
     timezone: str
