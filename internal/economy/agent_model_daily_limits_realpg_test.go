@@ -3,6 +3,7 @@ package economy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestB28301_AnOpusHoldOverItsCapWritesNothing_AHaikuHoldWritesOnePosting(t *
 		return n
 	}
 	refused := func(err error) bool {
-		return errors.Is(err, ErrAgentRule) && strings.Contains(err.Error(), `daily limit of 5 LXC for the model "`+opus+`"`)
+		return errors.Is(err, ErrAgentRule) && strings.Contains(err.Error(), "daily limit of 5 LXC for the model")
 	}
 
 	// 3 LXC of Opus is under its cap: one posting on the agent's account, naming Opus.
@@ -80,16 +81,19 @@ func TestB28301_AnOpusHoldOverItsCapWritesNothing_AHaikuHoldWritesOnePosting(t *
 		t.Fatal(err)
 	}
 
-	// Another 3 LXC of Opus is over it: refused, and nothing is written anywhere in the workspace's book.
+	// Another 3 LXC of Opus is over it, however the agent spells it: refused, and nothing is written anywhere
+	// in the workspace's book.
 	before := all()
-	if err := hold(opus, "res-opus-2", t1); !refused(err) {
-		t.Fatalf("an Opus hold over its cap = %v, want the Opus daily limit's refusal", err)
+	for i, spelt := range []string{opus, "Claude-Opus-4-1", "claude-opus-4-1-20250805", "claude-opus-4-1-latest"} {
+		if err := hold(spelt, fmt.Sprintf("res-opus-2-%d", i), t1); !refused(err) {
+			t.Fatalf("a %s hold over Opus's cap = %v, want the Opus daily limit's refusal", spelt, err)
+		}
 	}
 	if n := all(); n != before {
 		t.Fatalf("an Opus hold over its cap wrote %d postings, want none", n-before)
 	}
 	var reservations int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM lxc_reservations WHERE reservation_id = 'res-opus-2'`).Scan(&reservations); err != nil || reservations != 0 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM lxc_reservations WHERE reservation_id LIKE 'res-opus-2-%'`).Scan(&reservations); err != nil || reservations != 0 {
 		t.Fatalf("an Opus hold over its cap left %d reservations (%v), want none", reservations, err)
 	}
 

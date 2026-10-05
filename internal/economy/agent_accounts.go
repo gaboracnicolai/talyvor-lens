@@ -91,10 +91,10 @@ func postEntry(ctx context.Context, tx pgx.Tx, workspaceID, kind, ref string, le
 	return nil
 }
 
-// postModelEntry is postEntry for a question to a model: its postings name the model, which is what an agent's
-// per-model daily caps count (B28.301). An empty model names none.
+// postModelEntry is postEntry for a question to a model: its postings name the model as its caps know it
+// (modelCapKey), which is what an agent's per-model daily caps count (B28.301). An empty model names none.
 func postModelEntry(ctx context.Context, tx pgx.Tx, workspaceID, kind, ref, model string, legs ...leg) error {
-	if model == "" {
+	if model = modelCapKey(model); model == "" {
 		return postEntry(ctx, tx, workspaceID, kind, ref, legs...)
 	}
 	entry := uuid.New()

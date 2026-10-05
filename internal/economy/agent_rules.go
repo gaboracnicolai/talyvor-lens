@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 	_ "time/tzdata" // active hours are read in any IANA zone; the runtime image carries no zoneinfo
 
@@ -161,13 +163,19 @@ func (r AgentRules) validate() error {
 			return errors.New("a limit cannot be negative (0 means no limit)")
 		}
 	}
+	named := map[string]string{}
 	for model, v := range r.ModelDailyLimitsULXC {
-		if model == "" {
+		key := modelCapKey(model)
+		if key == "" {
 			return errors.New("a model's daily limit needs the model's name")
 		}
 		if v < 0 {
 			return fmt.Errorf("the daily limit for %q cannot be negative (0 means no limit)", model)
 		}
+		if other, ok := named[key]; ok {
+			return fmt.Errorf("%q and %q are the same model; give it one daily limit", other, model)
+		}
+		named[key] = model
 	}
 	if (r.ActiveFrom == "") != (r.ActiveUntil == "") {
 		return errors.New("active_from and active_until go together")
@@ -212,7 +220,18 @@ func scanAgentRules(row pgx.Row) (AgentRules, error) {
 	return r, err
 }
 
-// modelLimitsJSON is the JSON a model's daily caps are saved as, with the zeros (no cap) left out; nil when absent.
+// modelCapSuffix is what a dated snapshot or a -latest alias adds to its model's name.
+var modelCapSuffix = regexp.MustCompile(`-([0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}|latest)$`)
+
+// modelCapKey is the name a per-model daily cap knows a model by (B28.301): lower-case, without a dated
+// snapshot's or a -latest alias's suffix, so an agent cannot step around its cap on claude-opus-4-1 by asking
+// for Claude-Opus-4-1 or claude-opus-4-1-20250805. Caps are saved, judged and counted under it.
+func modelCapKey(model string) string {
+	return modelCapSuffix.ReplaceAllString(strings.ToLower(strings.TrimSpace(model)), "")
+}
+
+// modelLimitsJSON is the JSON a model's daily caps are saved as, by modelCapKey, with the zeros (no cap) left
+// out; nil when absent.
 func modelLimitsJSON(limits map[string]int64) (*string, error) {
 	if limits == nil {
 		return nil, nil
@@ -220,7 +239,7 @@ func modelLimitsJSON(limits map[string]int64) (*string, error) {
 	kept := map[string]int64{}
 	for model, v := range limits {
 		if v > 0 {
-			kept[model] = v
+			kept[modelCapKey(model)] = v
 		}
 	}
 	b, err := json.Marshal(kept)
@@ -348,7 +367,7 @@ func agentSpentSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID string
 
 // modelDailyLimit is r's daily cap on model (B28.301), 0 for none, and when its day began in loc as of now.
 func (r AgentRules) modelDailyLimit(model string, now time.Time, loc *time.Location) (int64, time.Time) {
-	return r.ModelDailyLimitsULXC[model], time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	return r.ModelDailyLimitsULXC[modelCapKey(model)], time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 }
 
 // agentModelSpentSince is what an agent has spent on model since `since`: its questions to it, held or debited,
@@ -357,7 +376,7 @@ func agentModelSpentSince(ctx context.Context, tx pgx.Tx, workspaceID, agentID, 
 	var spent int64
 	err := tx.QueryRow(ctx, `SELECT COALESCE(-sum(amount_ulxc), 0)::bigint FROM agent_postings
 		WHERE workspace_id = $1 AND account = $2 AND model = $3 AND created_at >= $4 AND kind IN ('spend', 'hold', 'settle', 'release')`,
-		workspaceID, agentAccount(agentID), model, since).Scan(&spent)
+		workspaceID, agentAccount(agentID), modelCapKey(model), since).Scan(&spent)
 	return spent, err
 }
 
