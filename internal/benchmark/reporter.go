@@ -1,8 +1,7 @@
 // Package benchmark parses `go test -bench` output and renders it as
 // markdown / HTML for the public benchmarks page. The parser is a pure
-// string transformer with no I/O, no goroutines, and no dependencies
-// beyond stdlib — same package can be vendored standalone if anyone
-// wants to generate benchmark pages for a different Go project.
+// string transformer with no I/O and no goroutines. Beyond stdlib it
+// depends only on internal/brand, for the page's colours, type and mark.
 package benchmark
 
 import (
@@ -10,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/talyvor/lens/internal/brand"
 )
 
 type BenchmarkResult struct {
@@ -118,28 +119,35 @@ func GenerateMarkdown(results []BenchmarkResult, goVersion, osArch string) strin
 	return b.String()
 }
 
-// GenerateHTML renders the results in the same dark Talyvor theme the
-// dashboard + status page use. Includes the competitive-comparison
-// section the spec mandates — known LiteLLM / Portkey numbers from
-// their own published docs and reproducible third-party benchmarks.
+// GenerateHTML renders the results in the brand the dashboard + status
+// page wear (internal/brand): dark unless the viewer prefers light, the
+// flat mark beside the name, IBM Plex Mono for every figure. Includes the
+// competitive-comparison section the spec mandates — known LiteLLM /
+// Portkey numbers from their own published docs and reproducible
+// third-party benchmarks.
 func GenerateHTML(results []BenchmarkResult, goVersion, osArch string) string {
 	var b strings.Builder
 	b.WriteString(htmlHead)
 	fmt.Fprintf(&b, `<body>
 <main>
 <header>
-  <h1>TALYVOR <span class="accent">LENS</span> &mdash; Benchmarks</h1>
-  <div class="subtitle">%s · %s</div>
+  %s
+  <div>
+    <div class="eyebrow">Benchmarks</div>
+    <h1>Talyvor Lens</h1>
+    <div class="subtitle"><span class="num">%s</span> · <span class="num">%s</span></div>
+    <span class="tv-rule"></span>
+  </div>
 </header>
 
-<section>
-  <h2>Results</h2>
-  <table>
-    <thead><tr><th>Benchmark</th><th>ops/sec</th><th>ms/op</th><th>ns/op</th><th>B/op</th><th>allocs/op</th></tr></thead>
-    <tbody>`, htmlEscape(osArch), htmlEscape(goVersion))
+<section class="results">
+  <h2 class="eyebrow">Results</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>Benchmark</th><th class="num">ops/sec</th><th class="num">ms/op</th><th class="num">ns/op</th><th class="num">B/op</th><th class="num">allocs/op</th></tr></thead>
+    <tbody>`, brand.Mark, htmlEscape(osArch), htmlEscape(goVersion))
 
 	for _, r := range results {
-		fmt.Fprintf(&b, `<tr><td>%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%d</td><td class="num">%d</td></tr>`,
+		fmt.Fprintf(&b, `<tr><td class="name">%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%d</td><td class="num">%d</td></tr>`,
 			htmlEscape(r.Name),
 			formatThousands(int64(r.OpsPerSec+0.5)),
 			formatMs(r.MsPerOp),
@@ -148,14 +156,14 @@ func GenerateHTML(results []BenchmarkResult, goVersion, osArch string) string {
 			r.AllocsPerOp,
 		)
 	}
-	b.WriteString(`</tbody></table></section>`)
+	b.WriteString(`</tbody></table></div></section>`)
 
 	// Competitive comparison — values from publicly-documented sources.
 	// LiteLLM RPS ceiling: ~2000 (community benchmarks against the
 	// Python proxy); Portkey overhead from their public gateway docs.
 	b.WriteString(`<section>
-  <h2>vs Competitors</h2>
-  <table>
+  <h2 class="eyebrow">vs Competitors</h2>
+  <div class="tbl"><table>
     <thead><tr><th>Metric</th><th>Talyvor Lens</th><th>LiteLLM</th><th>Portkey</th></tr></thead>
     <tbody>
       <tr><td>Language</td><td>Go</td><td>Python</td><td>Node.js</td></tr>
@@ -164,7 +172,7 @@ func GenerateHTML(results []BenchmarkResult, goVersion, osArch string) string {
       <tr><td>RPS @ 1 vCPU</td><td class="num">5,000+</td><td class="num">~500</td><td class="num">~1,000</td></tr>
       <tr><td>Open source</td><td>Yes (core)</td><td>Yes</td><td>Yes (gateway)</td></tr>
     </tbody>
-  </table>
+  </table></div>
   <p class="note">LiteLLM RPS struggles past ~2,000 due to Python overhead; memory under load can exceed 8 GB. Talyvor Lens is a single Go binary with bounded memory.</p>
 </section>
 
@@ -183,23 +191,49 @@ const htmlHead = `<!doctype html>
 <meta property="og:title" content="TALYVOR LENS BENCHMARKS">
 <title>Talyvor Lens Benchmarks</title>
 <style>
-  :root { --bg:#0c0e12; --panel:#13161c; --text:#d4d8e2; --secondary:#8892a4; --accent:#f0a030;
-          --mono: 'IBM Plex Mono', ui-monospace, monospace; }
+` + brand.TokensCSS + `
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 40px 24px; background: var(--bg); color: var(--text); font-family: var(--mono); }
+  body { margin: 0; padding: 40px 24px; background: var(--tv-canvas); color: var(--tv-ink);
+         font-family: var(--tv-font-sans); font-size: 15px; line-height: 24px;
+         -webkit-font-smoothing: antialiased; }
   main { max-width: 960px; margin: 0 auto; }
-  header { margin-bottom: 28px; }
-  h1 { margin: 0 0 4px; font-size: 1.6rem; letter-spacing: 0.05em; }
-  h1 .accent { color: var(--accent); }
-  .subtitle { color: var(--secondary); font-size: 0.9rem; }
-  section { background: var(--panel); border-radius: 10px; padding: 18px 20px; margin-bottom: 18px; }
-  section h2 { margin: 0 0 12px; font-size: 1rem; color: var(--secondary); letter-spacing: 0.04em; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
-  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-  th { color: var(--secondary); font-weight: 500; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .note { color: var(--secondary); font-size: 0.85rem; margin: 12px 0 0; }
-  footer { color: var(--secondary); font-size: 0.8rem; margin-top: 28px; text-align: center; }
+  header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 28px; }
+  header .tv-mark { width: 40px; height: 40px; margin-top: 4px; }
+  .eyebrow { font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .22em;
+             text-transform: uppercase; color: var(--tv-label); }
+  h1 { margin: 4px 0 6px; font-size: 28px; line-height: 34px; font-weight: 500; letter-spacing: -.01em; }
+  .subtitle { color: var(--tv-ink-muted); font-size: 13px; line-height: 20px; }
+  header .tv-rule { margin-top: 14px; }
+  .num, code { font-family: var(--tv-font-mono); font-variant-numeric: tabular-nums; }
+  section { background: var(--tv-surface); border: 1px solid var(--tv-line); border-radius: var(--tv-radius-md);
+            padding: 18px 20px; margin-bottom: 18px; }
+  section h2 { margin: 0 0 8px; }
+  .tbl { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 20px; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--tv-line); }
+  tbody tr:last-child td { border-bottom: 0; }
+  th { color: var(--tv-label); font-weight: 500; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+  th.num, td.num { text-align: right; white-space: nowrap; }
+  td.name { font-family: var(--tv-font-mono); overflow-wrap: anywhere; }
+  .note { color: var(--tv-ink-muted); font-size: 13px; line-height: 20px; margin: 12px 0 0; }
+  footer { color: var(--tv-ink-muted); font-size: 13px; margin-top: 28px; text-align: center; }
+  @media (max-width: 600px) {
+    body { padding: 28px 16px; }
+    h1 { font-size: 24px; line-height: 30px; }
+    header .tv-mark { width: 32px; height: 32px; }
+    section { padding: 14px 12px; }
+    table { font-size: 12px; }
+    th, td { padding: 8px 4px; }
+    th { letter-spacing: .02em; font-size: 11px; }
+    /* Results: the name takes its own line and the five figures sit
+       beneath it, so a 390px phone shows every column without scrolling. */
+    .results table, .results thead, .results tbody { display: block; }
+    .results tr { display: grid; grid-template-columns: 8fr 6fr 8fr 6fr 7fr; column-gap: 4px;
+                  padding: 6px 0; border-bottom: 1px solid var(--tv-line); }
+    .results tbody tr:last-child { border-bottom: 0; }
+    .results th, .results td { border-bottom: 0; padding: 2px 0; }
+    .results th:first-child, .results td.name { grid-column: 1 / -1; }
+  }
 </style>
 </head>
 `

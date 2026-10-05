@@ -4,6 +4,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/talyvor/lens/internal/brand"
 )
 
 func TestParseBenchmarkOutput_ParsesValidLine(t *testing.T) {
@@ -123,6 +125,23 @@ func TestGenerateHTML_ContainsCompetitiveComparisonAndDarkTheme(t *testing.T) {
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("HTML missing %q", want)
+		}
+	}
+}
+
+// The page wears brand v4: the tokens and the flat mark, the name written
+// in words rather than TALYVOR set in a font, and none of the old amber theme.
+func TestGenerateHTML_WearsTheBrand(t *testing.T) {
+	html := GenerateHTML([]BenchmarkResult{{Name: "BenchmarkX", NsPerOp: 100}}, "go1.25", "linux/amd64")
+	if !strings.Contains(html, brand.TokensCSS) || !strings.Contains(html, brand.Mark) {
+		t.Error("HTML missing the brand tokens or the mark")
+	}
+	if !strings.Contains(html, "<h1>Talyvor Lens</h1>") {
+		t.Error("HTML heading should name Talyvor Lens in words beside the mark")
+	}
+	for _, old := range []string{"#f0a030", "#0c0e12", "#13161c", `class="accent"`} {
+		if strings.Contains(html, old) {
+			t.Errorf("HTML still carries the pre-brand %s", old)
 		}
 	}
 }

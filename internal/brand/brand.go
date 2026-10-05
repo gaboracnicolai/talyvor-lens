@@ -50,15 +50,7 @@ const TokensCSS = `:root{
   color-scheme:dark;
 }
 @media (prefers-color-scheme: light){
-  :root{
-    --tv-canvas:#F4F7FB; --tv-surface:#FFFFFF; --tv-raised:#FFFFFF;
-    --tv-line:rgba(6,10,18,.10); --tv-line-strong:rgba(6,10,18,.20);
-    --tv-ink:#060A12; --tv-ink-muted:#46586E; --tv-label:#646B79;
-    --tv-accent:#0F7A6C; --tv-accent-hover:#0A5F54; --tv-on-accent:#FFFFFF; --tv-accent-tint:#C9E6E0;
-    --tv-positive:#1D7A45; --tv-caution:#8A6A12; --tv-critical:#BF3B2E;
-    color-scheme:light;
-  }
-}
+` + lightTokens + `}
 .tv-mark{display:inline-flex; flex:none}
 .tv-mark-dark,.tv-mark-light{display:block; width:100%; height:100%}
 .tv-mark-light{display:none}
@@ -67,4 +59,24 @@ const TokensCSS = `:root{
   .tv-mark-dark{display:none} .tv-mark-light{display:block}
 }
 .tv-rule{display:block; width:32px; height:2px; background:var(--tv-accent); border:0; margin:0}
+`
+
+// PrintCSS puts a page in the light theme on paper whatever the screen's
+// preference: browsers drop backgrounds when printing, so the dark theme would
+// print Frost text on white. Add it after TokensCSS on a page meant to be
+// printed.
+const PrintCSS = `@media print{
+` + lightTokens + `  .tv-mark-dark{display:none} .tv-mark-light{display:block}
+}
+`
+
+// lightTokens is the light column of brand-v4/tokens/tokens.css.
+const lightTokens = `  :root{
+    --tv-canvas:#F4F7FB; --tv-surface:#FFFFFF; --tv-raised:#FFFFFF;
+    --tv-line:rgba(6,10,18,.10); --tv-line-strong:rgba(6,10,18,.20);
+    --tv-ink:#060A12; --tv-ink-muted:#46586E; --tv-label:#646B79;
+    --tv-accent:#0F7A6C; --tv-accent-hover:#0A5F54; --tv-on-accent:#FFFFFF; --tv-accent-tint:#C9E6E0;
+    --tv-positive:#1D7A45; --tv-caution:#8A6A12; --tv-critical:#BF3B2E;
+    color-scheme:light;
+  }
 `
