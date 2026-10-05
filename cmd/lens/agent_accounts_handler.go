@@ -40,6 +40,10 @@ import (
 //	                                                           with who changed them and how
 //	POST /v1/workspaces/{wsID}/agents/{id}/rules/rollback {"version"}   put the rules back exactly as they were
 //	                                                           then; the rollback is a new version
+//	GET  /v1/workspaces/{wsID}/agents/{id}/rules/boosts       B28.308: the limits raised for now, and until when
+//	POST /v1/workspaces/{wsID}/agents/{id}/rules/boosts {"rule", "value", "until"}   raise a limit until a time,
+//	                                                           after which it is the rules' again by itself
+//	DELETE /v1/workspaces/{wsID}/agents/{id}/rules/boosts/{rule}   end a boost before its time
 //	GET  /v1/workspaces/{wsID}/agents/approvals                requests that needed approval, newest first;
 //	                                                           a payment's names its payee and memo (B23.5)
 //	POST /v1/workspaces/{wsID}/agents/approvals/{id}/approve   let that request through, once
@@ -133,6 +137,9 @@ type agentBank interface {
 	SimulateAgentRules(ctx context.Context, workspaceID, agentID string, in economy.SimulatedRequest) (economy.RuleSimulation, error)
 	AgentRulesHistory(ctx context.Context, workspaceID, agentID string) ([]economy.AgentRulesVersion, error)
 	RollbackAgentRules(ctx context.Context, workspaceID, agentID string, version int) (economy.AgentRules, error)
+	AgentBoosts(ctx context.Context, workspaceID, agentID string) ([]economy.AgentRuleBoost, error)
+	BoostAgentRule(ctx context.Context, workspaceID, agentID string, b economy.AgentRuleBoost) (economy.AgentRuleBoost, error)
+	EndAgentBoost(ctx context.Context, workspaceID, agentID, rule string) error
 	ListAgentApprovals(ctx context.Context, workspaceID string) ([]economy.AgentApproval, error)
 	DecideAgentApproval(ctx context.Context, workspaceID, approvalID string, approve bool) (economy.AgentApproval, error)
 	PayAgent(ctx context.Context, workspaceID, fromAgentID, toAgentID string, amount int64, memo string) (economy.AgentPayment, error)
@@ -427,6 +434,45 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		}
 		rules, err := bank.RollbackAgentRules(rulesChange(req, ""), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in.Version)
 		writeRules(w, rules, err)
+	}))
+	// B28.308: a boost raises a limit until a time; the rules judge it at each request's time, so it reverts by itself.
+	writeBoosts := func(w http.ResponseWriter, status int, body any, err error) {
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound), errors.Is(err, economy.ErrBoostNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrAgentRule):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		case body == nil:
+			w.WriteHeader(status)
+		default:
+			writeJSONOK(w, status, body)
+		}
+	}
+	r.Get("/v1/workspaces/{wsID}/agents/{agentID}/rules/boosts", func(w http.ResponseWriter, req *http.Request) {
+		boosts, err := bank.AgentBoosts(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"))
+		writeBoosts(w, http.StatusOK, map[string]any{"boosts": boosts}, err)
+	})
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/rules/boosts", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Rule  string    `json:"rule"`
+			Value int64     `json:"value"`
+			Until time.Time `json:"until"`
+		}
+		dec := json.NewDecoder(req.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&in); err != nil || in.Rule == "" || in.Until.IsZero() {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"rule": <the limit, e.g. daily_limit_ulxc>, "value": <raised to>, "until": <RFC 3339 time>}`)
+			return
+		}
+		b, err := bank.BoostAgentRule(rulesChange(req, "boost"), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"),
+			economy.AgentRuleBoost{Rule: in.Rule, Value: in.Value, Until: in.Until})
+		writeBoosts(w, http.StatusCreated, b, err)
+	}))
+	r.Delete("/v1/workspaces/{wsID}/agents/{agentID}/rules/boosts/{rule}", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
+		err := bank.EndAgentBoost(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), chi.URLParam(req, "rule"))
+		writeBoosts(w, http.StatusNoContent, nil, err)
 	}))
 	r.Get("/v1/workspaces/{wsID}/agents/approvals", func(w http.ResponseWriter, req *http.Request) {
 		list, err := bank.ListAgentApprovals(req.Context(), chi.URLParam(req, "wsID"))

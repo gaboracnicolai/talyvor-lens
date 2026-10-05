@@ -9,6 +9,10 @@ package api
 // reference open on it.
 const walletTag = "Agent Wallets"
 
+// boostableAgentRules are the limits a boost may raise (B28.308): economy.BoostableRules().
+var boostableAgentRules = []string{"approval_above_ulxc", "daily_limit_ulxc", "hourly_limit_ulxc", "max_per_request_ulxc",
+	"monthly_limit_ulxc", "requests_per_minute", "weekly_limit_ulxc"}
+
 func openAPIWalletTags() []map[string]any {
 	return []map[string]any{{
 		"name": walletTag,
@@ -124,6 +128,17 @@ func openAPIWalletSchemas() map[string]any {
 				"changed_by": map[string]any{"type": "string", "description": "the credential that changed them: operator, or its method, user and key (jwt:user:…); empty when unknown"},
 				"change":     map[string]any{"type": "string", "description": "set, template <id>, rollback to <n>, or before history for rules set before versions were kept"},
 				"created_at": at,
+			},
+		},
+		"AgentRuleBoost": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"rule":        map[string]any{"type": "string", "enum": boostableAgentRules, "description": "the limit raised, as AgentRules names it"},
+				"raised_from": map[string]any{"type": "integer", "format": "int64", "minimum": 1, "description": "the limit as the rules set it when the boost was set; once the rules change it, the boost no longer applies"},
+				"value":       map[string]any{"type": "integer", "format": "int64", "minimum": 1, "description": "what it is raised to: µLXC, or requests a minute for requests_per_minute"},
+				"until":       map[string]any{"type": "string", "format": "date-time", "description": "from this time on the boost is not read and the limit is the rules' again"},
+				"created_by":  map[string]any{"type": "string", "description": "the credential that set it; empty when unknown"},
+				"created_at":  at,
 			},
 		},
 		"AgentStatementLine": map[string]any{
@@ -328,6 +343,27 @@ func openAPIWalletPaths() map[string]any {
 				[]map[string]any{ws, agent},
 				map[string]any{"200": ok("the rules now in force", ref("AgentRules")), "400": map[string]any{"description": "no version given"}, "404": map[string]any{"description": "no such agent, or no such version"}}),
 				body(obj([]string{"version"}, map[string]any{"version": map[string]any{"type": "integer", "minimum": 1}}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/rules/boosts": map[string]any{
+			"get": op("List the agent's temporary limit boosts in force",
+				"The limits raised for now, the soonest to end first. A boost that has ended is not listed: the limit is the rules' again.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the boosts in force", listOf("boosts", "AgentRuleBoost")), "404": map[string]any{"description": "no such agent"}}),
+			"post": withBody(op("Raise one of the agent's limits until a time",
+				"Owner or admin. Until the time, the limit is the boost's value; from then on the rules judge it as the rules set it, with nothing to undo. The limit must be set and the value above it, and the boost applies only while the rules leave the limit as it was. A boost replaces the one the limit had.",
+				[]map[string]any{ws, agent},
+				map[string]any{"201": ok("the boost", ref("AgentRuleBoost")), "400": map[string]any{"description": "an unknown limit, a limit not set, a value not above it, or a time not in the future"}, "404": map[string]any{"description": "no such agent"}}),
+				body(obj([]string{"rule", "value", "until"}, map[string]any{
+					"rule":  map[string]any{"type": "string", "enum": boostableAgentRules},
+					"value": map[string]any{"type": "integer", "format": "int64", "minimum": 1},
+					"until": map[string]any{"type": "string", "format": "date-time"},
+				}))),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/rules/boosts/{rule}": map[string]any{
+			"delete": op("End a limit boost before its time",
+				"Owner or admin. The limit is the rules' again at once.",
+				[]map[string]any{ws, agent, param("rule", "path")},
+				map[string]any{"204": map[string]any{"description": "ended"}, "404": map[string]any{"description": "no such agent, or no boost in force on that limit"}}),
 		},
 		"/v1/workspaces/{wsID}/agents/approvals": map[string]any{
 			"get": op("List the requests the agents' rules sent to a person",

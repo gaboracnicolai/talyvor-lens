@@ -183,7 +183,7 @@ func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debi
 // model (B28.301), counted with the estimate already spent, and its balance — topped up from its company's
 // credit line where the spend path would draw it (B22.4).
 func agentAllowance(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, estimate, want int64, ref, model string) (int64, error) {
-	r, err := scanAgentRules(tx.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))
+	r, err := agentRulesInForce(ctx, tx, agentID, time.Now()) // with its boosts in force now (B28.308)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("economy: agent rules: %w", err)
 	}

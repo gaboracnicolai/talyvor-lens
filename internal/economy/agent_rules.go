@@ -542,9 +542,9 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 	if err := refuseIfPaused(ctx, tx, agentID); err != nil {
 		return err
 	}
-	r, err := scanAgentRules(tx.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))
+	req := agentRequestFrom(ctx)
+	r, err := agentRulesInForce(ctx, tx, agentID, req.At) // with its boosts in force then (B28.308)
 	if errors.Is(err, pgx.ErrNoRows) {
-		req := agentRequestFrom(ctx)
 		if err := recordPayeePayment(ctx, tx, workspaceID, agentID, req, nil, amount, ref); err != nil {
 			return err
 		}
@@ -553,7 +553,6 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 	if err != nil {
 		return fmt.Errorf("economy: agent rules: %w", err)
 	}
-	req := agentRequestFrom(ctx)
 	what := "request"
 	if req.Payment {
 		what = "payment"
