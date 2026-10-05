@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/text/language"
+
+	"github.com/talyvor/lens/internal/plans"
 )
 
 // wallet_capabilities.go — B22.1: EVERY WALLET CAPABILITY CARRIES ITS CLASS, AND REAL MONEY OBEYS IT.
@@ -121,6 +123,15 @@ const (
 	CapabilityPayoutsToPeople    = "payouts_to_people"
 )
 
+// b30 is every capability B30 registers: on a plan without live money each takes test money only, whatever its
+// class and even with a clearance (B32.12).
+var b30 = map[string]bool{CapabilityCurrencyAccounts: true, CapabilityAccountDetails: true, CapabilityPaymentsIn: true,
+	CapabilityPaymentsOut: true, CapabilityPayByBank: true, CapabilityFX: true, CapabilityStablecoins: true,
+	CapabilityX402: true, CapabilityMerchantAcceptance: true, CapabilityB2BCredit: true, CapabilitySellerAdvances: true,
+	CapabilityLendingMarketplace: true, CapabilityTradeEquities: true, CapabilityTradeCrypto: true,
+	CapabilityTradePrediction: true, CapabilityTreasurySweep: true, CapabilityPriceLock: true, CapabilityCover: true,
+	CapabilityPayoutsToPeople: true}
+
 // CapabilityByKey finds a capability.
 func CapabilityByKey(key string) (Capability, bool) {
 	for _, c := range Capabilities {
@@ -167,16 +178,31 @@ func lotFunding(ledgerType string, amount int64, metadata map[string]interface{}
 // ErrCapabilityNotCleared: live money for an AMBER or RED capability that has no clearance.
 var ErrCapabilityNotCleared = errors.New("economy: this capability takes test money only until Talyvor records a clearance")
 
-// CapabilityRefusal says which capability refused live money, and its class.
-type CapabilityRefusal struct{ Capability Capability }
+// CapabilityRefusal says which capability refused live money, and its class — or, when the capability is
+// cleared but the workspace's plan keeps it on test money (B32.12), the plan's refusal.
+type CapabilityRefusal struct {
+	Capability Capability
+	Plan       *plans.Refusal
+}
 
 func (e *CapabilityRefusal) Error() string {
+	if e.Plan != nil {
+		return e.Plan.Error()
+	}
 	return fmt.Sprintf("%s is class %s: it takes test money only until Talyvor records a clearance for it, and this would use real money",
 		e.Capability.Name, e.Capability.Class)
 }
 
 // Is makes a refusal an ErrCapabilityNotCleared.
 func (e *CapabilityRefusal) Is(target error) bool { return target == ErrCapabilityNotCleared }
+
+// Unwrap is the plan's refusal, when the plan refused.
+func (e *CapabilityRefusal) Unwrap() error {
+	if e.Plan == nil {
+		return nil
+	}
+	return e.Plan
+}
 
 // ClearanceTerms is what a clearance rests on and where it reaches: the lawyer's or partner's reference, the
 // licence, the licensed partner, the countries live money may be used from, and when it ends.
@@ -388,6 +414,28 @@ func capabilityCleared(ctx context.Context, q pgxDB, key string) (bool, error) {
 	return cleared, nil
 }
 
+// capabilityLive reports whether capability c may take live money for workspaceID: an AMBER or RED one once it is
+// cleared (capabilityCleared), a GREEN one always — and, B32.12, neither an AMBER or RED one nor any B30
+// registers while the workspace's plan keeps money capabilities on test money, a clearance or not; the plan's
+// refusal says so then.
+func capabilityLive(ctx context.Context, q pgxDB, workspaceID string, c Capability) (bool, *plans.Refusal, error) {
+	if c.Class != ClassGreen {
+		if cleared, err := capabilityCleared(ctx, q, c.Key); err != nil || !cleared {
+			return false, nil, err
+		}
+	} else if !b30[c.Key] {
+		return true, nil, nil
+	}
+	plan, err := plans.Of(ctx, q, workspaceID)
+	if err != nil {
+		return false, nil, err
+	}
+	if !plan.LiveMoney {
+		return false, plan.RefuseLiveMoney(plans.Current(), c.Name), nil
+	}
+	return true, nil, nil
+}
+
 // spendForCapability judges a spend of amount µLXC of workspaceID's credits on capability key, in tx. A
 // GREEN capability, or a cleared one, takes any credits and 0 is returned. An uncleared AMBER or RED one
 // takes test-funded credits only: they are taken here and their amount returned, or the spend is refused with
@@ -398,10 +446,11 @@ func spendForCapability(ctx context.Context, tx pgx.Tx, workspaceID, key string,
 	if !ok {
 		return 0, fmt.Errorf("economy: no wallet capability is called %q", key)
 	}
-	if c.Class == ClassGreen || amount <= 0 {
+	if amount <= 0 {
 		return 0, nil
 	}
-	if cleared, err := capabilityCleared(ctx, tx, key); err != nil || cleared {
+	live, byPlan, err := capabilityLive(ctx, tx, workspaceID, c)
+	if err != nil || live {
 		return 0, err
 	}
 	have, err := testFundedULXC(ctx, tx, workspaceID)
@@ -417,7 +466,7 @@ func spendForCapability(ctx context.Context, tx pgx.Tx, workspaceID, key string,
 			return 0, err
 		}
 		if !test {
-			return 0, &CapabilityRefusal{Capability: c}
+			return 0, &CapabilityRefusal{Capability: c, Plan: byPlan}
 		}
 		take = have
 	}
@@ -436,21 +485,22 @@ func testWorkspace(ctx context.Context, q pgxDB, workspaceID string) (bool, erro
 	return test, nil
 }
 
-// requireBilledCapability judges money on a Stripe bill for capability key: real money when the key is live,
-// which an uncleared AMBER or RED capability refuses.
-func (s *DualTokenStore) requireBilledCapability(ctx context.Context, q pgxDB, key string) error {
+// requireBilledCapability judges money on workspaceID's Stripe bill for capability key: real money when the key
+// is live, which an uncleared AMBER or RED capability refuses, and so does a cleared one on a plan that keeps it
+// on test money (B32.12).
+func (s *DualTokenStore) requireBilledCapability(ctx context.Context, q pgxDB, workspaceID, key string) error {
 	c, ok := CapabilityByKey(key)
 	if !ok {
 		return fmt.Errorf("economy: no wallet capability is called %q", key)
 	}
-	if c.Class == ClassGreen || !s.liveStripe {
+	if !s.liveStripe {
 		return nil
 	}
-	cleared, err := capabilityCleared(ctx, q, key)
-	if err != nil || cleared {
+	live, byPlan, err := capabilityLive(ctx, q, workspaceID, c)
+	if err != nil || live {
 		return err
 	}
-	return &CapabilityRefusal{Capability: c}
+	return &CapabilityRefusal{Capability: c, Plan: byPlan}
 }
 
 // testFundedULXC locks workspaceID's balance row and reads its test-funded credits: never more than the

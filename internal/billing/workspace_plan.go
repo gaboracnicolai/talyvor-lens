@@ -13,6 +13,7 @@ import (
 
 	"github.com/talyvor/lens/internal/fees"
 	"github.com/talyvor/lens/internal/operatoraudit"
+	"github.com/talyvor/lens/internal/plans"
 )
 
 // workspace_plan.go — B32.10: which plan a workspace is on, for every feature that charges or gates by plan.
@@ -27,18 +28,9 @@ type PlanQuerier interface {
 // PlanOf answers which plan workspaceID is on: enterprise while the operator has it on a contract; else the
 // plan its paying subscription bills (trialing, active or past_due — unpaid is Stripe having given up); else
 // free. A subscription whose Price is no plan's answers free too: there is no plan to charge or gate it by.
+// internal/plans answers it, so the packages billing builds on can gate by plan too (B32.12).
 func PlanOf(ctx context.Context, db PlanQuerier, workspaceID string) (string, error) {
-	var plan string
-	err := db.QueryRow(ctx, `
-		SELECT COALESCE(
-			(SELECT plan FROM workspace_contracts WHERE workspace_id = $1),
-			(SELECT plan FROM subscriptions
-			 WHERE workspace_id = $1 AND status IN ('trialing','active','past_due')),
-			$2)`, workspaceID, FreePlan).Scan(&plan)
-	if err != nil {
-		return "", fmt.Errorf("billing: the plan of %s: %w", workspaceID, err)
-	}
-	return plan, nil
+	return plans.PlanOf(ctx, db, workspaceID)
 }
 
 // PlatformFeeBPS is the platform fee on workspaceID's AI spend charged to credits, in basis points (B32.11):
@@ -68,12 +60,15 @@ func PlatformFeeBPS(ctx context.Context, db PlanQuerier, workspaceID string, s f
 }
 
 // Contract is an Enterprise contract as the operator records it: the contract's own platform fee and FX
-// margin, in basis points, where it agreed one (nil follows the enterprise figure in internal/fees).
+// margin, in basis points, where it agreed one (nil follows the enterprise figure in internal/fees), and its own
+// limits on agents and seats, -1 unlimited (nil follows enterprise's gates in LENS_PLAN_GATES, B32.12).
 type Contract struct {
 	WorkspaceID    string    `json:"workspace_id"`
 	Plan           string    `json:"plan"`
 	PlatformFeeBPS *int64    `json:"platform_fee_bps"`
 	FXMarginBPS    *int64    `json:"fx_margin_bps"`
+	Agents         *int64    `json:"agents"`
+	Seats          *int64    `json:"seats"`
 	Reference      string    `json:"reference"`
 	SetBy          string    `json:"set_by"`
 	SetAt          time.Time `json:"set_at"`
@@ -89,9 +84,9 @@ var ErrNoContract = errors.New("billing: the workspace has no contract")
 func ContractOf(ctx context.Context, db PlanQuerier, workspaceID string) (*Contract, error) {
 	c := Contract{WorkspaceID: workspaceID}
 	err := db.QueryRow(ctx, `
-		SELECT plan, platform_fee_bps, fx_margin_bps, reference, set_by, set_at
+		SELECT plan, platform_fee_bps, fx_margin_bps, agents, seats, reference, set_by, set_at
 		FROM workspace_contracts WHERE workspace_id = $1`, workspaceID).
-		Scan(&c.Plan, &c.PlatformFeeBPS, &c.FXMarginBPS, &c.Reference, &c.SetBy, &c.SetAt)
+		Scan(&c.Plan, &c.PlatformFeeBPS, &c.FXMarginBPS, &c.Agents, &c.Seats, &c.Reference, &c.SetBy, &c.SetAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -121,6 +116,11 @@ func SetContract(ctx context.Context, pool *pgxpool.Pool, c Contract, actor stri
 			return nil, fmt.Errorf("%w: %s is %d, outside 0–%d basis points", ErrInvalidContract, name, *v, fees.BPSDenominator)
 		}
 	}
+	for name, v := range map[string]*int64{"agents": c.Agents, "seats": c.Seats} {
+		if v != nil && *v < plans.Unlimited {
+			return nil, fmt.Errorf("%w: %s is %d; it is a count, or -1 for unlimited", ErrInvalidContract, name, *v)
+		}
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -134,12 +134,13 @@ func SetContract(ctx context.Context, pool *pgxpool.Pool, c Contract, actor stri
 		return nil, fmt.Errorf("%w: no workspace %q", ErrInvalidContract, c.WorkspaceID)
 	}
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO workspace_contracts (workspace_id, plan, platform_fee_bps, fx_margin_bps, reference, set_by)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO workspace_contracts (workspace_id, plan, platform_fee_bps, fx_margin_bps, agents, seats, reference, set_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (workspace_id) DO UPDATE SET plan = EXCLUDED.plan, platform_fee_bps = EXCLUDED.platform_fee_bps,
-			fx_margin_bps = EXCLUDED.fx_margin_bps, reference = EXCLUDED.reference, set_by = EXCLUDED.set_by, set_at = NOW()
+			fx_margin_bps = EXCLUDED.fx_margin_bps, agents = EXCLUDED.agents, seats = EXCLUDED.seats,
+			reference = EXCLUDED.reference, set_by = EXCLUDED.set_by, set_at = NOW()
 		RETURNING set_by, set_at`,
-		c.WorkspaceID, c.Plan, c.PlatformFeeBPS, c.FXMarginBPS, c.Reference, actor).Scan(&c.SetBy, &c.SetAt); err != nil {
+		c.WorkspaceID, c.Plan, c.PlatformFeeBPS, c.FXMarginBPS, c.Agents, c.Seats, c.Reference, actor).Scan(&c.SetBy, &c.SetAt); err != nil {
 		return nil, fmt.Errorf("billing: record the contract: %w", err)
 	}
 	detail, _ := json.Marshal(c)

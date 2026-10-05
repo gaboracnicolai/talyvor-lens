@@ -99,6 +99,7 @@ import (
 	"github.com/talyvor/lens/internal/pairverify"
 	"github.com/talyvor/lens/internal/passkey"
 	"github.com/talyvor/lens/internal/pii"
+	"github.com/talyvor/lens/internal/plans"
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/poolshadow"
 	"github.com/talyvor/lens/internal/povi"
@@ -355,6 +356,9 @@ func run() error {
 		return err
 	}
 	if err := fees.Check(); err != nil {
+		return err
+	}
+	if err := plans.Check(); err != nil {
 		return err
 	}
 
@@ -2436,6 +2440,9 @@ func run() error {
 
 		// B32.8 — every fee Talyvor charges, for /pricing.
 		pub.Get("/v1/public/fees", publicFeesHandler)
+
+		// B32.12 — what each plan unlocks, for /pricing.
+		pub.Get("/v1/public/plan-gates", publicPlanGatesHandler)
 	})
 
 	// Public status page. /status content-negotiates between HTML and
@@ -3447,6 +3454,11 @@ func run() error {
 				writeJSONOK(w, http.StatusOK, st)
 			}
 		}))
+
+		// B32.12 — the workspace's plan and what it unlocks, and the seats check the members feature asks before
+		// it adds one (plan_gates_handler.go). {wsID} is bound to the caller's credential like its siblings.
+		authed.Get("/v1/workspaces/{wsID}/plan", newWorkspacePlanHandler(pool))
+		authed.Get("/v1/workspaces/{wsID}/plan/seats", newSeatsCheckHandler(pool))
 
 		// B27.26 — "Your provider keys" (provider_keys_routes.go), only while custody is armed.
 		if byokStore != nil {

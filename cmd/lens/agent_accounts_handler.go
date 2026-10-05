@@ -215,6 +215,9 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusBadRequest, "an agent needs an owner: create it signed in as the person who will own it")
 			return
 		}
+		if writePlanRefusal(w, err) { // B32.12: past the agents the plan allows
+			return
+		}
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return

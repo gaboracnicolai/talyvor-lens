@@ -26,6 +26,11 @@ func TestB28303_NoPayPostingToABlockedPayee_OneToAnAllowedPayee(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc) VALUES ($1, 20000000, 20000000)`, ws); err != nil {
 		t.Fatal(err)
 	}
+	// B32.12: four agents, past free's three.
+	if _, err := pool.Exec(ctx, `INSERT INTO subscriptions (workspace_id, stripe_subscription_id, stripe_customer_id, price_id,
+		status, livemode, last_event_at, plan) VALUES ($1, 'sub_' || $1, 'cus_' || $1, 'price_team', 'active', false, NOW(), 'team')`, ws); err != nil {
+		t.Fatal(err)
+	}
 	store := economy.NewDualTokenStore(nil, pool, nil)
 	r := chi.NewRouter()
 	mountAgentAccountRoutes(r, store, tenant.NewStore(pool))

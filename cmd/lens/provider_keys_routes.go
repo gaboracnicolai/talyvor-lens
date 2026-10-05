@@ -9,9 +9,10 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talyvor/lens/internal/byok"
+	"github.com/talyvor/lens/internal/plans"
 )
 
-// B27.26 — "Your provider keys", for a workspace on the BYOK plan. A key goes in and never comes back out:
+// B27.26 — "Your provider keys", for a workspace whose plan lets it use its own (B32.12). A key goes in and never comes back out:
 // every answer carries the provider and the last four characters only. Registered only while custody is
 // armed (LENS_PROVIDER_SECRET_KEK); {wsID} is bound to the caller's credential like its billing siblings.
 
@@ -47,7 +48,7 @@ func newProviderKeyPutHandler(s *byok.Store) http.HandlerFunc {
 		switch {
 		case errors.Is(err, byok.ErrUnsupportedProvider), errors.Is(err, byok.ErrInvalidKey):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, byok.ErrNotSubscribed):
+		case errors.Is(err, plans.ErrRefused):
 			writeJSONErr(w, http.StatusPaymentRequired, err.Error())
 		case err != nil:
 			writeJSONErr(w, http.StatusInternalServerError, "the key could not be stored")

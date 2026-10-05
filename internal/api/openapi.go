@@ -393,6 +393,37 @@ func openAPIPaths() map[string]any {
 				"responses":   map[string]any{"200": map[string]any{"description": "every fee setting"}},
 			},
 		},
+		"/v1/public/plan-gates": map[string]any{
+			"get": map[string]any{
+				"summary":     "Get what each plan unlocks",
+				"description": "No key needed. order (free, team, business, enterprise) and, by plan, agents and seats (-1 unlimited), own_provider_keys (none, add_on — only with the BYOK add-on — or included), live_money, slack_teams_approvals, sso, audit_export and edge. plus, pro and max take free's; byok takes team's, with own keys.",
+				"security":    []map[string]any{},
+				"responses":   map[string]any{"200": map[string]any{"description": "order and plans"}},
+			},
+		},
+		"/v1/workspaces/{wsID}/plan": map[string]any{
+			"get": map[string]any{
+				"summary": "Get this workspace's plan and what it unlocks",
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{"200": map[string]any{"description": "plan, gated_as, byok_add_on, gates, own_provider_keys_allowed, agents_used"}},
+			},
+		},
+		"/v1/workspaces/{wsID}/plan/seats": map[string]any{
+			"get": map[string]any{
+				"summary":     "Check whether this workspace's plan takes a number of members",
+				"description": "Asked before a member is added, with the count the workspace would have. 402 names LENS_PLAN_GATES, the plan and the plan that would allow it.",
+				"parameters": []map[string]any{
+					{"name": "wsID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "members", "in": "query", "required": true, "schema": map[string]any{"type": "integer"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "plan, seats, members"},
+					"402": map[string]any{"description": "error, plan, gate, limit, allows"},
+				},
+			},
+		},
 		"/v1/workspaces/{wsID}/spend/current-month": map[string]any{
 			"get": map[string]any{
 				"summary":   "Get current-month spend for a workspace",
