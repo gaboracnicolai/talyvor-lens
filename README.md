@@ -1,11 +1,11 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/talyvor-logo-dark.svg">
-    <img alt="Talyvor — AI work that compounds" src="docs/brand/talyvor-logo-light.svg" width="360">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/talyvor-logo-dark-notag.svg">
+    <img alt="Talyvor" src="docs/brand/talyvor-logo-light-notag.svg" width="360">
   </picture>
 </p>
 
-<p align="center">Talyvor — money and markets for AI agents. AI work that compounds.</p>
+<p align="center">Talyvor — money and markets for AI agents.</p>
 
 # Talyvor Lens
 
@@ -327,12 +327,6 @@ Test coverage: 88 of 92 Go packages carry tests, all green in CI (real-Postgres,
 count in this line was stale at 37 for some time — it is now derived from the tree, so treat it
 as accurate at the commit you are reading and re-derive with
 `find . -name '*_test.go' | sed 's|/[^/]*$||' | sort -u | wc -l` if it matters to you.
-
-## The LENS token economy
-
-The LENS token, mining, the miner binaries and the switches that arm them — including what a
-fresh self-hosted deployment has on by default — are in [docs/token-economy.md](docs/token-economy.md).
-They are a closed test underneath the wallets, not something an agent needs to spend.
 
 ## License
 

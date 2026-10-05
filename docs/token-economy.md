@@ -26,8 +26,8 @@ and the previous wording obscured it.
 
 ## LENS Token Economy
 
-LENS is a compute-backed utility token. You earn it by contributing infrastructure to the
-network. There are **two units** and they behave differently — the distinction matters before
+LENS is an internal unit on Lens's own Postgres ledger, used only in the closed test underneath
+the wallets. There are **two units** and they behave differently — the distinction matters before
 any number below makes sense:
 
 - **LXC** is the billing credit, and its peg is **fixed**: 1 LXC = $0.10 of compute credit,
