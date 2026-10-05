@@ -62,6 +62,10 @@ func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connectFor conne
 			}
 		}
 		url, account, err := store.ConnectSeller(req.Context(), connect, chi.URLParam(req, "wsID"), in.Country, urls.refresh, urls.ret)
+		if err != nil && !errors.Is(err, market.ErrInvalid) {
+			// Stripe's code and request id, which the seller's sentence leaves out (B28.276).
+			slog.Warn("market: connect with Stripe", "workspace", chi.URLParam(req, "wsID"), "err", err)
+		}
 		switch {
 		case errors.Is(err, market.ErrInvalid):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
