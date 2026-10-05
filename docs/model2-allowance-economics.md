@@ -1,5 +1,42 @@
 # Model 2 — what the allowance economics actually require
 
+## §00 The decided formula — B32.13, Nicolai, 5 Oct 2026
+
+Plus, Pro and Max cost $20, $100 and $200 a month. Each plan's included usage D is computed from its
+price by `IncludedUsageULXC` (`internal/billing/included_usage.go`), so that a subscriber who uses all
+of it leaves Talyvor a **10% margin after Stripe's fees and pooled-answer royalties**:
+
+```
+D = 0.9 × (F × (1 − 0.029 − 0.007) − 30¢) × (1 − 0.3h) ÷ (1 − 0.65h)
+```
+
+- **F** is the plan's price. **2.9% + 30¢** is Stripe's US card fee and **0.7%** is Stripe Billing's.
+- **h** is the share of subscriber chat traffic, by metered value, served from the pool over the
+  30 days before the month: the Wilson 95% lower bound, 0 below 1,000 requests, D rising at most 25% a
+  month, recomputed monthly. A month already granted keeps its figure; a new figure applies from the
+  next monthly grant.
+- **Why 0.3 and 0.65.** An upstream answer draws its list price from the allowance and costs Talyvor
+  the same. A pooled answer costs nothing upstream, draws 0.7 × list and pays its contributor
+  0.35 × list. A subscriber drawing D therefore spends T = D ÷ (1 − 0.3h) of metered value and costs
+  Talyvor (1 − h)·T upstream plus 0.35h·T in royalties: (1 − 0.65h)·T, which is 90% of F net of
+  Stripe's fees.
+- Exact integers in µLXC (1 LXC = $0.10), rounded down.
+
+| plan | F | D at h = 0 | µLXC |
+|---|---|---|---|
+| Plus | $20 | $17.082 | 170,820,000 |
+| Pro | $100 | $86.49 | 864,900,000 |
+| Max | $200 | $173.25 | 1,732,500,000 |
+
+At h = 0.5 a Plus subscriber's D is 215,106,666 µLXC ($21.51), and drawing all of it costs Talyvor
+upstream plus royalties 90% of $18.98, short by less than one µLXC. `GET /v1/billing/plans` serves
+these figures. Past D a subscriber continues on prepaid credit, never overage on the plan.
+
+Everything below is the August 2026 analysis that preceded the decision. It is kept as history; where
+it differs from §00, §00 holds.
+
+---
+
 **W4.6.1 step 2 · tab-q4vn · 2026-08-26 · measured, nothing tuned**
 
 The item says: *"F AND D ARE NICOLAI'S. Build it with configurable values and a documented
