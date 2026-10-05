@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/text/language"
 )
 
 // wallet_capabilities.go — B22.1: EVERY WALLET CAPABILITY CARRIES ITS CLASS, AND REAL MONEY OBEYS IT.
@@ -17,8 +18,10 @@ import (
 //	RED    test money only, until a licence or a licensed partner exists.
 //
 // An AMBER or RED capability takes only test-funded money until the operator records a clearance for it
-// (wallet_clearances, migration 0158: who, when, the lawyer's or partner's reference), and revoking the
-// clearance stops live money again from the next use. A GREEN capability takes any.
+// (wallet_clearances, migration 0158: who, when, the lawyer's or partner's reference; 0194, B30.1: the licence,
+// the licensed partner, the countries it covers and its expiry), and revoking the clearance stops live money
+// again from the next use. A clearance past its expiry, or used from a country it does not list
+// (WithUseCountry), refuses live money exactly like no clearance. A GREEN capability takes any.
 //
 // Money reaches a capability two ways, and both are judged:
 //
@@ -71,7 +74,52 @@ var Capabilities = []Capability{
 	{"interest_and_yield", "Interest or yield", ClassRed},
 	{"invest_and_trade", "Investing and trading real assets", ClassRed},
 	{CapabilityAgentCard, "Cards", ClassRed},
+
+	// B30.1 — money and markets for AI agents (Nicolai, 5 Oct 2026: build everything now; real money only once
+	// licensed). invest_and_trade above stays, for simulated trading.
+	{CapabilityCurrencyAccounts, "Accounts in pounds, euros, dollars and USDC", ClassRed},
+	{CapabilityAccountDetails, "Account details others can pay into", ClassRed},
+	{CapabilityPaymentsIn, "Receiving money from outside Talyvor", ClassRed},
+	{CapabilityPaymentsOut, "Paying people and companies outside Talyvor", ClassRed},
+	{CapabilityPayByBank, "Topping up by a payment from your own bank", ClassAmber},
+	{CapabilityFX, "Converting between currencies", ClassRed},
+	{CapabilityStablecoins, "Stablecoin balances and transfers", ClassRed},
+	{CapabilityX402, "Paying and being paid over HTTP 402", ClassRed},
+	{CapabilityMerchantAcceptance, "Accepting payments from agents as a business", ClassRed},
+	{CapabilityB2BCredit, "Credit lines and loans to companies", ClassAmber},
+	{CapabilitySellerAdvances, "Advances against marketplace earnings", ClassAmber},
+	{CapabilityLendingMarketplace, "Companies lending to companies through the marketplace", ClassAmber},
+	{CapabilityTradeEquities, "Trading shares through a broker partner", ClassRed},
+	{CapabilityTradeCrypto, "Trading crypto through a broker partner", ClassRed},
+	{CapabilityTradePrediction, "Prediction-market trading", ClassRed},
+	{CapabilityTreasurySweep, "Idle money in a money-market fund", ClassRed},
+	{CapabilityPriceLock, "Prepaid usage at today's prices", ClassAmber},
+	{CapabilityCover, "Cover for agent mistakes", ClassRed},
+	{CapabilityPayoutsToPeople, "Paying people for tasks", ClassRed},
 }
+
+// The B30 capabilities. Each is asked at the point its money moves.
+const (
+	CapabilityCurrencyAccounts   = "currency_accounts"
+	CapabilityAccountDetails     = "account_details"
+	CapabilityPaymentsIn         = "payments_in"
+	CapabilityPaymentsOut        = "payments_out"
+	CapabilityPayByBank          = "pay_by_bank"
+	CapabilityFX                 = "fx"
+	CapabilityStablecoins        = "stablecoins"
+	CapabilityX402               = "x402"
+	CapabilityMerchantAcceptance = "merchant_acceptance"
+	CapabilityB2BCredit          = "b2b_credit"
+	CapabilitySellerAdvances     = "seller_advances"
+	CapabilityLendingMarketplace = "lending_marketplace"
+	CapabilityTradeEquities      = "trade_equities"
+	CapabilityTradeCrypto        = "trade_crypto"
+	CapabilityTradePrediction    = "trade_prediction"
+	CapabilityTreasurySweep      = "treasury_sweep"
+	CapabilityPriceLock          = "price_lock"
+	CapabilityCover              = "cover"
+	CapabilityPayoutsToPeople    = "payouts_to_people"
+)
 
 // CapabilityByKey finds a capability.
 func CapabilityByKey(key string) (Capability, bool) {
@@ -130,18 +178,66 @@ func (e *CapabilityRefusal) Error() string {
 // Is makes a refusal an ErrCapabilityNotCleared.
 func (e *CapabilityRefusal) Is(target error) bool { return target == ErrCapabilityNotCleared }
 
+// ClearanceTerms is what a clearance rests on and where it reaches: the lawyer's or partner's reference, the
+// licence, the licensed partner, the countries live money may be used from, and when it ends.
+type ClearanceTerms struct {
+	Reference string    `json:"reference"`
+	Licence   string    `json:"licence_reference"`
+	Partner   string    `json:"partner"`
+	Countries []string  `json:"countries"` // ISO 3166-1 alpha-2
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 // Clearance is the operator's record that a capability may take real money.
 type Clearance struct {
-	By        string    `json:"by"`
-	Reference string    `json:"reference"`
-	At        time.Time `json:"at"`
+	By string    `json:"by"`
+	At time.Time `json:"at"`
+	ClearanceTerms
 }
 
 // CapabilityStatus is a capability, its class, and whether it takes real money now.
 type CapabilityStatus struct {
 	Capability
-	RealMoney bool       `json:"real_money"`          // GREEN, or cleared
+	RealMoney bool       `json:"real_money"`          // GREEN, or cleared — then only in the countries the clearance lists
 	Clearance *Clearance `json:"clearance,omitempty"` // the clearance in force, for an AMBER or RED one
+}
+
+type useCountryKey struct{}
+
+// WithUseCountry says which country a use of a capability comes from (ISO 3166-1 alpha-2). A clearance lets live
+// money through only for a country it lists; a use from no known country is listed by none.
+func WithUseCountry(ctx context.Context, country string) context.Context {
+	return context.WithValue(ctx, useCountryKey{}, strings.ToUpper(strings.TrimSpace(country)))
+}
+
+func useCountry(ctx context.Context) string {
+	c, _ := ctx.Value(useCountryKey{}).(string)
+	return c
+}
+
+// countryCodes checks a clearance's countries are ISO 3166-1 alpha-2 country codes, and returns them upper-case,
+// each once.
+func countryCodes(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, c := range in {
+		c = strings.ToUpper(strings.TrimSpace(c))
+		if c == "" {
+			continue
+		}
+		r, err := language.ParseRegion(c)
+		if len(c) != 2 || err != nil || !r.IsCountry() || r.String() != c {
+			return nil, fmt.Errorf("economy: %q is not an ISO 3166-1 alpha-2 country code", c)
+		}
+		if !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("economy: a clearance names the countries it covers (ISO 3166-1 alpha-2, e.g. GB)")
+	}
+	return out, nil
 }
 
 // SetLiveStripe tells the store whether Lens's Stripe key is live, which makes a Stripe bill real money.
@@ -164,26 +260,39 @@ func (s *DualTokenStore) WalletCapabilities(ctx context.Context) ([]CapabilitySt
 	return out, nil
 }
 
-// ClearCapability records that the AMBER or RED capability may take real money, on the lawyer's or
-// partner's reference.
-func (s *DualTokenStore) ClearCapability(ctx context.Context, key, operator, reference string) (Clearance, error) {
-	return s.recordClearance(ctx, key, "clear", operator, reference)
+// ClearCapability records that the AMBER or RED capability may take real money, on the lawyer's or partner's
+// reference, under the licence and through the partner the terms name, from the countries they list, until they
+// expire.
+func (s *DualTokenStore) ClearCapability(ctx context.Context, key, operator string, terms ClearanceTerms) (Clearance, error) {
+	countries, err := countryCodes(terms.Countries)
+	if err != nil {
+		return Clearance{}, err
+	}
+	terms.Countries = countries
+	terms.Licence, terms.Partner = strings.TrimSpace(terms.Licence), strings.TrimSpace(terms.Partner)
+	switch {
+	case terms.Licence == "" || terms.Partner == "":
+		return Clearance{}, errors.New("economy: a clearance names the licence it rests on and the licensed partner the money moves through")
+	case !terms.ExpiresAt.After(time.Now()):
+		return Clearance{}, errors.New("economy: a clearance needs an expiry in the future")
+	}
+	return s.recordClearance(ctx, key, "clear", operator, terms)
 }
 
 // RevokeClearance stops the capability taking real money, from its next use; why is recorded.
 func (s *DualTokenStore) RevokeClearance(ctx context.Context, key, operator, why string) error {
-	_, err := s.recordClearance(ctx, key, "revoke", operator, why)
+	_, err := s.recordClearance(ctx, key, "revoke", operator, ClearanceTerms{Reference: why})
 	return err
 }
 
-func (s *DualTokenStore) recordClearance(ctx context.Context, key, action, operator, reference string) (Clearance, error) {
+func (s *DualTokenStore) recordClearance(ctx context.Context, key, action, operator string, terms ClearanceTerms) (Clearance, error) {
 	c, ok := CapabilityByKey(key)
 	switch {
 	case !ok:
 		return Clearance{}, fmt.Errorf("economy: no wallet capability is called %q", key)
 	case c.Class == ClassGreen:
 		return Clearance{}, fmt.Errorf("economy: %s is GREEN and takes real money already: there is nothing to clear", c.Name)
-	case strings.TrimSpace(operator) == "" || strings.TrimSpace(reference) == "":
+	case strings.TrimSpace(operator) == "" || strings.TrimSpace(terms.Reference) == "":
 		return Clearance{}, errors.New("economy: a clearance needs who records it and a reference (why, for a revoke)")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -203,9 +312,17 @@ func (s *DualTokenStore) recordClearance(ctx context.Context, key, action, opera
 	if action == "revoke" && latest != "clear" {
 		return Clearance{}, fmt.Errorf("economy: %s has no clearance to revoke", c.Name)
 	}
-	cl := Clearance{By: operator, Reference: reference}
-	if err := tx.QueryRow(ctx, `INSERT INTO wallet_clearances (capability, action, operator, reference) VALUES ($1, $2, $3, $4)
-		RETURNING created_at`, key, action, operator, reference).Scan(&cl.At); err != nil {
+	var expires *time.Time
+	if action == "clear" {
+		expires = &terms.ExpiresAt
+	}
+	if terms.Countries == nil {
+		terms.Countries = []string{}
+	}
+	cl := Clearance{By: operator, ClearanceTerms: terms}
+	if err := tx.QueryRow(ctx, `INSERT INTO wallet_clearances (capability, action, operator, reference, countries, partner, licence_reference,
+		expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING created_at`, key, action, operator, terms.Reference, terms.Countries,
+		terms.Partner, terms.Licence, expires).Scan(&cl.At); err != nil {
 		return Clearance{}, fmt.Errorf("economy: record clearance: %w", err)
 	}
 	return cl, tx.Commit(ctx)
@@ -233,37 +350,42 @@ func (s *DualTokenStore) ClearanceLog(ctx context.Context, limit int) ([]Clearan
 	})
 }
 
+// clearancesInForce is each capability's clearance whose latest row is a clear that names its countries and has
+// not expired.
 func clearancesInForce(ctx context.Context, q pgxDB) (map[string]Clearance, error) {
-	rows, err := q.Query(ctx, `SELECT DISTINCT ON (capability) capability, action, operator, reference, created_at
-		FROM wallet_clearances ORDER BY capability, id DESC`)
+	rows, err := q.Query(ctx, `SELECT capability, operator, reference, created_at, countries, partner, licence_reference, expires_at
+		FROM (SELECT DISTINCT ON (capability) * FROM wallet_clearances ORDER BY capability, id DESC) latest
+		WHERE action = 'clear' AND expires_at > now() AND cardinality(countries) > 0`)
 	if err != nil {
 		return nil, fmt.Errorf("economy: clearances: %w", err)
 	}
 	defer rows.Close()
 	out := map[string]Clearance{}
 	for rows.Next() {
-		var key, action string
+		var key string
 		var c Clearance
-		if err := rows.Scan(&key, &action, &c.By, &c.Reference, &c.At); err != nil {
+		if err := rows.Scan(&key, &c.By, &c.Reference, &c.At, &c.Countries, &c.Partner, &c.Licence, &c.ExpiresAt); err != nil {
 			return nil, err
 		}
-		if action == "clear" {
-			out[key] = c
-		}
+		out[key] = c
 	}
 	return out, rows.Err()
 }
 
+// capabilityCleared reports whether key's latest clearance row is a clear that has not expired and lists the
+// country the use comes from (WithUseCountry). Anything else — a revoke, an expired clear, another country, no
+// known country — is no clearance.
 func capabilityCleared(ctx context.Context, q pgxDB, key string) (bool, error) {
-	var action string
-	err := q.QueryRow(ctx, `SELECT action FROM wallet_clearances WHERE capability = $1 ORDER BY id DESC LIMIT 1`, key).Scan(&action)
+	var cleared bool
+	err := q.QueryRow(ctx, `SELECT action = 'clear' AND COALESCE(expires_at > now(), false) AND $2 = ANY(countries)
+		FROM wallet_clearances WHERE capability = $1 ORDER BY id DESC LIMIT 1`, key, useCountry(ctx)).Scan(&cleared)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("economy: clearance: %w", err)
 	}
-	return action == "clear", nil
+	return cleared, nil
 }
 
 // spendForCapability judges a spend of amount µLXC of workspaceID's credits on capability key, in tx. A

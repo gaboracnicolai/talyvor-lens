@@ -27,7 +27,7 @@ func (f *companyPaymentsFake) ChargeAgentPayment(context.Context, pgx.Tx, string
 // operator's clearance lets live money through, and revoking it stops it again; each clear and revoke is a row.
 func TestWalletClasses_AmberAndRedTakeTestMoneyUntilCleared(t *testing.T) {
 	pool := supplyPool(t)
-	ctx := context.Background()
+	ctx := WithUseCountry(context.Background(), "GB") // B30.1: a clearance reaches only the countries it lists
 	const ws, other = "ws-b221", "ws-b221-other"
 	for _, id := range []string{ws, other} {
 		if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id, name, cache_prefix) VALUES ($1, $1, $1)`, id); err != nil {
@@ -99,7 +99,8 @@ func TestWalletClasses_AmberAndRedTakeTestMoneyUntilCleared(t *testing.T) {
 		t.Fatalf("a purchase past the test money = %+v, want declined as class RED", d)
 	}
 	// The operator clears cards on a partner's reference: live credits go through, test money is left alone.
-	if _, err := s.ClearCapability(ctx, CapabilityAgentCard, "nicolai", "issuing partner PA-1"); err != nil {
+	if _, err := s.ClearCapability(ctx, CapabilityAgentCard, "nicolai", ClearanceTerms{Reference: "issuing partner PA-1",
+		Licence: "EMI-900001", Partner: "Issuer Ltd", Countries: []string{"GB"}, ExpiresAt: time.Now().Add(24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if d := buy("evt_cleared", 15); !d.Approved {
@@ -144,7 +145,8 @@ func TestWalletClasses_AmberAndRedTakeTestMoneyUntilCleared(t *testing.T) {
 		t.Fatalf("paying another owner with a test key = %v, want paid", err)
 	}
 	s.SetLiveStripe(true)
-	if _, err := s.ClearCapability(ctx, CapabilityPayAnotherOwner, "nicolai", "counsel opinion LNE-2026-09"); err != nil {
+	if _, err := s.ClearCapability(ctx, CapabilityPayAnotherOwner, "nicolai", ClearanceTerms{Reference: "counsel opinion LNE-2026-09",
+		Licence: "API-900002", Partner: "Payments Ltd", Countries: []string{"GB"}, ExpiresAt: time.Now().Add(24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := pay(); err != nil {
