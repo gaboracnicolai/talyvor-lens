@@ -17,10 +17,15 @@ import (
 //
 //	POST /v1/workspaces/{wsID}/marketplace/listings                {kind, title, description, price_per_use_ulxc, visibility, artifact, changelog}
 //	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/versions  {artifact, changelog}   a new version; the old ones stay usable
+//	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/offers    {offers: [...]}   B32.18: replace how it is sold
 //	GET  /v1/workspaces/{wsID}/marketplace/listings                the workspace's own listings
 //	GET  /v1/marketplace/listings?kind=                            the public catalog
 //	GET  /v1/marketplace/listings/{id}                             a listing and its versions (artifacts for its owner only)
 //	POST /v1/marketplace/listings/{id}/reports                     {reason, details}   B20.4: report a listing
+//
+// A listing is sold through its offers (internal/market/offers.go): per_use, buy, rent or subscribe, each under a
+// personal, commercial or enterprise licence, at a price in µUSD. A publish may carry them ("offers"); without them a
+// price_per_use_ulxc is one per_use commercial offer. Replacing the offers changes the next charge and no past one.
 //
 // A publish sent again with the Idempotency-Key it was first sent with answers 200 with the listing that key
 // made, and publishes nothing (B17.34). A publish the scan refuses is 422 with what it found (secrets, personal data, prompt injection); one the
@@ -82,6 +87,24 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 			return
 		}
 		writeJSONOK(w, http.StatusCreated, v)
+	}))
+	r.Put("/v1/workspaces/{wsID}/marketplace/listings/{listingID}/offers", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Offers []market.Offer `json:"offers"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 64<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {offers: [{kind, licence, price_usd_micros, ...}]}: "+err.Error())
+			return
+		}
+		offers, err := store.ReplaceOffers(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "listingID"), in.Offers)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if offers == nil {
+			offers = []market.Offer{}
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"offers": offers})
 	}))
 	r.Get("/v1/workspaces/{wsID}/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
 		list, err := store.OwnListings(req.Context(), chi.URLParam(req, "wsID"))
