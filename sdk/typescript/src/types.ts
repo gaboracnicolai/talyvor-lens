@@ -58,6 +58,7 @@ export interface AgentRules {
   allowed_providers: string[];
   allowed_payees: string[];
   blocked_payees: string[];
+  payee_daily_limits_ulxc: Record<string, number>;
   active_from: string;
   active_until: string;
   timezone: string;
