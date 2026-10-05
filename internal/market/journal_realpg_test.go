@@ -25,11 +25,10 @@ func billedUse(t *testing.T, pool *pgxpool.Pool, id, seller, buyer string, ulxc 
 	}
 }
 
-func journalBalance(t *testing.T, pool *pgxpool.Pool, account string) int64 {
+func journalBalance(t *testing.T, s *Store, account string) int64 {
 	t.Helper()
-	var b int64
-	if err := pool.QueryRow(context.Background(), `SELECT COALESCE(sum(balance_usd_micros), 0)::bigint FROM market_journal_balances
-		WHERE account = $1`, account).Scan(&b); err != nil {
+	b, err := s.JournalBalance(context.Background(), account, "USD")
+	if err != nil {
 		t.Fatal(err)
 	}
 	return b
@@ -60,7 +59,7 @@ func TestJournal_AClearedUseAndItsRefundMirrorEachOther(t *testing.T) {
 	if len(j) != 1 || j[0].Kind != JournalClear || j[0].Funding != "live" || !j[0].CreatedAt.Equal(paid) || !reflect.DeepEqual(j[0].Postings, cleared) {
 		t.Fatalf("the cleared use's journal = %+v; want one live clear entry %v at %v", j, cleared, paid)
 	}
-	if got := journalBalance(t, pool, SellerHoldback(seller)); got != -850_000 {
+	if got := journalBalance(t, s, SellerHoldback(seller)); got != -850_000 {
 		t.Fatalf("the seller's holdback balance = %d; want -850000", got)
 	}
 
@@ -80,7 +79,7 @@ func TestJournal_AClearedUseAndItsRefundMirrorEachOther(t *testing.T) {
 		t.Fatalf("the refunded use's journal = %+v; want its clear and then the reversal %v", j, mirror)
 	}
 	for _, a := range []string{AccountStripeClearing, AccountMarketFee, SellerHoldback(seller)} {
-		if got := journalBalance(t, pool, a); got != 0 {
+		if got := journalBalance(t, s, a); got != 0 {
 			t.Fatalf("%s reads %d after the sale and its reversal; want 0", a, got)
 		}
 	}

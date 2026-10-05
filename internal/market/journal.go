@@ -109,6 +109,20 @@ func postClearTx(ctx context.Context, tx pgx.Tx, useID, sellerWorkspaceID string
 	return err
 }
 
+// JournalBalance reads an account's balance in currency ("" is USD), test and live money together: the sum of its
+// postings, kept by market_journal_balances as each is written.
+func (s *Store) JournalBalance(ctx context.Context, account, currency string) (int64, error) {
+	if currency == "" {
+		currency = "USD"
+	}
+	var b int64
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(sum(balance_usd_micros), 0)::bigint FROM market_journal_balances
+		WHERE account = $1 AND currency = $2`, account, currency).Scan(&b); err != nil {
+		return 0, fmt.Errorf("market: journal balance of %s: %w", account, err)
+	}
+	return b, nil
+}
+
 // JournalEntry is one entry of the marketplace journal and its postings.
 type JournalEntry struct {
 	ID        string    `json:"id"`
