@@ -17,7 +17,8 @@ import (
 // B28.303 — the owner names, in an agent's rules, who it may pay and who it may not, through the routes the
 // console uses: a payment to a blocked payee is refused 403 and posts nothing; once the rules name allowed
 // payees, a payment to one posts its pair and a payment to any other posts nothing. Rules saved without the
-// lists keep them, an empty list clears one, and a payee both allowed and blocked is refused 400.
+// lists keep them, an empty list clears one, a payee both allowed and blocked is refused 400, and a company
+// named on a list names its agents.
 func TestB28303_NoPayPostingToABlockedPayee_OneToAnAllowedPayee(t *testing.T) {
 	pool := agentRoutesDB(t)
 	ctx := context.Background()
@@ -103,5 +104,10 @@ func TestB28303_NoPayPostingToABlockedPayee_OneToAnAllowedPayee(t *testing.T) {
 	put(`{"allowed_payees":[],"blocked_payees":[]}`, `"allowed_payees":[],"blocked_payees":[]`)
 	if code, n := pay(blocked); code != http.StatusOK || n != 1 {
 		t.Errorf("paying the once-blocked payee after the lists are cleared = %d with %d pay postings, want 200 and one", code, n)
+	}
+	// A company named on a list names its agents.
+	put(`{"blocked_payees":["`+ws+`"]}`, `"blocked_payees":["`+ws+`"]`)
+	if code, n := pay(supplier); code != http.StatusForbidden || n != 1 {
+		t.Errorf("paying an agent of a blocked company = %d with %d pay postings to it, want 403 and still one", code, n)
 	}
 }
