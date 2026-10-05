@@ -14,6 +14,10 @@ import (
 // the screen says why instead of "Nothing changed". Everything else Stripe answers stays 502 — Lens's own key
 // (401/403), a clash (409), slow down (429), an object Lens named that is gone (404), Stripe down — since
 // nothing the person typed would change it.
+//
+// B28.276 — Stripe's v2 API (a seller's account and onboarding link, B17.23) refuses with a code and a message
+// and no v1 type, so stripe-go v81 reads it with an empty Type. That is the same refusal: before this, every
+// Connect with Stripe Stripe turned down was a 502 and the seller read "Nothing happened".
 
 // stripeToken is something in Stripe's sentence that may be an object id (ich_1Nv…) or a key (sk_test_…),
 // which never reaches the screen; a param name (tos_acceptance) is told apart by having no digit or capital.
@@ -29,7 +33,7 @@ func stripeRefusal(err error) string {
 	if se.HTTPStatusCode != http.StatusBadRequest && se.HTTPStatusCode != http.StatusPaymentRequired {
 		return ""
 	}
-	if se.Type != stripe.ErrorTypeInvalidRequest && se.Type != stripe.ErrorTypeCard {
+	if se.Type != stripe.ErrorTypeInvalidRequest && se.Type != stripe.ErrorTypeCard && se.Type != "" {
 		return ""
 	}
 	return "Stripe says: " + stripeToken.ReplaceAllStringFunc(se.Msg, func(tok string) string {
