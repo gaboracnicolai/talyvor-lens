@@ -5,8 +5,8 @@ Every wallet capability has a class, and the class decides whether it may use re
 | Class | Real money | Capabilities |
 |---|---|---|
 | **GREEN** | Now | Spending on Talyvor, buying marketplace listings, moving money between one owner's own agents, rules, approvals, statements and pots, and Talyvor's credit line to companies |
-| **AMBER** | Only after the lawyer confirms | Sending and requesting money between different owners, loans between companies, and escrow |
-| **RED** | Only once a licence or a licensed partner exists | Cashing credits out, any loan or credit involving a private user, interest or yield, investing and trading, and cards |
+| **AMBER** | Only after the lawyer confirms | Sending and requesting money between different owners, loans between companies, escrow, topping up by a payment from your own bank, credit lines and loans to companies, advances against marketplace earnings, companies lending to companies through the marketplace, and prepaid usage at today's prices |
+| **RED** | Only once a licence or a licensed partner exists | Cashing credits out, any loan or credit involving a private user, interest or yield, investing and trading (simulated trading), cards, accounts in pounds, euros, dollars and USDC, account details others can pay into, receiving money from outside Talyvor, paying people and companies outside Talyvor, converting between currencies, stablecoin balances and transfers, paying and being paid over HTTP 402, accepting payments from agents as a business, trading shares, crypto and prediction markets through a broker partner, idle money in a money-market fund, cover for agent mistakes, and paying people for tasks |
 
 An AMBER or RED capability takes **test money only** until the operator records a clearance for it. A GREEN
 one takes any money.
@@ -47,14 +47,28 @@ Going live with Stripe therefore needs no code change to stay safe.
 Run these inside the lens container:
 
 ```
-docker compose exec lens /lens wallet-clearances
-docker compose exec lens /lens wallet-clearances clear pay_another_owner "counsel opinion LNE-2026-09"
-docker compose exec lens /lens wallet-clearances revoke pay_another_owner "FCA notification pending"
-docker compose exec lens /lens wallet-clearances log
+docker compose exec lens /lens clearances
+docker compose exec lens /lens clearances clear payments_out --licence EMI-900123 --partner "Partner Ltd" \
+    --countries GB,IE --expires 2027-10-01 "partner agreement PA-7"
+docker compose exec lens /lens clearances revoke payments_out "partner paused"
+docker compose exec lens /lens clearances log
 ```
 
-- The first command lists every capability, its class, and whether it takes real money.
-- A clearance needs a reference: the lawyer's opinion or the partner's agreement.
+(`lens wallet-clearances` is the same command.)
+
+- The first command lists every capability, its class, and its clearance: the countries, the expiry, the
+  licence and the partner.
+- A clearance names four things, and none is optional:
+  - the licence it rests on (`--licence`);
+  - the licensed partner the money moves through (`--partner`);
+  - the countries live money may be used from, as ISO 3166-1 alpha-2 codes (`--countries GB,IE`);
+  - when it ends (`--expires`, a day or an RFC 3339 time).
+
+  It also needs a reference: the lawyer's opinion or the partner's agreement.
+- Live money from a country the clearance does not list is refused exactly as if there were no clearance,
+  and so is a use whose country is not known. Once the expiry passes, live money is refused again.
+- A clearance recorded before these terms existed names no country, so it no longer lets live money
+  through. Record it again with its terms.
 - Every clear and every revoke is a row of `wallet_clearances`. That table is append-only, so it is the
   audit log, and each row records who, when and the reference.
 - A revoke stops real money from the capability's next use.

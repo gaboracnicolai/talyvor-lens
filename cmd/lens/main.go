@@ -173,8 +173,9 @@ func main() {
 		}
 		return
 	}
-	// `lens wallet-clearances` (B22.1): clear an AMBER or RED wallet capability for real money, or revoke it.
-	if len(os.Args) > 1 && os.Args[1] == "wallet-clearances" {
+	// `lens clearances` (B30.1; `lens wallet-clearances`, B22.1): clear an AMBER or RED wallet capability for real
+	// money, or revoke it.
+	if len(os.Args) > 1 && (os.Args[1] == "clearances" || os.Args[1] == "wallet-clearances") {
 		if err := runWalletClearances(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
