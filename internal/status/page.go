@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/talyvor/lens/internal/brand"
 )
 
 // pgxPinger is the subset of *pgxpool.Pool the status check uses.
@@ -513,46 +515,73 @@ func renderHTML(s *StatusResponse) string {
 <meta name="application-name" content="TALYVOR LENS STATUS">
 <title>Talyvor Lens Status</title>
 <style>
-  :root { --bg:#0c0e12; --panel:#13161c; --text:#d4d8e2; --secondary:#8892a4; --accent:#f0a030;
-          --good:#5ac17d; --warn:#f0a030; --bad:#e35d6a; --mono: 'IBM Plex Mono', ui-monospace, monospace; }
+%s
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 40px 24px; background: var(--bg); color: var(--text);
-         font-family: var(--mono); }
+  body { margin: 0; padding: 40px 24px; background: var(--tv-canvas); color: var(--tv-ink);
+         font-family: var(--tv-font-sans); font-size: 15px; line-height: 24px;
+         -webkit-font-smoothing: antialiased; }
   main { max-width: 880px; margin: 0 auto; }
-  header { margin-bottom: 28px; }
-  h1 { margin: 0 0 4px; font-size: 1.6rem; letter-spacing: 0.05em; }
-  h1 .accent { color: var(--accent); }
-  .subtitle { color: var(--secondary); font-size: 0.9rem; }
-  .banner { padding: 24px 20px; border-radius: 12px; margin-bottom: 28px;
-            font-size: 1.2rem; font-weight: 600; }
-  .banner.good { background: rgba(90, 193, 125, 0.12); color: var(--good); }
-  .banner.warn { background: rgba(240, 160, 48, 0.12); color: var(--warn); }
-  .banner.bad  { background: rgba(227, 93, 106, 0.12); color: var(--bad); }
-  section { background: var(--panel); border-radius: 10px; padding: 18px 20px; margin-bottom: 18px; }
-  section h2 { margin: 0 0 12px; font-size: 1rem; color: var(--secondary); letter-spacing: 0.04em; }
-  table { width: 100%%; border-collapse: collapse; font-size: 0.95rem; }
-  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-  th { color: var(--secondary); font-weight: 500; }
-  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.8rem; }
-  .pill.good { background: rgba(90, 193, 125, 0.12); color: var(--good); }
-  .pill.warn { background: rgba(240, 160, 48, 0.12); color: var(--warn); }
-  .pill.bad  { background: rgba(227, 93, 106, 0.12); color: var(--bad); }
-  .meta { color: var(--secondary); font-size: 0.85rem; margin-top: 24px; }
-  footer { color: var(--secondary); font-size: 0.8rem; margin-top: 28px; text-align: center; }
+  .num { font-family: var(--tv-font-mono); font-variant-numeric: tabular-nums; }
+  header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 28px; }
+  header .tv-mark { width: 40px; height: 40px; margin-top: 4px; }
+  .eyebrow { font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .22em;
+             text-transform: uppercase; color: var(--tv-label); }
+  h1 { margin: 4px 0 6px; font-size: 28px; line-height: 34px; font-weight: 500; letter-spacing: -.01em; }
+  .subtitle { color: var(--tv-ink-muted); font-size: 13px; line-height: 20px; }
+  header .tv-rule { margin-top: 14px; }
+  .banner { display: flex; align-items: center; gap: 12px; padding: 20px; margin-bottom: 24px;
+            background: var(--tv-raised); border: 1px solid var(--tv-line); border-radius: var(--tv-radius-md);
+            font-size: 20px; line-height: 26px; font-weight: 600; }
+  .banner::before, .pill::before { content: ""; flex: none; border-radius: var(--tv-radius-pill);
+            background: var(--tv-ink-muted); }
+  .banner::before { width: 10px; height: 10px; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; vertical-align: top; }
+  .pill::before { width: 7px; height: 7px; }
+  .banner.good::before, .pill.good::before { background: var(--tv-positive); }
+  .banner.warn::before, .pill.warn::before { background: var(--tv-caution); }
+  .banner.bad::before,  .pill.bad::before  { background: var(--tv-critical); }
+  section { background: var(--tv-surface); border: 1px solid var(--tv-line); border-radius: var(--tv-radius-md);
+            padding: 18px 20px; margin-bottom: 18px; }
+  section h2 { margin: 0 0 6px; }
+  .tbl { overflow-x: auto; }
+  table { width: 100%%; border-collapse: collapse; font-size: 14px; line-height: 20px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--tv-line); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  th:first-child { width: 46%%; }
+  th:nth-child(2) { width: 30%%; }
+  th { color: var(--tv-label); font-weight: 500; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+  td.num { white-space: nowrap; }
+  .msg { margin-top: 2px; font-size: 13px; color: var(--tv-ink-muted); overflow-wrap: anywhere; }
+  .meta { color: var(--tv-ink-muted); font-size: 13px; margin-top: 24px; }
+  footer { color: var(--tv-ink-muted); font-size: 13px; margin-top: 28px; text-align: center; }
+  @media (max-width: 600px) {
+    body { padding: 28px 16px; }
+    h1 { font-size: 24px; line-height: 30px; }
+    header .tv-mark { width: 32px; height: 32px; }
+    section { padding: 14px 12px; }
+    th, td { padding: 8px 6px; }
+  }
 </style>
 </head>
 <body>
 <main>
 <header>
-  <h1>TALYVOR <span class="accent">LENS</span> STATUS</h1>
-  <div class="subtitle">Agent Wallets and the gateway that enforces them · v%s · uptime %s</div>
+  %s
+  <div>
+    <div class="eyebrow">Service status</div>
+    <h1>Talyvor Lens</h1>
+    <div class="subtitle">Agent Wallets and the gateway that enforces them · <span class="num">v%s</span> · uptime <span class="num">%s</span></div>
+    <span class="tv-rule"></span>
+  </div>
 </header>
 
 <div class="banner %s">%s</div>
 
 <section>
-  <h2>Lens Components</h2>
-  <table><thead><tr><th>Component</th><th>Status</th><th>Latency</th><th>Message</th></tr></thead><tbody>`,
+  <h2 class="eyebrow">Lens components</h2>
+  <div class="tbl"><table><thead><tr><th>Component</th><th>Status</th><th>Latency</th></tr></thead><tbody>`,
+		brand.TokensCSS,
+		brand.Mark,
 		htmlEscape(s.Version),
 		formatUptime(s.UptimeHours),
 		bannerClass,
@@ -560,20 +589,26 @@ func renderHTML(s *StatusResponse) string {
 	)
 
 	for _, c := range s.Components {
-		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
-			htmlEscape(c.Name), statusPill(c.Status), latencyCell(c.Latency, c.Measured), htmlEscape(c.Message))
+		// The message sits under the name rather than in a fourth column, so the
+		// table fits a 390px phone without scrolling sideways.
+		msg := ""
+		if c.Message != "" {
+			msg = `<div class="msg">` + htmlEscape(c.Message) + `</div>`
+		}
+		fmt.Fprintf(&b, `<tr><td>%s%s</td><td>%s</td><td class="num">%s</td></tr>`,
+			htmlEscape(c.Name), msg, statusPill(c.Status), latencyCell(c.Latency, c.Measured))
 	}
-	b.WriteString(`</tbody></table></section>`)
+	b.WriteString(`</tbody></table></div></section>`)
 
-	b.WriteString(`<section><h2>LLM Providers</h2>
-<table><thead><tr><th>Provider</th><th>Status</th><th>Latency</th></tr></thead><tbody>`)
+	b.WriteString(`<section><h2 class="eyebrow">LLM providers</h2>
+<div class="tbl"><table><thead><tr><th>Provider</th><th>Status</th><th>Latency</th></tr></thead><tbody>`)
 	for _, p := range s.Providers {
-		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%dms</td></tr>`,
+		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td class="num">%dms</td></tr>`,
 			htmlEscape(p.Name), statusPill(p.Status), p.Latency)
 	}
-	b.WriteString(`</tbody></table></section>`)
+	b.WriteString(`</tbody></table></div></section>`)
 
-	fmt.Fprintf(&b, `<div class="meta">Last updated: %s UTC</div>
+	fmt.Fprintf(&b, `<div class="meta">Last updated: <span class="num">%s UTC</span></div>
 <footer>Updated every 60 seconds automatically</footer>
 </main>
 </body>

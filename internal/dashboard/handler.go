@@ -44,6 +44,8 @@ import (
 	"html"
 	"net/http"
 	"strings"
+
+	"github.com/talyvor/lens/internal/brand"
 )
 
 // Handler serves the status page. The HTML is rendered once at construction with
@@ -59,7 +61,8 @@ func New(version string) *Handler {
 	// The version is the only interpolation and it comes from the build, but
 	// escape it anyway — a page whose single dynamic value is unescaped is one
 	// bad ldflag away from an injection.
-	rendered := strings.ReplaceAll(statusHTML, "{{VERSION}}", html.EscapeString(version))
+	rendered := strings.NewReplacer("{{BRAND_CSS}}", brand.TokensCSS, "{{MARK}}", brand.Mark).Replace(statusHTML)
+	rendered = strings.ReplaceAll(rendered, "{{VERSION}}", html.EscapeString(version))
 	return &Handler{version: version, html: []byte(rendered)}
 }
 

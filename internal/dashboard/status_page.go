@@ -2,80 +2,67 @@ package dashboard
 
 // statusHTML is the whole page: one card, four rows, no dependencies.
 //
-// THE DESIGN IS THE SUITE'S, TAKEN FROM ITS SHIPPED CSS — talyvor-suite
-// packages/ui/src/theme.css and preset.ts, not from a description of them. Every
-// colour below is a verbatim token value; the type scale (head 17/600,
-// body 14/1.45, caption 12, micro 12.5/500), the 38px row, the 16px gutter and
-// the 10px card radius are the suite's own. The reference is macOS System
-// Settings: a dense stack of hairline-separated rows, label left and value
-// right, system font, nothing decorative. status_test.go pins the hexes, so a
-// drift from the design system fails the build rather than quietly diverging.
+// THE DESIGN IS THE BRAND'S — brand-v4 (the 4 Oct 2026 board), via
+// internal/brand: Obsidian canvas, Surface card, Frost ink, one Teal accent;
+// Space Grotesk for the UI and IBM Plex Mono for every number, both named first
+// over the system stack and never fetched. Dark is primary, light follows the
+// viewer's preference. The flat mark sits beside the name; it is the brand's own
+// file, inlined, never redrawn. The layout is a dense stack of hairline-separated
+// rows, label left and value right. status_test.go pins the hexes, so a drift
+// from the brand fails the build rather than quietly diverging.
 //
 // THE ONE INVARIANT WORTH NAMING: text is never a hue. The health state is a
 // word in ink beside a small coloured dot — the dot carries the status colour,
-// the word never does. That is the suite's rule and it is why this page has no
-// green "Healthy" or red "Down" label.
+// the word never does. That is why this page has no green "Healthy" or red
+// "Down" label.
 //
 // It is entirely self-contained: no CDN, no web font, no analytics. The API host
 // must not make a visitor's browser talk to a third party.
+//
+// {{BRAND_CSS}}, {{MARK}} and {{VERSION}} are filled in once, by New.
 const statusHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark light">
 <title>Talyvor Lens</title>
 <style>
-:root{
-  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Inter,system-ui,sans-serif;
-  --canvas:#F4F5F6; --surface:#FFFFFF; --rule:rgba(0,0,0,.085); --rule-strong:rgba(0,0,0,.14);
-  --ink:#1B1D1F; --muted:#6B6E73; --faint:#8B8F94;
-  --accent:#0B7A85; --accent-ink:#FFFFFF;
-  --settled:#1D7A45; --held:#8A6A12; --slashed:#BF3B2E;
-}
-@media (prefers-color-scheme: dark){
-  :root{
-    --canvas:#141618; --surface:#1D2023; --rule:rgba(255,255,255,.085); --rule-strong:rgba(255,255,255,.155);
-    --ink:#EDEFF1; --muted:#9CA1A6; --faint:#767B80;
-    --accent:#3ABDC9; --accent-ink:#08191B;
-    --settled:#45C77F; --held:#D6A93C; --slashed:#F0685C;
-  }
-}
+{{BRAND_CSS}}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
-  margin:0; background:var(--canvas); color:var(--ink);
-  font-family:var(--sans); font-size:13px; line-height:1.45;
+  margin:0; background:var(--tv-canvas); color:var(--tv-ink);
+  font-family:var(--tv-font-sans); font-size:15px; line-height:24px;
   -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
   display:flex; align-items:flex-start; justify-content:center; padding:48px 16px;
 }
 main{width:100%; max-width:560px}
-.card{background:var(--surface); border:1px solid var(--rule); border-radius:10px; overflow:hidden}
-.head{display:flex; align-items:center; gap:12px; padding:16px; border-bottom:1px solid var(--rule)}
-.mark{width:26px; height:26px; flex:none; border:1px solid var(--rule-strong); border-radius:7px;
-      display:flex; align-items:center; justify-content:center; background:var(--canvas)}
-.mark i{display:block; width:3px; height:12px; border-radius:9999px; background:var(--accent)}
+.num{font-family:var(--tv-font-mono); font-variant-numeric:tabular-nums}
+.card{background:var(--tv-surface); border:1px solid var(--tv-line); border-radius:var(--tv-radius-md); overflow:hidden}
+.head{display:flex; align-items:flex-start; gap:14px; padding:20px 16px 18px; border-bottom:1px solid var(--tv-line)}
+.head .tv-mark{width:32px; height:32px; margin-top:2px}
 .title{flex:1; min-width:0}
-h1{margin:0; font-size:17px; line-height:1.3; font-weight:600; color:var(--ink)}
-.sub{margin:1px 0 0; font-size:12px; line-height:1.35; color:var(--muted)}
-.ver{font-size:12.5px; line-height:1; font-weight:500; color:var(--muted);
-     border:1px solid var(--rule); border-radius:9999px; padding:4px 8px; white-space:nowrap}
+h1{margin:0; font-size:20px; line-height:26px; font-weight:600; letter-spacing:-.01em; color:var(--tv-ink)}
+.sub{margin:2px 0 12px; font-size:13px; line-height:20px; color:var(--tv-ink-muted)}
+.ver{font-size:12px; line-height:1; font-weight:500; color:var(--tv-ink-muted); margin-top:4px;
+     border:1px solid var(--tv-line-strong); border-radius:var(--tv-radius-pill); padding:5px 9px; white-space:nowrap}
 .row{display:flex; align-items:center; justify-content:space-between; gap:16px;
-     min-height:38px; padding:8px 16px; border-bottom:1px solid var(--rule)}
+     min-height:52px; padding:10px 16px; border-bottom:1px solid var(--tv-line)}
 .row:last-child{border-bottom:0}
-.label{font-size:14px; color:var(--ink)}
-.hint{font-size:12px; line-height:1.35; color:var(--muted)}
-.val{font-size:14px; color:var(--ink); display:flex; align-items:center; gap:8px; white-space:nowrap}
-.dot{width:6px; height:6px; border-radius:9999px; background:var(--faint); flex:none}
-.dot.ok{background:var(--settled)} .dot.warn{background:var(--held)} .dot.bad{background:var(--slashed)}
-.note{padding:14px 16px; border-bottom:1px solid var(--rule)}
-.note p{margin:0; font-size:14px; color:var(--muted)}
+.label{font-size:15px; line-height:22px; color:var(--tv-ink)}
+.hint{font-size:13px; line-height:20px; color:var(--tv-ink-muted)}
+.val{font-size:14px; color:var(--tv-ink); display:flex; align-items:center; gap:8px; white-space:nowrap}
+.dot{width:7px; height:7px; border-radius:var(--tv-radius-pill); background:var(--tv-ink-muted); flex:none}
+.dot.ok{background:var(--tv-positive)} .dot.warn{background:var(--tv-caution)} .dot.bad{background:var(--tv-critical)}
+.note{padding:16px; border-bottom:1px solid var(--tv-line); background:var(--tv-raised)}
+.note p{margin:0; font-size:14px; line-height:22px; color:var(--tv-ink-muted)}
 .note p + p{margin-top:8px}
 a.row{text-decoration:none; color:inherit}
-a.row:hover{background:var(--canvas)}
-a.row .go{font-size:14px; color:var(--accent)}
-a.row:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
-footer{margin-top:12px; text-align:center; font-size:12px; color:var(--faint)}
+a.row:hover{background:var(--tv-accent-tint)}
+a.row .go{font-size:18px; color:var(--tv-accent)}
+a.row:focus-visible{outline:2px solid var(--tv-accent); outline-offset:-2px}
+footer{margin-top:14px; text-align:center; font-size:13px; color:var(--tv-ink-muted)}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation-duration:.001ms!important; transition-duration:.001ms!important}
 }
@@ -85,12 +72,13 @@ footer{margin-top:12px; text-align:center; font-size:12px; color:var(--faint)}
 <main>
   <div class="card">
     <div class="head">
-      <span class="mark" aria-hidden="true"><i></i></span>
+      {{MARK}}
       <div class="title">
         <h1>Talyvor Lens</h1>
         <p class="sub">Agent Wallets and the gateway that enforces them</p>
+        <span class="tv-rule"></span>
       </div>
-      <span class="ver">v{{VERSION}}</span>
+      <span class="ver num">v{{VERSION}}</span>
     </div>
 
     <div class="row">
@@ -106,7 +94,7 @@ footer{margin-top:12px; text-align:center; font-size:12px; color:var(--faint)}
         <div class="label">Running for</div>
         <div class="hint">Since this instance last started</div>
       </div>
-      <div class="val" id="uptime">—</div>
+      <div class="val num" id="uptime">—</div>
     </div>
 
     <div class="note">
@@ -150,7 +138,7 @@ footer{margin-top:12px; text-align:center; font-size:12px; color:var(--faint)}
       <span class="go" aria-hidden="true">&rsaquo;</span>
     </a>
   </div>
-  <footer>Talyvor Lens v{{VERSION}}</footer>
+  <footer>Talyvor Lens <span class="num">v{{VERSION}}</span></footer>
 </main>
 <script>
 // The page's only live reading. /healthz is unauthenticated, so this is the one
