@@ -43,6 +43,8 @@ func TestServedOpenAPIDescribesAgentWallets(t *testing.T) {
 		{"post", "/v1/workspaces/{wsID}/agents/{agentID}/fund"},
 		{"get", "/v1/workspaces/{wsID}/agents/{agentID}/rules"},
 		{"put", "/v1/workspaces/{wsID}/agents/{agentID}/rules"},
+		{"get", "/v1/workspaces/{wsID}/agents/rule-templates"},
+		{"post", "/v1/workspaces/{wsID}/agents/{agentID}/rules/template"},
 		{"get", "/v1/workspaces/{wsID}/agents/approvals"},
 		{"post", "/v1/workspaces/{wsID}/agents/approvals/{approvalID}/approve"},
 		{"post", "/v1/workspaces/{wsID}/agents/approvals/{approvalID}/deny"},
@@ -64,7 +66,7 @@ func TestServedOpenAPIDescribesAgentWallets(t *testing.T) {
 
 	// Every schema a wallet operation points at is in the document — a dangling $ref breaks generation.
 	body := rec.Body.String()
-	for _, name := range []string{"Agent", "AgentBook", "AgentRules", "AgentApproval", "AgentStatementLine", "AgentTransfer"} {
+	for _, name := range []string{"Agent", "AgentBook", "AgentRules", "AgentApproval", "AgentStatementLine", "AgentTransfer", "RuleTemplate"} {
 		if _, ok := doc.Components.Schemas[name]; !ok {
 			t.Errorf("components.schemas.%s is missing", name)
 		}
