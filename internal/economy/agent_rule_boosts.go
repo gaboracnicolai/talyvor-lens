@@ -18,17 +18,19 @@ import (
 // rules with the boosts in force at the request's time laid over them wherever the rules are judged — the hold and
 // the debit (enforceAgentRules), the settle's allowance (agentAllowance) and so the simulator — and from until on
 // the boost is simply not read. Nothing runs at expiry, and agent_rules and its versions (B28.307) are never touched.
+// A boost raises the limit it was set over: once the rules change that limit, it no longer applies.
 
 // ErrBoostNotFound: the agent has no boost in force on that limit.
 var ErrBoostNotFound = errors.New("economy: the agent has no boost in force on that limit")
 
 // AgentRuleBoost is one of an agent's limits raised until a time.
 type AgentRuleBoost struct {
-	Rule      string    `json:"rule"`  // the limit, as AgentRules names it: daily_limit_ulxc, requests_per_minute, …
-	Value     int64     `json:"value"` // what it is raised to: µLXC, or requests a minute
-	Until     time.Time `json:"until"`
-	CreatedBy string    `json:"created_by"` // the credential that set it, as a rules version names it; empty when unknown
-	CreatedAt time.Time `json:"created_at"`
+	Rule       string    `json:"rule"`        // the limit, as AgentRules names it: daily_limit_ulxc, requests_per_minute, …
+	RaisedFrom int64     `json:"raised_from"` // the limit as the rules set it when the boost was set
+	Value      int64     `json:"value"`       // what it is raised to: µLXC, or requests a minute
+	Until      time.Time `json:"until"`
+	CreatedBy  string    `json:"created_by"` // the credential that set it, as a rules version names it; empty when unknown
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // boostableRules are the limits a boost may raise, each with where AgentRules keeps it.
@@ -52,15 +54,15 @@ func BoostableRules() []string {
 	return names
 }
 
-// applyBoosts raises r's limits to the boosts. A boost only ever raises: a limit that is not set (no limit) stays
-// unset, and one the rules have since raised above the boost keeps the rules' value.
+// applyBoosts raises r's limits to the boosts — each only while the rules still set its limit where it was when
+// the boost was set. A limit the rules have since changed, up or down, is the rules'.
 func (r *AgentRules) applyBoosts(boosts []AgentRuleBoost) {
 	for _, b := range boosts {
 		field, ok := boostableRules[b.Rule]
 		if !ok {
 			continue
 		}
-		if v := field(r); v != nil && *v > 0 && b.Value > *v {
+		if v := field(r); v != nil && *v == b.RaisedFrom && b.Value > *v {
 			*v = b.Value
 		}
 	}
@@ -83,7 +85,7 @@ func agentRulesInForce(ctx context.Context, tx pgx.Tx, agentID string, at time.T
 
 // agentBoosts are the agent's boosts in force at `at`, the soonest to end first.
 func agentBoosts(ctx context.Context, q pgxDB, agentID string, at time.Time) ([]AgentRuleBoost, error) {
-	rows, err := q.Query(ctx, `SELECT rule, value, until, created_by, created_at FROM agent_rule_boosts
+	rows, err := q.Query(ctx, `SELECT rule, raised_from, value, until, created_by, created_at FROM agent_rule_boosts
 		WHERE agent_id = $1 AND until > $2 ORDER BY until, rule`, agentID, at)
 	if err != nil {
 		return nil, fmt.Errorf("economy: agent boosts: %w", err)
@@ -92,7 +94,7 @@ func agentBoosts(ctx context.Context, q pgxDB, agentID string, at time.Time) ([]
 	out := []AgentRuleBoost{}
 	for rows.Next() {
 		var b AgentRuleBoost
-		if err := rows.Scan(&b.Rule, &b.Value, &b.Until, &b.CreatedBy, &b.CreatedAt); err != nil {
+		if err := rows.Scan(&b.Rule, &b.RaisedFrom, &b.Value, &b.Until, &b.CreatedBy, &b.CreatedAt); err != nil {
 			return nil, fmt.Errorf("economy: agent boosts: %w", err)
 		}
 		out = append(out, b)
@@ -117,8 +119,8 @@ func (s *DualTokenStore) AgentBoosts(ctx context.Context, workspaceID, agentID s
 }
 
 // BoostAgentRule raises one of the agent's limits to b.Value until b.Until, replacing the boost that limit had. The
-// limit must be set, and the boost above it: a boost raises a limit, it does not make one. Who sets it is who ctx
-// names (WithRulesChange).
+// limit must be set, and the boost above it: a boost raises a limit, it does not make one, and only while the rules
+// leave that limit as it is now. Who sets it is who ctx names (WithRulesChange).
 func (s *DualTokenStore) BoostAgentRule(ctx context.Context, workspaceID, agentID string, b AgentRuleBoost) (AgentRuleBoost, error) {
 	field, ok := boostableRules[b.Rule]
 	if !ok {
@@ -141,13 +143,13 @@ func (s *DualTokenStore) BoostAgentRule(ctx context.Context, workspaceID, agentI
 	case b.Value <= current:
 		return b, fmt.Errorf("%w: the agent's %s is %s, so a boost must raise it above that", ErrAgentRule, name, ruleAmount(b.Rule, current))
 	}
-	b.CreatedBy = rulesChangeFrom(ctx).by
+	b.RaisedFrom, b.CreatedBy = *field(&r), rulesChangeFrom(ctx).by
 	err = s.pool.QueryRow(ctx, `
-		INSERT INTO agent_rule_boosts (agent_id, workspace_id, rule, value, until, created_by)
-		SELECT id, workspace_id, $3, $4, $5, $6 FROM agent_accounts WHERE id = $1 AND workspace_id = $2
-		ON CONFLICT (agent_id, rule) DO UPDATE SET value = EXCLUDED.value, until = EXCLUDED.until,
-		       created_by = EXCLUDED.created_by, created_at = now()
-		RETURNING until, created_at`, agentID, workspaceID, b.Rule, b.Value, b.Until, b.CreatedBy).Scan(&b.Until, &b.CreatedAt)
+		INSERT INTO agent_rule_boosts (agent_id, workspace_id, rule, raised_from, value, until, created_by)
+		SELECT id, workspace_id, $3, $4, $5, $6, $7 FROM agent_accounts WHERE id = $1 AND workspace_id = $2
+		ON CONFLICT (agent_id, rule) DO UPDATE SET raised_from = EXCLUDED.raised_from, value = EXCLUDED.value,
+		       until = EXCLUDED.until, created_by = EXCLUDED.created_by, created_at = now()
+		RETURNING until, created_at`, agentID, workspaceID, b.Rule, b.RaisedFrom, b.Value, b.Until, b.CreatedBy).Scan(&b.Until, &b.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, ErrAgentNotFound
 	}

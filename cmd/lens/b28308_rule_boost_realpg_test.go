@@ -64,8 +64,9 @@ func TestB28308_AfterABoostEndsAHoldAtTheBoostedSizeWritesNothing(t *testing.T) 
 		t.Fatalf("POST rules/boosts = %d %s", code, body)
 	}
 	var set economy.AgentRuleBoost
-	if err := json.Unmarshal([]byte(body), &set); err != nil || set.Value != 50_000_000 || !set.Until.Equal(until) || set.CreatedBy != "jwt:user:alice" {
-		t.Fatalf("POST rules/boosts answered %s, want the daily limit raised to 50 LXC until %s by jwt:user:alice", body, until)
+	if err := json.Unmarshal([]byte(body), &set); err != nil || set.RaisedFrom != 10_000_000 || set.Value != 50_000_000 ||
+		!set.Until.Equal(until) || set.CreatedBy != "jwt:user:alice" {
+		t.Fatalf("POST rules/boosts answered %s, want the daily limit raised from 10 to 50 LXC until %s by jwt:user:alice", body, until)
 	}
 	code, body = call(http.MethodGet, base+"/rules/boosts", "")
 	var listed struct{ Boosts []economy.AgentRuleBoost }
@@ -104,7 +105,18 @@ func TestB28308_AfterABoostEndsAHoldAtTheBoostedSizeWritesNothing(t *testing.T) 
 		t.Fatalf("the hold after the boost ended wrote %d hold postings and %d reservations, want nothing", p, res)
 	}
 
-	// Ending a boost early puts the rules' limit back at once.
+	// A boost raises the limit it was set over: lowered by the rules while it lasts, the limit is the rules' at once.
+	if code, body := call(http.MethodPut, base+"/rules", `{"daily_limit_ulxc":5000000}`); code != http.StatusOK {
+		t.Fatalf("PUT rules lowering the daily limit = %d %s", code, body)
+	}
+	if err := hold("res-lowered", until.Add(-time.Minute)); !errors.Is(err, economy.ErrAgentRule) || !strings.Contains(err.Error(), "daily limit of 5 LXC") {
+		t.Fatalf("a 30 LXC hold once the boosted limit was lowered to 5 LXC = %v, want the 5 LXC daily limit's refusal", err)
+	}
+	if p, res := written("res-lowered"); p != 0 || res != 0 {
+		t.Fatalf("the hold after the limit was lowered wrote %d hold postings and %d reservations, want nothing", p, res)
+	}
+
+	// Ending a boost early takes it off the list.
 	if code, body := call(http.MethodDelete, base+"/rules/boosts/daily_limit_ulxc", ""); code != http.StatusNoContent {
 		t.Fatalf("DELETE rules/boosts/daily_limit_ulxc = %d %s", code, body)
 	}
@@ -117,7 +129,7 @@ func TestB28308_AfterABoostEndsAHoldAtTheBoostedSizeWritesNothing(t *testing.T) 
 		method, path, body string
 		want               int
 	}{
-		{http.MethodPost, base + "/rules/boosts", `{"rule":"daily_limit_ulxc","value":10000000,"until":"` + later + `"}`, http.StatusBadRequest},  // not above the limit
+		{http.MethodPost, base + "/rules/boosts", `{"rule":"daily_limit_ulxc","value":5000000,"until":"` + later + `"}`, http.StatusBadRequest},   // not above the limit
 		{http.MethodPost, base + "/rules/boosts", `{"rule":"weekly_limit_ulxc","value":10000000,"until":"` + later + `"}`, http.StatusBadRequest}, // no weekly limit to raise
 		{http.MethodPost, base + "/rules/boosts", `{"rule":"daily_limit_ulxc","value":50000000,"until":"2020-01-01T00:00:00Z"}`, http.StatusBadRequest},
 		{http.MethodPost, base + "/rules/boosts", `{"rule":"allowed_models","value":1,"until":"` + later + `"}`, http.StatusBadRequest},

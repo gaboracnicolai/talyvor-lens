@@ -133,11 +133,12 @@ func openAPIWalletSchemas() map[string]any {
 		"AgentRuleBoost": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"rule":       map[string]any{"type": "string", "enum": boostableAgentRules, "description": "the limit raised, as AgentRules names it"},
-				"value":      map[string]any{"type": "integer", "format": "int64", "minimum": 1, "description": "what it is raised to: µLXC, or requests a minute for requests_per_minute"},
-				"until":      map[string]any{"type": "string", "format": "date-time", "description": "from this time on the boost is not read and the limit is the rules' again"},
-				"created_by": map[string]any{"type": "string", "description": "the credential that set it; empty when unknown"},
-				"created_at": at,
+				"rule":        map[string]any{"type": "string", "enum": boostableAgentRules, "description": "the limit raised, as AgentRules names it"},
+				"raised_from": map[string]any{"type": "integer", "format": "int64", "minimum": 1, "description": "the limit as the rules set it when the boost was set; once the rules change it, the boost no longer applies"},
+				"value":       map[string]any{"type": "integer", "format": "int64", "minimum": 1, "description": "what it is raised to: µLXC, or requests a minute for requests_per_minute"},
+				"until":       map[string]any{"type": "string", "format": "date-time", "description": "from this time on the boost is not read and the limit is the rules' again"},
+				"created_by":  map[string]any{"type": "string", "description": "the credential that set it; empty when unknown"},
+				"created_at":  at,
 			},
 		},
 		"AgentStatementLine": map[string]any{
@@ -349,7 +350,7 @@ func openAPIWalletPaths() map[string]any {
 				[]map[string]any{ws, agent},
 				map[string]any{"200": ok("the boosts in force", listOf("boosts", "AgentRuleBoost")), "404": map[string]any{"description": "no such agent"}}),
 			"post": withBody(op("Raise one of the agent's limits until a time",
-				"Owner or admin. Until the time, the limit is the boost's value; from then on the rules judge it as the rules set it, with nothing to undo. The limit must be set and the value above it. A boost replaces the one the limit had.",
+				"Owner or admin. Until the time, the limit is the boost's value; from then on the rules judge it as the rules set it, with nothing to undo. The limit must be set and the value above it, and the boost applies only while the rules leave the limit as it was. A boost replaces the one the limit had.",
 				[]map[string]any{ws, agent},
 				map[string]any{"201": ok("the boost", ref("AgentRuleBoost")), "400": map[string]any{"description": "an unknown limit, a limit not set, a value not above it, or a time not in the future"}, "404": map[string]any{"description": "no such agent"}}),
 				body(obj([]string{"rule", "value", "until"}, map[string]any{
