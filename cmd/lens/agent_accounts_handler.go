@@ -33,6 +33,9 @@ import (
 //
 //	GET  /v1/workspaces/{wsID}/agents/{id}/rules              the agent's rules
 //	PUT  /v1/workspaces/{wsID}/agents/{id}/rules   {rules}    replace them (economy.AgentRules)
+//	POST /v1/workspaces/{wsID}/agents/{id}/rules/simulate {"amount_ulxc", "model"?, "provider"?, "payee"?, "at"?}
+//	                                                           B28.306: would the rules let it through? allowed,
+//	                                                           refused or approval_required, and why; moves nothing
 //	GET  /v1/workspaces/{wsID}/agents/approvals                requests that needed approval, newest first;
 //	                                                           a payment's names its payee and memo (B23.5)
 //	POST /v1/workspaces/{wsID}/agents/approvals/{id}/approve   let that request through, once
@@ -123,6 +126,7 @@ type agentBank interface {
 	AgentBook(ctx context.Context, workspaceID string) (economy.AgentBook, error)
 	SetAgentRules(ctx context.Context, workspaceID, agentID string, r economy.AgentRules) (economy.AgentRules, error)
 	GetAgentRules(ctx context.Context, workspaceID, agentID string) (economy.AgentRules, error)
+	SimulateAgentRules(ctx context.Context, workspaceID, agentID string, in economy.SimulatedRequest) (economy.RuleSimulation, error)
 	ListAgentApprovals(ctx context.Context, workspaceID string) ([]economy.AgentApproval, error)
 	DecideAgentApproval(ctx context.Context, workspaceID, approvalID string, approve bool) (economy.AgentApproval, error)
 	PayAgent(ctx context.Context, workspaceID, fromAgentID, toAgentID string, amount int64, memo string) (economy.AgentPayment, error)
@@ -358,6 +362,27 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		rules, err := bank.SetAgentRules(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in)
 		writeRules(w, rules, err)
 	}))
+	// B28.306: simulating moves nothing, so any of the workspace's credentials may ask, as any may read the rules.
+	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/rules/simulate", func(w http.ResponseWriter, req *http.Request) {
+		var in economy.SimulatedRequest
+		dec := json.NewDecoder(req.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"amount_ulxc", "model"?, "provider"?, "payee"?: {"kind", "id"}, "at"?}: `+err.Error())
+			return
+		}
+		sim, err := bank.SimulateAgentRules(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "agentID"), in)
+		switch {
+		case errors.Is(err, economy.ErrAgentNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, economy.ErrBadSimulation):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, sim)
+		}
+	})
 	r.Post("/v1/workspaces/{wsID}/agents/{agentID}/rules/template", ownerOnly(func(w http.ResponseWriter, req *http.Request) {
 		var in struct {
 			Template string `json:"template"`

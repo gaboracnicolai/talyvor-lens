@@ -235,6 +235,25 @@ func openAPIWalletPaths() map[string]any {
 				map[string]any{"200": ok("the rules as stored", ref("AgentRules")), "400": map[string]any{"description": "no such template"}, "404": map[string]any{"description": "no such agent"}}),
 				body(obj([]string{"template"}, map[string]any{"template": map[string]any{"type": "string", "example": "researcher"}}))),
 		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/rules/simulate": map[string]any{
+			"post": withBody(op("Ask whether the agent's rules would let a request through",
+				"Moves nothing: the rules judge the request exactly as a real one, against what the agent has really spent, and everything the judgement would write is rolled back — no posting, no approval filed. With payee it is a payment to that payee; without, a question to model through provider. at (RFC 3339) asks about another time, for the active hours and the periods; now when absent.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": ok("the rules' answer", obj([]string{"verdict", "reason", "amount_ulxc", "at", "balance_ulxc"}, map[string]any{
+					"verdict":      map[string]any{"type": "string", "enum": []string{"allowed", "refused", "approval_required"}},
+					"reason":       map[string]any{"type": "string", "description": "why it is refused or needs approval; empty when allowed"},
+					"amount_ulxc":  map[string]any{"type": "integer", "format": "int64"},
+					"at":           map[string]any{"type": "string", "format": "date-time"},
+					"balance_ulxc": map[string]any{"type": "integer", "format": "int64", "description": "what the agent holds now, which the rules do not judge"},
+				})), "400": map[string]any{"description": "an unknown field, a negative amount or a payee of no known kind"}, "404": map[string]any{"description": "no such agent"}}),
+				body(obj([]string{"amount_ulxc"}, map[string]any{
+					"amount_ulxc": map[string]any{"type": "integer", "format": "int64", "minimum": 0},
+					"model":       str, "provider": str,
+					"payee": obj([]string{"kind", "id"}, map[string]any{
+						"kind": map[string]any{"type": "string", "enum": []string{"agent", "listing", "company", "merchant"}}, "id": str}),
+					"at": map[string]any{"type": "string", "format": "date-time"},
+				}))),
+		},
 		"/v1/workspaces/{wsID}/agents/{agentID}": map[string]any{
 			"patch": withBody(op("Rename or describe the agent",
 				"Owner or admin. Either field or both; a name cannot be blank and a description is at most 500 characters.",

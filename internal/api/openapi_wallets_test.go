@@ -45,6 +45,7 @@ func TestServedOpenAPIDescribesAgentWallets(t *testing.T) {
 		{"put", "/v1/workspaces/{wsID}/agents/{agentID}/rules"},
 		{"get", "/v1/workspaces/{wsID}/agents/rule-templates"},
 		{"post", "/v1/workspaces/{wsID}/agents/{agentID}/rules/template"},
+		{"post", "/v1/workspaces/{wsID}/agents/{agentID}/rules/simulate"},
 		{"get", "/v1/workspaces/{wsID}/agents/approvals"},
 		{"post", "/v1/workspaces/{wsID}/agents/approvals/{approvalID}/approve"},
 		{"post", "/v1/workspaces/{wsID}/agents/approvals/{approvalID}/deny"},
