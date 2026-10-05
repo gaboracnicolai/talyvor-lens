@@ -64,11 +64,12 @@ func TestB28439_ThePublicPlansReadIsWhatANewSubscriberIsGranted(t *testing.T) {
 	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil {
 		t.Fatalf("GET /v1/billing/plans = %d %s", w.Code, w.Body.String())
 	}
-	// At h = 0 — no pooled traffic measured — D is the fee after Stripe's 2.9% + 30¢: about 191, 968 and 1,939 LXC.
+	// At h = 0 — no pooled traffic measured — D is 90% of the fee net of Stripe's 2.9% + 0.7% + 30¢ (B32.13):
+	// about 171, 865 and 1,733 LXC.
 	want := []billing.Plan{
-		{ID: "plus", USDCents: 2000, IncludedULXC: 191_200_000},
-		{ID: "pro", USDCents: 10000, IncludedULXC: 968_000_000},
-		{ID: "max", USDCents: 20000, IncludedULXC: 1_939_000_000},
+		{ID: "plus", USDCents: 2000, IncludedULXC: 170_820_000},
+		{ID: "pro", USDCents: 10000, IncludedULXC: 864_900_000},
+		{ID: "max", USDCents: 20000, IncludedULXC: 1_732_500_000},
 	}
 	if len(got.Plans) != len(want) {
 		t.Fatalf("plans = %+v; want plus, pro and max (BYOK includes no usage)", got.Plans)

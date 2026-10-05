@@ -12,26 +12,31 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 )
 
-// included_usage.go — B13.1: a plan's included usage D is COMPUTED from its price, not chosen, so a
-// subscriber who uses all of it can never cost Talyvor money:
+// included_usage.go — B13.1, B32.13: a plan's included usage D is COMPUTED from its price, not chosen, so a
+// subscriber who uses all of it leaves Talyvor a 10% margin after Stripe's fees and pooled-answer royalties
+// (Nicolai, 5 Oct 2026):
 //
-//	D = F × (1 − s) × (1 − 0.3·h) / (1 − h)
+//	D = 0.9 × (F × (1 − 0.029 − 0.007) − 30¢) × (1 − 0.3·h) / (1 − 0.65·h)
 //
-// F = the plan's price · s = the card fee on that price · h = the share of subscriber chat traffic, by
-// metered value, served from the pool over the last 30 days. Talyvor charges provider cost with no
-// markup, and a pooled answer costs Talyvor ~nothing upstream while drawing 0.7 × list from the
-// allowance: a subscriber drawing D spends T = D / (1 − 0.3h) of metered value, of which (1 − h)·T
-// is paid upstream — exactly F × (1 − s) at this D.
+// F = the plan's price · 2.9% + 30¢ is Stripe's US card fee and 0.7% Stripe Billing's · h = the share of
+// subscriber chat traffic, by metered value, served from the pool over the last 30 days. Talyvor charges
+// provider cost with no markup. A pooled answer costs Talyvor nothing upstream, draws 0.7 × list from the
+// allowance and pays 0.35 × list to its contributor: a subscriber drawing D spends T = D / (1 − 0.3h) of
+// metered value, of which (1 − h)·T is paid upstream and 0.35h·T in royalties — (1 − 0.65h)·T in all, which
+// is exactly 90% of F net of Stripe's fees at this D.
 //
 // GUARDRAILS (Nicolai): h only from production token_events; the conservative (Wilson 95%) lower bound,
 // not the point estimate; h = 0 until 1,000 subscriber requests in the window; D rises at most 25% a
 // month; recomputed monthly — the first grant of a month computes that month's figure from the 30 days
-// before the 1st, and every later grant that month reuses it. Past D a subscriber continues on prepaid
-// credit (B1.6), never overage on the plan.
+// before the 1st, and every later grant that month reuses it, so a month already granted keeps its figure.
+// Past D a subscriber continues on prepaid credit (B1.6), never overage on the plan.
 
 const (
 	// pooledDiscount is the consumer discount on a pooled answer (LENS_POOL_CONSUMER_DISCOUNT's default).
 	pooledDiscount = 0.3
+	// pooledRoyalty is what a pooled answer pays its contributor, as a share of list: s × (1 − r) at
+	// LENS_POOL_ROYALTY_SHARE's and LENS_POOL_CONSUMER_DISCOUNT's defaults, 0.5 × 0.7.
+	pooledRoyalty = 0.35
 	// minWindowRequests is the floor below which h is not measured: it stays 0.
 	minWindowRequests = 1000
 	// maxMonthlyRise caps D at 125% of the previous month's figure for the same price.
@@ -41,22 +46,22 @@ const (
 )
 
 // IncludedUsageULXC is D, in µLXC (rounded DOWN — an allowance never exceeds the formula), for a plan
-// priced feeCents at pooled share h. s is Stripe's standard card pricing, 2.9% + 30¢, so
-// F × (1 − s) = 0.971·F − 30¢, computed in exact integers.
+// priced feeCents at pooled share h. 0.9 × (F × (1 − 0.029 − 0.007) − 30¢) is computed in exact integers.
 func IncludedUsageULXC(feeCents int64, h float64) int64 {
 	if feeCents <= 0 {
 		return 0
 	}
 	h = math.Max(0, math.Min(h, maxPooledShare))
-	// F × (1 − s) in exact integers: F·(1 − 0.029) − 30¢ is (971·F − 30,000) thousandths of a cent.
-	base := (971*feeCents - 30_000) * ulxcPerCent / 1000
+	// F·(1 − 0.036) − 30¢ is (964·F − 30,000) thousandths of a cent; 90% of it is 9·(964·F − 30,000)/10,000 cents.
+	base := 9 * (964*feeCents - 30_000) * ulxcPerCent / 10_000
 	if base <= 0 {
 		return 0
 	}
 	if h == 0 {
 		return base
 	}
-	return int64(math.Floor(float64(base) * (1 - pooledDiscount*h) / (1 - h)))
+	// Per µLXC drawn, upstream (1 − h) plus royalties 0.35h of metered value T = D / (1 − 0.3h).
+	return int64(math.Floor(float64(base) * (1 - pooledDiscount*h) / (1 - h + pooledRoyalty*h)))
 }
 
 // wilsonLower is the Wilson score interval's lower bound for a share p observed over n requests (z=1.96).
