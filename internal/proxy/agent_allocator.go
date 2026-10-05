@@ -209,9 +209,14 @@ func (p *Proxy) agentDebitKeyFor(ctx context.Context, apiKeyID, model, prompt st
 	return hex.EncodeToString(h[:]), nil
 }
 
-// writeAgentRefusal answers a blocked agent request: its rules' refusal says which rule (403); a balance
-// or ceiling refusal, or a failure, is the 402 it always was. Returns the metrics reason.
+// writeAgentRefusal answers a blocked agent request: its rules' refusal says which rule (403) — the requests-per-
+// minute rule's is 429 (B28.302), since the same request goes through once the minute has room; a balance or
+// ceiling refusal, or a failure, is the 402 it always was. Returns the metrics reason.
 func writeAgentRefusal(w http.ResponseWriter, err error) string {
+	if errors.Is(err, economy.ErrAgentRequestRate) {
+		writeError(w, http.StatusTooManyRequests, strings.TrimPrefix(err.Error(), "economy: "))
+		return "agent_rate"
+	}
 	if errors.Is(err, economy.ErrAgentRule) || errors.Is(err, economy.ErrApprovalRequired) {
 		writeError(w, http.StatusForbidden, strings.TrimPrefix(err.Error(), "economy: "))
 		return "agent_rule"
