@@ -72,8 +72,8 @@ func (u *b2726Upstream) calls() (int, string) {
 func b2726BYOK(t *testing.T, pool *pgxpool.Pool, store *byok.Store, ws, key string) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), `INSERT INTO subscriptions (workspace_id, stripe_subscription_id,
-		stripe_customer_id, price_id, status, livemode, last_event_at, byok)
-		VALUES ($1, 'sub_' || $1, 'cus_' || $1, 'price_byok', 'active', false, NOW(), true)`, ws); err != nil {
+		stripe_customer_id, price_id, status, livemode, last_event_at, byok, plan)
+		VALUES ($1, 'sub_' || $1, 'cus_' || $1, 'price_byok', 'active', false, NOW(), true, 'byok')`, ws); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Put(context.Background(), ws, "openai", key); err != nil {

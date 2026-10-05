@@ -117,7 +117,7 @@ func (s *DualTokenStore) payCompanyAgent(ctx context.Context, workspaceID, payee
 		return pay, fmt.Errorf("%w: %s", ErrWashTrade, refusal)
 	}
 	// B22.1: paying another owner is AMBER — the company's marketplace bill is real money once Stripe is live.
-	if err := s.requireBilledCapability(ctx, s.pool, CapabilityPayAnotherOwner); err != nil {
+	if err := s.requireBilledCapability(ctx, s.pool, workspaceID, CapabilityPayAnotherOwner); err != nil {
 		return pay, err
 	}
 	tx, err := s.pool.Begin(ctx)

@@ -98,7 +98,9 @@ func TestWalletClasses_AmberAndRedTakeTestMoneyUntilCleared(t *testing.T) {
 	if d := buy("evt_over", 15); d.Approved || !strings.Contains(d.Reason, "class RED") {
 		t.Fatalf("a purchase past the test money = %+v, want declined as class RED", d)
 	}
-	// The operator clears cards on a partner's reference: live credits go through, test money is left alone.
+	// The operator clears cards on a partner's reference: live credits go through, test money is left alone — on a
+	// plan with live money (B32.12; free keeps it on test money even cleared).
+	planGatesOnPlan(t, pool, ws, "team", false)
 	if _, err := s.ClearCapability(ctx, CapabilityAgentCard, "nicolai", ClearanceTerms{Reference: "issuing partner PA-1",
 		Licence: "EMI-900001", Partner: "Issuer Ltd", Countries: []string{"GB"}, ExpiresAt: time.Now().Add(24 * time.Hour)}); err != nil {
 		t.Fatal(err)

@@ -1,5 +1,6 @@
-// Package byok is BYOK, the one subscription tier (B27.26): a workspace on the BYOK plan stores its own
-// provider keys, its requests go upstream on them, and Talyvor charges it no tokens for those requests.
+// Package byok is BYOK, the one subscription tier (B27.26): a workspace on the BYOK plan — or, B32.12, on a plan
+// whose gates include own keys (business and enterprise; team with the BYOK add-on) — stores its own provider
+// keys, its requests go upstream on them, and Talyvor charges it no tokens for those requests.
 //
 // Custody follows docs/provider-secret-envelope.md §"The contract": a key is accepted only while
 // LENS_PROVIDER_SECRET_KEK is armed (the caller registers no route otherwise), it is sealed by
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/envelope"
+	"github.com/talyvor/lens/internal/plans"
 )
 
 // Providers are the providers a workspace can bring a key for: each authenticates with one API key.
@@ -40,9 +42,6 @@ var ErrUnsupportedProvider = errors.New("byok: provider does not take a key (ant
 // ErrInvalidKey is a key that cannot be a provider API key.
 var ErrInvalidKey = errors.New("byok: the key must be 8 to 512 printable characters with no spaces")
 
-// ErrNotSubscribed is a key offered by a workspace that is not on the BYOK plan.
-var ErrNotSubscribed = errors.New("byok: subscribe to the BYOK plan to use your own provider keys")
-
 // Key is what is ever shown of a stored key.
 type Key struct {
 	Provider  string    `json:"provider"`
@@ -64,18 +63,18 @@ func New(pool *pgxpool.Pool, ring *envelope.Keyring) *Store {
 // aad binds a sealed key to its workspace and provider, so a row copied into another slot fails to open.
 func aad(workspaceID, provider string) []byte { return []byte(workspaceID + "|" + provider) }
 
-// Subscribed reports whether the workspace's live subscription is the BYOK plan.
+// Subscribed reports whether the workspace's plan lets it use its own provider keys (B32.12, LENS_PLAN_GATES):
+// business, enterprise and byok include them, team has them with the BYOK add-on, and no other plan does.
 func (s *Store) Subscribed(ctx context.Context, workspaceID string) (bool, error) {
-	var on bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM subscriptions WHERE workspace_id = $1 AND byok
-		AND status IN ('trialing','active','past_due'))`, workspaceID).Scan(&on)
+	plan, err := plans.Of(ctx, s.pool, workspaceID)
 	if err != nil {
-		return false, fmt.Errorf("byok: subscription read: %w", err)
+		return false, fmt.Errorf("byok: %w", err)
 	}
-	return on, nil
+	return plan.OwnKeysAllowed(), nil
 }
 
-// Put stores (or replaces) the workspace's key for provider. It refuses a workspace not on the BYOK plan.
+// Put stores (or replaces) the workspace's key for provider. It refuses, with a *plans.Refusal, a workspace whose
+// plan does not let it use its own keys.
 func (s *Store) Put(ctx context.Context, workspaceID, provider, key string) (Key, error) {
 	if !Supported(provider) {
 		return Key{}, ErrUnsupportedProvider
@@ -84,12 +83,12 @@ func (s *Store) Put(ctx context.Context, workspaceID, provider, key string) (Key
 	if !validKey(key) {
 		return Key{}, ErrInvalidKey
 	}
-	on, err := s.Subscribed(ctx, workspaceID)
+	plan, err := plans.Of(ctx, s.pool, workspaceID)
 	if err != nil {
-		return Key{}, err
+		return Key{}, fmt.Errorf("byok: %w", err)
 	}
-	if !on {
-		return Key{}, ErrNotSubscribed
+	if !plan.OwnKeysAllowed() {
+		return Key{}, plan.RefuseOwnKeys(plans.Current())
 	}
 	sealed, err := s.ring.Seal([]byte(key), aad(workspaceID, provider))
 	if err != nil {
@@ -142,20 +141,21 @@ func (s *Store) Delete(ctx context.Context, workspaceID, provider string) (bool,
 	return ct.RowsAffected() == 1, nil
 }
 
-// OwnKeys opens the workspace's keys, by provider, for the serving path — only while the workspace is on
-// the BYOK plan; empty otherwise. A key that cannot be opened (its KEK was dropped) is left out and the
+// OwnKeys opens the workspace's keys, by provider, for the serving path — only while its plan lets it use them
+// (Subscribed); empty otherwise. A key that cannot be opened (its KEK was dropped) is left out and the
 // error says which, so the request is served on Talyvor's key rather than refused.
 func (s *Store) OwnKeys(ctx context.Context, workspaceID string) (map[string]string, error) {
+	keys := map[string]string{}
+	if on, err := s.Subscribed(ctx, workspaceID); err != nil || !on {
+		return keys, err
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT k.provider, k.key_id, k.wrapped_dek, k.dek_nonce, k.ciphertext, k.ct_nonce
-		FROM workspace_provider_keys k
-		WHERE k.workspace_id = $1 AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.workspace_id = $1 AND s.byok
-			AND s.status IN ('trialing','active','past_due'))`, workspaceID)
+		FROM workspace_provider_keys k WHERE k.workspace_id = $1`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("byok: read keys: %w", err)
 	}
 	defer rows.Close()
-	keys := map[string]string{}
 	var errs []error
 	for rows.Next() {
 		var provider string

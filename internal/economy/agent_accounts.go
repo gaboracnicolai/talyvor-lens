@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/plans"
 )
 
 // agent_accounts.go — B19.1: AGENT ACCOUNTS, EVERY AGENT WITH ITS OWN BALANCE, ON A DOUBLE-ENTRY LEDGER.
@@ -216,7 +218,7 @@ func lockAgent(ctx context.Context, tx pgx.Tx, workspaceID, agentID string) erro
 }
 
 // CreateAgent creates an agent account in workspaceID, with no balance, owned by ownerUserID — the person
-// creating it (B19.11).
+// creating it (B19.11) — or refuses it with a *plans.Refusal past the agents its plan allows (B32.12).
 func (s *DualTokenStore) CreateAgent(ctx context.Context, workspaceID, name, ownerUserID string) (Agent, error) {
 	if workspaceID == "" || name == "" {
 		return Agent{}, errors.New("economy: an agent needs a workspace and a name")
@@ -224,13 +226,36 @@ func (s *DualTokenStore) CreateAgent(ctx context.Context, workspaceID, name, own
 	if ownerUserID == "" {
 		return Agent{}, ErrAgentOwnerless
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Agent{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// B32.12: no more agents than the workspace's plan allows (LENS_PLAN_GATES); an archived agent is retired
+	// for good and does not count. Counted under the workspace's lock, so two creates cannot both take the last
+	// place.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('agents:' || $1, 0))`, workspaceID); err != nil {
+		return Agent{}, fmt.Errorf("economy: lock the workspace's agents: %w", err)
+	}
+	plan, err := plans.Of(ctx, tx, workspaceID)
+	if err != nil {
+		return Agent{}, err
+	}
+	var n int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_accounts WHERE workspace_id = $1 AND archived_at IS NULL`,
+		workspaceID).Scan(&n); err != nil {
+		return Agent{}, fmt.Errorf("economy: count agents: %w", err)
+	}
+	if !plans.Within(n+1, plan.Agents) {
+		return Agent{}, plan.RefuseCount(plans.Current(), "agents", plan.Agents)
+	}
 	a := Agent{ID: "agt_" + uuid.NewString(), Name: name, Keys: []string{}, OwnerUserID: ownerUserID}
-	err := s.pool.QueryRow(ctx, `INSERT INTO agent_accounts (id, workspace_id, name, owner_user_id) VALUES ($1, $2, $3, $4) RETURNING created_at`,
+	err = tx.QueryRow(ctx, `INSERT INTO agent_accounts (id, workspace_id, name, owner_user_id) VALUES ($1, $2, $3, $4) RETURNING created_at`,
 		a.ID, workspaceID, name, ownerUserID).Scan(&a.CreatedAt)
 	if err != nil {
 		return Agent{}, fmt.Errorf("economy: create agent: %w", err)
 	}
-	return a, nil
+	return a, tx.Commit(ctx)
 }
 
 // AttachAgentKey makes scopedKeyID one of agentID's keys: from then on its spending is the agent's.
