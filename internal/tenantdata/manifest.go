@@ -205,6 +205,7 @@ var Manifest = map[string]Entry{
 	// ─── DELETE: everything else. The bulk of what is actually sensitive. ─────────────────────
 	"agent_accounts":               {Delete, ""},
 	"agent_rules":                  {Delete, ""},
+	"agent_rules_versions":         {Delete, "B28.307: every version of an agent's rules and the credential that changed them"},
 	"agent_cards":                  {Delete, "B19.12: an agent's test-mode card — Stripe's card and cardholder ids, last 4, expiry"},
 	"agent_approvals":              {Delete, ""},
 	"agent_lxc_subbudgets":         {Delete, ""},
