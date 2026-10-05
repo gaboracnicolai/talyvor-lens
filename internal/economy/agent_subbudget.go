@@ -163,11 +163,18 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// B32.11: the debit carries the plan's platform fee, at the rate its settle will charge it at (the claim's).
+	bps, err := s.platformFeeBPS(ctx, tx, workspaceID)
+	if err != nil {
+		return err
+	}
+	fee := PlatformFee(lxcAmount, bps)
+
 	// (1) EXACTLY-ONCE claim. ON CONFLICT DO NOTHING ⇒ 0 rows means this requestID already succeeded — an
 	// idempotent replay: debit NOTHING, return nil. The claim is committed in THIS tx (below) only on success.
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO lxc_spend_claims (request_id, scoped_key_id, lxc_amount) VALUES ($1, $2, $3)
-		 ON CONFLICT (request_id) DO NOTHING`, requestID, scopedKeyID, lxcAmount)
+		`INSERT INTO lxc_spend_claims (request_id, scoped_key_id, lxc_amount, platform_fee_bps) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (request_id) DO NOTHING`, requestID, scopedKeyID, lxcAmount, bps)
 	if err != nil {
 		return fmt.Errorf("economy: spend claim: %w", err)
 	}
@@ -192,11 +199,11 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	// (3) CEILING check — reject (rollback ⇒ no orphan claim) if this debit would exceed remaining.
 	// B19.1: a key attached to an agent account spends the agent's balance, posted in this transaction;
 	// the per-key ceiling binds only a key with no agent.
-	isAgent, err := agentMovement(ctx, tx, scopedKeyID, lxcAmount, "spend", requestID, meta.RequestedModel)
+	isAgent, err := agentMovementFee(ctx, tx, scopedKeyID, lxcAmount, fee, bps, "spend", requestID, meta.RequestedModel)
 	if err != nil {
 		return s.refusedMovement(ctx, tx, err)
 	}
-	if !isAgent && ceiling-spent < lxcAmount {
+	if !isAgent && ceiling-spent < lxcAmount+fee {
 		return ErrSubBudgetExceeded
 	}
 
@@ -205,11 +212,11 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	if err != nil {
 		return err
 	}
-	if bal < lxcAmount {
+	if bal < lxcAmount+fee {
 		return ErrInsufficientLXC // rollback ⇒ no orphan claim; retriable after funding
 	}
 	if !isAgent { // B19.13: a key attached to no agent is the workspace's own spending
-		if err := requireUnallocated(ctx, tx, workspaceID, bal, lxcAmount); err != nil {
+		if err := requireUnallocated(ctx, tx, workspaceID, bal, lxcAmount+fee); err != nil {
 			return err
 		}
 	}
@@ -219,14 +226,17 @@ func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, work
 	if err := insertLXCLedger(ctx, tx, workspaceID, -lxcAmount, newBal, LXCTypeSpend, description, meta.toMap()); err != nil {
 		return err
 	}
-	if err := writeLXCBalance(ctx, tx, workspaceID, newBal, minted, wsSpent+lxcAmount); err != nil {
+	if err := insertPlatformFee(ctx, tx, workspaceID, fee, newBal-fee, bps, lxcAmount, meta.RequestID); err != nil {
+		return err
+	}
+	if err := writeLXCBalance(ctx, tx, workspaceID, newBal-fee, minted, wsSpent+lxcAmount+fee); err != nil {
 		return err
 	}
 
 	// (5) Bump the agent's spent_lxc (monotonic) — atomic with the debit + the claim.
 	if _, err := tx.Exec(ctx,
 		`UPDATE agent_lxc_subbudgets SET spent_lxc = spent_lxc + $2, updated_at = now() WHERE scoped_key_id = $1`,
-		scopedKeyID, lxcAmount); err != nil {
+		scopedKeyID, lxcAmount+fee); err != nil {
 		return fmt.Errorf("economy: bump spent: %w", err)
 	}
 
@@ -276,11 +286,19 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// B32.11: the hold is the estimate plus its platform fee, so the agent's balance and every limit judge the
+	// whole price; the rate rides the reservation to its settle.
+	bps, err := s.platformFeeBPS(ctx, tx, workspaceID)
+	if err != nil {
+		return err
+	}
+	heldLXC += PlatformFee(heldLXC, bps)
+
 	// (1) EXACTLY-ONCE hold claim — reservation_id PK. 0 rows ⇒ this id already holds ⇒ idempotent replay.
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO lxc_reservations (reservation_id, scoped_key_id, workspace_id, held_ulxc, status, requested_model, request_id)
-		 VALUES ($1, $2, $3, $4, 'held', $5, $6) ON CONFLICT (reservation_id) DO NOTHING`,
-		reservationID, scopedKeyID, workspaceID, heldLXC, nullIfEmpty(meta.RequestedModel), nullIfEmpty(meta.RequestID))
+		`INSERT INTO lxc_reservations (reservation_id, scoped_key_id, workspace_id, held_ulxc, status, requested_model, request_id, platform_fee_bps)
+		 VALUES ($1, $2, $3, $4, 'held', $5, $6, $7) ON CONFLICT (reservation_id) DO NOTHING`,
+		reservationID, scopedKeyID, workspaceID, heldLXC, nullIfEmpty(meta.RequestedModel), nullIfEmpty(meta.RequestID), bps)
 	if err != nil {
 		return fmt.Errorf("economy: reservation claim: %w", err)
 	}
@@ -373,13 +391,14 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var scopedKeyID, workspaceID, status, reqModel, reqID string
-	var heldLXC int64
+	var heldLXC, bps int64
 	// requested_model + request_id come from the reservation ROW — the SINGLE source the hold wrote, so the
 	// settle's rows stamp exactly what the hold row shows (never a second in-memory copy that could drift).
+	// So does the platform fee's rate (B32.11): the hold counted the fee at it.
 	err = tx.QueryRow(ctx,
-		`SELECT scoped_key_id, workspace_id, held_ulxc, status, COALESCE(requested_model, ''), COALESCE(request_id, '')
+		`SELECT scoped_key_id, workspace_id, held_ulxc, status, COALESCE(requested_model, ''), COALESCE(request_id, ''), platform_fee_bps
 		   FROM lxc_reservations WHERE reservation_id = $1 FOR UPDATE`,
-		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status, &reqModel, &reqID)
+		reservationID).Scan(&scopedKeyID, &workspaceID, &heldLXC, &status, &reqModel, &reqID, &bps)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, 0, fmt.Errorf("economy: settle unknown reservation %q", reservationID)
 	}
@@ -391,10 +410,12 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		// cash-backed: the second call returns before consumeCashBacked is ever reached.
 		return 0, 0, nil
 	}
-	if finalLXC > heldLXC {
-		finalLXC = heldLXC // never bill above the conservative hold
+	// Never bill above the conservative hold: the delivered charge and its platform fee together fit in it.
+	if within := spendWithin(heldLXC, bps); finalLXC > within {
+		finalLXC = within
 	}
-	refund := heldLXC - finalLXC // ≥ 0
+	fee := PlatformFee(finalLXC, bps)
+	refund := heldLXC - finalLXC - fee // ≥ 0
 
 	// Two compensating rows: release the whole hold (+held), then book the delivered charge (−final). Net
 	// balance move = +refund. Both are INSERTs — 0055-safe. lifetime_spent nets to +final (was +held at hold).
@@ -419,6 +440,11 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 			return 0, 0, err
 		}
 	}
+	// B32.11: the platform fee on the delivered charge, its own row in this transaction.
+	if err := insertPlatformFee(ctx, tx, workspaceID, fee, afterSpend-fee, bps, finalLXC, reqID); err != nil {
+		return 0, 0, err
+	}
+	afterSpend -= fee
 	// Resolved BEFORE the balance write, which keeps test-funded credits (B22.1) within the balance and the
 	// holds still open — this one is not.
 	if _, err := tx.Exec(ctx,
@@ -442,6 +468,10 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 	if err != nil {
 		return 0, 0, err
 	}
+	// The fee consumes backing after the charge; only the charge's part may fund a royalty.
+	if _, err := consumeCashBacked(ctx, tx, workspaceID, afterRelease-finalLXC, fee); err != nil {
+		return 0, 0, err
+	}
 	if cashSpent, err = royaltyBacked(ctx, tx, workspaceID, finalLXC, cashSpent); err != nil {
 		return 0, 0, err
 	}
@@ -450,8 +480,11 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		scopedKeyID, refund); err != nil {
 		return 0, 0, fmt.Errorf("economy: reclaim spent (settle): %w", err)
 	}
-	// B19.1: the part of the hold not charged goes back to the agent.
-	if _, err := agentMovement(ctx, tx, scopedKeyID, -refund, "settle", reservationID, reqModel); err != nil {
+	// B19.1: the part of the hold not charged goes back to the agent, and its platform fee is its own posting.
+	if _, err := agentMovement(ctx, tx, scopedKeyID, -(refund + fee), "settle", reservationID, reqModel); err != nil {
+		return 0, 0, err
+	}
+	if err := postAgentFee(ctx, tx, scopedKeyID, fee, bps, reservationID, reqModel); err != nil {
 		return 0, 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {

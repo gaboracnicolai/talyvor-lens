@@ -1718,6 +1718,10 @@ func run() error {
 	billingSvc := billing.New(pool, dualToken, liveStripe, cfg.StripeWebhookSecret)
 	// B22.1: with a live Stripe key a bill is real money, which an uncleared AMBER or RED capability refuses.
 	dualToken.SetLiveStripe(billing.LiveKey(cfg.StripeSecretKey))
+	// B32.11: every model call charged to credits carries its plan's platform fee (LENS_PLATFORM_FEE_BPS).
+	dualToken.SetPlatformFee(func(ctx context.Context, q economy.FeeQuerier, workspaceID string) (int64, error) {
+		return billing.PlatformFeeBPS(ctx, q, workspaceID, fees.Current())
+	})
 	// MODEL 2 (W4.6.1 step 1). Subscriptions are a SECOND gate on top of billing: a
 	// deployment selling one-off top-ups does not start selling a subscription because
 	// it has a Stripe key. With no price configured the routes below are not registered

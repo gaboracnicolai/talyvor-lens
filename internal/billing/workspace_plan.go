@@ -41,6 +41,32 @@ func PlanOf(ctx context.Context, db PlanQuerier, workspaceID string) (string, er
 	return plan, nil
 }
 
+// PlatformFeeBPS is the platform fee on workspaceID's AI spend charged to credits, in basis points (B32.11):
+// the Enterprise contract's own figure where the operator recorded one; else its plan's in s.PlatformFeeBPS —
+// plus, pro, max and byok take team's, and a workspace with no plan, or a plan the setting does not name,
+// takes free's.
+func PlatformFeeBPS(ctx context.Context, db PlanQuerier, workspaceID string, s fees.Settings) (int64, error) {
+	c, err := ContractOf(ctx, db, workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	if c != nil && c.PlatformFeeBPS != nil {
+		return *c.PlatformFeeBPS, nil
+	}
+	plan, err := PlanOf(ctx, db, workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	switch plan {
+	case "plus", "pro", "max", BYOKPlan:
+		plan = TeamPlan
+	}
+	if bps, ok := s.PlatformFeeBPS[plan]; ok {
+		return bps, nil
+	}
+	return s.PlatformFeeBPS[FreePlan], nil
+}
+
 // Contract is an Enterprise contract as the operator records it: the contract's own platform fee and FX
 // margin, in basis points, where it agreed one (nil follows the enterprise figure in internal/fees).
 type Contract struct {

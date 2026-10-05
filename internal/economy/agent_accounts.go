@@ -340,6 +340,12 @@ func (s *DualTokenStore) moveAgentFunds(ctx context.Context, workspaceID, agentI
 // isAgent is false for a key attached to no agent, which keeps its per-key ceiling and posts nothing. model is
 // the model the question asked for, which the postings name (B28.301): a refund names its hold's or debit's.
 func agentMovement(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta int64, kind, ref, model string) (isAgent bool, err error) {
+	return agentMovementFee(ctx, tx, scopedKeyID, delta, 0, 0, kind, ref, model)
+}
+
+// agentMovementFee is agentMovement for a spend that carries a platform fee (B32.11): the agent's balance, its
+// credit line and its rules judge delta + fee, the whole price, and the fee is posted as its own movement.
+func agentMovementFee(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta, fee, bps int64, kind, ref, model string) (isAgent bool, err error) {
 	var agentID, workspaceID string
 	err = tx.QueryRow(ctx,
 		`SELECT a.id, a.workspace_id FROM agent_account_keys k JOIN agent_accounts a ON a.id = k.agent_id
@@ -350,35 +356,43 @@ func agentMovement(ctx context.Context, tx pgx.Tx, scopedKeyID string, delta int
 	if err != nil {
 		return false, fmt.Errorf("economy: agent of key: %w", err)
 	}
-	if delta == 0 {
+	if delta == 0 && fee == 0 {
 		return true, nil
 	}
 	if err := lockAgent(ctx, tx, workspaceID, agentID); err != nil {
 		return true, err
 	}
-	if delta > 0 {
+	if need := delta + fee; delta > 0 {
 		bal, err := accountBalance(ctx, tx, workspaceID, agentAccount(agentID))
 		if err != nil {
 			return true, err
 		}
-		if bal < delta && (kind == "spend" || kind == "hold") { // B22.4: a company's credit line lends the rest
-			drew, err := drawCreditLine(ctx, tx, workspaceID, agentID, delta-bal, ref)
+		if bal < need && (kind == "spend" || kind == "hold") { // B22.4: a company's credit line lends the rest
+			drew, err := drawCreditLine(ctx, tx, workspaceID, agentID, need-bal, ref)
 			if err != nil {
 				return true, err
 			}
 			if drew {
-				bal = delta
+				bal = need
 			}
 		}
-		if bal < delta {
-			return true, fmt.Errorf("%w: agent %s holds %d µLXC, this needs %d", ErrSubBudgetExceeded, agentID, bal, delta)
+		if bal < need {
+			return true, fmt.Errorf("%w: agent %s holds %d µLXC, this needs %d", ErrSubBudgetExceeded, agentID, bal, need)
 		}
 		// B19.2: the agent's spending rules, under the same lock, before anything is held or debited.
-		if err := enforceAgentRules(ctx, tx, workspaceID, agentID, delta, ref); err != nil {
+		if err := enforceAgentRules(ctx, tx, workspaceID, agentID, need, ref); err != nil {
 			return true, err
 		}
 	}
-	return true, postModelEntry(ctx, tx, workspaceID, kind, ref, model, leg{agentAccount(agentID), -delta}, leg{"spend", delta})
+	if delta != 0 {
+		if err := postModelEntry(ctx, tx, workspaceID, kind, ref, model, leg{agentAccount(agentID), -delta}, leg{"spend", delta}); err != nil {
+			return true, err
+		}
+	}
+	if fee != 0 {
+		return true, postFeeEntry(ctx, tx, workspaceID, agentID, fee, bps, ref, model)
+	}
+	return true, nil
 }
 
 // AgentBook reads a workspace's agents and reconciles them with its LXC balance.
@@ -411,7 +425,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 		SELECT a.id, a.name, a.description, a.archived_at, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id, COALESCE(a.handle, ''),
 		       COALESCE((SELECT b.balance_ulxc FROM agent_account_balances b WHERE b.workspace_id = a.workspace_id AND b.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
-		                   AND p.kind IN ('spend', 'hold', 'settle', 'release', 'card')), 0)::bigint,
+		                   AND p.kind IN ('spend', 'hold', 'settle', 'release', 'card', 'platform_fee')), 0)::bigint,
 		       COALESCE((SELECT array_agg(k.scoped_key_id ORDER BY k.created_at) FROM agent_account_keys k WHERE k.agent_id = a.id), '{}'),
 		       COALESCE((SELECT sum(b.balance_ulxc) FROM agent_account_balances b JOIN agent_pots t ON b.account = 'pot:' || t.id
 		                  WHERE t.agent_id = a.id AND b.workspace_id = a.workspace_id), 0)::bigint
