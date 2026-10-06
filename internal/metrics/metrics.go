@@ -130,6 +130,13 @@ var (
 		prometheus.CounterOpts{Name: "lens_budget_blocks_total", Help: "Requests blocked by a hard_block budget, by scope."},
 		[]string{"scope"},
 	)
+	// AgentSettleFailuresTotal counts an agent's served answer whose settle still failed after its retries
+	// (B35.2): its hold is left for the stranded sweeper to refund, so the answer is not billed. Bounded {path}:
+	// reservation, pooled or debit.
+	AgentSettleFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_agent_settle_failures_total", Help: "Agent answers served whose settle failed after its retries, by path — each is an answer not billed as it should be."},
+		[]string{"path"},
+	)
 
 	// ─── cost forecasting (Upgrade 20) ───
 	// Both carry only the bounded {scope} label (workspace/team/sprint).
@@ -388,7 +395,7 @@ func init() {
 		HAInstanceCount,
 		ReplicaLagSeconds,
 		BudgetSpentUSD, BudgetUtilizationRatio,
-		BudgetThresholdCrossedTotal, BudgetBlocksTotal,
+		BudgetThresholdCrossedTotal, BudgetBlocksTotal, AgentSettleFailuresTotal,
 		ForecastProjectedUSD, ForecastWillExceedTotal,
 		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged, DetectorLastRunAgeSeconds, AnnotationReputationEvents,
 		ROIReportsGeneratedTotal, ROIReportDuration,
@@ -470,6 +477,9 @@ func SetBudgetUtilization(scope, scopeID string, v float64) {
 // BudgetThresholdCrossed / BudgetBlocked use only the bounded {scope} label.
 func BudgetThresholdCrossed(scope string) { BudgetThresholdCrossedTotal.WithLabelValues(scope).Inc() }
 func BudgetBlocked(scope string)          { BudgetBlocksTotal.WithLabelValues(scope).Inc() }
+
+// AgentSettleFailed counts a served agent answer whose settle failed on path (reservation, pooled or debit).
+func AgentSettleFailed(path string) { AgentSettleFailuresTotal.WithLabelValues(path).Inc() }
 
 // ─── cost forecasting helpers ───
 // Bounded {scope} label only — no scope_id, so no cardinality guard needed.

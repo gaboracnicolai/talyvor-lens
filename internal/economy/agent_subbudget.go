@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // agent_subbudget.go — F4-capstone step A: the per-scoped-key LXC sub-budget + the EXACTLY-ONCE agent debit.
@@ -15,6 +17,79 @@ import (
 // type. CENTRAL-COUNTERPARTY + CLOSED-LOOP: LXC is debited from the workspace's lxc_balances via the SAME
 // internals SpendLXC uses (readLXCBalance/insertLXCLedger/writeLXCBalance) — this file NEVER touches
 // LedgerStore.Transfer (LENS P2P) or the marketplace (asserted by agent_subbudget_noloop_test.go).
+//
+// THE LOCK ORDER (B35.2). Every transaction that takes these rows takes them in this order, and only this order:
+//
+//  1. the request's own row: its lxc_reservations row (a hold inserts it; a settle or a release locks it), its
+//     lxc_spend_claims row (a debit) or its agent_debit_settlements row (the debit's settle);
+//  2. the key's agent_lxc_subbudgets row;
+//  3. the agent's agent_accounts row (lockAgent), and with it the agent's stored balance and its company's
+//     credit line;
+//  4. the workspace's lxc_balances row (readLXCBalance).
+//
+// A step a transaction does not need is skipped, never reordered: an agent's funding, a move back to its
+// workspace, a payment and every other agent movement take 3 then 4. Before B35.2 a settle and a release took 4 before 2 and 3 while a hold took 2, 3, 4,
+// so a hold and a settle of one agent at the same moment deadlocked: Postgres cancelled one, a cancelled hold
+// was refused with money in the wallet and a cancelled settle left the answer unbilled. The order makes that
+// cycle impossible; retryLocks below runs again whatever Postgres still cancels.
+
+// lockRetries is how many more times a hold, debit, settle or release runs after Postgres cancels it as a
+// deadlock or a serialization failure. Each is idempotent under its reservation or request id, so running it
+// again cannot hold or bill twice.
+const lockRetries = 5
+
+// ErrLockContention is a hold, debit, settle or release Postgres cancelled as a deadlock or a serialization
+// failure on every one of its attempts. It is never a shortfall: nothing was held, debited or settled, and the
+// same call may be made again.
+var ErrLockContention = errors.New("economy: Lens could not take the locks for this movement")
+
+// lockFailure reports whether Postgres cancelled the transaction as a deadlock (40P01) or a serialization
+// failure (40001), which running it again resolves.
+func lockFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001")
+}
+
+// retryLocks runs one money transaction, and runs it again, after a short jittered wait, each time Postgres
+// cancels it as a deadlock or a serialization failure, up to lockRetries more times. Any other outcome is
+// returned as it is; the last cancellation is returned as ErrLockContention.
+func retryLocks(ctx context.Context, run func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := run()
+		if !lockFailure(err) {
+			return err
+		}
+		if attempt == lockRetries {
+			return fmt.Errorf("%w after %d attempts: %w", ErrLockContention, attempt+1, err)
+		}
+		wait := time.Duration(5<<attempt) * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %w", ErrLockContention, err)
+		case <-time.After(wait + rand.N(wait)):
+		}
+	}
+}
+
+// lockKeyAndAgent takes steps 2 and 3 of the lock order for a settle or a release of scopedKeyID's hold: the key's
+// sub-budget row, then its agent's row (a key attached to no agent has none). Both are taken before the
+// workspace's balance, as the hold took them.
+func lockKeyAndAgent(ctx context.Context, tx pgx.Tx, scopedKeyID string) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM agent_lxc_subbudgets WHERE scoped_key_id = $1 FOR UPDATE`, scopedKeyID); err != nil {
+		return fmt.Errorf("economy: lock sub-budget: %w", err)
+	}
+	var agentID, workspaceID string
+	err := tx.QueryRow(ctx,
+		`SELECT a.id, a.workspace_id FROM agent_account_keys k JOIN agent_accounts a ON a.id = k.agent_id
+		  WHERE k.scoped_key_id = $1`, scopedKeyID).Scan(&agentID, &workspaceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("economy: agent of key: %w", err)
+	}
+	return lockAgent(ctx, tx, workspaceID, agentID)
+}
 
 // ErrSubBudgetExceeded is returned when a debit would push the agent's spent_lxc past its ceiling. The whole
 // transaction rolls back — no claim, no debit — so the request_id stays retriable (e.g. after a ceiling raise).
@@ -147,6 +222,13 @@ func (m AgentDebitMeta) toSpendMap(chargedULXC int64) map[string]interface{} {
 // debited). Returns ErrSubBudgetExceeded (ceiling) or ErrInsufficientLXC (balance) on a rejected debit —
 // both roll the whole tx back (no orphan claim, retriable).
 func (s *DualTokenStore) SpendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string, meta AgentDebitMeta) error {
+	return retryLocks(ctx, func() error {
+		return s.spendLXCForAgent(ctx, scopedKeyID, workspaceID, requestID, lxcAmount, description, meta)
+	})
+}
+
+// spendLXCForAgent is one attempt of SpendLXCForAgent, in one transaction.
+func (s *DualTokenStore) spendLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, requestID string, lxcAmount int64, description string, meta AgentDebitMeta) error {
 	if lxcAmount <= 0 {
 		return errors.New("economy: agent spend amount must be positive")
 	}
@@ -270,6 +352,13 @@ const (
 // full by ReleaseLXCReservation. Returns ErrSubBudgetExceeded / ErrInsufficientLXC on a rejected hold (whole
 // tx rolls back — no orphan reservation, retriable); nil on a fresh hold AND on an idempotent replay.
 func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, reservationID string, heldLXC int64, meta AgentDebitMeta) error {
+	return retryLocks(ctx, func() error {
+		return s.reserveLXCForAgent(ctx, scopedKeyID, workspaceID, reservationID, heldLXC, meta)
+	})
+}
+
+// reserveLXCForAgent is one attempt of ReserveLXCForAgent, in one transaction.
+func (s *DualTokenStore) reserveLXCForAgent(ctx context.Context, scopedKeyID, workspaceID, reservationID string, heldLXC int64, meta AgentDebitMeta) error {
 	if heldLXC <= 0 {
 		return errors.New("economy: reservation hold amount must be positive")
 	}
@@ -374,6 +463,16 @@ func (s *DualTokenStore) ReserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 // error path return 0 (this call charged nothing new): a royalty funded on a 0 return mints nothing, which
 // is the deflationary-safe direction. cashBackedULXC is the part that may fund that royalty (royaltyBacked).
 func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) (settledULXC, cashBackedULXC int64, err error) {
+	err = retryLocks(ctx, func() error {
+		var err error
+		settledULXC, cashBackedULXC, err = s.settleLXCReservation(ctx, reservationID, finalLXC, meta)
+		return err
+	})
+	return settledULXC, cashBackedULXC, err
+}
+
+// settleLXCReservation is one attempt of SettleLXCReservation, in one transaction.
+func (s *DualTokenStore) settleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) (settledULXC, cashBackedULXC int64, err error) {
 	if reservationID == "" {
 		return 0, 0, errors.New("economy: settle requires reservation_id")
 	}
@@ -409,6 +508,10 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 		// ⚠ IDEMPOTENT NO-OP, and it is what makes a double settle unable to double-decrement
 		// cash-backed: the second call returns before consumeCashBacked is ever reached.
 		return 0, 0, nil
+	}
+	// The lock order: the key's sub-budget and its agent before the workspace's balance, as the hold took them.
+	if err := lockKeyAndAgent(ctx, tx, scopedKeyID); err != nil {
+		return 0, 0, err
 	}
 	// Never bill above the conservative hold: the delivered charge and its platform fee together fit in it.
 	if within := spendWithin(heldLXC, bps); finalLXC > within {
@@ -498,6 +601,11 @@ func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID
 // One compensating LXCTypeReservationRelease credit of +held; spent_lxc drops by the whole held. Idempotent
 // via the status-CAS. A release of an unknown reservation is a no-op (a stranded-sweeper double-run is safe).
 func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationID, reason string) error {
+	return retryLocks(ctx, func() error { return s.releaseLXCReservation(ctx, reservationID, reason) })
+}
+
+// releaseLXCReservation is one attempt of ReleaseLXCReservation, in one transaction.
+func (s *DualTokenStore) releaseLXCReservation(ctx context.Context, reservationID, reason string) error {
 	if reservationID == "" {
 		return errors.New("economy: release requires reservation_id")
 	}
@@ -527,6 +635,10 @@ func (s *DualTokenStore) ReleaseLXCReservation(ctx context.Context, reservationI
 	}
 	if status != "held" {
 		return nil // already resolved — idempotent
+	}
+	// The lock order: the key's sub-budget and its agent before the workspace's balance, as the hold took them.
+	if err := lockKeyAndAgent(ctx, tx, scopedKeyID); err != nil {
+		return err
 	}
 
 	bal, minted, wsSpent, err := readLXCBalance(ctx, tx, workspaceID)
