@@ -134,8 +134,9 @@ type Querier interface {
 }
 
 // PlanOf answers which plan workspaceID is on: enterprise while the operator has it on a contract; else the
-// plan its paying subscription bills (trialing, active or past_due — unpaid is Stripe having given up); else
-// free. A subscription whose Price is no plan's answers free too: there is no plan to charge or gate it by.
+// plan its paying subscription bills (trialing, active or past_due — unpaid is Stripe having given up); else,
+// for a synthetic workspace, the plan the testers put it on (B35.1); else free. A subscription whose Price is no
+// plan's answers free too: there is no plan to charge or gate it by.
 func PlanOf(ctx context.Context, db Querier, workspaceID string) (string, error) {
 	w, err := Of(ctx, db, workspaceID)
 	return w.Plan, err
@@ -156,21 +157,25 @@ func Of(ctx context.Context, db Querier, workspaceID string) (Workspace, error) 
 
 // OfUnder is workspaceID's plan and its gates under gates. plus, pro and max are personal chat plans and take
 // free's; byok alone takes team's, with own keys; an Enterprise contract's own agents and seats, where it set
-// them, replace enterprise's.
+// them, replace enterprise's. A synthetic workspace takes its plan's gates but never live money, whatever its
+// plan says (B35.1): its money is test money.
 func OfUnder(ctx context.Context, db Querier, workspaceID string, gates map[string]Gates) (Workspace, error) {
 	var w Workspace
 	var agents, seats *int64
+	var synthetic bool
 	err := db.QueryRow(ctx, `
 		SELECT COALESCE(
 			(SELECT plan FROM workspace_contracts WHERE workspace_id = $1),
 			(SELECT plan FROM subscriptions
 			 WHERE workspace_id = $1 AND status IN ('trialing','active','past_due')),
+			(SELECT synthetic_plan FROM workspaces WHERE id = $1),
 			$2),
 			EXISTS (SELECT 1 FROM subscriptions WHERE workspace_id = $1 AND byok
 				AND status IN ('trialing','active','past_due')),
 			(SELECT agents FROM workspace_contracts WHERE workspace_id = $1),
-			(SELECT seats FROM workspace_contracts WHERE workspace_id = $1)`, workspaceID, Free).
-		Scan(&w.Plan, &w.BYOKAddOn, &agents, &seats)
+			(SELECT seats FROM workspace_contracts WHERE workspace_id = $1),
+			COALESCE((SELECT synthetic FROM workspaces WHERE id = $1), false)`, workspaceID, Free).
+		Scan(&w.Plan, &w.BYOKAddOn, &agents, &seats, &synthetic)
 	if err != nil {
 		return Workspace{}, fmt.Errorf("plans: the plan of %s: %w", workspaceID, err)
 	}
@@ -192,6 +197,9 @@ func OfUnder(ctx context.Context, db Querier, workspaceID string, gates map[stri
 	}
 	if seats != nil {
 		g.Seats = *seats
+	}
+	if synthetic {
+		g.LiveMoney = false
 	}
 	w.Gates = g
 	return w, nil

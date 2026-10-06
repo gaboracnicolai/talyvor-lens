@@ -11,14 +11,17 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/plans"
 	"github.com/talyvor/lens/internal/storedanswers"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -28,7 +31,11 @@ import (
 // Two operator routes, registered ONLY when LENS_SYNTHETIC_KEY is set (otherwise a 404):
 //
 //	POST /v1/synthetic/workspaces        {"count":100} — creates that many synthetic workspaces, each
-//	                                     with test credits and a token the harness uses as that user.
+//	                                     with test credits and a token the harness uses as that user;
+//	                                     "plan" (free, the default, team, business or enterprise) puts
+//	                                     each on that plan (B35.1).
+//	POST /v1/synthetic/workspaces/{wsID}/plan  {"plan":"team"} — moves a synthetic workspace to another
+//	                                     plan, to test an upgrade or a downgrade; any other is refused 403.
 //	POST /v1/synthetic/workspaces/reset  — every synthetic workspace, or only those named in
 //	                                     {"workspaces":["s…",…]}: its stored answers deleted, its test
 //	                                     credits restored. Set-based (B26.1): a handful of statements and
@@ -39,6 +46,10 @@ import (
 //
 // B25.7 adds four more that bring a test workspace's slow money due inside one tester run
 // (synthetic_due_handler.go).
+//
+// A synthetic workspace's plan gates it and sets its platform fee exactly as a paying workspace's does
+// (internal/plans reads it after a contract and a subscription), but it creates no Stripe object, invoice or
+// payment, and its live-money gate is always off whatever the plan says.
 //
 // The key is compared in constant time, calls are rate-limited, and every call — refused ones too —
 // is written to synthetic_operations. What makes a workspace synthetic, and what that forbids, is in
@@ -86,6 +97,7 @@ type syntheticDeps struct {
 	answers    syntheticAnswers
 	audit      syntheticAudit
 	mint       tokenMinter
+	plans      plans.Querier    // B35.1: sets and reads a synthetic workspace's plan
 	due        syntheticDueDeps // B25.7; unset, its routes are not registered
 }
 
@@ -121,6 +133,7 @@ func mountSyntheticRoutes(r chi.Router, key string, d syntheticDeps) {
 	limit := &callLimiter{max: syntheticMaxCalls, per: syntheticCallsPer}
 	r.Post("/v1/synthetic/workspaces", syntheticGuard(key, "create", limit, d, d.create))
 	r.Post("/v1/synthetic/workspaces/reset", syntheticGuard(key, "reset", limit, d, d.reset))
+	r.Post("/v1/synthetic/workspaces/{wsID}/plan", syntheticGuard(key, "plan", &callLimiter{max: syntheticMaxDueCalls, per: syntheticCallsPer}, d, d.setPlan))
 	mountSyntheticDueRoutes(r, key, d)
 }
 
@@ -164,7 +177,8 @@ type syntheticUser struct {
 
 func (d syntheticDeps) create(w http.ResponseWriter, r *http.Request) (int, string) {
 	in := struct {
-		Count int `json:"count"`
+		Count int    `json:"count"`
+		Plan  string `json:"plan"`
 	}{Count: 100}
 	if r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -176,12 +190,19 @@ func (d syntheticDeps) create(w http.ResponseWriter, r *http.Request) (int, stri
 		writeJSONErr(w, http.StatusBadRequest, fmt.Sprintf("count must be 1 to %d", syntheticMaxCount))
 		return 0, "error: bad count"
 	}
+	if in.Plan != "" && !slices.Contains(plans.Order, in.Plan) {
+		writeJSONErr(w, http.StatusBadRequest, fmt.Sprintf("plan must be one of %s", strings.Join(plans.Order, ", ")))
+		return 0, "error: bad plan"
+	}
 	users := make([]syntheticUser, 0, in.Count)
 	expires := time.Now().Add(syntheticTokenTTL).UTC().Format(time.RFC3339)
 	for i := 0; i < in.Count; i++ {
 		id, err := syntheticID()
 		if err == nil {
 			err = d.workspaces.CreateSynthetic(r.Context(), id, fmt.Sprintf("Synthetic user %s", id[1:7]))
+		}
+		if err == nil && in.Plan != "" {
+			err = d.putOnPlan(r.Context(), id, in.Plan)
 		}
 		if err == nil {
 			_, err = d.credits.GrantLXC(r.Context(), id, syntheticCreditULXC, "synthetic test credits",
@@ -197,9 +218,61 @@ func (d syntheticDeps) create(w http.ResponseWriter, r *http.Request) (int, stri
 		}
 		users = append(users, syntheticUser{WorkspaceID: id, Token: tok, ExpiresAt: expires})
 	}
-	slog.Info("synthetic: workspaces created", "count", len(users))
-	writeJSONOK(w, http.StatusCreated, map[string]any{"created": len(users), "workspaces": users})
+	if in.Plan == "" {
+		in.Plan = plans.Free
+	}
+	slog.Info("synthetic: workspaces created", "count", len(users), "plan", in.Plan)
+	writeJSONOK(w, http.StatusCreated, map[string]any{"created": len(users), "plan": in.Plan, "workspaces": users})
 	return len(users), "ok"
+}
+
+// errNotSynthetic is a plan asked for a workspace that is not an active synthetic one.
+var errNotSynthetic = errors.New("not an active synthetic workspace")
+
+// putOnPlan records plan as synthetic workspace id's plan. It changes nothing on any other workspace.
+func (d syntheticDeps) putOnPlan(ctx context.Context, id, plan string) error {
+	if d.plans == nil {
+		return errors.New("synthetic plans need the database")
+	}
+	err := d.plans.QueryRow(ctx, `UPDATE workspaces SET synthetic_plan = $2, updated_at = NOW()
+		WHERE id = $1 AND synthetic AND active RETURNING id`, id, plan).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errNotSynthetic
+	}
+	return err
+}
+
+// setPlan moves a synthetic workspace to another plan and answers the plan and gates it is now on — after a
+// contract or a test-mode subscription it bought, which still come first.
+func (d syntheticDeps) setPlan(w http.ResponseWriter, r *http.Request) (int, string) {
+	ws := chi.URLParam(r, "wsID")
+	var in struct {
+		Plan string `json:"plan"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return 0, "error: bad request"
+	}
+	if !slices.Contains(plans.Order, in.Plan) {
+		writeJSONErr(w, http.StatusBadRequest, fmt.Sprintf("plan must be one of %s", strings.Join(plans.Order, ", ")))
+		return 0, "error: bad plan"
+	}
+	switch err := d.putOnPlan(r.Context(), ws, in.Plan); {
+	case errors.Is(err, errNotSynthetic):
+		writeJSONErr(w, http.StatusForbidden, "only a test (synthetic) workspace's plan can be set here")
+		return 0, "refused: not a test workspace"
+	case err != nil:
+		writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		return 0, "error: " + err.Error()
+	}
+	plan, err := plans.Of(r.Context(), d.plans, ws)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		return 0, "error: " + err.Error()
+	}
+	slog.Info("synthetic: plan set", "workspace", ws, "plan", in.Plan, "on", plan.Plan)
+	writeJSONOK(w, http.StatusOK, map[string]any{"workspace_id": ws, "plan": plan})
+	return 1, "ok"
 }
 
 func (d syntheticDeps) reset(w http.ResponseWriter, r *http.Request) (int, string) {

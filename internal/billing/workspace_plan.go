@@ -26,9 +26,10 @@ type PlanQuerier interface {
 }
 
 // PlanOf answers which plan workspaceID is on: enterprise while the operator has it on a contract; else the
-// plan its paying subscription bills (trialing, active or past_due — unpaid is Stripe having given up); else
-// free. A subscription whose Price is no plan's answers free too: there is no plan to charge or gate it by.
-// internal/plans answers it, so the packages billing builds on can gate by plan too (B32.12).
+// plan its paying subscription bills (trialing, active or past_due — unpaid is Stripe having given up); else, for
+// a synthetic workspace, the plan the testers put it on (B35.1); else free. A subscription whose Price is no
+// plan's answers free too: there is no plan to charge or gate it by. internal/plans answers it, so the packages
+// billing builds on can gate by plan too (B32.12).
 func PlanOf(ctx context.Context, db PlanQuerier, workspaceID string) (string, error) {
 	return plans.PlanOf(ctx, db, workspaceID)
 }

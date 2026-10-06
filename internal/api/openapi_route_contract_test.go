@@ -328,7 +328,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 //
 // 201 → 202 (B32.25): POST /v1/workspaces/{wsID}/marketplace/listings/{listingID}/remix, accepting a listing's remix
 // licence and opening its artifact, beside the undocumented publish and listing routes.
-const undocumentedNonAdminV1Routes = 202
+//
+// 202 → 203 (B35.1): POST /v1/synthetic/workspaces/{wsID}/plan, a test workspace moved to another plan, beside the
+// undocumented synthetic-key routes it belongs to, registered only when LENS_SYNTHETIC_KEY is set.
+const undocumentedNonAdminV1Routes = 203
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)
