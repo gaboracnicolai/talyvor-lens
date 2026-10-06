@@ -1765,6 +1765,7 @@ func run() error {
 	marketStore := market.NewStore(pool)
 	marketStore.SetTrialMax(cfg.MarketTrialMax)                               // B32.21
 	marketStore.SetLineageLimits(cfg.LineageMaxShareBPS, cfg.LineageMaxDepth) // B32.24
+	marketStore.SetLineageTotalCap(cfg.LineageTotalCapBPS)                    // B32.26
 	dualToken.SetListingCharger(marketStore)                                  // B19.17: a schedule may pay a marketplace listing
 	// The real workspaces' Stripe (B25.6: a test workspace's is on the test-mode key, below).
 	liveSide := stripeSide{cards: agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)} // B19.12

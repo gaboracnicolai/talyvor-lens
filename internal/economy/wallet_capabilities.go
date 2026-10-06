@@ -62,6 +62,8 @@ const (
 	// GREEN, both on the buyer's monthly marketplace bill (B32.19): asked where a licence's charge is recorded.
 	CapabilityBuyListings      = "buy_marketplace_listings"
 	CapabilityRentAndSubscribe = "rent_and_subscribe_listings"
+	// GREEN (B32.26): asked where a marketplace sale's pool flows up to the originals of a remix.
+	CapabilityLineageRoyalties = "lineage_royalties"
 )
 
 // Capabilities is every wallet capability and its class, as Nicolai decided them on 28 Sep 2026.
@@ -69,6 +71,7 @@ var Capabilities = []Capability{
 	{"spend_on_talyvor", "Spending on Talyvor", ClassGreen},
 	{CapabilityBuyListings, "Buying marketplace listings", ClassGreen},
 	{CapabilityRentAndSubscribe, "Renting and subscribing to marketplace listings", ClassGreen},
+	{CapabilityLineageRoyalties, "Royalties to the authors of remixed listings, paid from marketplace sales", ClassGreen},
 	{"move_between_own_agents", "Moving money between one owner's own agents", ClassGreen},
 	{"rules_approvals_statements_pots", "Rules, approvals, statements and pots", ClassGreen},
 	{"company_credit_line", "Talyvor's credit line to companies, for Talyvor services", ClassGreen},

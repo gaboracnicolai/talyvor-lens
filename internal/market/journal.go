@@ -19,7 +19,8 @@ import (
 // account's total in the same transaction.
 //
 //   - clear: a paid invoice clears a use — +gross stripe:clearing, −fee revenue:market_fee, −share
-//     seller:<ws>:holdback. ClearInvoice posts it beside the earning.
+//     seller:<ws>:holdback for each payee: the seller and every ancestor its royalties pay (B32.26). ClearInvoice
+//     posts it beside the earnings.
 //   - reversal: a refund or chargeback of a cleared use posts the exact mirror of its clear entry. A trigger on
 //     market_refunds posts it in the transaction that writes the refund, so every writer of one —
 //     ReverseInvoice, refundUses, a test-money crossing's reversal — is journalled without being touched. Once
@@ -106,13 +107,12 @@ func PostJournalTx(ctx context.Context, tx pgx.Tx, kind, ref, fundedBy string, a
 	return id, nil
 }
 
-// postClearTx journals the clearing of one use: the buyer paid gross, Talyvor keeps gross − share and the seller's
-// share waits in their holdback.
-func postClearTx(ctx context.Context, tx pgx.Tx, useID, sellerWorkspaceID string, gross, share int64, fundedBy string, at time.Time) error {
-	_, err := PostJournalTx(ctx, tx, JournalClear, useID, fundedBy, at,
-		Posting{Account: AccountStripeClearing, AmountUSDMicros: gross},
-		Posting{Account: AccountMarketFee, AmountUSDMicros: -(gross - share)},
-		Posting{Account: SellerHoldback(sellerWorkspaceID), AmountUSDMicros: -share})
+// postClearTx journals the clearing of one use: the buyer paid gross, Talyvor keeps fee, and the rest waits in the
+// holdback of each of its payees — the seller, and the ancestors its lineage royalties pay (B32.26).
+func postClearTx(ctx context.Context, tx pgx.Tx, useID string, gross, fee int64, fundedBy string, at time.Time, payees ...Posting) error {
+	_, err := PostJournalTx(ctx, tx, JournalClear, useID, fundedBy, at, append([]Posting{
+		{Account: AccountStripeClearing, AmountUSDMicros: gross},
+		{Account: AccountMarketFee, AmountUSDMicros: -fee}}, payees...)...)
 	return err
 }
 

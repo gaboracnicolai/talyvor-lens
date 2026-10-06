@@ -314,7 +314,7 @@ func (s *Store) RefundTakenDown(ctx context.Context, refunder Refunder) (refunde
 func (s *Store) refundUses(ctx context.Context, listingID string) (int, error) {
 	rows, err := s.pool.Query(ctx, `SELECT u.id FROM market_uses u
 		JOIN market_listings l ON l.id = u.listing_id
-		LEFT JOIN market_earnings e ON e.use_id = u.id
+		LEFT JOIN market_earnings e ON e.use_id = u.id AND e.kind = 'sale'
 		WHERE l.review_status = 'taken_down' AND ($1 = '' OR l.id = $1)
 		  AND u.charge = 'billed' AND u.ran_at IS NOT NULL
 		  AND (e.use_id IS NULL OR e.payable_at > l.taken_down_at)
@@ -338,7 +338,7 @@ func (s *Store) refundUses(ctx context.Context, listingID string) (int, error) {
 				return err
 			}
 			var share int64
-			if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT share_usd_micros FROM market_earnings WHERE use_id = $1), 0)`, id).Scan(&share); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(share_usd_micros), 0)::bigint FROM market_earnings WHERE use_id = $1`, id).Scan(&share); err != nil {
 				return err
 			}
 			tag, err := tx.Exec(ctx, `INSERT INTO market_refunds (use_id, listing_id, buyer_workspace_id, seller_workspace_id, price_ulxc,
