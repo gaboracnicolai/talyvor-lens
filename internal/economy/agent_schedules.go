@@ -291,10 +291,12 @@ func (s *DualTokenStore) RemoveAgentTopUp(ctx context.Context, workspaceID, agen
 // (B32.20), then every top-up due.
 func (s *DualTokenStore) RunAgentSchedules(ctx context.Context, now time.Time) (ScheduleRunResult, error) {
 	var res ScheduleRunResult
+	var tickErr error
 	for i := 0; i < maxTicksPerRun; i++ {
 		outcome, err := s.runScheduleTick(ctx, now)
 		if err != nil {
-			return res, err
+			tickErr = err
+			break
 		}
 		if outcome == "" {
 			break
@@ -305,11 +307,14 @@ func (s *DualTokenStore) RunAgentSchedules(ctx context.Context, now time.Time) (
 			res.Refused++
 		}
 	}
-	if r, ok := s.listings.(LicenceRenewer); ok {
+	if r, ok := s.listings.(LicenceRenewer); ok { // a failed schedule tick does not hold the licences' renewals up
 		var err error
 		if res.Renewed, res.Unpaid, err = r.RenewLicences(ctx, now, s); err != nil {
-			return res, err
+			return res, errors.Join(tickErr, err)
 		}
+	}
+	if tickErr != nil {
+		return res, tickErr
 	}
 	rows, err := s.pool.Query(ctx, `SELECT workspace_id, agent_id FROM agent_topups`)
 	if err != nil {

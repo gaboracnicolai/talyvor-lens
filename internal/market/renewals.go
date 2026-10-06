@@ -51,27 +51,33 @@ type dueLicence struct {
 }
 
 // RenewLicences renews every licence due at now, one renewal per period, and ends as unpaid each whose renewal is
-// refused. It answers how many it renewed and how many it ended.
+// refused. It answers how many it renewed and how many it ended; a licence whose renewal fails is passed over until the
+// next tick, and its failure returned once the others are done.
 func (s *Store) RenewLicences(ctx context.Context, now time.Time, judge economy.LicenceJudge) (renewed, unpaid int, err error) {
+	passed := []string{} // licences this run tried and did not renew or end
+	var failed []error
 	for range maxRenewalsPerRun {
 		var d dueLicence
 		err := s.pool.QueryRow(ctx, `SELECT c.id, c.listing_id, c.buyer_workspace_id, c.agent_id, c.person_id, c.pinned_version, c.ends_at,
 				COALESCE(o.price_usd_micros, 0), o.period_days
 			FROM market_licences c LEFT JOIN market_offers o ON o.id = c.offer_id
-			WHERE c.status = 'active' AND c.auto_renew AND c.ends_at <= $1
-			ORDER BY c.ends_at, c.id LIMIT 1`, now).
+			WHERE c.status = 'active' AND c.auto_renew AND c.ends_at <= $1 AND c.id <> ALL($2)
+			ORDER BY c.ends_at, c.id LIMIT 1`, now, passed).
 			Scan(&d.id, &d.listingID, &d.buyer, &d.agentID, &d.person, &d.pinned, &d.endsAt, &d.priceUSDMicros, &d.periodDays)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return renewed, unpaid, nil
+			break
 		}
 		if err != nil {
-			return renewed, unpaid, fmt.Errorf("market: licences due: %w", err)
+			failed = append(failed, fmt.Errorf("market: licences due: %w", err))
+			break
 		}
 		refused, err := s.renew(ctx, d, judge)
 		switch {
 		case errors.Is(err, errNotDue):
+			passed = append(passed, d.id)
 		case err != nil:
-			return renewed, unpaid, fmt.Errorf("market: renew licence %s: %w", d.id, err)
+			passed = append(passed, d.id)
+			failed = append(failed, fmt.Errorf("market: renew licence %s: %w", d.id, err))
 		case refused:
 			tag, err := s.pool.Exec(ctx, `UPDATE market_licences SET status = 'unpaid', auto_renew = false
 				WHERE id = $1 AND status = 'active' AND auto_renew AND ends_at = $2`, d.id, d.endsAt)
@@ -83,7 +89,7 @@ func (s *Store) RenewLicences(ctx context.Context, now time.Time, judge economy.
 			renewed++
 		}
 	}
-	return renewed, unpaid, nil
+	return renewed, unpaid, errors.Join(failed...)
 }
 
 // renew records d's renewal for the period starting at its ends_at, and moves its ends_at on a period — or reports

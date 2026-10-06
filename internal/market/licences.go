@@ -306,8 +306,8 @@ type cover struct {
 
 // licenceFor finds the active licence of buyer to listingID that covers a use by agentID (or person) of version (0:
 // whichever the licence runs), preferring one that still covers its charge, then the caller's own, then the newest.
-// only, when set, asks about that one licence. nil: no licence covers it at now. One that renews covers until the
-// schedules' tick renews or ends it, and an unpaid one runs to its ends_at (B32.20).
+// only, when set, asks about that one licence. nil: no licence covers it at now. An unpaid one runs to its ends_at
+// (B32.20).
 func licenceFor(ctx context.Context, tx pgx.Tx, now time.Time, buyer, agentID, person, listingID string, version int, only string) (*cover, error) {
 	if err := expireLicences(ctx, tx, buyer, now); err != nil {
 		return nil, err
@@ -318,7 +318,7 @@ func licenceFor(ctx context.Context, tx pgx.Tx, now time.Time, buyer, agentID, p
 		       EXISTS (SELECT 1 FROM market_uses u WHERE u.licence_id = c.id AND u.charge = 'licensed' AND u.agent_id = '' AND u.person_id = $3 AND $3 <> '')
 		FROM market_licences c LEFT JOIN market_offers o ON o.id = c.offer_id
 		WHERE c.buyer_workspace_id = $1 AND c.listing_id = $2 AND c.starts_at <= $5
-		  AND ((c.status = 'active' AND (c.ends_at IS NULL OR c.ends_at > $5 OR c.auto_renew)) OR (c.status = 'unpaid' AND c.ends_at > $5))
+		  AND (c.status = 'active' OR (c.status = 'unpaid' AND c.ends_at IS NOT NULL)) AND (c.ends_at IS NULL OR c.ends_at > $5)
 		  AND ($4 = '' OR c.id = $4)
 		ORDER BY c.created_at DESC, c.id`, buyer, listingID, person, only, now)
 	if err != nil {
