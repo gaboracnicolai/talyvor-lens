@@ -171,10 +171,11 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 				return err
 			}
 		}
+		// Stamped by the clock a licence's periods are (B32.20): a rent's or subscription's included uses count per period.
 		if err := tx.QueryRow(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge,
-				licence_id, person_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10) RETURNING used_at`,
-			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge, u.LicenceID, req.Person).Scan(&u.UsedAt); err != nil {
+				licence_id, person_id, used_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11) RETURNING used_at`,
+			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge, u.LicenceID, req.Person, s.now()).Scan(&u.UsedAt); err != nil {
 			return err
 		}
 		for _, st := range steps {
@@ -548,12 +549,12 @@ func run(ctx context.Context, r Runner, calls []call, model string, u *Use) erro
 
 // ClearInvoice clears the billed uses the buyer's paid marketplace invoice carried — those used within
 // [periodStart, periodEnd) — and credits each seller their share, each use journalled as one clear entry in
-// the same transaction (B32.16). A replay clears nothing more. Each earning is live or test as the invoice was
+// the same transaction (B32.16), each rent counted towards owning its listing (B32.20). A replay clears nothing more. Each earning is live or test as the invoice was
 // (B22.1): only live earnings reach a live payout.
 func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time, livemode bool) (int, error) {
 	n := 0
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, seller_workspace_id, price_ulxc, COALESCE(payee_agent_id, '') <> '' FROM market_uses
+		rows, err := tx.Query(ctx, `SELECT id, seller_workspace_id, price_ulxc, COALESCE(payee_agent_id, '') <> '', COALESCE(licence_id, ''), use_kind FROM market_uses
 			WHERE buyer_workspace_id = $1 AND charge = 'billed' AND metered_at IS NOT NULL AND cleared_at IS NULL
 			  AND used_at >= $2 AND used_at < $3
 			ORDER BY used_at, id FOR UPDATE`, buyerWorkspaceID, periodStart, periodEnd)
@@ -564,11 +565,13 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 			id, seller string
 			ulxc       int64
 			payment    bool // a payment to another company's agent, not a use of a listing
+			licence    string
+			kind       string // its use_kind
 		}
 		var uses []cleared
 		for rows.Next() {
 			var c cleared
-			if err := rows.Scan(&c.id, &c.seller, &c.ulxc, &c.payment); err != nil {
+			if err := rows.Scan(&c.id, &c.seller, &c.ulxc, &c.payment, &c.licence, &c.kind); err != nil {
 				rows.Close()
 				return err
 			}
@@ -602,6 +605,11 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 			}
 			if _, err := tx.Exec(ctx, `UPDATE market_uses SET cleared_invoice_id = $2, cleared_at = $3 WHERE id = $1`, c.id, invoiceID, paidAt); err != nil {
 				return err
+			}
+			if c.licence != "" && (c.kind == OfferRent || c.kind == "renewal") { // B32.20: rents add up to ownership
+				if err := rentCleared(ctx, tx, c.licence, gross, paidAt); err != nil {
+					return err
+				}
 			}
 			n++
 		}

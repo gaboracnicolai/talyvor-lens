@@ -81,8 +81,8 @@ func TestLicences_RentCoversUsesUntilItEndsAndPinsItsVersion(t *testing.T) {
 	if c, k, p, lic := row(rent.UseID); c != ChargeBilled || k != OfferRent || p != 10_000_000 || lic != rent.ID {
 		t.Fatalf("the rent's row = %s %s at %d µLXC for %q; want one billed rent at 10,000,000 µLXC for %s", c, k, p, lic, rent.ID)
 	}
-	if rent.Status != LicenceActive || rent.EndsAt == nil || rent.EndsAt.Sub(rent.StartsAt) != 30*24*time.Hour || rent.RentPaidUSDMicros != 1_000_000 {
-		t.Fatalf("the licence = %+v; want active for 30 days, 1,000,000 µUSD of rent paid", rent)
+	if rent.Status != LicenceActive || rent.EndsAt == nil || rent.EndsAt.Sub(rent.StartsAt) != 30*24*time.Hour || rent.RentPaidUSDMicros != 0 {
+		t.Fatalf("the licence = %+v; want active for 30 days, no rent paid until it clears (B32.20)", rent)
 	}
 	if !slices.Equal(meter.accepted, []string{rent.UseID}) || !slices.Equal(asked, []string{economy.CapabilityRentAndSubscribe}) {
 		t.Fatalf("metered %v, asked %v; want the rent's row metered once and rent_and_subscribe_listings asked", meter.accepted, asked)

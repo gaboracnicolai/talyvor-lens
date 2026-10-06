@@ -24,6 +24,7 @@ import (
 //	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/use   {version, model, input, variables}
 //	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/licences  {offer_id, version} + Idempotency-Key   B32.19: buy, rent or subscribe
 //	GET  /v1/workspaces/{wsID}/marketplace/licences            the licences the workspace holds or held
+//	POST /v1/workspaces/{wsID}/marketplace/licences/{id}/cancel  B32.20: stop renewing; it runs to its ends_at
 //	GET  /v1/workspaces/{wsID}/marketplace/earnings            the seller's payable, in holdback and available (µUSD)
 //	GET  /v1/workspaces/{wsID}/marketplace/journal             the seller's holdback and available on the journal, and whether they reconcile (B32.17)
 //	GET  /v1/workspaces/{wsID}/marketplace/bill?month=2026-09  the buyer's billed uses in a month
@@ -198,6 +199,17 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 			list = []market.Licence{}
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{"licences": list})
+	})
+	r.Post("/v1/workspaces/{wsID}/marketplace/licences/{licenceID}/cancel", func(w http.ResponseWriter, req *http.Request) {
+		lic, err := store.CancelLicence(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "licenceID"))
+		switch {
+		case errors.Is(err, market.ErrNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, lic)
+		}
 	})
 	r.Get("/v1/workspaces/{wsID}/marketplace/earnings", func(w http.ResponseWriter, req *http.Request) {
 		e, err := store.SellerEarnings(req.Context(), chi.URLParam(req, "wsID"), time.Now())

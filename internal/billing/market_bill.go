@@ -41,6 +41,12 @@ type MarketClearer interface {
 	ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time, livemode bool) (int, error)
 }
 
+// MarketFailer ends what a marketplace invoice Stripe gave up on was to pay for (B32.20): the licences it carried end
+// unpaid. *market.Store satisfies it.
+type MarketFailer interface {
+	FailInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd time.Time) (int, error)
+}
+
 // WithMarketBill turns the marketplace bill on: uses are metered as eventName onto a subscription to
 // priceID, and a paid invoice of one clears its uses through clearer.
 func (s *Service) WithMarketBill(api marketStripeAPI, priceID, eventName string, clearer MarketClearer) *Service {
@@ -119,7 +125,8 @@ type marketInvoice struct {
 	StatusTransitions struct {
 		PaidAt int64 `json:"paid_at"`
 	} `json:"status_transitions"`
-	Lines struct {
+	NextPaymentAttempt int64 `json:"next_payment_attempt"` // 0 (null) on a failed invoice: Stripe has given up on it
+	Lines              struct {
 		Data []struct {
 			Period struct {
 				Start int64 `json:"start"`
@@ -151,6 +158,71 @@ func (inv marketInvoice) subscriptionID() string {
 	return inv.Parent.SubscriptionDetails.Subscription
 }
 
+// marketPeriod is the span of an invoice's marketplace lines, in Unix seconds: end 0 when it has none.
+func (s *Service) marketPeriod(inv marketInvoice) (start, end int64) {
+	for _, line := range inv.Lines.Data {
+		price := ""
+		if line.Price != nil {
+			price = line.Price.ID
+		} else if line.Pricing != nil {
+			price = line.Pricing.PriceDetails.Price
+		}
+		if price != s.marketPrice {
+			continue
+		}
+		if start == 0 || line.Period.Start < start {
+			start = line.Period.Start
+		}
+		end = max(end, line.Period.End)
+	}
+	return start, end
+}
+
+// marketInvoiceFailed handles a failed payment of a marketplace bill, answering false when the invoice is not one
+// (B32.20). Once Stripe has given up on it — no next attempt — the licences it was to pay for end unpaid at their
+// ends_at; a failure Stripe will retry is acknowledged and changes nothing.
+func (s *Service) marketInvoiceFailed(w http.ResponseWriter, ctx context.Context, event *stripe.Event) bool {
+	failer, ok := s.marketClearer.(MarketFailer)
+	if !ok || s.marketPrice == "" {
+		return false
+	}
+	var inv marketInvoice
+	if err := json.Unmarshal(event.Data.Raw, &inv); err != nil {
+		return false
+	}
+	var workspaceID string
+	err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM market_bills WHERE stripe_subscription_id = $1`, inv.subscriptionID()).Scan(&workspaceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		s.fail(w, "market bill lookup", event.ID, err)
+		return true
+	}
+	start, end := s.marketPeriod(inv)
+	if inv.NextPaymentAttempt != 0 || end == 0 {
+		s.log.Info("billing webhook: a marketplace invoice's payment failed; Stripe tries again", "invoice", inv.ID, "workspace", workspaceID)
+		w.WriteHeader(http.StatusOK)
+		return true
+	}
+	if mine, err := s.takes(ctx, workspaceID); err != nil {
+		s.fail(w, "workspace kind", event.ID, err)
+		return true
+	} else if !mine {
+		w.WriteHeader(http.StatusOK) // the other kind of workspace's bill: its own Service ends its licences
+		return true
+	}
+	n, err := failer.FailInvoice(ctx, workspaceID, inv.ID, time.Unix(start, 0).UTC(), time.Unix(end, 0).UTC())
+	if err != nil {
+		s.fail(w, "market fail", event.ID, err)
+		return true
+	}
+	s.log.Info("billing webhook: Stripe gave up on a marketplace invoice; its licences end unpaid", "invoice", inv.ID, "workspace", workspaceID,
+		"licences", n)
+	w.WriteHeader(http.StatusOK)
+	return true
+}
+
 // handleInvoicePaid clears the uses a paid marketplace invoice carried. Any other paid invoice is
 // acknowledged and left alone.
 func (s *Service) handleInvoicePaid(w http.ResponseWriter, ctx context.Context, event *stripe.Event) {
@@ -167,22 +239,7 @@ func (s *Service) handleInvoicePaid(w http.ResponseWriter, ctx context.Context, 
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	var start, end int64
-	for _, line := range inv.Lines.Data {
-		price := ""
-		if line.Price != nil {
-			price = line.Price.ID
-		} else if line.Pricing != nil {
-			price = line.Pricing.PriceDetails.Price
-		}
-		if price != s.marketPrice {
-			continue
-		}
-		if start == 0 || line.Period.Start < start {
-			start = line.Period.Start
-		}
-		end = max(end, line.Period.End)
-	}
+	start, end := s.marketPeriod(inv)
 	if end == 0 {
 		w.WriteHeader(http.StatusOK) // no marketplace line: not a marketplace bill
 		return

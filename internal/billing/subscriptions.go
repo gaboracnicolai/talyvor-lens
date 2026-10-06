@@ -22,7 +22,8 @@ import (
 //	customer.subscription.created  → the workspace is subscribed
 //	customer.subscription.updated  → renewal, past_due, cancel-at-period-end
 //	customer.subscription.deleted  → cancelled, for good
-//	invoice.payment_failed         → the dunning signal, recorded on its own
+//	invoice.payment_failed         → the dunning signal, recorded on its own (a marketplace bill's, once Stripe
+//	                                  gives up on it, ends the licences it carried unpaid: B32.20, market_bill.go)
 //
 // ⚠ WHAT THIS FILE DELIBERATELY DOES NOT DO. It does not grant an allowance, and it
 // does not touch the LXC ledger. W4.6.1's step 2 is the allowance ledger (phi = F/D
@@ -733,6 +734,9 @@ func periodStart(sub *stripe.Subscription) time.Time {
 // time Stripe's retry succeeded. This records that a payment failed — the row is the
 // evidence — and lets the subscription event move the state.
 func (s *Service) handleInvoicePaymentFailed(w http.ResponseWriter, ctx context.Context, event *stripe.Event) {
+	if s.marketInvoiceFailed(w, ctx, event) { // B32.20 — a marketplace bill: Stripe giving up on it ends its licences unpaid
+		return
+	}
 	var inv stripe.Invoice
 	if err := json.Unmarshal(event.Data.Raw, &inv); err != nil {
 		s.log.Warn("billing webhook: unparseable invoice", "event", event.ID)

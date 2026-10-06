@@ -63,6 +63,7 @@ type AgentTopUp struct {
 // ScheduleRunResult counts what one RunAgentSchedules did.
 type ScheduleRunResult struct {
 	Paid, Refused, ToppedUp int
+	Renewed, Unpaid         int // marketplace licences renewed, and ended unpaid (B32.20)
 }
 
 func nextTick(t time.Time, every string) time.Time {
@@ -98,6 +99,18 @@ type ListingCharger interface {
 	// when the listing cannot be paid; judge's error is returned as it is.
 	ChargeScheduledListing(ctx context.Context, tx pgx.Tx, buyerWorkspaceID, agentID, listingID string, maxULXC int64, at time.Time,
 		judge func(price int64) error) (useID, refusal string, err error)
+}
+
+// LicenceJudge is what renewing a marketplace licence asks of the economy (B32.20), as its first charge did: its
+// agent's rules, and the capability its charge is recorded under. *DualTokenStore satisfies it.
+type LicenceJudge interface {
+	JudgeAgentPurchase(ctx context.Context, workspaceID, agentID, listingID string, amount int64, what string, record func(pgx.Tx) error) error
+	RequireBilledCapability(ctx context.Context, workspaceID, key string) error
+}
+
+// LicenceRenewer renews the marketplace's licences whose period has ended (B32.20). *market.Store satisfies it.
+type LicenceRenewer interface {
+	RenewLicences(ctx context.Context, now time.Time, judge LicenceJudge) (renewed, unpaid int, err error)
 }
 
 // SetListingCharger lets schedules pay marketplace listings.
@@ -274,13 +287,16 @@ func (s *DualTokenStore) RemoveAgentTopUp(ctx context.Context, workspaceID, agen
 	return nil
 }
 
-// RunAgentSchedules runs every schedule tick due at now, each exactly once, then every top-up due.
+// RunAgentSchedules runs every schedule tick due at now, each exactly once, then renews every marketplace licence due
+// (B32.20), then every top-up due.
 func (s *DualTokenStore) RunAgentSchedules(ctx context.Context, now time.Time) (ScheduleRunResult, error) {
 	var res ScheduleRunResult
+	var tickErr error
 	for i := 0; i < maxTicksPerRun; i++ {
 		outcome, err := s.runScheduleTick(ctx, now)
 		if err != nil {
-			return res, err
+			tickErr = err
+			break
 		}
 		if outcome == "" {
 			break
@@ -290,6 +306,15 @@ func (s *DualTokenStore) RunAgentSchedules(ctx context.Context, now time.Time) (
 		} else {
 			res.Refused++
 		}
+	}
+	if r, ok := s.listings.(LicenceRenewer); ok { // a failed schedule tick does not hold the licences' renewals up
+		var err error
+		if res.Renewed, res.Unpaid, err = r.RenewLicences(ctx, now, s); err != nil {
+			return res, errors.Join(tickErr, err)
+		}
+	}
+	if tickErr != nil {
+		return res, tickErr
 	}
 	rows, err := s.pool.Query(ctx, `SELECT workspace_id, agent_id FROM agent_topups`)
 	if err != nil {
