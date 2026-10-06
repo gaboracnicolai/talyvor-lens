@@ -1911,7 +1911,8 @@ func run() error {
 				if res, err := dualToken.RunAgentSchedules(ctx, now); err != nil {
 					slog.Warn("agents: schedule run failed", slog.String("err", err.Error()))
 				} else if res != (economy.ScheduleRunResult{}) {
-					slog.Info("agents: schedules run", slog.Int("paid", res.Paid), slog.Int("refused", res.Refused), slog.Int("topped_up", res.ToppedUp))
+					slog.Info("agents: schedules run", slog.Int("paid", res.Paid), slog.Int("refused", res.Refused), slog.Int("topped_up", res.ToppedUp),
+						slog.Int("licences_renewed", res.Renewed), slog.Int("licences_unpaid", res.Unpaid))
 				}
 				// B22.5: loan instalments due, taken from the borrowers' agents.
 				if res, err := dualToken.RunLoanRepayments(ctx, now); err != nil {

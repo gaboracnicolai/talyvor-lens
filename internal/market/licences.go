@@ -60,9 +60,10 @@ type LicenceDeps struct {
 
 // LicenceRequest is what a buyer asks to license: an offer, and the version to pin (0: follow the latest).
 type LicenceRequest struct {
-	OfferID string `json:"offer_id"`
-	Version int    `json:"version"`
-	Person  string `json:"-"` // who is buying: whom a personal licence covers
+	OfferID   string `json:"offer_id"`
+	Version   int    `json:"version"`
+	AutoRenew *bool  `json:"auto_renew,omitempty"` // B32.20 — null: a subscription renews, a rent does not; a buy never ends
+	Person    string `json:"-"`                    // who is buying: whom a personal licence covers
 }
 
 // Licence is one licence a buyer holds, and what bought it.
@@ -83,7 +84,8 @@ type Licence struct {
 	Seats             *int       `json:"seats,omitempty"`
 	IncludedUses      *int       `json:"included_uses,omitempty"` // a rent's or subscription's, from its offer: 0 is unlimited
 	UsesCovered       int        `json:"uses_covered"`
-	RentPaidUSDMicros int64      `json:"rent_paid_usd_micros"`
+	RentPaidUSDMicros int64      `json:"rent_paid_usd_micros"` // what its rents have cleared (B32.20)
+	Source            string     `json:"source"`               // offer, or rent_to_own: its buyer's rents paid for it (B32.20)
 	CreatedAt         time.Time  `json:"created_at"`
 	// The licence's purchase: one use on the buyer's bill.
 	UseID      string `json:"use_id"`
@@ -129,16 +131,30 @@ func (s *Store) License(ctx context.Context, deps LicenceDeps, buyerWorkspaceID,
 		return Licence{}, false, invalid("a personal licence is for one person, never an agent key")
 	case o.Licence == LicencePersonal && req.Person == "":
 		return Licence{}, false, invalid("a personal licence is bought by the person it is for")
+	case o.Kind == OfferBuy && req.AutoRenew != nil && *req.AutoRenew:
+		return Licence{}, false, invalid("a bought licence never ends, so it has nothing to renew")
+	}
+	if o.Kind != OfferBuy {
+		// B32.20: what the buyer owns needs no renting: its rents may have paid for it already.
+		var owned bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM market_licences WHERE buyer_workspace_id = $1 AND listing_id = $2
+				AND licence = $3 AND person_id = $4 AND kind = 'buy' AND status = 'active' AND ends_at IS NULL)`,
+			buyerWorkspaceID, l.ID, o.Licence, personFor(o.Licence, agentID, req.Person)).Scan(&owned); err != nil {
+			return Licence{}, false, fmt.Errorf("market: licences: %w", err)
+		}
+		if owned {
+			return Licence{}, false, invalid("you already own this listing under a %s licence, so it needs no %s", o.Licence, o.Kind)
+		}
 	}
 
 	lic := Licence{ID: "lic_" + uuid.NewString(), ListingID: l.ID, Title: l.Title, OfferID: o.ID, AgentID: agentID, Licence: o.Licence,
 		Terms: LicenceTerms[o.Licence], Kind: o.Kind, Status: LicenceActive, AutoRenew: o.Kind == OfferSubscribe, Seats: o.Seats,
-		IncludedUses: o.IncludedUses, UseID: "use_" + uuid.NewString(), Charge: ChargeBilled, PriceULXC: o.PriceUSDMicros * ulxcPerUSDMicro}
+		IncludedUses: o.IncludedUses, Source: SourceOffer, UseID: "use_" + uuid.NewString(), Charge: ChargeBilled, PriceULXC: o.PriceUSDMicros * ulxcPerUSDMicro}
 	if req.Version != 0 {
 		lic.PinnedVersion = &version
 	}
-	if o.Kind == OfferRent {
-		lic.RentPaidUSDMicros = o.PriceUSDMicros
+	if req.AutoRenew != nil {
+		lic.AutoRenew = *req.AutoRenew
 	}
 	if lic.PriceULXC == 0 {
 		lic.Charge = ChargeFree
@@ -151,7 +167,7 @@ func (s *Store) License(ctx context.Context, deps LicenceDeps, buyerWorkspaceID,
 			return Licence{}, false, err
 		}
 		if linked {
-			lic.Charge, lic.PriceULXC, lic.RentPaidUSDMicros = ChargeLinked, 0, 0
+			lic.Charge, lic.PriceULXC = ChargeLinked, 0
 		}
 	}
 	if lic.Charge == ChargeBilled {
@@ -217,9 +233,13 @@ func personFor(licence, agentID, person string) string {
 	return ""
 }
 
+// periodStart is when a licence's current period began: its last renewal's, or before any of its uses (B32.20). A
+// rent's or a subscription's included uses are counted from it.
+const periodStart = `COALESCE((SELECT max(r.used_at) FROM market_uses r WHERE r.licence_id = c.id AND r.use_kind = 'renewal'), '-infinity')`
+
 const licenceColumns = `c.id, c.listing_id, COALESCE(l.title, ''), COALESCE(c.offer_id, ''), c.agent_id, c.licence, c.kind, c.pinned_version,
-	c.starts_at, c.ends_at, c.auto_renew, c.status, c.seats, o.included_uses, c.rent_paid_usd_micros, c.created_at,
-	(SELECT count(*) FROM market_uses u WHERE u.licence_id = c.id AND u.charge = 'licensed'),
+	c.starts_at, c.ends_at, c.auto_renew, c.status, c.seats, o.included_uses, c.rent_paid_usd_micros, c.source, c.created_at,
+	(SELECT count(*) FROM market_uses u WHERE u.licence_id = c.id AND u.charge = 'licensed' AND u.used_at >= ` + periodStart + `),
 	COALESCE(p.id, ''), COALESCE(p.charge, ''), COALESCE(p.price_ulxc, 0)
 	FROM market_licences c LEFT JOIN market_listings l ON l.id = c.listing_id LEFT JOIN market_offers o ON o.id = c.offer_id
 	LEFT JOIN LATERAL (SELECT id, charge, price_ulxc FROM market_uses u WHERE u.licence_id = c.id AND u.use_kind <> 'use'
@@ -228,7 +248,7 @@ const licenceColumns = `c.id, c.listing_id, COALESCE(l.title, ''), COALESCE(c.of
 func scanLicence(r pgx.Row) (Licence, error) {
 	var x Licence
 	err := r.Scan(&x.ID, &x.ListingID, &x.Title, &x.OfferID, &x.AgentID, &x.Licence, &x.Kind, &x.PinnedVersion, &x.StartsAt, &x.EndsAt,
-		&x.AutoRenew, &x.Status, &x.Seats, &x.IncludedUses, &x.RentPaidUSDMicros, &x.CreatedAt, &x.UsesCovered, &x.UseID, &x.Charge, &x.PriceULXC)
+		&x.AutoRenew, &x.Status, &x.Seats, &x.IncludedUses, &x.RentPaidUSDMicros, &x.Source, &x.CreatedAt, &x.UsesCovered, &x.UseID, &x.Charge, &x.PriceULXC)
 	x.Terms = LicenceTerms[x.Licence]
 	return x, err
 }
@@ -248,12 +268,13 @@ func (s *Store) licensedWith(ctx context.Context, buyer, key, offerID string) (L
 	return lic, nil
 }
 
-// expireLicences marks buyer's licences past their end at now expired.
+// expireLicences marks buyer's licences past their end at now expired — but one that renews, which the schedules' tick
+// renews or ends (B32.20).
 func expireLicences(ctx context.Context, q interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }, buyer string, now time.Time) error {
 	if _, err := q.Exec(ctx, `UPDATE market_licences SET status = 'expired'
-		WHERE buyer_workspace_id = $1 AND status = 'active' AND ends_at <= $2`, buyer, now); err != nil {
+		WHERE buyer_workspace_id = $1 AND status = 'active' AND ends_at <= $2 AND NOT auto_renew`, buyer, now); err != nil {
 		return fmt.Errorf("market: expire licences: %w", err)
 	}
 	return nil
@@ -285,18 +306,20 @@ type cover struct {
 
 // licenceFor finds the active licence of buyer to listingID that covers a use by agentID (or person) of version (0:
 // whichever the licence runs), preferring one that still covers its charge, then the caller's own, then the newest.
-// only, when set, asks about that one licence. nil: no licence covers it at now.
+// only, when set, asks about that one licence. nil: no licence covers it at now. One that renews covers until the
+// schedules' tick renews or ends it, and an unpaid one runs to its ends_at (B32.20).
 func licenceFor(ctx context.Context, tx pgx.Tx, now time.Time, buyer, agentID, person, listingID string, version int, only string) (*cover, error) {
 	if err := expireLicences(ctx, tx, buyer, now); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `SELECT c.id, c.agent_id, c.person_id, c.licence, c.pinned_version, COALESCE(c.seats, 0), COALESCE(o.included_uses, 0),
-		       (SELECT count(*) FROM market_uses u WHERE u.licence_id = c.id AND u.charge = 'licensed'),
+		       (SELECT count(*) FROM market_uses u WHERE u.licence_id = c.id AND u.charge = 'licensed' AND u.used_at >= `+periodStart+`),
 		       (SELECT count(DISTINCT u.person_id) FROM market_uses u WHERE u.licence_id = c.id AND u.charge = 'licensed' AND u.agent_id = '' AND u.person_id <> ''),
 		       EXISTS (SELECT 1 FROM market_uses u WHERE u.licence_id = c.id AND u.charge = 'licensed' AND u.agent_id = '' AND u.person_id = $3 AND $3 <> '')
 		FROM market_licences c LEFT JOIN market_offers o ON o.id = c.offer_id
-		WHERE c.buyer_workspace_id = $1 AND c.listing_id = $2 AND c.status = 'active' AND c.starts_at <= $5
-		  AND (c.ends_at IS NULL OR c.ends_at > $5) AND ($4 = '' OR c.id = $4)
+		WHERE c.buyer_workspace_id = $1 AND c.listing_id = $2 AND c.starts_at <= $5
+		  AND ((c.status = 'active' AND (c.ends_at IS NULL OR c.ends_at > $5 OR c.auto_renew)) OR (c.status = 'unpaid' AND c.ends_at > $5))
+		  AND ($4 = '' OR c.id = $4)
 		ORDER BY c.created_at DESC, c.id`, buyer, listingID, person, only, now)
 	if err != nil {
 		return nil, fmt.Errorf("market: licences: %w", err)
