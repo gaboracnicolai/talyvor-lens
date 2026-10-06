@@ -19,7 +19,8 @@ import (
 )
 
 // b28439Fees are the plan Prices the fake Stripe account holds, in US cents.
-var b28439Fees = map[string]int64{"price_plus": 2000, "price_pro": 10000, "price_max": 20000}
+var b28439Fees = map[string]int64{"price_plus": 2000, "price_pro": 10000, "price_max": 20000,
+	"price_team": 4900, "price_business": 29900, "price_byok": 19900}
 
 // b28439Stripe answers GET /v1/prices/{id} with the Price's amount, as Stripe does.
 type b28439Stripe struct{}
@@ -54,7 +55,7 @@ func TestB28439_ThePublicPlansReadIsWhatANewSubscriberIsGranted(t *testing.T) {
 		WithPlans(liveStripe, map[string]string{"plus": "price_plus", "pro": "price_pro", "max": "price_max", "byok": "price_byok"})
 	b := newBillingRouter(svc, nil, func(string) bool { return false }, key, "", "")
 	r := chi.NewRouter()
-	r.Get("/v1/billing/plans", newPlansHandler(b))
+	r.Get("/v1/billing/plans", newPlansHandler(b, billing.EnterpriseFromUSDCentsDefault))
 	r.Post("/v1/billing/webhook", svc.HandleWebhook)
 
 	// A visitor, with no credential, reads the plans.

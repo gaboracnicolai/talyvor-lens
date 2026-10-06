@@ -369,6 +369,10 @@ func run() error {
 	if err := plans.Check(); err != nil {
 		return err
 	}
+	enterpriseFromUSDCents, err := billing.EnterpriseFromUSDCents(os.Getenv("LENS_ENTERPRISE_FROM_USD_CENTS"))
+	if err != nil {
+		return err
+	}
 
 	// Boot-time environment checks. Neither blocks startup; both surface a state that no test in
 	// this repository can see — see cmd/lens/env_hygiene.go for why each has to be here.
@@ -2448,7 +2452,7 @@ func run() error {
 		})
 
 		// B28.439 — each plan's price and included usage, for a visitor: what a new subscriber is granted.
-		subs.get(pub, "/v1/billing/plans", newPlansHandler(billRoute))
+		subs.get(pub, "/v1/billing/plans", newPlansHandler(billRoute, enterpriseFromUSDCents))
 
 		// B32.8 — every fee Talyvor charges, for /pricing.
 		pub.Get("/v1/public/fees", publicFeesHandler)

@@ -263,19 +263,30 @@ func newSubscribeHandler(svc *billing.Service) http.HandlerFunc {
 // newPlansHandler — GET /v1/billing/plans (B28.439): public and credential-free, each plan's id, the price
 // Stripe bills it at (usd_cents) and the usage it includes this month (included_ulxc) — what a new
 // subscriber to it is granted. Registered only where subscriptions are sold; it describes the plans the real
-// workspaces' Service sells, or the test-mode Service's on a deployment that sells only those.
-func newPlansHandler(b billingRouter) http.HandlerFunc {
+// workspaces' Service sells, or the test-mode Service's on a deployment that sells only those. B32.77: beside
+// them, Team's and Business's prices (company_plans), the BYOK add-on's (byok_add_on_usd_cents, absent when
+// BYOK is not sold) and what Enterprise costs from (enterprise_from_usd_cents, LENS_ENTERPRISE_FROM_USD_CENTS).
+func newPlansHandler(b billingRouter, enterpriseFromUSDCents int64) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		svc := b.live
 		if !svc.SellsSubscriptions() && b.test != nil {
 			svc = b.test
 		}
 		plans, err := svc.Plans(req.Context(), time.Now())
+		var company []billing.PlanPrice
+		var byok int64
+		if err == nil {
+			company, byok, err = svc.CompanyPrices(req.Context())
+		}
 		if err != nil {
 			slog.Error("billing: the public plans read failed", "err", err)
 			writeJSONErr(w, http.StatusBadGateway, "the plans could not be read")
 			return
 		}
-		writeJSONOK(w, http.StatusOK, map[string]any{"plans": plans})
+		body := map[string]any{"plans": plans, "company_plans": company, "enterprise_from_usd_cents": enterpriseFromUSDCents}
+		if byok > 0 {
+			body["byok_add_on_usd_cents"] = byok
+		}
+		writeJSONOK(w, http.StatusOK, body)
 	}
 }

@@ -3,6 +3,8 @@ package billing
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -55,6 +57,71 @@ func (s *Service) Plans(ctx context.Context, now time.Time) ([]Plan, error) {
 		out = append(out, Plan{ID: id, USDCents: fee, IncludedULXC: d})
 	}
 	return out, nil
+}
+
+// CompanyPlans are the company plans the public read prices beside PublicPlans (B32.77), in the order /pricing
+// shows them. They are priced per workspace and include no usage.
+var CompanyPlans = []string{TeamPlan, BusinessPlan}
+
+// PlanPrice is a plan's price alone.
+type PlanPrice struct {
+	ID       string `json:"id"`
+	USDCents int64  `json:"usd_cents"`
+}
+
+// CompanyPrices returns each of CompanyPlans this Service sells at the price Stripe bills it at, and the BYOK
+// add-on's price — 0 when this Service does not sell BYOK. Each is read through planFee exactly as Plans
+// reads Plus's, Pro's and Max's, and a plan with no USD price is left out, never priced at zero.
+func (s *Service) CompanyPrices(ctx context.Context) ([]PlanPrice, int64, error) {
+	api, ok := s.subStripe.(priceReader)
+	if !ok {
+		return []PlanPrice{}, 0, nil
+	}
+	read := func(id string) (int64, error) {
+		priceID := s.subPlans[id]
+		if priceID == "" {
+			return 0, nil
+		}
+		fee, err := s.planFee(ctx, api, priceID)
+		if err != nil {
+			return 0, fmt.Errorf("billing: read the %s price: %w", id, err)
+		}
+		return max(fee, 0), nil
+	}
+	out := []PlanPrice{}
+	for _, id := range CompanyPlans {
+		fee, err := read(id)
+		if err != nil {
+			return nil, 0, err
+		}
+		if fee > 0 {
+			out = append(out, PlanPrice{ID: id, USDCents: fee})
+		}
+	}
+	byok, err := read(BYOKPlan)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, byok, nil
+}
+
+// EnterpriseFromUSDCentsDefault is what Enterprise costs from, a month: Nicolai's decision of 5 Oct 2026,
+// "Enterprise from $2,500 a month" (B32.10). Enterprise is contracted, never a Stripe Price, so /pricing reads
+// this figure from LENS_ENTERPRISE_FROM_USD_CENTS.
+const EnterpriseFromUSDCentsDefault = 250_000
+
+// EnterpriseFromUSDCents is LENS_ENTERPRISE_FROM_USD_CENTS's value v: whole US cents above zero, or the
+// default when unset. Lens will not start with a malformed one.
+func EnterpriseFromUSDCents(v string) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return EnterpriseFromUSDCentsDefault, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("billing: LENS_ENTERPRISE_FROM_USD_CENTS=%q must be whole US cents above zero, like %d", v, EnterpriseFromUSDCentsDefault)
+	}
+	return n, nil
 }
 
 // planFee is a Price's USD amount, read from Stripe once per Price id: a Stripe Price's amount cannot be
