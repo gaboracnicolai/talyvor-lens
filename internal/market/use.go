@@ -81,6 +81,7 @@ type UseRequest struct {
 	Model     string            `json:"model"`     // overrides the artifact's model
 	Input     string            `json:"input"`     // the user's message (an agent or a skill)
 	Variables map[string]string `json:"variables"` // a prompt's {{variables}}
+	Person    string            `json:"-"`         // who is using it: a personal or enterprise licence counts its people (B32.19)
 }
 
 // CaseResult is one evaluation case's outcome.
@@ -104,7 +105,8 @@ type Use struct {
 	Cases      []CaseResult `json:"cases,omitempty"`
 	UsedAt     time.Time    `json:"used_at"`
 	AgentID    string       `json:"agent_id,omitempty"`
-	Steps      []StepResult `json:"steps,omitempty"` // a pipeline's steps, in the order they ran (B20.7)
+	LicenceID  string       `json:"licence_id,omitempty"` // the licence it ran under (B32.19)
+	Steps      []StepResult `json:"steps,omitempty"`      // a pipeline's steps, in the order they ran (B20.7)
 	MeterError string       `json:"-"`
 }
 
@@ -132,7 +134,16 @@ type UseDeps struct {
 // Use runs listingID for buyerWorkspaceID (agentID when an agent's key asked; "" otherwise) and records
 // the use: its charge is metered onto the buyer's bill once the run has answered.
 func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID, listingID string, req UseRequest) (Use, error) {
-	l, artifact, version, err := s.resolve(ctx, buyerWorkspaceID, listingID, req.Version)
+	// B32.19: a licence the buyer holds runs its pinned version unless the use names one, and covers the charge.
+	lic, err := s.coverUse(ctx, buyerWorkspaceID, agentID, req.Person, listingID, req.Version)
+	if err != nil {
+		return Use{}, err
+	}
+	version := req.Version
+	if lic != nil && version == 0 && lic.pinned != nil {
+		version = *lic.pinned
+	}
+	l, artifact, version, err := s.resolve(ctx, buyerWorkspaceID, listingID, version)
 	if err != nil {
 		return Use{}, err
 	}
@@ -148,32 +159,22 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 		return Use{}, err
 	}
 	u := Use{ID: "use_" + uuid.NewString(), ListingID: l.ID, Version: version, Kind: l.Kind, Model: model, AgentID: agentID}
-	if u.Charge, u.PriceULXC, err = s.chargeFor(ctx, l, buyerWorkspaceID); err != nil {
-		return Use{}, err
-	}
-	// Every billed use this makes: the listing's own, and each pipeline step that is another seller's.
-	billed := map[string]int64{}
-	if u.Charge == ChargeBilled {
-		billed[u.ID] = u.PriceULXC
-	}
-	total := u.PriceULXC
-	for _, st := range steps {
-		if st.UseID != "" && st.Charge == ChargeBilled {
-			billed[st.UseID] = st.PriceULXC
-			total += st.PriceULXC
-		}
-	}
-	if len(billed) > 0 && deps.Meter == nil {
-		return Use{}, ErrNoBill
-	}
-	ids := []string{u.ID}
+	var ids []string
+	var billed map[string]int64
 
 	// The use is recorded before it runs, so an agent's limits count it the moment it is judged; a run that
 	// fails removes it again, and only a use that ran is ever metered.
 	record := func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING used_at`,
-			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge).Scan(&u.UsedAt); err != nil {
+		ids = []string{u.ID}
+		if u.Charge == ChargeLicensed {
+			if err := claimLicence(ctx, tx, s.now(), u.LicenceID, buyerWorkspaceID, agentID, req.Person, l.ID, version); err != nil {
+				return err
+			}
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge,
+				licence_id, person_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10) RETURNING used_at`,
+			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge, u.LicenceID, req.Person).Scan(&u.UsedAt); err != nil {
 			return err
 		}
 		for _, st := range steps {
@@ -189,15 +190,45 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 		}
 		return nil
 	}
-	// An agent's every use is judged — a free one too, since its rules may name the listings it may use. A
-	// pipeline is judged once, for all it bills.
-	if agentID != "" && deps.Agents != nil {
-		what := fmt.Sprintf("market:%s:%s:%d:%d", agentID, l.ID, version, total)
-		if err := deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, total, what, record); err != nil {
+	for attempt := 0; ; attempt++ {
+		if lic != nil && lic.charged && l.WorkspaceID != buyerWorkspaceID {
+			u.Charge, u.PriceULXC, u.LicenceID = ChargeLicensed, 0, lic.id
+		} else if u.Charge, u.PriceULXC, err = s.chargeFor(ctx, l, buyerWorkspaceID); err != nil {
+			return Use{}, err
+		} else {
+			u.LicenceID = ""
+		}
+		// Every billed use this makes: the listing's own, and each pipeline step that is another seller's.
+		billed = map[string]int64{}
+		if u.Charge == ChargeBilled {
+			billed[u.ID] = u.PriceULXC
+		}
+		total := u.PriceULXC
+		for _, st := range steps {
+			if st.UseID != "" && st.Charge == ChargeBilled {
+				billed[st.UseID] = st.PriceULXC
+				total += st.PriceULXC
+			}
+		}
+		if len(billed) > 0 && deps.Meter == nil {
+			return Use{}, ErrNoBill
+		}
+		// An agent's every use is judged — a free one too, since its rules may name the listings it may use. A
+		// pipeline is judged once, for all it bills.
+		if agentID != "" && deps.Agents != nil {
+			what := fmt.Sprintf("market:%s:%s:%d:%d", agentID, l.ID, version, total)
+			err = deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, total, what, record)
+		} else if err = pgx.BeginFunc(ctx, s.pool, record); err != nil {
+			err = fmt.Errorf("market: record use: %w", err)
+		}
+		if errors.Is(err, errLicenceUsedUp) && attempt == 0 {
+			lic.charged = false // its last included use went to another use first: this one is billed
+			continue
+		}
+		if err != nil {
 			return Use{}, err
 		}
-	} else if err := pgx.BeginFunc(ctx, s.pool, record); err != nil {
-		return Use{}, fmt.Errorf("market: record use: %w", err)
+		break
 	}
 
 	if l.Kind == "pipeline" {

@@ -59,12 +59,16 @@ type Capability struct {
 const (
 	CapabilityPayAnotherOwner = "pay_another_owner" // AMBER: agents of different owners pay each other
 	CapabilityAgentCard       = "agent_card"        // RED
+	// GREEN, both on the buyer's monthly marketplace bill (B32.19): asked where a licence's charge is recorded.
+	CapabilityBuyListings      = "buy_marketplace_listings"
+	CapabilityRentAndSubscribe = "rent_and_subscribe_listings"
 )
 
 // Capabilities is every wallet capability and its class, as Nicolai decided them on 28 Sep 2026.
 var Capabilities = []Capability{
 	{"spend_on_talyvor", "Spending on Talyvor", ClassGreen},
-	{"buy_marketplace_listings", "Buying marketplace listings", ClassGreen},
+	{CapabilityBuyListings, "Buying marketplace listings", ClassGreen},
+	{CapabilityRentAndSubscribe, "Renting and subscribing to marketplace listings", ClassGreen},
 	{"move_between_own_agents", "Moving money between one owner's own agents", ClassGreen},
 	{"rules_approvals_statements_pots", "Rules, approvals, statements and pots", ClassGreen},
 	{"company_credit_line", "Talyvor's credit line to companies, for Talyvor services", ClassGreen},
@@ -501,6 +505,12 @@ func (s *DualTokenStore) requireBilledCapability(ctx context.Context, q pgxDB, w
 		return err
 	}
 	return &CapabilityRefusal{Capability: c, Plan: byPlan}
+}
+
+// RequireBilledCapability asks capability key whether money on workspaceID's Stripe bill may be taken for it: the
+// marketplace asks it where it records a licence's charge (B32.19).
+func (s *DualTokenStore) RequireBilledCapability(ctx context.Context, workspaceID, key string) error {
+	return s.requireBilledCapability(ctx, s.pool, workspaceID, key)
 }
 
 // testFundedULXC locks workspaceID's balance row and reads its test-funded credits: never more than the

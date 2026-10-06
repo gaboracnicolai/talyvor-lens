@@ -315,7 +315,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 //
 // 195 → 196 (B32.18): PUT /v1/workspaces/{wsID}/marketplace/listings/{listingID}/offers, how a listing is sold,
 // beside the undocumented publish and version routes of the same listing.
-const undocumentedNonAdminV1Routes = 196
+//
+// 196 → 198 (B32.19): POST /v1/workspaces/{wsID}/marketplace/listings/{listingID}/licences, buying, renting or
+// subscribing to a listing, and GET /v1/workspaces/{wsID}/marketplace/licences, beside the undocumented use route.
+const undocumentedNonAdminV1Routes = 198
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

@@ -149,7 +149,17 @@ func draftOffers(d Draft) ([]Offer, error) {
 }
 
 // Store reads and writes the catalog.
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool  *pgxpool.Pool
+	clock func() time.Time // nil: time.Now; when a licence starts, ends and is in force (B32.19)
+}
+
+func (s *Store) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
 
 // NewStore wraps a pool.
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }

@@ -22,6 +22,8 @@ import (
 // B20.2 — USE A LISTING, PAY PER USE, AND THE SELLER EARNS (internal/market/use.go).
 //
 //	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/use   {version, model, input, variables}
+//	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/licences  {offer_id, version} + Idempotency-Key   B32.19: buy, rent or subscribe
+//	GET  /v1/workspaces/{wsID}/marketplace/licences            the licences the workspace holds or held
 //	GET  /v1/workspaces/{wsID}/marketplace/earnings            the seller's payable, in holdback and available (µUSD)
 //	GET  /v1/workspaces/{wsID}/marketplace/journal             the seller's holdback and available on the journal, and whether they reconcile (B32.17)
 //	GET  /v1/workspaces/{wsID}/marketplace/bill?month=2026-09  the buyer's billed uses in a month
@@ -30,10 +32,42 @@ import (
 // billed to the buyer as usual; a paid listing's price then goes on the buyer's monthly marketplace bill.
 // An agent's key may use a listing within its spending rules (403 when they refuse, naming the approval
 // one needs).
+//
+// A licence (internal/market/licences.go) is bought once, on the bill, and covers the uses after it: each is charged
+// "licensed" and runs the version the licence pins. A licence sent again with its Idempotency-Key answers 200 with
+// the licence that key bought, and buys nothing.
 
 type marketAgents interface {
 	market.AgentJudge
+	market.Capabilities
 	AgentOfKey(ctx context.Context, scopedKeyID string) (agentID, workspaceID string, err error)
+}
+
+// marketCaller is who in wsID is calling: its agent, when an agent's key of wsID asked, else the person — the user,
+// or the key or session they called with — a personal or enterprise licence counts.
+func marketCaller(req *http.Request, agents marketAgents, wsID string) (agentID, person string, err error) {
+	actx := auth.GetAuthContext(req.Context())
+	if actx == nil {
+		return "", "", nil
+	}
+	if actx.APIKeyID != "" && agents != nil {
+		a, ws, err := agents.AgentOfKey(req.Context(), actx.APIKeyID)
+		switch {
+		case err == nil && ws == wsID:
+			return a, "", nil
+		case err != nil && !errors.Is(err, economy.ErrAgentNotFound):
+			return "", "", err
+		}
+	}
+	switch {
+	case actx.UserID != "":
+		return "", "user:" + actx.UserID, nil
+	case actx.APIKeyID != "":
+		return "", "key:" + actx.APIKeyID, nil
+	case actx.SessionKeyID != "":
+		return "", "session:" + actx.SessionKeyID, nil
+	}
+	return "", "", nil
 }
 
 func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, meter market.Meter, agents marketAgents) {
@@ -44,17 +78,12 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 			return
 		}
 		wsID := chi.URLParam(req, "wsID")
-		agentID := ""
-		if actx := auth.GetAuthContext(req.Context()); actx != nil && actx.APIKeyID != "" && agents != nil {
-			a, ws, err := agents.AgentOfKey(req.Context(), actx.APIKeyID)
-			switch {
-			case err == nil && ws == wsID:
-				agentID = a
-			case err != nil && !errors.Is(err, economy.ErrAgentNotFound):
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
+		agentID, person, err := marketCaller(req, agents, wsID)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
 		}
+		in.Person = person
 		// B25.6: a test workspace's paid uses go on its Stripe test-mode bill.
 		m, byKind := meter, stripeByKind{}
 		if k, ok := meter.(stripeByKind); ok {
@@ -105,6 +134,70 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 			}
 			writeJSONOK(w, http.StatusOK, u)
 		}
+	})
+	r.Post("/v1/workspaces/{wsID}/marketplace/listings/{listingID}/licences", func(w http.ResponseWriter, req *http.Request) {
+		var in market.LicenceRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, `body must be {"offer_id", "version"}: `+err.Error())
+			return
+		}
+		wsID := chi.URLParam(req, "wsID")
+		agentID, person, err := marketCaller(req, agents, wsID)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		in.Person = person
+		m, byKind := meter, stripeByKind{}
+		if k, ok := meter.(stripeByKind); ok {
+			m, byKind = k.meterFor(wsID), k
+		}
+		deps := market.LicenceDeps{Meter: m, Agents: agents, Capabilities: agents}
+		lic, again, err := store.License(req.Context(), deps, wsID, agentID, chi.URLParam(req, "listingID"), req.Header.Get("Idempotency-Key"), in)
+		var need *economy.ApprovalNeededError
+		switch {
+		case errors.As(err, &need):
+			writeJSONOK(w, http.StatusForbidden, map[string]any{"error": err.Error(), "approval_id": need.ApprovalID})
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, workspace.ErrMoneyWall), errors.Is(err, economy.ErrCapabilityNotCleared):
+			writeJSONErr(w, http.StatusForbidden, err.Error())
+		case errors.Is(err, market.ErrNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, market.ErrTakenDown):
+			writeJSONErr(w, http.StatusGone, err.Error())
+		case errors.Is(err, market.ErrKeyReused):
+			writeJSONErr(w, http.StatusConflict, err.Error())
+		case errors.Is(err, market.ErrInvalid):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, market.ErrNoBill):
+			if byKind.isTest != nil {
+				if _, why := byKind.billFor(wsID); why != nil {
+					writeJSONErr(w, http.StatusForbidden, why.Error())
+					return
+				}
+			}
+			writeJSONErr(w, http.StatusServiceUnavailable, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		case again:
+			writeJSONOK(w, http.StatusOK, lic)
+		default:
+			if lic.MeterError != "" {
+				slog.Warn("market: a licence was bought but is not yet on the buyer's bill; the next pass bills it",
+					"licence", lic.ID, "use", lic.UseID, "workspace", wsID, "err", lic.MeterError)
+			}
+			writeJSONOK(w, http.StatusCreated, lic)
+		}
+	})
+	r.Get("/v1/workspaces/{wsID}/marketplace/licences", func(w http.ResponseWriter, req *http.Request) {
+		list, err := store.Licences(req.Context(), chi.URLParam(req, "wsID"))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if list == nil {
+			list = []market.Licence{}
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"licences": list})
 	})
 	r.Get("/v1/workspaces/{wsID}/marketplace/earnings", func(w http.ResponseWriter, req *http.Request) {
 		e, err := store.SellerEarnings(req.Context(), chi.URLParam(req, "wsID"), time.Now())
