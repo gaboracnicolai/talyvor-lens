@@ -109,6 +109,8 @@ var shipped = map[string]recorded{
 	"keel.DefaultMinWorkspaces":                   {keel.DefaultMinWorkspaces, 3, "k-anonymity floor"},
 	"localrouter.DefaultHealthCheckInterval":      {localrouter.DefaultHealthCheckInterval, 30 * time.Second, "health check interval"},
 	"market.DefaultTrialMax":                      {market.DefaultTrialMax, 5, "most free trial uses an offer may give (B32.21)"},
+	"market.DefaultLineageMaxShareBPS":            {market.DefaultLineageMaxShareBPS, 3000, "largest remix share a royalty listing may ask (B32.24)"},
+	"market.DefaultLineageMaxDepth":               {market.DefaultLineageMaxDepth, 5, "generations the lineage read walks up (B32.24)"},
 	"mining.DefaultPatternEarnCapPerWorkspace":    {mining.DefaultPatternEarnCapPerWorkspace, 50_000, "pattern earn cap"},
 	"modelwatch.DefaultInterval":                  {modelwatch.DefaultInterval, time.Hour, "model-watch interval"},
 	"modelwatch.DefaultApplyInterval":             {modelwatch.DefaultApplyInterval, 5 * time.Minute, "how soon every replica applies a confirmed price or a retirement"},

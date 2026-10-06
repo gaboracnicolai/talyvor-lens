@@ -64,6 +64,8 @@ type Listing struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 	ReviewStatus    string    `json:"review_status"`           // approved | held | taken_down (review.go)
 	ReviewReason    string    `json:"review_reason,omitempty"` // why it is held or was taken down
+	RemixPolicy     string    `json:"remix_policy"`            // none | free | royalty (lineage.go)
+	RemixShareBPS   int       `json:"remix_share_bps"`         // a royalty's share of each remix's sales
 	Offers          []Offer   `json:"offers"`                  // how it is sold (offers.go); none: it is free
 	Versions        []Version `json:"versions,omitempty"`
 }
@@ -77,6 +79,7 @@ type Version struct {
 	Scan           Scan            `json:"scan"`
 	CreatedAt      time.Time       `json:"created_at"`
 	Needs          Needs           `json:"needs"`
+	Parents        []Parent        `json:"parents,omitempty"` // the listing versions it builds on (lineage.go)
 	Artifact       json.RawMessage `json:"artifact,omitempty"`
 }
 
@@ -127,6 +130,9 @@ type Draft struct {
 	Visibility      string          `json:"visibility"`
 	Artifact        json.RawMessage `json:"artifact"`
 	Changelog       string          `json:"changelog"`
+	RemixPolicy     string          `json:"remix_policy"`    // none (default) | free | royalty
+	RemixShareBPS   int             `json:"remix_share_bps"` // royalty: 1 to LENS_LINEAGE_MAX_SHARE_BPS
+	Parents         []ParentRef     `json:"parents"`         // the listings it builds on (lineage.go)
 }
 
 // draftOffers is the set of offers a draft publishes, its price per use folded in.
@@ -154,6 +160,9 @@ type Store struct {
 	pool     *pgxpool.Pool
 	clock    func() time.Time // nil: time.Now; when a licence starts, ends and is in force (B32.19)
 	trialMax *int             // nil: DefaultTrialMax; the most trial uses an offer may give (B32.21)
+
+	lineageMaxShare *int // nil: DefaultLineageMaxShareBPS (B32.24)
+	lineageMaxDepth *int // nil: DefaultLineageMaxDepth (B32.24)
 }
 
 func (s *Store) now() time.Time {
@@ -266,6 +275,10 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if d.Visibility != "public" && d.Visibility != "unlisted" && d.Visibility != "private" {
 		return Listing{}, invalid("visibility must be public, unlisted or private")
 	}
+	terms, err := s.checkRemixTerms(RemixTerms{Policy: d.RemixPolicy, ShareBPS: d.RemixShareBPS})
+	if err != nil {
+		return Listing{}, err
+	}
 	artifact, sum, scan, err := checkArtifact(d.Kind, d.Artifact, d.Title, d.Description, d.Changelog)
 	if err != nil {
 		return Listing{}, err
@@ -277,14 +290,17 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	l := Listing{ID: "lst_" + uuid.NewString(), WorkspaceID: workspaceID, Kind: d.Kind, Title: d.Title, Description: d.Description,
-		PricePerUseULXC: d.PricePerUseULXC, Visibility: d.Visibility, LatestVersion: 1, ReviewStatus: ReviewApproved}
+		PricePerUseULXC: d.PricePerUseULXC, Visibility: d.Visibility, LatestVersion: 1, ReviewStatus: ReviewApproved,
+		RemixPolicy: terms.Policy, RemixShareBPS: terms.ShareBPS}
 	if scan.Held != "" {
 		l.ReviewStatus, l.ReviewReason = ReviewHeld, scan.Held
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO market_listings (id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, review_status, review_reason, publish_key)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''))
+	err = tx.QueryRow(ctx, `INSERT INTO market_listings (id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, review_status, review_reason, publish_key,
+			remix_policy, remix_share_bps)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), $11, $12)
 		ON CONFLICT (workspace_id, publish_key) WHERE publish_key IS NOT NULL DO NOTHING RETURNING created_at, updated_at`,
-		l.ID, workspaceID, d.Kind, d.Title, d.Description, d.PricePerUseULXC, d.Visibility, l.ReviewStatus, l.ReviewReason, key).Scan(&l.CreatedAt, &l.UpdatedAt)
+		l.ID, workspaceID, d.Kind, d.Title, d.Description, d.PricePerUseULXC, d.Visibility, l.ReviewStatus, l.ReviewReason, key,
+		l.RemixPolicy, l.RemixShareBPS).Scan(&l.CreatedAt, &l.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Listing{}, errKeyTaken
 	}
@@ -300,14 +316,18 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if l.Offers, err = writeOffers(ctx, tx, l.ID, offers); err != nil {
 		return Listing{}, err
 	}
+	if v.Parents, err = s.declareParents(ctx, tx, workspaceID, l.ID, 1, d.Parents); err != nil {
+		return Listing{}, err
+	}
 	l.Versions = []Version{v}
 	return l, tx.Commit(ctx)
 }
 
 // PublishVersion adds a version to one of workspaceID's listings; the earlier ones stay as they were. A
 // version the review holds holds the whole listing; a clean one never releases a hold (an admin does), and
-// a taken-down listing takes no versions.
-func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID string, artifact json.RawMessage, changelog string) (Version, error) {
+// a taken-down listing takes no versions. The new version keeps the parents of the one before it and adds
+// those parents declares (B32.24).
+func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID string, artifact json.RawMessage, changelog string, parents []ParentRef) (Version, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Version{}, err
@@ -336,6 +356,9 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 		VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`, listingID, v.Version, string(canonical), sum, changelog, string(scanJSON)).Scan(&v.CreatedAt); err != nil {
 		return Version{}, fmt.Errorf("market: version: %w", err)
 	}
+	if v.Parents, err = s.declareParents(ctx, tx, workspaceID, listingID, v.Version, parents); err != nil {
+		return Version{}, err
+	}
 	if scan.Held != "" {
 		if _, err := tx.Exec(ctx, `UPDATE market_listings SET review_status = 'held', review_reason = $2 WHERE id = $1`,
 			listingID, fmt.Sprintf("version %d: %s", v.Version, scan.Held)); err != nil {
@@ -348,12 +371,12 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 	return v, tx.Commit(ctx)
 }
 
-const listingColumns = `id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, latest_version, created_at, updated_at, review_status, review_reason`
+const listingColumns = `id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, latest_version, created_at, updated_at, review_status, review_reason, remix_policy, remix_share_bps`
 
 func scanListing(row pgx.Row) (Listing, error) {
 	var l Listing
 	err := row.Scan(&l.ID, &l.WorkspaceID, &l.Kind, &l.Title, &l.Description, &l.PricePerUseULXC, &l.Visibility, &l.LatestVersion, &l.CreatedAt, &l.UpdatedAt,
-		&l.ReviewStatus, &l.ReviewReason)
+		&l.ReviewStatus, &l.ReviewReason, &l.RemixPolicy, &l.RemixShareBPS)
 	return l, err
 }
 
@@ -474,6 +497,10 @@ func (s *Store) Get(ctx context.Context, viewerWorkspace, listingID string) (Lis
 		return Listing{}, err
 	}
 	l.Offers = orNone(offers[listingID])
+	parents, err := versionParents(ctx, s.pool, listingID, 0)
+	if err != nil {
+		return Listing{}, err
+	}
 	rows, err := s.pool.Query(ctx, `SELECT version, artifact_sha256, changelog, scan, created_at, artifact FROM market_listing_versions
 		WHERE listing_id = $1 ORDER BY version`, listingID)
 	if err != nil {
@@ -488,6 +515,7 @@ func (s *Store) Get(ctx context.Context, viewerWorkspace, listingID string) (Lis
 		}
 		_ = json.Unmarshal(scan, &v.Scan)
 		v.Needs = needsOf(l.Kind, artifact)
+		v.Parents = parents[v.Version]
 		if owner {
 			v.Artifact = artifact
 		}

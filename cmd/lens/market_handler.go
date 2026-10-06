@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
@@ -15,12 +16,15 @@ import (
 
 // B20.1 — PUBLISH: a listing is a versioned agent, prompt, skill, evaluation or pipeline (internal/market).
 //
-//	POST /v1/workspaces/{wsID}/marketplace/listings                {kind, title, description, price_per_use_ulxc, visibility, artifact, changelog}
-//	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/versions  {artifact, changelog}   a new version; the old ones stay usable
+//	POST /v1/workspaces/{wsID}/marketplace/listings                {kind, title, description, price_per_use_ulxc, visibility, artifact, changelog,
+//	                                                               remix_policy, remix_share_bps, parents: [{listing_id, version}]}
+//	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/versions  {artifact, changelog, parents}   a new version; the old ones stay usable
 //	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/offers    {offers: [...]}   B32.18: replace how it is sold
+//	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/remix-terms {remix_policy, remix_share_bps}   B32.24: may others build on it
 //	GET  /v1/workspaces/{wsID}/marketplace/listings                the workspace's own listings
 //	GET  /v1/marketplace/listings?kind=                            the public catalog
 //	GET  /v1/marketplace/listings/{id}                             a listing and its versions (artifacts for its owner only)
+//	GET  /v1/marketplace/listings/{id}/lineage?version=            B32.24: its ancestors with each edge's share, and its remixes
 //	POST /v1/marketplace/listings/{id}/reports                     {reason, details}   B20.4: report a listing
 //
 // A listing is sold through its offers (internal/market/offers.go): per_use, buy, rent or subscribe, each under a
@@ -32,6 +36,11 @@ import (
 // review holds (B20.4, internal/market/review.go) is 201 with review_status "held" and the reason, and only
 // its owner sees it until an admin approves it. Publishing takes the workspace's owner or an admin; reading
 // and reporting take any of its credentials.
+//
+// B32.24: a version may declare the listings it builds on (parents). Each must be one the publisher may see whose
+// remix_policy is free or royalty — or the publisher's own — and none may descend from the version's own listing
+// (400). Each parent's share is locked when it is declared: changing a listing's remix terms never changes a remix
+// already made, and a new version keeps the parents of the one before it.
 
 func mountMarketRoutes(r chi.Router, store *market.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {
@@ -74,14 +83,15 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 	}))
 	r.Post("/v1/workspaces/{wsID}/marketplace/listings/{listingID}/versions", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
 		var in struct {
-			Artifact  json.RawMessage `json:"artifact"`
-			Changelog string          `json:"changelog"`
+			Artifact  json.RawMessage    `json:"artifact"`
+			Changelog string             `json:"changelog"`
+			Parents   []market.ParentRef `json:"parents"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, market.MaxArtifactBytes+64<<10)).Decode(&in); err != nil {
-			writeJSONErr(w, http.StatusBadRequest, "body must be {artifact, changelog}: "+err.Error())
+			writeJSONErr(w, http.StatusBadRequest, "body must be {artifact, changelog, parents}: "+err.Error())
 			return
 		}
-		v, err := store.PublishVersion(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "listingID"), in.Artifact, in.Changelog)
+		v, err := store.PublishVersion(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "listingID"), in.Artifact, in.Changelog, in.Parents)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -105,6 +115,19 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 			offers = []market.Offer{}
 		}
 		writeJSONOK(w, http.StatusOK, map[string]any{"offers": offers})
+	}))
+	r.Put("/v1/workspaces/{wsID}/marketplace/listings/{listingID}/remix-terms", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in market.RemixTerms
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {remix_policy, remix_share_bps}: "+err.Error())
+			return
+		}
+		terms, err := store.SetRemixTerms(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "listingID"), in)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, terms)
 	}))
 	r.Get("/v1/workspaces/{wsID}/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
 		list, err := store.OwnListings(req.Context(), chi.URLParam(req, "wsID"))
@@ -130,6 +153,24 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 			return
 		}
 		writeJSONOK(w, http.StatusOK, l)
+	})
+	r.Get("/v1/marketplace/listings/{listingID}/lineage", func(w http.ResponseWriter, req *http.Request) {
+		viewer, _ := auth.WorkspaceIdentity(req.Context())
+		version := 0
+		if v := req.URL.Query().Get("version"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				writeJSONErr(w, http.StatusBadRequest, "version must be a positive whole number")
+				return
+			}
+			version = n
+		}
+		lineage, err := store.Lineage(req.Context(), viewer, chi.URLParam(req, "listingID"), version)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, lineage)
 	})
 	r.Post("/v1/marketplace/listings/{listingID}/reports", func(w http.ResponseWriter, req *http.Request) {
 		reporter, _ := auth.WorkspaceIdentity(req.Context())

@@ -47,7 +47,7 @@ func TestMarketplaceSale_OverPgBouncerSimpleProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("publish over simple protocol: %v", err)
 	}
-	if _, err := s.PublishVersion(ctx, seller, l.ID, json.RawMessage(`{"template":"What is {{a}} plus {{b}}?","model":"claude-haiku-4-5"}`), "reworded"); err != nil {
+	if _, err := s.PublishVersion(ctx, seller, l.ID, json.RawMessage(`{"template":"What is {{a}} plus {{b}}?","model":"claude-haiku-4-5"}`), "reworded", nil); err != nil {
 		t.Fatalf("a new version over simple protocol: %v", err)
 	}
 	now := time.Now()
