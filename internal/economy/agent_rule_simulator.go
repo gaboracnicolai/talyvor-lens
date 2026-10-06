@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,19 +17,21 @@ import (
 // with enforceAgentRules itself, the very judgement a hold or a debit makes, inside a transaction that is always
 // rolled back. Whatever the judgement writes on the way (the payee ledger's row, an unusual-spend alert, a used
 // approval) goes with it, so a simulation posts nothing, files no approval and pauses no one. The spend it counts
-// is the agent's real spend so far.
+// is the agent's real spend so far. A licence to a listing (B32.22) is judged by the licence rules too.
 
 // ErrBadSimulation: the simulated request cannot be judged as given.
 var ErrBadSimulation = errors.New("economy: the simulated request cannot be judged")
 
 // SimulatedRequest is a request to judge. With Payee it is a payment to that payee — a listing's is a use of the
-// listing — and without one a question to Model through Provider.
+// listing, or with Licence a licence to it (B32.22): its kind and licence, committing the agent to AmountULXC — and
+// without one a question to Model through Provider.
 type SimulatedRequest struct {
-	AmountULXC int64      `json:"amount_ulxc"`
-	Model      string     `json:"model"`
-	Provider   string     `json:"provider"`
-	Payee      *Payee     `json:"payee"`
-	At         *time.Time `json:"at"` // when it is asked, for the active hours and the periods; now when absent
+	AmountULXC int64       `json:"amount_ulxc"`
+	Model      string      `json:"model"`
+	Provider   string      `json:"provider"`
+	Payee      *Payee      `json:"payee"`
+	Licence    *Commitment `json:"licence"`
+	At         *time.Time  `json:"at"` // when it is asked, for the active hours and the periods; now when absent
 }
 
 // RuleSimulation is the rules' answer: allowed, refused, or approval_required (it would wait for the workspace's
@@ -66,6 +69,17 @@ func (s *DualTokenStore) SimulateAgentRules(ctx context.Context, workspaceID, ag
 		if in.Payee.Kind == "listing" {
 			req.Listing = in.Payee.ID
 		}
+	}
+	if in.Licence != nil {
+		switch {
+		case in.Payee == nil || in.Payee.Kind != "listing":
+			return out, fmt.Errorf("%w: a licence is to a listing: name it as the payee", ErrBadSimulation)
+		case in.Licence.Kind != "buy" && in.Licence.Kind != "rent" && in.Licence.Kind != "subscribe":
+			return out, fmt.Errorf("%w: a licence's kind is buy, rent or subscribe, not %q", ErrBadSimulation, in.Licence.Kind)
+		case in.Licence.Licence != "personal" && !slices.Contains(AgentLicences, in.Licence.Licence):
+			return out, fmt.Errorf("%w: a licence is personal, commercial or enterprise, not %q", ErrBadSimulation, in.Licence.Licence)
+		}
+		req.Commitment, what = Commitment{Kind: in.Licence.Kind, Licence: in.Licence.Licence, ULXC: in.AmountULXC}, in.Licence.Kind
 	}
 
 	tx, err := s.pool.Begin(ctx)

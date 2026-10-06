@@ -44,6 +44,7 @@ var errNotDue = errors.New("market: the licence is no longer due to renew")
 // dueLicence is a licence whose period has ended and that renews, with its offer's terms.
 type dueLicence struct {
 	id, listingID, buyer, agentID, person string
+	kind, licence                         string
 	pinned                                *int
 	endsAt                                time.Time
 	priceUSDMicros                        int64
@@ -58,12 +59,12 @@ func (s *Store) RenewLicences(ctx context.Context, now time.Time, judge economy.
 	var failed []error
 	for range maxRenewalsPerRun {
 		var d dueLicence
-		err := s.pool.QueryRow(ctx, `SELECT c.id, c.listing_id, c.buyer_workspace_id, c.agent_id, c.person_id, c.pinned_version, c.ends_at,
+		err := s.pool.QueryRow(ctx, `SELECT c.id, c.listing_id, c.buyer_workspace_id, c.agent_id, c.person_id, c.kind, c.licence, c.pinned_version, c.ends_at,
 				COALESCE(o.price_usd_micros, 0), o.period_days
 			FROM market_licences c LEFT JOIN market_offers o ON o.id = c.offer_id
 			WHERE c.status = 'active' AND c.auto_renew AND c.ends_at <= $1 AND c.id <> ALL($2)
 			ORDER BY c.ends_at, c.id LIMIT 1`, now, passed).
-			Scan(&d.id, &d.listingID, &d.buyer, &d.agentID, &d.person, &d.pinned, &d.endsAt, &d.priceUSDMicros, &d.periodDays)
+			Scan(&d.id, &d.listingID, &d.buyer, &d.agentID, &d.person, &d.kind, &d.licence, &d.pinned, &d.endsAt, &d.priceUSDMicros, &d.periodDays)
 		if errors.Is(err, pgx.ErrNoRows) {
 			break
 		}
@@ -148,7 +149,10 @@ func (s *Store) renew(ctx context.Context, d dueLicence, judge economy.LicenceJu
 	}
 	if d.agentID != "" {
 		what := fmt.Sprintf("renewal:%s:%s:%d", d.id, d.endsAt.UTC().Format(time.RFC3339), ulxc)
-		err = judge.JudgeAgentPurchase(ctx, d.buyer, d.agentID, l.ID, ulxc, what, record)
+		// B32.22: a renewal commits the agent to another period, judged as the licence was: a subscription's needs
+		// may_subscribe still, so an owner who turns it off stops the agent's subscriptions renewing.
+		c := economy.Commitment{Kind: d.kind, Licence: d.licence, ULXC: ulxc}
+		err = judge.JudgeAgentPurchase(ctx, d.buyer, d.agentID, l.ID, ulxc, c, what, record)
 	} else {
 		err = pgx.BeginFunc(ctx, s.pool, record)
 	}

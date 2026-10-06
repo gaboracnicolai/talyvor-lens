@@ -59,6 +59,9 @@ export interface AgentRules {
   allowed_payees: string[];
   blocked_payees: string[];
   payee_daily_limits_ulxc: Record<string, number>;
+  max_commitment_ulxc: number;
+  allowed_licences: string[];
+  may_subscribe: boolean;
   active_from: string;
   active_until: string;
   timezone: string;

@@ -33,7 +33,7 @@ import (
 //
 //	GET  /v1/workspaces/{wsID}/agents/{id}/rules              the agent's rules
 //	PUT  /v1/workspaces/{wsID}/agents/{id}/rules   {rules}    replace them (economy.AgentRules)
-//	POST /v1/workspaces/{wsID}/agents/{id}/rules/simulate {"amount_ulxc", "model"?, "provider"?, "payee"?, "at"?}
+//	POST /v1/workspaces/{wsID}/agents/{id}/rules/simulate {"amount_ulxc", "model"?, "provider"?, "payee"?, "licence"?, "at"?}
 //	                                                           B28.306: would the rules let it through? allowed,
 //	                                                           refused or approval_required, and why; moves nothing
 //	GET  /v1/workspaces/{wsID}/agents/{id}/rules/history      B28.307: every version of the rules, newest first,
