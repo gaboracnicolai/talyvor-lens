@@ -64,6 +64,9 @@ func TestMarketLineage_ParentsLockTheirShareAndRefuseCyclesAndClosedListings(t *
 	if a.RemixPolicy != market.RemixRoyalty || a.RemixShareBPS != 1000 {
 		t.Fatalf("A's terms = %s %d, want royalty 1000", a.RemixPolicy, a.RemixShareBPS)
 	}
+	if code, body := call(sellerB, http.MethodPost, "/v1/workspaces/"+sellerB+"/marketplace/listings/"+a.ID+"/remix", `{}`); code != http.StatusOK {
+		t.Fatalf("B accepts A's remix licence = %d %s", code, body) // B32.25: a parent needs a grant
+	}
 	b := publish(sellerB, "Remix", `,"remix_policy":"free","parents":[{"listing_id":"`+a.ID+`"}]`)
 	if got := b.Versions[0].Parents; len(got) != 1 || got[0].ListingID != a.ID || got[0].Version != 1 || got[0].ShareBPS != 1000 {
 		t.Fatalf("B's parents = %+v, want A v1 at 1000 bps", got)

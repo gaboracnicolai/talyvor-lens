@@ -133,7 +133,8 @@ func (s *Store) SetRemixTerms(ctx context.Context, workspaceID, listingID string
 
 // declareParents records the parents of childID's version childVersion, published by workspaceID: those of the
 // version before it, carried forward with the share they were given, and the ones refs declares. A ref naming a
-// parent already carried forward moves it to that version and keeps its share.
+// parent already carried forward moves it to that version and keeps its share. Someone else's listing is declared
+// under the remix grant workspaceID holds for that version (B32.25, remix.go), at the share the grant locked.
 func (s *Store) declareParents(ctx context.Context, tx pgx.Tx, workspaceID, childID string, childVersion int, refs []ParentRef) ([]Parent, error) {
 	var carried []Parent
 	if childVersion > 1 {
@@ -176,17 +177,6 @@ func (s *Store) declareParents(ctx context.Context, tx pgx.Tx, workspaceID, chil
 		if err != nil {
 			return nil, fmt.Errorf("market: lineage: %w", err)
 		}
-		version := ref.Version
-		if version == 0 {
-			version = latest
-		}
-		if version < 1 || version > latest {
-			return nil, invalid("parent %s has no version %d", ref.ListingID, ref.Version)
-		}
-		if i, ok := at[ref.ListingID]; ok {
-			out[i].Version = version
-			continue
-		}
 		var cycle bool
 		if err := tx.QueryRow(ctx, `WITH RECURSIVE up(id) AS (
 				SELECT parent_listing_id FROM market_lineage WHERE child_listing_id = $1
@@ -198,10 +188,32 @@ func (s *Store) declareParents(ctx context.Context, tx pgx.Tx, workspaceID, chil
 		if cycle {
 			return nil, fmt.Errorf("%w (%s descends from %s)", ErrLineageCycle, ref.ListingID, childID)
 		}
-		if owner != workspaceID && policy == RemixNone {
-			return nil, fmt.Errorf("%w (%s)", ErrNotRemixable, ref.ListingID)
+		version := ref.Version
+		var grant RemixGrant
+		if owner != workspaceID {
+			// B32.25: someone else's listing is built on under the remix licence the publisher accepted for the
+			// version declared (version 0: the newest it accepted), at the share locked then.
+			if grant, err = remixGrant(ctx, tx, workspaceID, ref.ListingID, ref.Version); err != nil {
+				if errors.Is(err, ErrNoRemixGrant) && policy == RemixNone {
+					return nil, fmt.Errorf("%w (%s)", ErrNotRemixable, ref.ListingID)
+				}
+				return nil, err
+			}
+			version = grant.Version
 		}
-		if policy != RemixRoyalty {
+		if version == 0 {
+			version = latest
+		}
+		if version < 1 || version > latest {
+			return nil, invalid("parent %s has no version %d", ref.ListingID, ref.Version)
+		}
+		if i, ok := at[ref.ListingID]; ok {
+			out[i].Version = version
+			continue
+		}
+		if owner != workspaceID {
+			share = grant.ShareBPS
+		} else if policy != RemixRoyalty {
 			share = 0
 		}
 		out = append(out, Parent{ListingID: ref.ListingID, Version: version, ShareBPS: share, Source: LineageDeclared})

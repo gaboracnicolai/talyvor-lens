@@ -228,6 +228,7 @@ var Manifest = map[string]Entry{
 	"agent_debit_settlements":      {Delete, "B23.13: how each agent question's pre-serve estimate was settled to its delivered cost and what its limit wrote off; the credits' movements are in agent_postings and lxc_ledger"},
 	"market_bills":                 {Delete, "B20.2: the Stripe subscription a buyer's marketplace uses are metered onto"},
 	"market_sellers":               {Delete, "B20.5: the seller's connected Stripe account and what Stripe last said of it"},
+	"market_remix_grants":          {Delete, "B32.25: the remix licences a workspace accepted, one per listing version, each with the share it locked"},
 	"market_listing_reports":       {Delete, "B20.4: keys `reporter_workspace_id`: the reports a workspace made of listings; reports of its own listings cascade with them"},
 	"workspace_passkeys":           {Delete, "B19.16: the owner's passkeys' public keys"},
 	"workspace_provider_keys":      {Delete, "B27.26: the workspace's own provider keys (BYOK), sealed; deleting the row is the end of Talyvor's custody"},
