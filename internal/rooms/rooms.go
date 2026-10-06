@@ -101,7 +101,7 @@ type Room struct {
 // Member is a workspace's membership of a room.
 type Member struct {
 	WorkspaceID  string     `json:"workspace_id"`
-	UserID       string     `json:"user_id"`
+	UserID       string     `json:"user_id,omitempty"` // shown to its own workspace (and an admin) only
 	Role         string     `json:"role"`
 	MaySpend     bool       `json:"may_spend"`
 	TermsVersion int        `json:"terms_version"`
@@ -373,6 +373,9 @@ func (s *Store) Get(ctx context.Context, viewer string, admin bool, roomID strin
 			if err != nil {
 				rows.Close()
 				return err
+			}
+			if m.WorkspaceID != viewer && !admin {
+				m.UserID = ""
 			}
 			d.Members = append(d.Members, m)
 		}

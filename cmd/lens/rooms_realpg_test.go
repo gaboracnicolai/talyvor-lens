@@ -85,6 +85,10 @@ func TestRooms_CreateJoinUnderTermsRolesAndTheOpenList(t *testing.T) {
 	if code, body := call(joiner, http.MethodPost, "/v1/rooms/"+room.ID+"/join", `{"terms_version":2}`); code != http.StatusOK {
 		t.Fatalf("accept v2 = %d %s, want 200", code, body)
 	}
+	// Another workspace's user ids are not shown to the room.
+	if _, body := call(joiner, http.MethodGet, "/v1/rooms/"+room.ID, ""); strings.Contains(body, "user-"+owner) || !strings.Contains(body, "user-"+joiner) {
+		t.Fatalf("the room read by the joiner = %s, want its own user id and not the owner's", body)
+	}
 	if _, _, terms := row(room.ID, joiner); terms != 2 {
 		t.Fatalf("joiner terms after accepting = v%d, want v2", terms)
 	}
