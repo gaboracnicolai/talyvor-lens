@@ -50,6 +50,25 @@ func lockUse(ctx context.Context, tx pgx.Tx, useID string) error {
 	return err
 }
 
+// lockPayees takes the seller lock of every payee of useID — its seller and every ancestor its royalties pay
+// (B32.26) — in one order, so two transactions taking several never wait on each other.
+func lockPayees(ctx context.Context, tx pgx.Tx, useID, seller string) error {
+	rows, err := tx.Query(ctx, `SELECT $2::text UNION SELECT seller_workspace_id FROM market_earnings WHERE use_id = $1 ORDER BY 1`, useID, seller)
+	if err != nil {
+		return err
+	}
+	payees, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	for _, ws := range payees {
+		if err := lockSeller(ctx, tx, ws); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // OpenHold keeps the earning of useID in its seller's holdback until the hold is released. The use may not have
 // cleared yet; once its earning is past its holdback the hold is refused (ErrOutOfHoldback), since the money may
 // already be paid out.
@@ -69,8 +88,8 @@ func (s *Store) OpenHold(ctx context.Context, useID, reason, openedBy string, no
 			}
 			return err
 		}
-		// The seller's lock orders this with a payout, which reads the holds; the use's, with its release.
-		if err := lockSeller(ctx, tx, seller); err != nil {
+		// The payees' locks order this with a payout, which reads the holds; the use's, with its release.
+		if err := lockPayees(ctx, tx, useID, seller); err != nil {
 			return err
 		}
 		if err := lockUse(ctx, tx, useID); err != nil {
@@ -112,7 +131,7 @@ func (s *Store) ReleaseHold(ctx context.Context, holdID, decision string, now ti
 			}
 			return err
 		}
-		if err := lockSeller(ctx, tx, seller); err != nil {
+		if err := lockPayees(ctx, tx, h.UseID, seller); err != nil {
 			return err
 		}
 		if err := lockUse(ctx, tx, h.UseID); err != nil {
