@@ -33,8 +33,11 @@ const maxPipelineSteps = 10
 // pipelineStep is one step, resolved before the pipeline runs.
 type pipelineStep struct {
 	StepResult
-	seller   string
-	artifact map[string]any
+	seller    string
+	artifact  map[string]any
+	charge    string // what chargeFor said it costs, before any trial (B32.21)
+	priceULXC int64
+	trialULXC int64 // a trial's would-be price
 }
 
 // pipelineSteps resolves every step of pipeline l for buyer, and what each costs them.
@@ -85,9 +88,10 @@ func (s *Store) pipelineSteps(ctx context.Context, l Listing, artifact map[strin
 		}
 		if sl.WorkspaceID != l.WorkspaceID {
 			st.UseID = "use_" + uuid.NewString()
-			if st.Charge, st.PriceULXC, err = s.chargeFor(ctx, sl, buyer); err != nil {
+			if st.charge, st.priceULXC, err = s.chargeFor(ctx, sl, buyer); err != nil {
 				return nil, err
 			}
+			st.Charge, st.PriceULXC = st.charge, st.priceULXC
 		}
 		steps = append(steps, st)
 	}

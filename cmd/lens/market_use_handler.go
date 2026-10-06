@@ -34,6 +34,9 @@ import (
 // An agent's key may use a listing within its spending rules (403 when they refuse, naming the approval
 // one needs).
 //
+// A listing whose per_use offer gives trial uses runs each buyer's first ones as trials (internal/market/trials.go,
+// B32.21): free, never on the bill, and answered with trial: true and what the use would have cost.
+//
 // A licence (internal/market/licences.go) is bought once, on the bill, and covers the uses after it: each is charged
 // "licensed" and runs the version the licence pins. A licence sent again with its Idempotency-Key answers 200 with
 // the licence that key bought, and buys nothing.
