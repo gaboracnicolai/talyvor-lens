@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/talyvor/lens/internal/catalog"
+	"github.com/talyvor/lens/internal/metrics"
 )
 
 // agent_subbudget.go — F4-capstone step A: the per-scoped-key LXC sub-budget + the EXACTLY-ONCE agent debit.
@@ -162,6 +166,10 @@ type AgentDebitMeta struct {
 	// configured today: the rate is tunable at boot, so reading it back from config would silently
 	// re-price history.
 	PoolDiscountRate float64
+
+	// WrittenOffULXC is the part of the delivered cost a settle did not charge because it was above the hold
+	// (B35.3). Set only by that settle, on its spend row; zero leaves every other row untouched.
+	WrittenOffULXC int64
 }
 
 // toMap renders the scalars as the lxc_ledger metadata document, OMITTING an empty scalar so a row carries
@@ -180,6 +188,9 @@ func (m AgentDebitMeta) toMap() map[string]interface{} {
 	}
 	if m.PriceBasis != "" {
 		out["price_basis"] = m.PriceBasis
+	}
+	if m.WrittenOffULXC > 0 {
+		out["written_off_ulxc"] = m.WrittenOffULXC
 	}
 	return out
 }
@@ -451,7 +462,8 @@ func (s *DualTokenStore) reserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 // SettleLXCReservation reconciles a held reservation to the DELIVERED charge finalLXC: it credits back the
 // unused reservation (refund = held − final) and books final as the real bill. final is CLAMPED to [0, held]
 // — the conservative hold is an upper bound, and the customer is NEVER charged more than was reserved (belt
-// and braces: even a mis-estimated hold cannot over-bill). Two immutable ledger rows in one tx: a
+// and braces: even a mis-estimated hold cannot over-bill). B35.3: a clamp is never silent — it is an ERROR
+// log and lens_agent_hold_cuts_total, and the spend row records the written_off_ulxc. Two immutable ledger rows in one tx: a
 // LXCTypeReservationRelease credit of +held (undo the hold) and a LXCTypeSpend debit of −final (THE bill,
 // joined to token_events by request_id) — net balance move +refund. The agent's spent_lxc drops by refund so
 // the reserved-but-unspent headroom returns to its budget. Idempotent via the status-CAS: a second settle, or
@@ -463,16 +475,35 @@ func (s *DualTokenStore) reserveLXCForAgent(ctx context.Context, scopedKeyID, wo
 // error path return 0 (this call charged nothing new): a royalty funded on a 0 return mints nothing, which
 // is the deflationary-safe direction. cashBackedULXC is the part that may fund that royalty (royaltyBacked).
 func (s *DualTokenStore) SettleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) (settledULXC, cashBackedULXC int64, err error) {
+	var cut holdCut
 	err = retryLocks(ctx, func() error {
 		var err error
-		settledULXC, cashBackedULXC, err = s.settleLXCReservation(ctx, reservationID, finalLXC, meta)
+		cut = holdCut{}
+		settledULXC, cashBackedULXC, err = s.settleLXCReservation(ctx, reservationID, finalLXC, meta, &cut)
 		return err
 	})
+	if err == nil && cut.writtenOff > 0 {
+		slog.Error("economy: a settle was cut to its hold — the answer cost more than was reserved, and the rest is written off",
+			slog.String("reservation", reservationID), slog.String("model", cut.model),
+			slog.Int64("delivered_ulxc", cut.delivered), slog.Int64("held_ulxc", cut.held),
+			slog.Int64("charged_ulxc", settledULXC), slog.Int64("written_off_ulxc", cut.writtenOff))
+		label := "other" // a requested model is the client's string; a metric label must be a bounded set
+		if _, known := catalog.Get(cut.model); known {
+			label = cut.model
+		}
+		metrics.AgentHoldCut(label)
+	}
 	return settledULXC, cashBackedULXC, err
 }
 
-// settleLXCReservation is one attempt of SettleLXCReservation, in one transaction.
-func (s *DualTokenStore) settleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta) (settledULXC, cashBackedULXC int64, err error) {
+// holdCut is what a settle's clamp to its hold cut off (B35.3): zero when the delivered cost fit.
+type holdCut struct {
+	model                       string
+	delivered, held, writtenOff int64
+}
+
+// settleLXCReservation is one attempt of SettleLXCReservation, in one transaction. cut reports a clamp.
+func (s *DualTokenStore) settleLXCReservation(ctx context.Context, reservationID string, finalLXC int64, meta AgentDebitMeta, cut *holdCut) (settledULXC, cashBackedULXC int64, err error) {
 	if reservationID == "" {
 		return 0, 0, errors.New("economy: settle requires reservation_id")
 	}
@@ -515,6 +546,11 @@ func (s *DualTokenStore) settleLXCReservation(ctx context.Context, reservationID
 	}
 	// Never bill above the conservative hold: the delivered charge and its platform fee together fit in it.
 	if within := spendWithin(heldLXC, bps); finalLXC > within {
+		model := meta.ServedModel
+		if model == "" {
+			model = reqModel
+		}
+		*cut = holdCut{model: model, delivered: finalLXC, held: heldLXC, writtenOff: finalLXC - within}
 		finalLXC = within
 	}
 	fee := PlatformFee(finalLXC, bps)
@@ -539,7 +575,7 @@ func (s *DualTokenStore) settleLXCReservation(ctx context.Context, reservationID
 		if err := insertLXCLedger(ctx, tx, workspaceID, -finalLXC, afterSpend, LXCTypeSpend, "reservation settle: delivered charge",
 			AgentDebitMeta{RequestedModel: reqModel, ServedModel: meta.ServedModel, RequestID: reqID,
 				PriceBasis: meta.PriceBasis, PoolListULXC: meta.PoolListULXC,
-				PoolDiscountRate: meta.PoolDiscountRate}.toSpendMap(finalLXC)); err != nil {
+				PoolDiscountRate: meta.PoolDiscountRate, WrittenOffULXC: cut.writtenOff}.toSpendMap(finalLXC)); err != nil {
 			return 0, 0, err
 		}
 	}
