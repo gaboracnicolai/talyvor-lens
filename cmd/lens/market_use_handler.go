@@ -16,12 +16,13 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/market"
+	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/workspace"
 )
 
 // B20.2 — USE A LISTING, PAY PER USE, AND THE SELLER EARNS (internal/market/use.go).
 //
-//	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/use   {version, model, input, variables}
+//	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/use   {version, model, input, variables, max_price_usd_micros}
 //	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/licences  {offer_id, version} + Idempotency-Key   B32.19: buy, rent or subscribe
 //	GET  /v1/workspaces/{wsID}/marketplace/licences            the licences the workspace holds or held
 //	POST /v1/workspaces/{wsID}/marketplace/licences/{id}/cancel  B32.20: stop renewing; it runs to its ends_at
@@ -32,7 +33,8 @@ import (
 // A use runs the listing through Lens's own proxy with the caller's credential, so the models it calls are
 // billed to the buyer as usual; a paid listing's price then goes on the buyer's monthly marketplace bill.
 // An agent's key may use a listing within its spending rules (403 when they refuse, naming the approval
-// one needs).
+// one needs). A use that would cost more than its max_price_usd_micros answers 409, runs nothing and is charged
+// nothing (B32.23).
 //
 // A listing whose per_use offer gives trial uses runs each buyer's first ones as trials (internal/market/trials.go,
 // B32.21): free, never on the bill, and answered with trial: true and what the use would have cost.
@@ -106,7 +108,7 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, market.ErrTakenDown):
 			writeJSONErr(w, http.StatusGone, err.Error())
-		case errors.Is(err, market.ErrNotSoldPerUse):
+		case errors.Is(err, market.ErrNotSoldPerUse), errors.Is(err, market.ErrOverMaxPrice):
 			writeJSONErr(w, http.StatusConflict, err.Error())
 		case errors.Is(err, market.ErrInvalid), errors.Is(err, market.ErrNoModel):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
@@ -317,6 +319,29 @@ func releaseMarketHoldbacks(ctx context.Context, store *market.Store) {
 			}
 		}
 	}
+}
+
+// mcpMarketDeps gives the MCP market tools (B32.23) what the routes above give a use and a licence: the workspace's
+// bill, the agent's judge, and a runner that calls the models with the credential the tool call came in with.
+type mcpMarketDeps struct {
+	lens   http.Handler
+	meter  market.Meter
+	agents marketAgents
+}
+
+func (d mcpMarketDeps) meterFor(wsID string) market.Meter {
+	if k, ok := d.meter.(stripeByKind); ok {
+		return k.meterFor(wsID)
+	}
+	return d.meter
+}
+
+func (d mcpMarketDeps) UseDeps(ctx context.Context, wsID string) market.UseDeps {
+	return market.UseDeps{Runner: proxyRunner{lens: d.lens, from: mcp.CallerRequest(ctx)}, Meter: d.meterFor(wsID), Agents: d.agents}
+}
+
+func (d mcpMarketDeps) LicenceDeps(_ context.Context, wsID string) market.LicenceDeps {
+	return market.LicenceDeps{Meter: d.meterFor(wsID), Agents: d.agents, Capabilities: d.agents}
 }
 
 // proxyRunner runs a listing's model calls through Lens's own proxy routes as the caller — the same

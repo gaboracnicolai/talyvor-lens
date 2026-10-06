@@ -15,6 +15,7 @@ import (
 	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/learner"
+	"github.com/talyvor/lens/internal/market"
 	"github.com/talyvor/lens/internal/reqtrack"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/session"
@@ -50,7 +51,9 @@ type Server struct {
 	sessionTracker *session.SessionTracker
 	router         *router.Router
 	version        string
-	agentBank      AgentBank // B19.9: the agent tools; nil leaves them out
+	agentBank      AgentBank     // B19.9: the agent tools; nil leaves them out
+	market         *market.Store // B32.23: the market tools; nil leaves them out
+	marketDeps     MarketDeps
 }
 
 func New(
@@ -143,7 +146,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		s.writeRPCResult(w, req.ID, map[string]any{"tools": s.tools()})
 	case "tools/call":
-		s.handleToolsCall(w, r.Context(), req.ID, req.Params)
+		s.handleToolsCall(w, context.WithValue(r.Context(), callerRequestKey{}, r), req.ID, req.Params)
 	default:
 		s.writeRPCError(w, req.ID, rpcErrMethodNotFnd, "method not found: "+req.Method)
 	}
@@ -189,7 +192,11 @@ func (s *Server) tools() []map[string]any {
 	if s.agentBank == nil {
 		return toolDefinitions()
 	}
-	return append(append(toolDefinitions(), agentToolDefinitions()...), walletToolDefinitions()...)
+	all := append(append(toolDefinitions(), agentToolDefinitions()...), walletToolDefinitions()...)
+	if s.market != nil {
+		all = append(all, marketToolDefinitions()...)
+	}
+	return all
 }
 
 func toolDefinitions() []map[string]any {
@@ -302,11 +309,12 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, id,
 	case "route_model":
 		result, err = s.toolRouteModel(ctx, params.Arguments)
 	default:
-		if !isWalletTool(params.Name) || s.agentBank == nil {
+		known := isWalletTool(params.Name) || (isMarketTool(params.Name) && s.market != nil)
+		if !known || s.agentBank == nil {
 			s.writeRPCError(w, id, rpcErrMethodNotFnd, "unknown tool: "+params.Name)
 			return
 		}
-		result, err = s.callAgentTool(ctx, params.Name, params.Arguments) // B22.11: run and logged as the agent tools are
+		result, err = s.callAgentTool(ctx, params.Name, params.Arguments) // B22.11, B32.23: run and logged as the agent tools are
 	}
 	var refusal *toolRefusal
 	if errors.As(err, &refusal) {

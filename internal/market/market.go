@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -405,6 +406,51 @@ func (s *Store) Catalog(ctx context.Context, kind string) ([]Listing, error) {
 		return s.list(ctx, `visibility = 'public' AND review_status = 'approved' AND kind = $1`, kind)
 	}
 	return s.list(ctx, `visibility = 'public' AND review_status = 'approved'`)
+}
+
+// SearchQuery is what a buyer looks for in the catalog (B32.23). Each field set narrows it.
+type SearchQuery struct {
+	Text              string // every word in the title or description
+	Kind              string
+	Capability        string // what it should do; until listings declare capabilities (B32.50), matched like Text
+	Licence           string // sold under this licence
+	MaxPriceUSDMicros *int64 // one use costs at most this: free, or a per_use commercial offer at or under it
+}
+
+// MaxSearchResults is the most listings Search answers.
+const MaxSearchResults = 50
+
+// Search reads the public listings the review approved that q matches, newest first.
+func (s *Store) Search(ctx context.Context, q SearchQuery) ([]Listing, error) {
+	where, args := `visibility = 'public' AND review_status = 'approved'`, []any{}
+	if q.Kind != "" {
+		args = append(args, q.Kind)
+		where += fmt.Sprintf(` AND kind = $%d`, len(args))
+	}
+	for _, word := range strings.Fields(q.Text + " " + q.Capability) {
+		args = append(args, "%"+strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(word)+"%")
+		where += fmt.Sprintf(` AND (title ILIKE $%[1]d OR description ILIKE $%[1]d)`, len(args))
+	}
+	all, err := s.list(ctx, where, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := []Listing{}
+	for _, l := range all {
+		if q.Licence != "" && !slices.ContainsFunc(l.Offers, func(o Offer) bool { return o.Licence == q.Licence }) {
+			continue
+		}
+		if q.MaxPriceUSDMicros != nil {
+			price, perUse := perUseULXC(l.Offers)
+			if (!perUse && len(l.Offers) > 0) || price/ulxcPerUSDMicro > *q.MaxPriceUSDMicros {
+				continue
+			}
+		}
+		if out = append(out, l); len(out) == MaxSearchResults {
+			break
+		}
+	}
+	return out, nil
 }
 
 // hidden says whether viewer may not see l: a private listing, or one held or taken down, is its owner's alone.
