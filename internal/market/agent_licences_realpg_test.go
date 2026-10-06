@@ -85,8 +85,13 @@ func TestAgentLicences_AnAgentTakesOnlyTheLicencesItsRulesAllow(t *testing.T) {
 	if !errors.Is(err, economy.ErrAgentRule) || !strings.Contains(err.Error(), "may_subscribe") {
 		t.Fatalf("a subscription by an agent whose rules do not allow one = %v; want refused naming may_subscribe", err)
 	}
+	renews := true
+	_, _, err = s.License(ctx, deps, buyer, buyer20, l.ID, "rent-renews", LicenceRequest{OfferID: offer["rent commercial"], AutoRenew: &renews})
+	if !errors.Is(err, economy.ErrAgentRule) || !strings.Contains(err.Error(), "may_subscribe") {
+		t.Fatalf("a rent that renews itself, by an agent that may not subscribe = %v; want refused naming may_subscribe", err)
+	}
 	if licences, billed := written(buyer20); licences != 1 || billed != 1 {
-		t.Fatalf("after the refused subscription the agent has %d licences and %d billed rows; want still 1 and 1", licences, billed)
+		t.Fatalf("after the refused subscriptions the agent has %d licences and %d billed rows; want still 1 and 1", licences, billed)
 	}
 	yes := true
 	if _, err := bank.SetAgentRules(ctx, buyer, buyer20, economy.AgentRules{MaySubscribe: &yes}); err != nil {

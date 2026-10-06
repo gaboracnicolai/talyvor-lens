@@ -78,8 +78,8 @@ type AgentRules struct {
 	// MaxCommitmentULXC, AllowedLicences and MaySubscribe (B32.22) bound the marketplace licences the agent may take:
 	// the most one may commit it to (a buy's or a rent's price, one subscription period's), the licences it may hold —
 	// commercial and enterprise; personal is never an agent's, and empty allows both — and whether it may subscribe at
-	// all, which it may not until its owner says so. Read, they are never nil; nil (absent from the JSON) saves the
-	// rules without changing them.
+	// all — or take a rent that renews itself — which it may not until its owner says so. Read, they are never nil; nil
+	// (absent from the JSON) saves the rules without changing them.
 	MaxCommitmentULXC *int64   `json:"max_commitment_ulxc"`
 	AllowedLicences   []string `json:"allowed_licences"`
 	MaySubscribe      *bool    `json:"may_subscribe"`
@@ -89,11 +89,12 @@ type AgentRules struct {
 var AgentLicences = []string{"commercial", "enterprise"}
 
 // Commitment is what a marketplace licence commits an agent to (B32.22): its kind — buy, rent or subscribe — its
-// licence, and its price: a buy's or a rent's, or one subscription period's. A use commits to nothing beyond itself,
-// and is the zero Commitment.
+// licence, its price — a buy's or a rent's, or one subscription period's — and whether it renews itself, as a
+// subscription and a rent set to renew do. A use commits to nothing beyond itself, and is the zero Commitment.
 type Commitment struct {
 	Kind    string `json:"kind"`
 	Licence string `json:"licence"`
+	Renews  bool   `json:"renews"`
 	ULXC    int64  `json:"-"`
 }
 
@@ -732,6 +733,8 @@ func (r AgentRules) judgeCommitment(c Commitment) error {
 			strings.Join(r.AllowedLicences, " and "), c.Kind, c.Licence)
 	case c.Kind == "subscribe" && (r.MaySubscribe == nil || !*r.MaySubscribe):
 		return ruleRefusal("the agent's rules do not let it subscribe (may_subscribe)")
+	case c.Renews && (r.MaySubscribe == nil || !*r.MaySubscribe): // a rent that renews itself is a subscription
+		return ruleRefusal("the agent's rules do not let it take a %s that renews itself (may_subscribe)", c.Kind)
 	case limitOf(r.MaxCommitmentULXC) > 0 && c.ULXC > *r.MaxCommitmentULXC:
 		return ruleRefusal("this %s would commit the agent to %s LXC; the most one licence may commit it to is %s LXC (max_commitment_ulxc)",
 			c.Kind, lxcString(c.ULXC), lxcString(*r.MaxCommitmentULXC))
