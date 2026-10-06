@@ -160,7 +160,7 @@ func (s *Store) ReviewQueue(ctx context.Context) ([]QueueItem, error) {
 		var reasons []string
 		l := &q.Listing
 		if err := rows.Scan(&l.ID, &l.WorkspaceID, &l.Kind, &l.Title, &l.Description, &l.PricePerUseULXC, &l.Visibility, &l.LatestVersion,
-			&l.CreatedAt, &l.UpdatedAt, &l.ReviewStatus, &l.ReviewReason, &q.OpenReports, &reasons, &q.Details); err != nil {
+			&l.CreatedAt, &l.UpdatedAt, &l.ReviewStatus, &l.ReviewReason, &l.RemixPolicy, &l.RemixShareBPS, &q.OpenReports, &reasons, &q.Details); err != nil {
 			return nil, err
 		}
 		q.Reasons = byFrequency(reasons)

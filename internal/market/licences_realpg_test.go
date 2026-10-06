@@ -157,7 +157,7 @@ func TestLicences_RentCoversUsesUntilItEndsAndPinsItsVersion(t *testing.T) {
 	if err != nil || pinned.PinnedVersion == nil || *pinned.PinnedVersion != 1 || pinned.EndsAt != nil {
 		t.Fatalf("buy pinned to version 1 = %+v, %v", pinned, err)
 	}
-	if _, err := s.PublishVersion(ctx, seller, l.ID, json.RawMessage(`{"template":"v2: what is {{a}} plus {{b}}?","model":"claude-haiku-4-5"}`), "v2"); err != nil {
+	if _, err := s.PublishVersion(ctx, seller, l.ID, json.RawMessage(`{"template":"v2: what is {{a}} plus {{b}}?","model":"claude-haiku-4-5"}`), "v2", nil); err != nil {
 		t.Fatal(err)
 	}
 	var seen promptsSeen
