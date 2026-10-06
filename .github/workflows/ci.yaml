@@ -135,6 +135,10 @@ jobs:
         # -timeout is per package: cmd/lens alone takes 108–120s under -race on a normal runner, so 120s
         # timed it out on three consecutive attempts at 29221e6 with no test at fault.
         run: go test -timeout 300s -race -count=1 -p 1 ./...
+      # B35.2 — one agent's 60 simultaneous requests, and two agents' at once, all hold and settle with no
+      # deadlock: five runs in a row, as the item's DONE asks, because one green run of a race proves little.
+      - name: B35.2 simultaneous agent requests, five runs in a row
+        run: go test -timeout 300s -race -count=5 -run '^TestB352_' ./internal/economy/
 
   # B27.35 — Tare phase 2a against the REAL weights: the pure-Go port reproduces onnxruntime's logits
   # (golden_test.go), and on real payloads the measured reduction and the known-answer scenarios hold

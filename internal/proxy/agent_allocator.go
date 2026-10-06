@@ -16,6 +16,7 @@ import (
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/localrouter"
+	"github.com/talyvor/lens/internal/metrics"
 )
 
 // agent_allocator.go — F4-capstone step C.1: the live bounded-allocation glue. For an AGENT request (an
@@ -210,9 +211,14 @@ func (p *Proxy) agentDebitKeyFor(ctx context.Context, apiKeyID, model, prompt st
 }
 
 // writeAgentRefusal answers a blocked agent request: its rules' refusal says which rule (403) — the requests-per-
-// minute rule's is 429 (B28.302), since the same request goes through once the minute has room; a balance or
-// ceiling refusal, or a failure, is the 402 it always was. Returns the metrics reason.
+// minute rule's is 429 (B28.302), since the same request goes through once the minute has room; a hold Lens could
+// not take for its locks is 503 and says so, never that the balance is short (B35.2); a balance or ceiling
+// refusal, or another failure, is the 402 it always was. Returns the metrics reason.
 func writeAgentRefusal(w http.ResponseWriter, err error) string {
+	if errors.Is(err, economy.ErrLockContention) {
+		writeError(w, http.StatusServiceUnavailable, "Lens could not take the hold for this request; nothing was charged, and it can be sent again")
+		return "agent_hold_unavailable"
+	}
 	if errors.Is(err, economy.ErrAgentRequestRate) {
 		writeError(w, http.StatusTooManyRequests, strings.TrimPrefix(err.Error(), "economy: "))
 		return "agent_rate"
@@ -337,11 +343,13 @@ func (p *Proxy) settleReservationBasis(ctx context.Context, deliveredUSD float64
 	settledLXC, _, err := p.agentSpender.SettleLXCReservation(ctx, h.reservationID, finalLXC,
 		economy.AgentDebitMeta{ServedModel: servedModel, PriceBasis: priceBasis})
 	if err != nil {
-		// Logged-and-swallowed — the response is already served. A failed settle leaves the hold, which the
-		// stranded sweeper later REFUNDS (never over-charges): the customer is protected on the error path.
-		// Return 0 charge ⇒ the royalty seam treats it as unfunded (deflationary; never mint on a failed bill).
-		slog.Warn("economy: reservation settle failed (hold will be swept/refunded; royalty treated as unfunded)",
-			slog.String("reservation", h.reservationID), slog.String("err", err.Error()))
+		// The response is already served. A failed settle leaves the hold, which the stranded sweeper later
+		// REFUNDS (never over-charges): the customer is protected on the error path, and the answer goes unbilled,
+		// so it is an ERROR and counted (B35.2) — never silent. Return 0 charge ⇒ the royalty seam treats it as
+		// unfunded (deflationary; never mint on a failed bill).
+		slog.Error("economy: reservation settle failed — the answer is unbilled (hold will be swept/refunded; royalty treated as unfunded)",
+			slog.String("reservation", h.reservationID), slog.Int64("final_ulxc", finalLXC), slog.String("err", err.Error()))
+		metrics.AgentSettleFailed("reservation")
 		return 0
 	}
 	return float64(settledLXC) * economy.LXCUSDValue / 1e6 // the USD the consumer ACTUALLY paid
@@ -372,9 +380,11 @@ func (p *Proxy) settleAgentDebitULXC(ctx context.Context, wsID string, delivered
 	meta.RequestedModel, meta.RequestID = d.requestedModel, d.requestID
 	s, err := p.agentSpender.SettleAgentDebit(ctx, wsID, d.debitKey, deliveredLXC, meta)
 	if err != nil {
-		// Logged-and-swallowed — the response is already served; the question stays charged its estimate.
-		slog.Warn("economy: agent debit settle failed (charged the pre-serve estimate)",
-			slog.String("request_id", d.requestID), slog.String("err", err.Error()))
+		// The response is already served; the question stays charged its estimate, not what it cost (B35.2).
+		slog.Error("economy: agent debit settle failed (charged the pre-serve estimate)",
+			slog.String("request_id", d.requestID), slog.String("debit_key", d.debitKey),
+			slog.Int64("delivered_ulxc", deliveredLXC), slog.String("err", err.Error()))
+		metrics.AgentSettleFailed("debit")
 		return 0, true
 	}
 	if s.WrittenOffULXC > 0 {
@@ -429,8 +439,9 @@ func (p *Proxy) settleReservationPooled(ctx context.Context, chargedUSD float64,
 		economy.AgentDebitMeta{ServedModel: price.modelForRow, PriceBasis: price.PriceBasis,
 			PoolListULXC: price.ListULXC, PoolDiscountRate: price.Rate})
 	if err != nil {
-		slog.Warn("economy: pooled reservation settle failed (hold will be swept/refunded; royalty treated as unfunded)",
-			slog.String("reservation", h.reservationID), slog.String("err", err.Error()))
+		slog.Error("economy: pooled reservation settle failed — the answer is unbilled (hold will be swept/refunded; royalty treated as unfunded)",
+			slog.String("reservation", h.reservationID), slog.Int64("final_ulxc", price.ChargedULXC), slog.String("err", err.Error()))
+		metrics.AgentSettleFailed("pooled")
 		return 0
 	}
 	// ⚠ THIS RETURNS THE CASH-BACKED PORTION, NOT THE CHARGE. The customer is still billed the full

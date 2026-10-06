@@ -38,6 +38,17 @@ type AgentDebitSettlement struct {
 // the question). A replay settles nothing and returns the zero settlement.
 func (s *DualTokenStore) SettleAgentDebit(ctx context.Context, workspaceID, debitKey string, deliveredLXC int64, meta AgentDebitMeta) (AgentDebitSettlement, error) {
 	var out AgentDebitSettlement
+	err := retryLocks(ctx, func() error { // B35.2: a settle Postgres cancels on a lock runs again
+		var err error
+		out, err = s.settleAgentDebit(ctx, workspaceID, debitKey, deliveredLXC, meta)
+		return err
+	})
+	return out, err
+}
+
+// settleAgentDebit is one attempt of SettleAgentDebit, in one transaction.
+func (s *DualTokenStore) settleAgentDebit(ctx context.Context, workspaceID, debitKey string, deliveredLXC int64, meta AgentDebitMeta) (AgentDebitSettlement, error) {
+	var out AgentDebitSettlement
 	if workspaceID == "" || debitKey == "" {
 		return out, errors.New("economy: agent debit settle requires workspace_id, debit key")
 	}
