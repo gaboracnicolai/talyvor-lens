@@ -325,7 +325,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 // 199 → 201 (B32.24): PUT /v1/workspaces/{wsID}/marketplace/listings/{listingID}/remix-terms, whether a listing may
 // be remixed and on what share, and GET /v1/marketplace/listings/{listingID}/lineage, its family tree, beside the
 // undocumented publish and listing routes.
-const undocumentedNonAdminV1Routes = 201
+//
+// 201 → 202 (B32.25): POST /v1/workspaces/{wsID}/marketplace/listings/{listingID}/remix, accepting a listing's remix
+// licence and opening its artifact, beside the undocumented publish and listing routes.
+const undocumentedNonAdminV1Routes = 202
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

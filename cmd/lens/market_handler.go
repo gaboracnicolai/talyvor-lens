@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -21,6 +22,7 @@ import (
 //	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/versions  {artifact, changelog, parents}   a new version; the old ones stay usable
 //	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/offers    {offers: [...]}   B32.18: replace how it is sold
 //	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/remix-terms {remix_policy, remix_share_bps}   B32.24: may others build on it
+//	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/remix      {version}   B32.25: accept its remix licence and open its artifact
 //	GET  /v1/workspaces/{wsID}/marketplace/listings                the workspace's own listings
 //	GET  /v1/marketplace/listings?kind=                            the public catalog
 //	GET  /v1/marketplace/listings/{id}                             a listing and its versions (artifacts for its owner only)
@@ -41,6 +43,11 @@ import (
 // remix_policy is free or royalty — or the publisher's own — and none may descend from the version's own listing
 // (400). Each parent's share is locked when it is declared: changing a listing's remix terms never changes a remix
 // already made, and a new version keeps the parents of the one before it.
+//
+// B32.25: a listing's artifact is its owner's to read, but pressing Remix on someone else's free or royalty listing
+// accepts its remix licence (docs/terms/remix.md): one grant per workspace and version, with the share locked, and the
+// version's artifact to edit. Declaring someone else's listing as a parent needs that grant, and its edge carries the
+// grant's share. A listing whose remix_policy is none is never opened (400).
 
 func mountMarketRoutes(r chi.Router, store *market.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {
@@ -128,6 +135,25 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 			return
 		}
 		writeJSONOK(w, http.StatusOK, terms)
+	}))
+	r.Post("/v1/workspaces/{wsID}/marketplace/listings/{listingID}/remix", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Version int `json:"version"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4<<10)).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {version}: "+err.Error())
+			return
+		}
+		if in.Version < 0 {
+			writeJSONErr(w, http.StatusBadRequest, "version must be a positive whole number")
+			return
+		}
+		remix, err := store.Remix(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "listingID"), in.Version)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, remix)
 	}))
 	r.Get("/v1/workspaces/{wsID}/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
 		list, err := store.OwnListings(req.Context(), chi.URLParam(req, "wsID"))
