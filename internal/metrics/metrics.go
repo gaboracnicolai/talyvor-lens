@@ -137,6 +137,12 @@ var (
 		prometheus.CounterOpts{Name: "lens_agent_settle_failures_total", Help: "Agent answers served whose settle failed after its retries, by path — each is an answer not billed as it should be."},
 		[]string{"path"},
 	)
+	// AgentHoldCutsTotal counts an agent's answer whose delivered cost was above its hold, so its settle charged
+	// the hold and wrote the rest off (B35.3). Each is logged at ERROR with the reservation and the amounts.
+	AgentHoldCutsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "lens_agent_hold_cuts_total", Help: "Agent answers whose delivered cost was above the hold, so the settle charged the hold and wrote the rest off, by model."},
+		[]string{"model"},
+	)
 
 	// ─── cost forecasting (Upgrade 20) ───
 	// Both carry only the bounded {scope} label (workspace/team/sprint).
@@ -395,7 +401,7 @@ func init() {
 		HAInstanceCount,
 		ReplicaLagSeconds,
 		BudgetSpentUSD, BudgetUtilizationRatio,
-		BudgetThresholdCrossedTotal, BudgetBlocksTotal, AgentSettleFailuresTotal,
+		BudgetThresholdCrossedTotal, BudgetBlocksTotal, AgentSettleFailuresTotal, AgentHoldCutsTotal,
 		ForecastProjectedUSD, ForecastWillExceedTotal,
 		AnomaliesDetectedTotal, AnomalyMaxFactor, RoyaltyDetectorFlagged, DetectorLastRunAgeSeconds, AnnotationReputationEvents,
 		ROIReportsGeneratedTotal, ROIReportDuration,
@@ -480,6 +486,10 @@ func BudgetBlocked(scope string)          { BudgetBlocksTotal.WithLabelValues(sc
 
 // AgentSettleFailed counts a served agent answer whose settle failed on path (reservation, pooled or debit).
 func AgentSettleFailed(path string) { AgentSettleFailuresTotal.WithLabelValues(path).Inc() }
+
+// AgentHoldCut counts an agent's answer whose settle was cut to its hold (B35.3). The caller names a model the
+// catalog knows, or "other": a requested model is the client's string, and a label must be a bounded set.
+func AgentHoldCut(model string) { AgentHoldCutsTotal.WithLabelValues(model).Inc() }
 
 // ─── cost forecasting helpers ───
 // Bounded {scope} label only — no scope_id, so no cardinality guard needed.

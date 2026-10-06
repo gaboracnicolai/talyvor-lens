@@ -945,6 +945,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// routing work and physically cannot exceed its ceiling. Non-agent traffic (agentKeyID == "") skips this
 	// entirely and is unchanged. agentKeyID is reused below to pick the price-aware routing strategy.
 	agentKeyID := agentKeyIDFromContext(ctx)
+	// The output the hold allows: an agent's request is held for it, and a pooled answer is priced within it (B35.3).
+	holdMaxOut := boundedMaxOut(extractMaxTokens(body), p.reservationMaxOut)
 	// B27.26: a BYOK agent request is held or debited nothing, so its agent's rules are judged on their own.
 	if agentKeyID != "" && byok {
 		if err := p.byokAgentRules(withAgentCall(ctx, agentKeyID, model, cfg.ProviderName(), prompt, ""), agentKeyID); err != nil {
@@ -960,8 +962,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// Billing redesign: HOLD a conservative (output-aware, BOUNDED) reservation pre-serve — the
 			// ceiling stays enforced against it — and SETTLE the delivered cost post-serve (or RELEASE a
 			// cache hit, free). The hold rides ctx to the post-serve seam.
-			maxOut := boundedMaxOut(extractMaxTokens(body), p.reservationMaxOut)
-			rctx, err := p.agentReserve(ctx, agentKeyID, wsID, model, prompt, requestID, maxOut)
+			rctx, err := p.agentReserve(ctx, agentKeyID, wsID, model, prompt, requestID, holdMaxOut)
 			if err != nil {
 				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), writeAgentRefusal(w, err)).Inc()
 				return
@@ -1236,7 +1237,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			if byok || p.pooledPaidBefore(ctx, wsID, pooledHit, cached) {
 				chargedHit = nil
 			}
-			price := p.pricePooledServe(chargedHit, prompt, cached)
+			price := p.pricePooledServe(chargedHit, prompt, cached, holdMaxOut)
 			price.setSavingHeaders(w)
 			if streaming {
 				// SSE replay: synthesises the provider's streaming wire
@@ -3552,12 +3553,25 @@ func boundedMaxOut(explicit int, cap func() int) int {
 // A model the catalog does not know is priced at the provider's cheapest known rate and MARKED
 // (PriceBasis), exactly as before: pricing it at 0 would bill the consumer nothing for value they
 // received AND leave the contributor's royalty unfunded.
-func (p *Proxy) pricePooledServe(pooledHit *poolroyalty.ServedHit, prompt string, served []byte) pooledPrice {
+//
+// B35.3 — WHAT THE LIVE CALL WOULD HAVE COST IS THE STORED ANSWER'S OWN USAGE, priced as the live seam
+// prices a reply. It used to be len(served)/4 output tokens: the whole stored JSON reply, envelope and all,
+// so a four-character answer asked with max_tokens 16 priced as about 124 output tokens, eight times its
+// hold. The settle cut every such charge to the hold, silently, while the header promised the full price.
+// Without a usage block it is still the prompt's and the reply's len/4. Either way it is never above what
+// this request's hold priced (its prompt and maxOut, the output the hold allows), so the hold covers it.
+func (p *Proxy) pricePooledServe(pooledHit *poolroyalty.ServedHit, prompt string, served []byte, maxOut int) pooledPrice {
 	if pooledHit == nil {
 		return pooledPrice{}
 	}
-	avoided, prov := alerts.CostUSDResolved(pooledHit.Model, catalog.PurposeCharge,
-		len(prompt)/4, 0, 0, len(served)/4)
+	uncached, cached, written, out := len(prompt)/4, 0, 0, len(served)/4
+	if u, ok := inference.ExtractUsage(pooledHit.Provider, served); ok {
+		uncached, cached, written, out = u.UncachedInputTokens, u.CachedInputTokens, u.CacheWriteInputTokens, u.OutputTokens
+	}
+	avoided, prov := alerts.CostUSDResolved(pooledHit.Model, catalog.PurposeCharge, uncached, cached, written, out)
+	if held, _ := alerts.CostUSDResolved(pooledHit.Model, catalog.PurposeCharge, len(prompt)/4, 0, 0, maxOut); avoided > held {
+		avoided = held
+	}
 	basis := ""
 	if prov == catalog.ProvenanceFallback {
 		basis = prov.String()

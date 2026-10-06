@@ -128,7 +128,7 @@ func TestOwnCacheHitIsFree(t *testing.T) {
 	ctx := context.Background()
 	seamFund(t, pool, "ws", 100_000_000)
 	rctx, _ := p.agentReserveBlocks(ctx, "agent", "ws", "gpt-4o", "prompt", "rq1", 4096)
-	if funded := p.settlePooledServe(rctx, "", p.pricePooledServe(nil, "", nil)); funded != 0 { // own hit → release → $0
+	if funded := p.settlePooledServe(rctx, "", p.pricePooledServe(nil, "", nil, 4096)); funded != 0 { // own hit → release → $0
 		t.Fatalf("own cache hit funded=$%v, want 0 (free)", funded)
 	}
 	if b := seamBalance(t, store, "ws"); b != 100_000_000 {
@@ -155,7 +155,7 @@ func TestCrossTenantHitChargesDiscountedAvoidedCOGS(t *testing.T) {
 	// production discounted.
 	p.SetPoolConsumerDiscount(0.30)
 	wantCharge := int64(math.Ceil(avoided * 0.70 / economy.LXCUSDValue * 1e6)) // list × (1−r), ceil
-	funded := p.settlePooledServe(rctx, "", p.pricePooledServe(&poolroyalty.ServedHit{Model: "gpt-4o"}, prompt, served))
+	funded := p.settlePooledServe(rctx, "", p.pricePooledServe(&poolroyalty.ServedHit{Model: "gpt-4o"}, prompt, served, 4096))
 	if funded <= 0 {
 		t.Fatalf("cross-tenant resolve must return the positive settled charge, got $%v", funded)
 	}
