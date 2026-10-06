@@ -16,7 +16,8 @@ import (
 // B20.5 — SELLERS ARE PAID IN MONEY, THROUGH STRIPE CONNECT (internal/market/payout.go).
 //
 //	GET  /v1/workspaces/{wsID}/marketplace/payouts          the seller's account, balance, next payout with its fees, and payouts
-//	POST /v1/workspaces/{wsID}/marketplace/payouts/connect  {country}  a link to Stripe's onboarding (creating the account)
+//	POST /v1/workspaces/{wsID}/marketplace/payouts/connect  {country, email}  a link to Stripe's onboarding (creating the
+//	                                                       account, with email — the signed-in person's — as its contact)
 //	POST /v1/workspaces/{wsID}/marketplace/payouts/credits  take the available balance as Talyvor credits, 1:1
 //
 // connectFor is the Connect client a workspace's seller account is made and paid with — a test workspace's in
@@ -54,14 +55,15 @@ func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connectFor conne
 		}
 		var in struct {
 			Country string `json:"country"`
+			Email   string `json:"email"`
 		}
 		if req.ContentLength != 0 {
 			if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4<<10)).Decode(&in); err != nil {
-				writeJSONErr(w, http.StatusBadRequest, `body must be {"country"}: `+err.Error())
+				writeJSONErr(w, http.StatusBadRequest, `body must be {"country", "email"}: `+err.Error())
 				return
 			}
 		}
-		url, account, err := store.ConnectSeller(req.Context(), connect, chi.URLParam(req, "wsID"), in.Country, urls.refresh, urls.ret)
+		url, account, err := store.ConnectSeller(req.Context(), connect, chi.URLParam(req, "wsID"), in.Country, in.Email, urls.refresh, urls.ret)
 		if err != nil && !errors.Is(err, market.ErrInvalid) {
 			// Stripe's code and request id, which the seller's sentence leaves out (B28.276).
 			slog.Warn("market: connect with Stripe", "workspace", chi.URLParam(req, "wsID"), "err", err)

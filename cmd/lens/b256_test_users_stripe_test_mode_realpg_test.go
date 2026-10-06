@@ -295,7 +295,7 @@ func TestB256_ATestUsersBillPayoutsAndCardsStayInStripeTestModeAfterTheLiveSwitc
 	})
 	only("the test seller's Connect account", testKey, calls, "POST /v2/core/accounts", "POST /v2/core/account_links")
 	calls = fake.during(func() {
-		do(rSeller, http.MethodPost, "/v1/workspaces/"+rSeller+"/marketplace/payouts/connect", `{"country":"gb"}`, http.StatusOK, nil)
+		do(rSeller, http.MethodPost, "/v1/workspaces/"+rSeller+"/marketplace/payouts/connect", `{"country":"gb","email":"seller@b256.example"}`, http.StatusOK, nil)
 	})
 	only("the real seller's Connect account", liveKey, calls, "POST /v2/core/accounts", "POST /v2/core/account_links")
 	calls = fake.during(func() {

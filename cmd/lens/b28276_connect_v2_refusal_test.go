@@ -35,7 +35,7 @@ func TestB28276_ASellerAccountStripesV2APIRefusesAnswers400WithStripesReason(t *
 
 	r := chi.NewRouter()
 	mountMarketPayoutRoutes(r, market.NewStore(pool), everyWorkspace(billing.NewTestModeStripe("sk_test_b28276", "", "")), nil, marketPayoutURLs{})
-	code, why := b2612Post(t, r, "/v1/workspaces/ws-b2612/marketplace/payouts/connect", `{"country":"GB"}`)
+	code, why := b2612Post(t, r, "/v1/workspaces/ws-b2612/marketplace/payouts/connect", `{"country":"GB","email":"owner@b28276.example"}`)
 	if code != http.StatusBadRequest || why != "Stripe says: The direct merchant has not signed up for Connect and cannot create connected accounts." {
 		t.Fatalf("a seller account Stripe's v2 API refuses = %d %q, want 400 with Stripe's reason", code, why)
 	}

@@ -91,7 +91,7 @@ func TestB2612_APayoutAccountStripeRefusesAnswers400WithStripesReason(t *testing
 	b2612Stripe(t, http.StatusBadRequest, "invalid_request_error", "Connect is not available to accounts in AQ.")
 	r := chi.NewRouter()
 	mountMarketPayoutRoutes(r, market.NewStore(pool), everyWorkspace(billing.NewTestModeStripe("sk_test_b2612", "", "")), nil, marketPayoutURLs{})
-	code, why := b2612Post(t, r, "/v1/workspaces/ws-b2612/marketplace/payouts/connect", `{"country":"AQ"}`)
+	code, why := b2612Post(t, r, "/v1/workspaces/ws-b2612/marketplace/payouts/connect", `{"country":"AQ","email":"owner@b2612.example"}`)
 	if code != http.StatusBadRequest || why != "Stripe says: Connect is not available to accounts in AQ." {
 		t.Fatalf("a seller account Stripe refuses = %d %q, want 400 with Stripe's reason", code, why)
 	}
