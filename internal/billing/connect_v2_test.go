@@ -43,13 +43,13 @@ func TestB1723_ASellersAccountIsCreatedWithAccountsV2AndOnboardedByAV2Link(t *te
 	t.Cleanup(func() { stripe.SetBackend(stripe.APIBackend, prev) })
 
 	l := &LiveStripe{key: "sk_test_b1723"}
-	a, err := l.CreateConnectedAccount(context.Background(), "ws-b1723", "GB")
+	a, err := l.CreateConnectedAccount(context.Background(), "ws-b1723", "GB", "owner@seller.example")
 	if err != nil || a.ID != "acct_b1723" || a.Country != "GB" || a.PayoutsEnabled {
 		t.Fatalf("CreateConnectedAccount = %+v, %v; want acct_b1723 in GB, not yet payable", a, err)
 	}
 	created, _ := json.Marshal(asked["/v2/core/accounts"])
 	const want = `{"configuration":{"recipient":{"capabilities":{"stripe_balance":{"stripe_transfers":{"requested":true}}}}},` +
-		`"dashboard":"express","defaults":{"responsibilities":{"fees_collector":"application","losses_collector":"application"}},` +
+		`"contact_email":"owner@seller.example","dashboard":"express","defaults":{"responsibilities":{"fees_collector":"application","losses_collector":"application"}},` +
 		`"identity":{"country":"gb"},"include":["identity"],"metadata":{"market_workspace_id":"ws-b1723"}}`
 	if string(created) != want {
 		t.Fatalf("the account Lens asked for:\n %s\nwant\n %s", created, want)

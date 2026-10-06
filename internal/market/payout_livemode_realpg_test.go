@@ -67,7 +67,7 @@ type connectLive struct {
 }
 
 func (c *connectLive) Livemode() bool { return c.live }
-func (c *connectLive) CreateConnectedAccount(context.Context, string, string) (billing.ConnectAccount, error) {
+func (c *connectLive) CreateConnectedAccount(context.Context, string, string, string) (billing.ConnectAccount, error) {
 	return billing.ConnectAccount{}, nil
 }
 func (c *connectLive) OnboardingLink(context.Context, string, string, string) (string, error) {

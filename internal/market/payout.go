@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -50,9 +51,13 @@ var ErrNotConnected = errors.New("market: connect a Stripe account to be paid")
 // ErrNothingAvailable: no earnings are past their holdback and unpaid.
 var ErrNothingAvailable = errors.New("market: no earnings are available yet — they become available 14 days after the buyer's payment clears")
 
+// ErrNoContactEmail: the person connecting has no email address, and Stripe opens a seller's account only
+// with one to reach them at (B35.4).
+var ErrNoContactEmail = invalid("Add an email address to your sign-in to connect with Stripe — Stripe needs one to reach you about your payouts.")
+
 // ConnectStripe is Stripe Connect as the payouts use it. *billing.LiveStripe satisfies it.
 type ConnectStripe interface {
-	CreateConnectedAccount(ctx context.Context, workspaceID, country string) (billing.ConnectAccount, error)
+	CreateConnectedAccount(ctx context.Context, workspaceID, country, contactEmail string) (billing.ConnectAccount, error)
 	OnboardingLink(ctx context.Context, accountID, refreshURL, returnURL string) (string, error)
 	ConnectedAccount(ctx context.Context, accountID string) (billing.ConnectAccount, error)
 	TransferToSeller(ctx context.Context, accountID string, cents int64, payoutID, workspaceID string) (transferID string, err error)
@@ -168,14 +173,21 @@ func monthOf(t time.Time) string { return t.UTC().Format("2006-01") }
 
 // ConnectSeller gives the seller a link to Stripe's onboarding for their connected account, creating the
 // account the first time. country (ISO 3166-1 alpha-2, "" for the platform's) is fixed once it exists.
-func (s *Store) ConnectSeller(ctx context.Context, api ConnectStripe, workspaceID, country, refreshURL, returnURL string) (string, billing.ConnectAccount, error) {
+// email is the signed-in person's, which Stripe is given as the account's contact email (B35.4): a test
+// (synthetic) workspace, whose owner has none, is given synthetic+<workspace id>@example.com, and anyone
+// else without one is refused before Stripe is asked.
+func (s *Store) ConnectSeller(ctx context.Context, api ConnectStripe, workspaceID, country, email, refreshURL, returnURL string) (string, billing.ConnectAccount, error) {
 	country = strings.ToUpper(strings.TrimSpace(country))
 	if country != "" && len(country) != 2 {
 		return "", billing.ConnectAccount{}, invalid("country must be a two-letter code, such as GB or US")
 	}
 	a, err := s.sellerAccount(ctx, workspaceID)
 	if errors.Is(err, ErrNotConnected) {
-		created, cerr := api.CreateConnectedAccount(ctx, workspaceID, country)
+		contact, cerr := s.contactEmail(ctx, workspaceID, email)
+		if cerr != nil {
+			return "", a, cerr
+		}
+		created, cerr := api.CreateConnectedAccount(ctx, workspaceID, country, contact)
 		if cerr != nil {
 			return "", a, fmt.Errorf("market: create the seller's Stripe account: %w", cerr)
 		}
@@ -194,6 +206,26 @@ func (s *Store) ConnectSeller(ctx context.Context, api ConnectStripe, workspaceI
 		return "", a, fmt.Errorf("market: Stripe onboarding link: %w", err)
 	}
 	return url, a, nil
+}
+
+// contactEmail is the address a new seller account gives Stripe: a test workspace's own test address, or
+// the signed-in person's.
+func (s *Store) contactEmail(ctx context.Context, workspaceID, email string) (string, error) {
+	var test bool
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT synthetic FROM workspaces WHERE id = $1), false)`, workspaceID).Scan(&test); err != nil {
+		return "", fmt.Errorf("market: is the seller a test workspace: %w", err)
+	}
+	if test {
+		return "synthetic+" + workspaceID + "@example.com", nil
+	}
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return "", ErrNoContactEmail
+	}
+	if a, err := mail.ParseAddress(email); err != nil || a.Address != email {
+		return "", invalid("email must be an address, such as you@company.com")
+	}
+	return email, nil
 }
 
 func (s *Store) sellerAccount(ctx context.Context, workspaceID string) (billing.ConnectAccount, error) {

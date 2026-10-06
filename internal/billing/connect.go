@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -73,10 +75,12 @@ func (l *LiveStripe) v2Post(ctx context.Context, path, idempotencyKey string, bo
 
 // CreateConnectedAccount creates a seller's account, asking for the transfers capability their payouts
 // need. country "" leaves it to the seller to say in onboarding. One account per workspace, however
-// often asked.
-func (l *LiveStripe) CreateConnectedAccount(ctx context.Context, workspaceID, country string) (ConnectAccount, error) {
+// often asked. contactEmail is where Stripe reaches the seller: Stripe refuses a recipient account without
+// one (B35.4).
+func (l *LiveStripe) CreateConnectedAccount(ctx context.Context, workspaceID, country, contactEmail string) (ConnectAccount, error) {
 	body := map[string]any{
-		"dashboard": "express",
+		"contact_email": contactEmail,
+		"dashboard":     "express",
 		"defaults": map[string]any{"responsibilities": map[string]string{
 			"fees_collector": "application", "losses_collector": "application"}},
 		"configuration": map[string]any{"recipient": map[string]any{"capabilities": map[string]any{
@@ -93,7 +97,11 @@ func (l *LiveStripe) CreateConnectedAccount(ctx context.Context, workspaceID, co
 			Country string `json:"country"`
 		} `json:"identity"`
 	}
-	if err := l.v2Post(ctx, "/v2/core/accounts", "market-seller-v2-"+workspaceID+"-"+country, body, &a); err != nil {
+	// The key changed with B35.4, whose body carries the email the old key was sent without, and names the
+	// email, so a seller who retries with another is not answered with the first one's result.
+	sum := sha256.Sum256([]byte(contactEmail))
+	key := "market-seller-v2-contact-" + workspaceID + "-" + country + "-" + hex.EncodeToString(sum[:6])
+	if err := l.v2Post(ctx, "/v2/core/accounts", key, body, &a); err != nil {
 		return ConnectAccount{}, err
 	}
 	c := ConnectAccount{ID: a.ID, Country: strings.ToUpper(country), CurrentlyDue: []string{}}

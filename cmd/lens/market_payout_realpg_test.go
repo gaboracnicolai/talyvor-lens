@@ -44,7 +44,7 @@ type connectCharge struct {
 	cents   int64
 }
 
-func (f *connectFake) CreateConnectedAccount(_ context.Context, ws, country string) (billing.ConnectAccount, error) {
+func (f *connectFake) CreateConnectedAccount(_ context.Context, ws, country, _ string) (billing.ConnectAccount, error) {
 	a := &billing.ConnectAccount{ID: "acct_" + ws, Country: country, CurrentlyDue: []string{"external_account", "individual.verification.document"}}
 	f.accounts[a.ID] = a
 	return *a, nil
@@ -126,7 +126,7 @@ func TestMarketPayouts_OnboardEarnPaidOutAfterHoldbackAndRefundsReverse(t *testi
 	now := time.Now()
 
 	// The seller connects: Lens creates their Express account and hands them Stripe's onboarding.
-	code, out := call(seller, http.MethodPost, "/v1/workspaces/"+seller+"/marketplace/payouts/connect", `{"country":"gb"}`)
+	code, out := call(seller, http.MethodPost, "/v1/workspaces/"+seller+"/marketplace/payouts/connect", `{"country":"gb","email":"seller@pay.example"}`)
 	var connected struct {
 		URL     string                 `json:"url"`
 		Account billing.ConnectAccount `json:"account"`
