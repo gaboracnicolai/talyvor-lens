@@ -22,6 +22,7 @@ import (
 	"github.com/talyvor/lens/internal/eval"
 	"github.com/talyvor/lens/internal/keel"
 	"github.com/talyvor/lens/internal/localrouter"
+	"github.com/talyvor/lens/internal/market"
 	"github.com/talyvor/lens/internal/mining"
 	"github.com/talyvor/lens/internal/modelwatch"
 	"github.com/talyvor/lens/internal/poolroyalty"
@@ -107,6 +108,7 @@ var shipped = map[string]recorded{
 	"eval.DefaultEstOutputTokens":                 {eval.DefaultEstOutputTokens, 256, "pre-serve cost estimate"},
 	"keel.DefaultMinWorkspaces":                   {keel.DefaultMinWorkspaces, 3, "k-anonymity floor"},
 	"localrouter.DefaultHealthCheckInterval":      {localrouter.DefaultHealthCheckInterval, 30 * time.Second, "health check interval"},
+	"market.DefaultTrialMax":                      {market.DefaultTrialMax, 5, "most free trial uses an offer may give (B32.21)"},
 	"mining.DefaultPatternEarnCapPerWorkspace":    {mining.DefaultPatternEarnCapPerWorkspace, 50_000, "pattern earn cap"},
 	"modelwatch.DefaultInterval":                  {modelwatch.DefaultInterval, time.Hour, "model-watch interval"},
 	"modelwatch.DefaultApplyInterval":             {modelwatch.DefaultApplyInterval, 5 * time.Minute, "how soon every replica applies a confirmed price or a retirement"},

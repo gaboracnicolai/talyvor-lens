@@ -129,7 +129,7 @@ type Draft struct {
 }
 
 // draftOffers is the set of offers a draft publishes, its price per use folded in.
-func draftOffers(d Draft) ([]Offer, error) {
+func draftOffers(d Draft, trialMax int) ([]Offer, error) {
 	if d.PricePerUseULXC%ulxcPerUSDMicro != 0 {
 		return nil, invalid("the price per use must be a whole number of µUSD (a multiple of %d µLXC)", ulxcPerUSDMicro)
 	}
@@ -139,7 +139,7 @@ func draftOffers(d Draft) ([]Offer, error) {
 		}
 		return []Offer{{Kind: OfferPerUse, Licence: LicenceCommercial, PriceUSDMicros: d.PricePerUseULXC / ulxcPerUSDMicro}}, nil
 	}
-	if err := checkOffers(d.Offers); err != nil {
+	if err := checkOffers(d.Offers, trialMax); err != nil {
 		return nil, err
 	}
 	if price, _ := perUseULXC(d.Offers); d.PricePerUseULXC != 0 && d.PricePerUseULXC != price {
@@ -150,8 +150,9 @@ func draftOffers(d Draft) ([]Offer, error) {
 
 // Store reads and writes the catalog.
 type Store struct {
-	pool  *pgxpool.Pool
-	clock func() time.Time // nil: time.Now; when a licence starts, ends and is in force (B32.19)
+	pool     *pgxpool.Pool
+	clock    func() time.Time // nil: time.Now; when a licence starts, ends and is in force (B32.19)
+	trialMax *int             // nil: DefaultTrialMax; the most trial uses an offer may give (B32.21)
 }
 
 func (s *Store) now() time.Time {
@@ -253,7 +254,7 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if d.PricePerUseULXC < 0 {
 		return Listing{}, invalid("the price per use cannot be negative (0 is free)")
 	}
-	offers, err := draftOffers(d)
+	offers, err := draftOffers(d, s.maxTrials())
 	if err != nil {
 		return Listing{}, err
 	}

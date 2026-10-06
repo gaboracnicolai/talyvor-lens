@@ -970,6 +970,10 @@ type Config struct {
 	MarketBillPriceID string
 	MarketMeterEvent  string
 
+	// MarketTrialMax is the most free trial uses one per_use offer may give each buyer (B32.21). Env:
+	// LENS_MARKET_TRIAL_MAX, default 5 — a proposal for Nicolai; 0 lets no offer give any.
+	MarketTrialMax int
+
 	// MarketPayoutReturnURL / MarketPayoutRefreshURL are where Stripe's seller onboarding returns to when a
 	// seller finishes it, and when its link has expired (B20.5). Env: LENS_MARKET_PAYOUT_RETURN_URL,
 	// LENS_MARKET_PAYOUT_REFRESH_URL; default the web app's selling page.
@@ -2099,6 +2103,16 @@ func Load() (*Config, error) {
 	c.BatchEnabled = false
 	if os.Getenv("LENS_BATCH_ENABLED") != "" {
 		c.BatchEnabled = parseBoolEnv("LENS_BATCH_ENABLED")
+	}
+
+	// B32.21 — the most trial uses an offer may give. A malformed value is refused.
+	c.MarketTrialMax = 5
+	if v := os.Getenv("LENS_MARKET_TRIAL_MAX"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("config: LENS_MARKET_TRIAL_MAX must be a non-negative integer, got %q", v)
+		}
+		c.MarketTrialMax = n
 	}
 
 	// D — the Model 2 allowance, in µLXC (W4.6.1 step 2). Default 0 = "no allowance

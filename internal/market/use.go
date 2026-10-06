@@ -108,6 +108,12 @@ type Use struct {
 	LicenceID  string       `json:"licence_id,omitempty"` // the licence it ran under (B32.19)
 	Steps      []StepResult `json:"steps,omitempty"`      // a pipeline's steps, in the order they ran (B20.7)
 	MeterError string       `json:"-"`
+
+	// B32.21: a trial use, or one with a step that was — free, and what it would have cost had it been billed.
+	Trial                  bool  `json:"trial,omitempty"`
+	TrialUsesLeft          *int  `json:"trial_uses_left,omitempty"` // of the listing's trial uses, for the buyer's owner
+	WouldHaveCostUSDMicros int64 `json:"would_have_cost_usd_micros,omitempty"`
+	trialULXC              int64 // a trial's would-be price
 }
 
 // StepResult is one step of a pipeline use: the listing it ran, what it answered, and — when the step is
@@ -171,26 +177,36 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 				return err
 			}
 		}
+		left, err := claimTrials(ctx, tx, buyerWorkspaceID, &u, steps)
+		if err != nil {
+			return err
+		}
+		if u.Charge == ChargeTrial {
+			u.TrialUsesLeft = &left
+		}
 		// Stamped by the clock a licence's periods are (B32.20): a rent's or subscription's included uses count per period.
 		if err := tx.QueryRow(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge,
-				licence_id, person_id, used_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11) RETURNING used_at`,
-			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge, u.LicenceID, req.Person, s.now()).Scan(&u.UsedAt); err != nil {
+				licence_id, person_id, used_at, use_kind)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, $12) RETURNING used_at`,
+			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge, u.LicenceID, req.Person, s.now(),
+			useKind(u.Charge)).Scan(&u.UsedAt); err != nil {
 			return err
 		}
 		for _, st := range steps {
 			if st.UseID == "" {
 				continue
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge, used_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-				st.UseID, st.ListingID, st.Version, st.seller, buyerWorkspaceID, agentID, st.PriceULXC, st.Charge, u.UsedAt); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge, used_at,
+					use_kind)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+				st.UseID, st.ListingID, st.Version, st.seller, buyerWorkspaceID, agentID, st.PriceULXC, st.Charge, u.UsedAt, useKind(st.Charge)); err != nil {
 				return err
 			}
 			ids = append(ids, st.UseID)
 		}
 		return nil
 	}
+	noTrial := false
 	for attempt := 0; ; attempt++ {
 		if lic != nil && lic.charged && l.WorkspaceID != buyerWorkspaceID {
 			u.Charge, u.PriceULXC, u.LicenceID = ChargeLicensed, 0, lic.id
@@ -198,6 +214,16 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 			return Use{}, err
 		} else {
 			u.LicenceID = ""
+		}
+		// B32.21: a billed use, or step, of a listing its buyer's owner still has a trial use of is a trial.
+		u.Trial, u.trialULXC, u.TrialUsesLeft = false, 0, nil
+		for i := range steps {
+			steps[i].Charge, steps[i].PriceULXC, steps[i].trialULXC = steps[i].charge, steps[i].priceULXC, 0
+		}
+		if !noTrial {
+			if err := s.offerTrials(ctx, buyerWorkspaceID, &u, steps); err != nil {
+				return Use{}, err
+			}
 		}
 		// Every billed use this makes: the listing's own, and each pipeline step that is another seller's.
 		billed = map[string]int64{}
@@ -226,6 +252,10 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 			lic.charged = false // its last included use went to another use first: this one is billed
 			continue
 		}
+		if errors.Is(err, errTrialUsedUp) && !noTrial {
+			noTrial = true // another use took the last trial first: this one is billed
+			continue
+		}
 		if err != nil {
 			return Use{}, err
 		}
@@ -243,7 +273,27 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 		}
 		return Use{}, err
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE market_uses SET ran_at = now() WHERE id = ANY($1)`, ids); err != nil {
+	// A trial is journalled once it has answered, with the use it explains.
+	if err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE market_uses SET ran_at = now() WHERE id = ANY($1)`, ids); err != nil {
+			return err
+		}
+		if u.Charge == ChargeTrial {
+			if err := postTrialTx(ctx, tx, u.ID, l.WorkspaceID, u.trialULXC/ulxcPerUSDMicro, u.UsedAt); err != nil {
+				return err
+			}
+			u.WouldHaveCostUSDMicros += u.trialULXC / ulxcPerUSDMicro
+		}
+		for _, st := range steps {
+			if st.Charge == ChargeTrial {
+				if err := postTrialTx(ctx, tx, st.UseID, st.seller, st.trialULXC/ulxcPerUSDMicro, u.UsedAt); err != nil {
+					return err
+				}
+				u.WouldHaveCostUSDMicros += st.trialULXC / ulxcPerUSDMicro
+			}
+		}
+		return nil
+	}); err != nil {
 		return u, fmt.Errorf("market: record use: %w", err)
 	}
 	for _, id := range ids {
@@ -456,15 +506,19 @@ func (s *Store) resolve(ctx context.Context, buyer, listingID string, version in
 // workspaces share a captured card fingerprint or an owner key?
 func (s *Store) linked(ctx context.Context, a, b string) (bool, error) {
 	var linked bool
-	err := s.pool.QueryRow(ctx, `SELECT
-		EXISTS (SELECT 1 FROM workspace_card_fingerprints x JOIN workspace_card_fingerprints y ON x.fingerprint_hash = y.fingerprint_hash
-		        WHERE x.workspace_id = $1 AND y.workspace_id = $2)
-		OR EXISTS (SELECT 1 FROM workspace_owner_links x JOIN workspace_owner_links y ON x.owner_key = y.owner_key
-		        WHERE x.workspace_id = $1 AND y.workspace_id = $2)`, a, b).Scan(&linked)
+	err := s.pool.QueryRow(ctx, `SELECT `+linkedSQL("$1", "$2"), a, b).Scan(&linked)
 	if err != nil {
 		return false, fmt.Errorf("market: single-party check: %w", err)
 	}
 	return linked, nil
+}
+
+// linkedSQL is that question as SQL, for the workspaces the expressions a and b name.
+func linkedSQL(a, b string) string {
+	return fmt.Sprintf(`(EXISTS (SELECT 1 FROM workspace_card_fingerprints x JOIN workspace_card_fingerprints y ON x.fingerprint_hash = y.fingerprint_hash
+		        WHERE x.workspace_id = %[1]s AND y.workspace_id = %[2]s)
+		OR EXISTS (SELECT 1 FROM workspace_owner_links x JOIN workspace_owner_links y ON x.owner_key = y.owner_key
+		        WHERE x.workspace_id = %[1]s AND y.workspace_id = %[2]s))`, a, b)
 }
 
 var variable = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_]+)\s*\}\}`)

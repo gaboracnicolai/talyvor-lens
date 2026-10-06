@@ -1763,7 +1763,8 @@ func run() error {
 	}
 	// B20.2 — a buyer's paid marketplace uses go on their monthly Stripe bill, and a paid invoice clears them.
 	marketStore := market.NewStore(pool)
-	dualToken.SetListingCharger(marketStore) // B19.17: a schedule may pay a marketplace listing
+	marketStore.SetTrialMax(cfg.MarketTrialMax) // B32.21
+	dualToken.SetListingCharger(marketStore)    // B19.17: a schedule may pay a marketplace listing
 	// The real workspaces' Stripe (B25.6: a test workspace's is on the test-mode key, below).
 	liveSide := stripeSide{cards: agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)} // B19.12
 	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {

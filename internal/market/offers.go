@@ -62,8 +62,9 @@ type Offer struct {
 	CreatedAt      time.Time `json:"created_at,omitzero"`
 }
 
-// checkOffers validates a listing's whole set of offers: each well formed, and one per kind and licence.
-func checkOffers(offers []Offer) error {
+// checkOffers validates a listing's whole set of offers: each well formed, one per kind and licence, and none giving
+// more than trialMax trial uses.
+func checkOffers(offers []Offer, trialMax int) error {
 	seen := map[[2]string]bool{}
 	for i := range offers {
 		o := &offers[i]
@@ -116,6 +117,9 @@ func checkOffers(offers []Offer) error {
 		}
 		if o.TrialUses < 0 || (o.TrialUses > 0 && o.Kind != OfferPerUse) {
 			return invalid("%s: only a per_use offer gives trial uses, and never fewer than 0", where)
+		}
+		if o.TrialUses > trialMax {
+			return invalid("%s: an offer gives at most %d trial uses", where, trialMax)
 		}
 	}
 	return nil
@@ -230,7 +234,7 @@ func writeOffers(ctx context.Context, tx pgx.Tx, listingID string, offers []Offe
 // ReplaceOffers makes offers the active set of workspaceID's listing listingID (B32.18): the next charge uses the new
 // prices, and every past use keeps its own. An empty set makes the listing free.
 func (s *Store) ReplaceOffers(ctx context.Context, workspaceID, listingID string, offers []Offer) ([]Offer, error) {
-	if err := checkOffers(offers); err != nil {
+	if err := checkOffers(offers, s.maxTrials()); err != nil {
 		return nil, err
 	}
 	var out []Offer
