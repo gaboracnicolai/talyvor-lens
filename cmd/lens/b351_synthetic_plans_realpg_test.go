@@ -49,7 +49,9 @@ func TestB351_ASyntheticWorkspaceIsOnThePlanTheTestersPutItOn(t *testing.T) {
 	r := chi.NewRouter()
 	mountSyntheticRoutes(r, "the-key", syntheticDeps{workspaces: wsm, credits: dual, answers: storedanswers.New(pool, nil),
 		audit: pool, plans: pool,
-		mint: func(workspaceID, _ string, _ []string, _ time.Duration) (string, error) { return "tok-" + workspaceID, nil }})
+		mint: func(workspaceID, _ string, _ []string, _ time.Duration) (string, error) {
+			return "tok-" + workspaceID, nil
+		}})
 	call := func(path, body string) (int, map[string]any) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
