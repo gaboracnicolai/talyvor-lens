@@ -2527,6 +2527,8 @@ func run() error {
 		mint: func(workspaceID, userID string, scopes []string, ttl time.Duration) (string, error) {
 			return auth.GenerateToken(workspaceID, userID, scopes, authManager.PrivateKey(), ttl)
 		},
+		// B35.1 — a test workspace on any plan.
+		plans: pool,
 		// B25.7 — a test user's loan instalment, bill, refund and card purchase brought due now.
 		due: syntheticDueDeps{db: pool, loans: dualToken, bills: marketStore, cards: dualToken,
 			authorizer: agentcard.NewHandler(cfg.StripeIssuingWebhookSecret, dualToken, ecbRates)},
