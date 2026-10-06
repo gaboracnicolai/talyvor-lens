@@ -70,9 +70,11 @@ type Meter interface {
 }
 
 // AgentJudge judges an agent's use of a listing against its spending rules (B19.2, B19.14), recording the
-// use in the same transaction so its daily and monthly limits count it.
+// use in the same transaction so its daily and monthly limits count it — and a licence it takes against its licence
+// rules (B32.22).
 type AgentJudge interface {
-	JudgeAgentPurchase(ctx context.Context, workspaceID, agentID, listingID string, amount int64, what string, record func(pgx.Tx) error) error
+	JudgeAgentPurchase(ctx context.Context, workspaceID, agentID, listingID string, amount int64, c economy.Commitment, what string,
+		record func(pgx.Tx) error) error
 }
 
 // UseRequest is what a buyer asks of a listing.
@@ -244,7 +246,7 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 		// pipeline is judged once, for all it bills.
 		if agentID != "" && deps.Agents != nil {
 			what := fmt.Sprintf("market:%s:%s:%d:%d", agentID, l.ID, version, total)
-			err = deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, total, what, record)
+			err = deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, total, economy.Commitment{}, what, record)
 		} else if err = pgx.BeginFunc(ctx, s.pool, record); err != nil {
 			err = fmt.Errorf("market: record use: %w", err)
 		}

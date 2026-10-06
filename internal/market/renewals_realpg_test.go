@@ -232,7 +232,8 @@ func TestRenewals_AnAgentWhoseMonthlyLimitIsSpentEndsItsSubscriptionUnpaid(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bank.SetAgentRules(ctx, buyer, agent.ID, economy.AgentRules{MonthlyLimitULXC: 4_000_000}); err != nil {
+	maySubscribe := true // B32.22: an agent subscribes only when its rules let it
+	if _, err := bank.SetAgentRules(ctx, buyer, agent.ID, economy.AgentRules{MonthlyLimitULXC: 4_000_000, MaySubscribe: &maySubscribe}); err != nil {
 		t.Fatal(err)
 	}
 	meter := &stripeMeter{tried: map[string]int{}}

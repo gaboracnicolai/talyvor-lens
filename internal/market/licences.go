@@ -204,7 +204,9 @@ func (s *Store) License(ctx context.Context, deps LicenceDeps, buyerWorkspaceID,
 	}
 	if agentID != "" && deps.Agents != nil {
 		what := fmt.Sprintf("licence:%s:%s:%s:%d", agentID, l.ID, o.ID, lic.PriceULXC)
-		err = deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, lic.PriceULXC, what, record)
+		// B32.22: what the licence commits the agent to is what it charges — nothing when it is free or linked.
+		c := economy.Commitment{Kind: o.Kind, Licence: o.Licence, Renews: lic.AutoRenew, ULXC: lic.PriceULXC}
+		err = deps.Agents.JudgeAgentPurchase(ctx, buyerWorkspaceID, agentID, l.ID, lic.PriceULXC, c, what, record)
 	} else {
 		err = pgx.BeginFunc(ctx, s.pool, record)
 	}

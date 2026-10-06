@@ -75,6 +75,27 @@ type AgentRules struct {
 	// a day. Read, it is never nil; nil (absent from the JSON) saves the rules without changing it. Saved, it
 	// replaces the stored caps whole: a payee left out, or capped at zero, has no cap.
 	PayeeDailyLimitsULXC map[string]int64 `json:"payee_daily_limits_ulxc"`
+	// MaxCommitmentULXC, AllowedLicences and MaySubscribe (B32.22) bound the marketplace licences the agent may take:
+	// the most one may commit it to (a buy's or a rent's price, one subscription period's), the licences it may hold —
+	// commercial and enterprise; personal is never an agent's, and empty allows both — and whether it may subscribe at
+	// all — or take a rent that renews itself — which it may not until its owner says so. Read, they are never nil; nil
+	// (absent from the JSON) saves the rules without changing them.
+	MaxCommitmentULXC *int64   `json:"max_commitment_ulxc"`
+	AllowedLicences   []string `json:"allowed_licences"`
+	MaySubscribe      *bool    `json:"may_subscribe"`
+}
+
+// AgentLicences are the marketplace licences an agent may hold (B32.22): a personal licence is one person's.
+var AgentLicences = []string{"commercial", "enterprise"}
+
+// Commitment is what a marketplace licence commits an agent to (B32.22): its kind — buy, rent or subscribe — its
+// licence, its price — a buy's or a rent's, or one subscription period's — and whether it renews itself, as a
+// subscription and a rent set to renew do. A use commits to nothing beyond itself, and is the zero Commitment.
+type Commitment struct {
+	Kind    string `json:"kind"`
+	Licence string `json:"licence"`
+	Renews  bool   `json:"renews"`
+	ULXC    int64  `json:"-"`
 }
 
 // AgentRequest is what the rules judge about a request besides its amount.
@@ -87,6 +108,7 @@ type AgentRequest struct {
 	Listing     string    // the marketplace listing a use is of (B19.14)
 	Payee       Payee     // who a payment goes to, and Memo why: the approval it files names both (B23.5)
 	Memo        string
+	Commitment  Commitment // the marketplace licence a payment takes, if it takes one (B32.22)
 }
 
 // Payee is who a payment goes to. Name is the one it had when the approval was filed; empty until then
@@ -176,7 +198,7 @@ func limitOf(v *int64) int64 {
 
 func (r AgentRules) validate() error {
 	for _, v := range []int64{r.MaxPerRequestULXC, limitOf(r.HourlyLimitULXC), r.DailyLimitULXC, limitOf(r.WeeklyLimitULXC),
-		r.MonthlyLimitULXC, r.ApprovalAboveULXC, limitOf(r.RequestsPerMinute)} {
+		r.MonthlyLimitULXC, r.ApprovalAboveULXC, limitOf(r.RequestsPerMinute), limitOf(r.MaxCommitmentULXC)} {
 		if v < 0 {
 			return errors.New("a limit cannot be negative (0 means no limit)")
 		}
@@ -216,6 +238,11 @@ func (r AgentRules) validate() error {
 			return fmt.Errorf("the daily limit for %q cannot be negative (0 means no limit)", id)
 		}
 	}
+	for _, licence := range r.AllowedLicences {
+		if !slices.Contains(AgentLicences, licence) {
+			return fmt.Errorf("an agent may hold commercial and enterprise licences, not %q: a personal licence is one person's", licence)
+		}
+	}
 	if (r.ActiveFrom == "") != (r.ActiveUntil == "") {
 		return errors.New("active_from and active_until go together")
 	}
@@ -248,15 +275,19 @@ func nullIfZero(v int64) any {
 const agentRulesColumns = `COALESCE(max_per_request_ulxc, 0), COALESCE(daily_limit_ulxc, 0), COALESCE(monthly_limit_ulxc, 0),
 	COALESCE(approval_above_ulxc, 0), allowed_models, allowed_providers, COALESCE(active_from, ''), COALESCE(active_until, ''), timezone,
 	pause_on_unusual_spend, allowed_listings, COALESCE(hourly_limit_ulxc, 0), COALESCE(weekly_limit_ulxc, 0), model_daily_limits_ulxc,
-	COALESCE(requests_per_minute, 0), allowed_payees, blocked_payees, payee_daily_limits_ulxc`
+	COALESCE(requests_per_minute, 0), allowed_payees, blocked_payees, payee_daily_limits_ulxc,
+	COALESCE(max_commitment_ulxc, 0), COALESCE(allowed_licences, '{}'), COALESCE(may_subscribe, false)`
 
 func scanAgentRules(row pgx.Row) (AgentRules, error) {
 	var r AgentRules
-	var hourly, weekly, rpm int64
+	var hourly, weekly, rpm, commitment int64
+	var maySubscribe bool
 	err := row.Scan(&r.MaxPerRequestULXC, &r.DailyLimitULXC, &r.MonthlyLimitULXC, &r.ApprovalAboveULXC,
 		&r.AllowedModels, &r.AllowedProviders, &r.ActiveFrom, &r.ActiveUntil, &r.Timezone, &r.PauseOnUnusualSpend, &r.AllowedListings,
-		&hourly, &weekly, &r.ModelDailyLimitsULXC, &rpm, &r.AllowedPayees, &r.BlockedPayees, &r.PayeeDailyLimitsULXC)
+		&hourly, &weekly, &r.ModelDailyLimitsULXC, &rpm, &r.AllowedPayees, &r.BlockedPayees, &r.PayeeDailyLimitsULXC,
+		&commitment, &r.AllowedLicences, &maySubscribe)
 	r.HourlyLimitULXC, r.WeeklyLimitULXC, r.RequestsPerMinute = &hourly, &weekly, &rpm
+	r.MaxCommitmentULXC, r.MaySubscribe = &commitment, &maySubscribe
 	return r, err
 }
 
@@ -297,9 +328,10 @@ func capsJSON(limits map[string]int64, key func(string) string) (*string, error)
 }
 
 // SetAgentRules replaces an agent's rules — all but AllowedListings, HourlyLimitULXC, WeeklyLimitULXC,
-// ModelDailyLimitsULXC, RequestsPerMinute, AllowedPayees, BlockedPayees and PayeeDailyLimitsULXC when they are nil
-// (absent from the JSON): a client that predates them (B19.14, B28.300, B28.301, B28.302, B28.303, B28.304) must not
-// clear an agent's listings, caps or payees by saving its other rules. An empty list or a zero clears them. A save
+// ModelDailyLimitsULXC, RequestsPerMinute, AllowedPayees, BlockedPayees, PayeeDailyLimitsULXC, MaxCommitmentULXC,
+// AllowedLicences and MaySubscribe when they are nil (absent from the JSON): a client that predates them (B19.14,
+// B28.300, B28.301, B28.302, B28.303, B28.304, B32.22) must not clear an agent's listings, caps, payees or licence
+// rules by saving its other rules. An empty list or a zero clears them. A save
 // that changes them is their next version (B28.307), recorded with who ctx names (WithRulesChange).
 func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID string, r AgentRules) (AgentRules, error) {
 	if err := r.validate(); err != nil {
@@ -331,16 +363,19 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// $14 to $20 are NULL when absent, which keeps the stored caps and payees; a zero or an empty list clears one.
-	var hourly, weekly, rpm int64
+	// $14 to $23 are NULL when absent, which keeps the stored caps, payees and licence rules; a zero or an empty list
+	// clears one.
+	var hourly, weekly, rpm, commitment int64
+	var maySubscribe bool
 	err = tx.QueryRow(ctx, `
 		INSERT INTO agent_rules (agent_id, workspace_id, max_per_request_ulxc, daily_limit_ulxc, monthly_limit_ulxc,
 		       approval_above_ulxc, allowed_models, allowed_providers, active_from, active_until, timezone, pause_on_unusual_spend,
 		       allowed_listings, hourly_limit_ulxc, weekly_limit_ulxc, model_daily_limits_ulxc, requests_per_minute,
-		       allowed_payees, blocked_payees, payee_daily_limits_ulxc)
+		       allowed_payees, blocked_payees, payee_daily_limits_ulxc, max_commitment_ulxc, allowed_licences, may_subscribe)
 		SELECT id, workspace_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13::text[], '{}'),
 		       NULLIF($14::bigint, 0), NULLIF($15::bigint, 0), COALESCE($16::text::jsonb, '{}'), NULLIF($17::integer, 0),
-		       COALESCE($18::text[], '{}'), COALESCE($19::text[], '{}'), COALESCE($20::text::jsonb, '{}')
+		       COALESCE($18::text[], '{}'), COALESCE($19::text[], '{}'), COALESCE($20::text::jsonb, '{}'),
+		       NULLIF($21::bigint, 0), COALESCE($22::text[], '{}'), COALESCE($23::boolean, false)
 		  FROM agent_accounts WHERE id = $1 AND workspace_id = $2
 		ON CONFLICT (agent_id) DO UPDATE SET max_per_request_ulxc = EXCLUDED.max_per_request_ulxc,
 		       daily_limit_ulxc = EXCLUDED.daily_limit_ulxc, monthly_limit_ulxc = EXCLUDED.monthly_limit_ulxc,
@@ -354,13 +389,18 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 		       requests_per_minute = NULLIF(COALESCE($17::integer, agent_rules.requests_per_minute), 0),
 		       allowed_payees = COALESCE($18::text[], agent_rules.allowed_payees),
 		       blocked_payees = COALESCE($19::text[], agent_rules.blocked_payees),
-		       payee_daily_limits_ulxc = COALESCE($20::text::jsonb, agent_rules.payee_daily_limits_ulxc), updated_at = now()
+		       payee_daily_limits_ulxc = COALESCE($20::text::jsonb, agent_rules.payee_daily_limits_ulxc),
+		       max_commitment_ulxc = NULLIF(COALESCE($21::bigint, agent_rules.max_commitment_ulxc), 0),
+		       allowed_licences = COALESCE($22::text[], agent_rules.allowed_licences),
+		       may_subscribe = COALESCE($23::boolean, agent_rules.may_subscribe), updated_at = now()
 		RETURNING COALESCE(hourly_limit_ulxc, 0), COALESCE(weekly_limit_ulxc, 0), model_daily_limits_ulxc, COALESCE(requests_per_minute, 0),
-		       allowed_payees, blocked_payees, payee_daily_limits_ulxc`,
+		       allowed_payees, blocked_payees, payee_daily_limits_ulxc, COALESCE(max_commitment_ulxc, 0), allowed_licences, may_subscribe`,
 		agentID, workspaceID, nullIfZero(r.MaxPerRequestULXC), nullIfZero(r.DailyLimitULXC), nullIfZero(r.MonthlyLimitULXC),
 		nullIfZero(r.ApprovalAboveULXC), r.AllowedModels, r.AllowedProviders, from, until, r.Timezone, r.PauseOnUnusualSpend,
-		r.AllowedListings, r.HourlyLimitULXC, r.WeeklyLimitULXC, models, r.RequestsPerMinute, r.AllowedPayees, r.BlockedPayees, payeeCaps).
-		Scan(&hourly, &weekly, &r.ModelDailyLimitsULXC, &rpm, &r.AllowedPayees, &r.BlockedPayees, &r.PayeeDailyLimitsULXC)
+		r.AllowedListings, r.HourlyLimitULXC, r.WeeklyLimitULXC, models, r.RequestsPerMinute, r.AllowedPayees, r.BlockedPayees, payeeCaps,
+		r.MaxCommitmentULXC, r.AllowedLicences, r.MaySubscribe).
+		Scan(&hourly, &weekly, &r.ModelDailyLimitsULXC, &rpm, &r.AllowedPayees, &r.BlockedPayees, &r.PayeeDailyLimitsULXC,
+			&commitment, &r.AllowedLicences, &maySubscribe)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, ErrAgentNotFound
 	}
@@ -374,6 +414,7 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
 	r.HourlyLimitULXC, r.WeeklyLimitULXC, r.RequestsPerMinute = &hourly, &weekly, &rpm
+	r.MaxCommitmentULXC, r.MaySubscribe = &commitment, &maySubscribe
 	return r, nil
 }
 
@@ -389,10 +430,12 @@ func (s *DualTokenStore) GetAgentRules(ctx context.Context, workspaceID, agentID
 	}
 	r, err := scanAgentRules(s.pool.QueryRow(ctx, `SELECT `+agentRulesColumns+` FROM agent_rules WHERE agent_id = $1`, agentID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		var hourly, weekly, rpm int64
+		var hourly, weekly, rpm, commitment int64
+		var maySubscribe bool
 		return AgentRules{HourlyLimitULXC: &hourly, WeeklyLimitULXC: &weekly, RequestsPerMinute: &rpm, ModelDailyLimitsULXC: map[string]int64{},
 			AllowedModels: []string{}, AllowedProviders: []string{}, AllowedListings: []string{}, AllowedPayees: []string{},
-			BlockedPayees: []string{}, PayeeDailyLimitsULXC: map[string]int64{}, Timezone: "UTC"}, nil
+			BlockedPayees: []string{}, PayeeDailyLimitsULXC: map[string]int64{}, Timezone: "UTC",
+			MaxCommitmentULXC: &commitment, AllowedLicences: []string{}, MaySubscribe: &maySubscribe}, nil
 	}
 	if err != nil {
 		return r, fmt.Errorf("economy: agent rules: %w", err)
@@ -546,6 +589,9 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 	req := agentRequestFrom(ctx)
 	r, err := agentRulesInForce(ctx, tx, agentID, req.At) // with its boosts in force then (B28.308)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if err := (AgentRules{}).judgeCommitment(req.Commitment); err != nil {
+			return err
+		}
 		if err := recordPayeePayment(ctx, tx, workspaceID, agentID, req, nil, amount, ref); err != nil {
 			return err
 		}
@@ -583,6 +629,9 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 	}
 	if len(r.AllowedListings) > 0 && req.Listing != "" && !slices.Contains(r.AllowedListings, req.Listing) {
 		return ruleRefusal("the agent may not use the marketplace listing %q", req.Listing)
+	}
+	if err := r.judgeCommitment(req.Commitment); err != nil {
+		return err
 	}
 	var ids []string // the ids the payee lists and caps name a payment's payee by
 	if req.Payment && len(r.AllowedPayees)+len(r.BlockedPayees)+len(r.PayeeDailyLimitsULXC) > 0 {
@@ -668,6 +717,29 @@ func enforceAgentRules(ctx context.Context, tx pgx.Tx, workspaceID, agentID stri
 		return err
 	}
 	return watchAgentSpend(ctx, tx, workspaceID, agentID, amount, req.At, r.PauseOnUnusualSpend)
+}
+
+// judgeCommitment judges the marketplace licence a payment takes, if it takes one (B32.22), against r — the zero rules
+// for an agent with none, which let it take a commercial or an enterprise licence at any price but never subscribe.
+// Each refusal names its rule.
+func (r AgentRules) judgeCommitment(c Commitment) error {
+	switch {
+	case c.Kind == "":
+		return nil
+	case !slices.Contains(AgentLicences, c.Licence):
+		return ruleRefusal("an agent may hold only commercial and enterprise licences, and this %s is %s: a personal licence is one person's", c.Kind, c.Licence)
+	case len(r.AllowedLicences) > 0 && !slices.Contains(r.AllowedLicences, c.Licence):
+		return ruleRefusal("the agent may hold only %s licences (allowed_licences), and this %s is %s",
+			strings.Join(r.AllowedLicences, " and "), c.Kind, c.Licence)
+	case c.Kind == "subscribe" && (r.MaySubscribe == nil || !*r.MaySubscribe):
+		return ruleRefusal("the agent's rules do not let it subscribe (may_subscribe)")
+	case c.Renews && (r.MaySubscribe == nil || !*r.MaySubscribe): // a rent that renews itself is a subscription
+		return ruleRefusal("the agent's rules do not let it take a %s that renews itself (may_subscribe)", c.Kind)
+	case limitOf(r.MaxCommitmentULXC) > 0 && c.ULXC > *r.MaxCommitmentULXC:
+		return ruleRefusal("this %s would commit the agent to %s LXC; the most one licence may commit it to is %s LXC (max_commitment_ulxc)",
+			c.Kind, lxcString(c.ULXC), lxcString(*r.MaxCommitmentULXC))
+	}
+	return nil
 }
 
 // fileApproval records the approval a refused request needs — or finds the one already open for it — once
