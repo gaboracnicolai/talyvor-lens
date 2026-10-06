@@ -26,11 +26,18 @@ key = owner.agents.issue_key(agent["id"])["key"]
 ai = LensClient(lens_url=lens_url, api_key=key, workspace_id="acme").openai
 ai.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "Hello"}])
 
-# 5. Read its statement, newest first: the model call, then the funding.
+# 5. Read its statement, newest first: the model call's three lines, then the funding.
 owner.agents.statement(agent["id"])["lines"]
-# [{"kind": "spend", "amount_ulxc": -1500, "balance_after_ulxc": 9998500, ...},
+# [{"kind": "platform_fee", "amount_ulxc": -4, "balance_after_ulxc": 9999930, ...},
+#  {"kind": "settle", "amount_ulxc": 25864, "balance_after_ulxc": 9999934, ...},
+#  {"kind": "hold", "amount_ulxc": -25930, "balance_after_ulxc": 9974070, ...},
 #  {"kind": "fund", "amount_ulxc": 10000000, "balance_after_ulxc": 10000000, ...}]
 ```
+
+These are the lines a local Lens wrote for that call: the `hold` sets aside the most the call could
+cost, the `settle` returns what it did not use, so the call cost the hold less the settle
+(25,930 − 25,864 = 66 µLXC), and the platform fee is a line of its own (4 µLXC here, at the
+workspace's plan rate).
 
 Every agent has a person as its owner, so create it signed in — with your own token, or on the
 Agent Wallets screen of the Talyvor app. Funding, `withdraw`, `issue_key`, `statement` and
