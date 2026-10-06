@@ -163,6 +163,7 @@ type Store struct {
 
 	lineageMaxShare *int // nil: DefaultLineageMaxShareBPS (B32.24)
 	lineageMaxDepth *int // nil: DefaultLineageMaxDepth (B32.24)
+	lineageTotalCap *int // nil: DefaultLineageTotalCapBPS (B32.26)
 }
 
 func (s *Store) now() time.Time {

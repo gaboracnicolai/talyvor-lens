@@ -50,6 +50,25 @@ func lockUse(ctx context.Context, tx pgx.Tx, useID string) error {
 	return err
 }
 
+// lockPayees takes the seller lock of every payee of useID — its seller and every ancestor its royalties pay
+// (B32.26) — in one order, so two transactions taking several never wait on each other.
+func lockPayees(ctx context.Context, tx pgx.Tx, useID, seller string) error {
+	rows, err := tx.Query(ctx, `SELECT $2::text UNION SELECT seller_workspace_id FROM market_earnings WHERE use_id = $1 ORDER BY 1`, useID, seller)
+	if err != nil {
+		return err
+	}
+	payees, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	for _, ws := range payees {
+		if err := lockSeller(ctx, tx, ws); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // OpenHold keeps the earning of useID in its seller's holdback until the hold is released. The use may not have
 // cleared yet; once its earning is past its holdback the hold is refused (ErrOutOfHoldback), since the money may
 // already be paid out.
@@ -69,8 +88,8 @@ func (s *Store) OpenHold(ctx context.Context, useID, reason, openedBy string, no
 			}
 			return err
 		}
-		// The seller's lock orders this with a payout, which reads the holds; the use's, with its release.
-		if err := lockSeller(ctx, tx, seller); err != nil {
+		// The payees' locks order this with a payout, which reads the holds; the use's, with its release.
+		if err := lockPayees(ctx, tx, useID, seller); err != nil {
 			return err
 		}
 		if err := lockUse(ctx, tx, useID); err != nil {
@@ -112,7 +131,7 @@ func (s *Store) ReleaseHold(ctx context.Context, holdID, decision string, now ti
 			}
 			return err
 		}
-		if err := lockSeller(ctx, tx, seller); err != nil {
+		if err := lockPayees(ctx, tx, h.UseID, seller); err != nil {
 			return err
 		}
 		if err := lockUse(ctx, tx, h.UseID); err != nil {
@@ -147,23 +166,34 @@ func dueAt(now string) string {
 	AND NOT EXISTS (SELECT 1 FROM market_journal_entries j WHERE j.kind = 'release' AND j.ref = e.use_id)`
 }
 
-// releaseUseTx releases the earning of useID if it is due at now, on tx under the use's lock: +share to the
-// seller's holdback and −share to their available balance, funded as the earning was. It reports whether it did.
+// releaseUseTx releases the earnings of useID if they are due at now, on tx under the use's lock: for each of its
+// payees (B32.26), +share to their holdback and −share to their available balance, funded as the earning was — one
+// release entry for the use. It reports whether it did.
 func releaseUseTx(ctx context.Context, tx pgx.Tx, useID string, now time.Time) (bool, error) {
-	var seller string
-	var share int64
-	var livemode, test bool
-	err := tx.QueryRow(ctx, `SELECT e.seller_workspace_id, e.share_usd_micros, e.livemode, e.test FROM market_earnings e
-		WHERE e.use_id = $1 AND `+dueAt("$2"), useID, now).Scan(&seller, &share, &livemode, &test)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
+	rows, err := tx.Query(ctx, `SELECT e.seller_workspace_id, e.share_usd_micros, e.livemode, e.test FROM market_earnings e
+		WHERE e.use_id = $1 AND `+dueAt("$2")+` ORDER BY e.kind <> 'sale', e.depth, e.id`, useID, now)
 	if err != nil {
 		return false, err
 	}
-	_, err = PostJournalTx(ctx, tx, JournalRelease, useID, funding(livemode, test), now,
-		Posting{Account: SellerHoldback(seller), AmountUSDMicros: share},
-		Posting{Account: SellerAvailable(seller), AmountUSDMicros: -share})
+	type due struct {
+		payee          string
+		share          int64
+		livemode, test bool
+	}
+	earnings, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (due, error) {
+		var d due
+		return d, row.Scan(&d.payee, &d.share, &d.livemode, &d.test)
+	})
+	if err != nil || len(earnings) == 0 {
+		return false, err
+	}
+	postings := make([]Posting, 0, 2*len(earnings))
+	for _, d := range earnings {
+		postings = append(postings,
+			Posting{Account: SellerHoldback(d.payee), AmountUSDMicros: d.share, Funding: funding(d.livemode, d.test)},
+			Posting{Account: SellerAvailable(d.payee), AmountUSDMicros: -d.share, Funding: funding(d.livemode, d.test)})
+	}
+	_, err = PostJournalTx(ctx, tx, JournalRelease, useID, postings[0].Funding, now, postings...)
 	return err == nil, err
 }
 
@@ -173,7 +203,7 @@ func (s *Store) ReleaseDue(ctx context.Context, now time.Time) (int, error) {
 	n := 0
 	for {
 		rows, err := s.pool.Query(ctx, `SELECT e.use_id FROM market_earnings e WHERE `+dueAt("$1")+`
-			ORDER BY e.payable_at, e.use_id LIMIT 500`, now)
+			GROUP BY e.use_id ORDER BY min(e.payable_at), e.use_id LIMIT 500`, now)
 		if err != nil {
 			return n, fmt.Errorf("market: earnings due for release: %w", err)
 		}

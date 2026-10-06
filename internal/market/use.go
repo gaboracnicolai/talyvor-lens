@@ -616,13 +616,15 @@ func run(ctx context.Context, r Runner, calls []call, model string, u *Use) erro
 }
 
 // ClearInvoice clears the billed uses the buyer's paid marketplace invoice carried — those used within
-// [periodStart, periodEnd) — and credits each seller their share, each use journalled as one clear entry in
-// the same transaction (B32.16), each rent counted towards owning its listing (B32.20). A replay clears nothing more. Each earning is live or test as the invoice was
+// [periodStart, periodEnd) — and credits each seller their share, less the royalties it pays up its listing's family
+// tree (B32.26), each use journalled as one clear entry in the same transaction (B32.16), each rent counted towards
+// owning its listing (B32.20). A replay clears nothing more. Each earning is live or test as the invoice was
 // (B22.1): only live earnings reach a live payout.
 func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time, livemode bool) (int, error) {
 	n := 0
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, seller_workspace_id, price_ulxc, COALESCE(payee_agent_id, '') <> '', COALESCE(licence_id, ''), use_kind FROM market_uses
+		rows, err := tx.Query(ctx, `SELECT id, seller_workspace_id, price_ulxc, COALESCE(payee_agent_id, '') <> '', COALESCE(licence_id, ''), use_kind,
+			       listing_id, version FROM market_uses
 			WHERE buyer_workspace_id = $1 AND charge = 'billed' AND metered_at IS NOT NULL AND cleared_at IS NULL
 			  AND used_at >= $2 AND used_at < $3
 			ORDER BY used_at, id FOR UPDATE`, buyerWorkspaceID, periodStart, periodEnd)
@@ -635,11 +637,12 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 			payment    bool // a payment to another company's agent, not a use of a listing
 			licence    string
 			kind       string // its use_kind
+			sold       versionRef
 		}
 		var uses []cleared
 		for rows.Next() {
 			var c cleared
-			if err := rows.Scan(&c.id, &c.seller, &c.ulxc, &c.payment, &c.licence, &c.kind); err != nil {
+			if err := rows.Scan(&c.id, &c.seller, &c.ulxc, &c.payment, &c.licence, &c.kind, &c.sold.listing, &c.sold.version); err != nil {
 				rows.Close()
 				return err
 			}
@@ -662,13 +665,37 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 			}
 			gross := c.ulxc / ulxcPerUSDMicro
 			share := SellerShare(gross, takeBPS(c.payment))
-			var test bool // a test workspace's earning is test money whatever paid it (B25.1)
-			if err := tx.QueryRow(ctx, `INSERT INTO market_earnings (use_id, seller_workspace_id, gross_usd_micros, share_usd_micros, fee_usd_micros, invoice_id,
-				cleared_at, payable_at, livemode) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING test`, c.id, c.seller, gross, share, gross-share, invoiceID, paidAt,
-				paidAt.Add(Holdback), livemode).Scan(&test); err != nil {
+			// B32.26: the pool flows up the sold version's family tree; the seller keeps what does not.
+			keep, royalties := share, []royalty(nil)
+			if !c.payment {
+				var test bool // a test workspace's earning is test money whatever paid it (B25.1)
+				if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT synthetic FROM workspaces WHERE id = $1), false)`, c.seller).Scan(&test); err != nil {
+					return err
+				}
+				if keep, royalties, err = s.lineageRoyaltiesTx(ctx, tx, buyerWorkspaceID, c.seller, c.sold, share, funding(livemode, test) == "live"); err != nil {
+					return err
+				}
+			}
+			payees := make([]Posting, 0, 1+len(royalties))
+			earn := func(payee, kind, ref string, depth int, gross, fee, amount int64) error {
+				var test bool // set by the database from the payee's workspace (0173)
+				if err := tx.QueryRow(ctx, `INSERT INTO market_earnings (use_id, seller_workspace_id, kind, source_ref, depth, gross_usd_micros, share_usd_micros,
+					fee_usd_micros, invoice_id, cleared_at, payable_at, livemode) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING test`,
+					c.id, payee, kind, ref, depth, gross, amount, fee, invoiceID, paidAt, paidAt.Add(Holdback), livemode).Scan(&test); err != nil {
+					return err
+				}
+				payees = append(payees, Posting{Account: SellerHoldback(payee), AmountUSDMicros: -amount, Funding: funding(livemode, test)})
+				return nil
+			}
+			if err := earn(c.seller, EarningSale, "", 0, gross, gross-share, keep); err != nil {
 				return err
 			}
-			if err := postClearTx(ctx, tx, c.id, c.seller, gross, share, funding(livemode, test), paidAt); err != nil {
+			for _, r := range royalties {
+				if err := earn(r.payee, EarningLineage, r.edgeID, r.depth, 0, 0, r.amount); err != nil {
+					return err
+				}
+			}
+			if err := postClearTx(ctx, tx, c.id, gross, gross-share, payees[0].Funding, paidAt, payees...); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE market_uses SET cleared_invoice_id = $2, cleared_at = $3 WHERE id = $1`, c.id, invoiceID, paidAt); err != nil {
@@ -721,13 +748,16 @@ type Earnings struct {
 	Earnings            []Earning `json:"earnings"`
 }
 
-// Earning is one cleared use's share.
+// Earning is one cleared use's share: the seller's, or an original's royalty from a remix's sale (B32.26).
 type Earning struct {
 	UseID          string     `json:"use_id"`
 	ListingID      string     `json:"listing_id"`
-	GrossUSDMicros int64      `json:"gross_usd_micros"`
-	ShareUSDMicros int64      `json:"share_usd_micros"`
-	FeeUSDMicros   int64      `json:"fee_usd_micros"` // Talyvor's take: gross − share (0 on an earning cleared before B32.8)
+	Kind           string     `json:"kind"`                          // sale, or lineage: a royalty from a remix's sale
+	Depth          int        `json:"depth,omitempty"`               // a royalty's generation: 1 a parent of the listing sold
+	OriginalID     string     `json:"original_listing_id,omitempty"` // a royalty's listing: the original the listing sold builds on
+	GrossUSDMicros int64      `json:"gross_usd_micros"`              // what the buyer paid: on the sale, 0 on a royalty
+	ShareUSDMicros int64      `json:"share_usd_micros"`              // what this payee keeps
+	FeeUSDMicros   int64      `json:"fee_usd_micros"`                // Talyvor's take, on the sale (0 on one cleared before B32.8)
 	InvoiceID      string     `json:"invoice_id"`
 	ClearedAt      time.Time  `json:"cleared_at"`
 	PayableAt      time.Time  `json:"payable_at"`
@@ -742,7 +772,7 @@ type Earning struct {
 func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, now time.Time) (Earnings, error) {
 	e := Earnings{Earnings: []Earning{}}
 	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(sum(e.gross_usd_micros), 0)::bigint,
-		       COALESCE(sum(r.reversed_share_usd_micros), 0)::bigint
+		       COALESCE(sum(e.share_usd_micros) FILTER (WHERE r.use_id IS NOT NULL), 0)::bigint
 		FROM market_earnings e LEFT JOIN market_refunds r ON r.use_id = e.use_id
 		WHERE e.seller_workspace_id = $1`, sellerWorkspaceID).
 		Scan(&e.LifetimeGrossMicros, &e.RefundedUSDMicros); err != nil {
@@ -766,18 +796,19 @@ func (s *Store) SellerEarnings(ctx context.Context, sellerWorkspaceID string, no
 		return e, fmt.Errorf("market: pending earnings: %w", err)
 	}
 	e.PendingUSDMicros = SellerShare(usesULXC/ulxcPerUSDMicro, takeBPS(false)) + SellerShare(paymentsULXC/ulxcPerUSDMicro, takeBPS(true))
-	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.fee_usd_micros, e.invoice_id, e.cleared_at, e.payable_at, r.refunded_at,
+	rows, err := s.pool.Query(ctx, `SELECT e.use_id, COALESCE(u.listing_id, ''), e.kind, e.depth, COALESCE(lin.parent_listing_id, ''), e.gross_usd_micros, e.share_usd_micros, e.fee_usd_micros, e.invoice_id, e.cleared_at, e.payable_at, r.refunded_at,
 		       COALESCE(u.payee_agent_id, ''),
 		       COALESCE((SELECT h.reason FROM market_holds h WHERE h.use_id = e.use_id AND h.released_at IS NULL ORDER BY h.opened_at LIMIT 1), '')
 		FROM market_earnings e LEFT JOIN market_uses u ON u.id = e.use_id LEFT JOIN market_refunds r ON r.use_id = e.use_id
-		WHERE e.seller_workspace_id = $1 ORDER BY e.cleared_at DESC, e.use_id LIMIT 100`, sellerWorkspaceID)
+		LEFT JOIN market_lineage lin ON lin.id = e.source_ref AND e.kind = 'lineage'
+		WHERE e.seller_workspace_id = $1 ORDER BY e.cleared_at DESC, e.use_id, e.id LIMIT 100`, sellerWorkspaceID)
 	if err != nil {
 		return e, fmt.Errorf("market: earnings: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var x Earning
-		if err := rows.Scan(&x.UseID, &x.ListingID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.FeeUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt, &x.RefundedAt,
+		if err := rows.Scan(&x.UseID, &x.ListingID, &x.Kind, &x.Depth, &x.OriginalID, &x.GrossUSDMicros, &x.ShareUSDMicros, &x.FeeUSDMicros, &x.InvoiceID, &x.ClearedAt, &x.PayableAt, &x.RefundedAt,
 			&x.PayeeAgentID, &x.HeldFor); err != nil {
 			return e, err
 		}

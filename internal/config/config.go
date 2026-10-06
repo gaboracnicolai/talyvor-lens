@@ -979,6 +979,9 @@ type Config struct {
 	// LineageMaxDepth is how many generations a listing's lineage read walks up (B32.24). Env:
 	// LENS_LINEAGE_MAX_DEPTH, default 5 — a proposal for Nicolai.
 	LineageMaxDepth int
+	// LineageTotalCapBPS is the most a listing's parents together receive of what it received from a sale (B32.26).
+	// Env: LENS_LINEAGE_TOTAL_CAP_BPS, default 5000 (50%) — a proposal for Nicolai.
+	LineageTotalCapBPS int
 
 	// MarketPayoutReturnURL / MarketPayoutRefreshURL are where Stripe's seller onboarding returns to when a
 	// seller finishes it, and when its link has expired (B20.5). Env: LENS_MARKET_PAYOUT_RETURN_URL,
@@ -2121,7 +2124,8 @@ func Load() (*Config, error) {
 		c.MarketTrialMax = n
 	}
 
-	// B32.24 — the remix share's ceiling and the lineage read's depth. A malformed value is refused.
+	// B32.24 — the remix share's ceiling and the lineage read's depth; B32.26 — the royalties' cap. A malformed value
+	// is refused.
 	c.LineageMaxShareBPS = 3000
 	if v := os.Getenv("LENS_LINEAGE_MAX_SHARE_BPS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -2137,6 +2141,14 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_LINEAGE_MAX_DEPTH must be a positive integer, got %q", v)
 		}
 		c.LineageMaxDepth = n
+	}
+	c.LineageTotalCapBPS = 5000
+	if v := os.Getenv("LENS_LINEAGE_TOTAL_CAP_BPS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 10000 {
+			return nil, fmt.Errorf("config: LENS_LINEAGE_TOTAL_CAP_BPS must be 0 to 10000, got %q", v)
+		}
+		c.LineageTotalCapBPS = n
 	}
 
 	// D — the Model 2 allowance, in µLXC (W4.6.1 step 2). Default 0 = "no allowance

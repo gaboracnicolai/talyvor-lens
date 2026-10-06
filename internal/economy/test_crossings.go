@@ -337,8 +337,8 @@ func refundCrossingUseTx(ctx context.Context, tx pgx.Tx, useID string) error {
 	tag, err := tx.Exec(ctx, `INSERT INTO market_refunds (use_id, listing_id, buyer_workspace_id, seller_workspace_id, price_ulxc,
 		gross_usd_micros, reversed_share_usd_micros, reason, cause)
 		SELECT u.id, u.listing_id, u.buyer_workspace_id, u.seller_workspace_id, u.price_ulxc, u.price_ulxc / $2,
-		       COALESCE(e.share_usd_micros, 0), $3, 'test_crossing'
-		FROM market_uses u LEFT JOIN market_earnings e ON e.use_id = u.id
+		       COALESCE((SELECT sum(e.share_usd_micros) FROM market_earnings e WHERE e.use_id = u.id), 0), $3, 'test_crossing'
+		FROM market_uses u
 		WHERE u.id = $1 AND u.charge = 'billed' AND u.ran_at IS NOT NULL
 		ON CONFLICT (use_id) DO NOTHING`, useID, ulxcPerUSDMicro, crossingNote)
 	if err != nil {
