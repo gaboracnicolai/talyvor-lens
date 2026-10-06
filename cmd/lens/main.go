@@ -2371,6 +2371,8 @@ func run() error {
 	// additionally force the acted-on workspace to the verified caller (effectiveWorkspace).
 	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, lensVersion)
 	mcpServer.SetAgentBank(dualToken) // B19.9: agents use their wallets with their own keys
+	// B32.23: and shop the marketplace with them — search, license, use within a max price, cancel.
+	mcpServer.SetMarket(marketStore, mcpMarketDeps{lens: r, meter: marketMeter, agents: dualToken})
 	// B19.16: approvals signed with the owner's passkey; a web push per approval filed when a VAPID key is set.
 	var approvalPusher economy.ApprovalPusher
 	if cfg.VAPIDPrivateKey != "" {

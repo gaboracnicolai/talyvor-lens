@@ -50,6 +50,8 @@ var (
 	ErrNoModel = errors.New(`market: name the model to run this listing on ("model")`)
 	// ErrNoBill: a paid use, but no marketplace bill is configured to put it on.
 	ErrNoBill = errors.New("market: paid listings cannot be used here: no marketplace bill is configured")
+	// ErrOverMaxPrice: the use would cost more than the buyer's max_price_usd_micros (B32.23).
+	ErrOverMaxPrice = errors.New("market: this use costs more than its max_price_usd_micros")
 )
 
 // Message is one chat message a use sends to a model.
@@ -84,6 +86,9 @@ type UseRequest struct {
 	Input     string            `json:"input"`     // the user's message (an agent or a skill)
 	Variables map[string]string `json:"variables"` // a prompt's {{variables}}
 	Person    string            `json:"-"`         // who is using it: a personal or enterprise licence counts its people (B32.19)
+	// B32.23: the most this use may cost, in µUSD — a pipeline's billed steps included. Above it nothing runs and no
+	// row is written. nil: no cap; 0: only a use that costs nothing.
+	MaxPriceUSDMicros *int64 `json:"max_price_usd_micros,omitempty"`
 }
 
 // CaseResult is one evaluation case's outcome.
@@ -142,6 +147,9 @@ type UseDeps struct {
 // Use runs listingID for buyerWorkspaceID (agentID when an agent's key asked; "" otherwise) and records
 // the use: its charge is metered onto the buyer's bill once the run has answered.
 func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID, listingID string, req UseRequest) (Use, error) {
+	if req.MaxPriceUSDMicros != nil && *req.MaxPriceUSDMicros < 0 {
+		return Use{}, invalid("max_price_usd_micros cannot be negative")
+	}
 	// B32.19: a licence the buyer holds runs its pinned version unless the use names one, and covers the charge.
 	lic, err := s.coverUse(ctx, buyerWorkspaceID, agentID, req.Person, listingID, req.Version)
 	if err != nil {
@@ -238,6 +246,10 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 				billed[st.UseID] = st.PriceULXC
 				total += st.PriceULXC
 			}
+		}
+		if most := req.MaxPriceUSDMicros; most != nil && total/ulxcPerUSDMicro > *most {
+			return Use{}, fmt.Errorf("%w: it costs %d µUSD now, above your %d — nothing ran and nothing was charged",
+				ErrOverMaxPrice, total/ulxcPerUSDMicro, *most)
 		}
 		if len(billed) > 0 && deps.Meter == nil {
 			return Use{}, ErrNoBill
