@@ -333,6 +333,7 @@ var w626PopulationDelta = []string{
 	"pool_royalty_mints",
 	"room_contributions", // B32.31: keyed author_workspace_id, classified in the manifest
 	"room_messages",      // B32.30: keyed author_workspace_id, classified in the manifest
+	"room_prizes",        // B32.35: keyed poster_workspace_id, classified in the manifest
 	"rooms",              // B32.28: keyed owner_workspace_id, classified in the manifest
 	"routing_prediction_mints", "royalty_detector_findings",
 	"test_crossing_reversals", // B26.15: keyed from_/to_workspace_id, classified in the manifest

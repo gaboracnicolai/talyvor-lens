@@ -236,6 +236,7 @@ var Manifest = map[string]Entry{
 	"room_messages":                {Delete, "B32.30: keys `author_workspace_id`: the messages a workspace posted in rooms; a room's own messages and events cascade with it"},
 	"room_contributions":           {Delete, "B32.31: keys `author_workspace_id`: the contributions a workspace proposed to rooms; a room's own contributions, and its listings', cascade with them"},
 	"room_votes":                   {Delete, "B32.31: the workspace's votes on rooms' contributions; a contribution's votes cascade with it"},
+	"room_prizes":                  {Delete, "B32.35: keys `poster_workspace_id`: the prizes a workspace posted in its rooms; a room's own prizes cascade with it"},
 	"market_listing_reports":       {Delete, "B20.4: keys `reporter_workspace_id`: the reports a workspace made of listings; reports of its own listings cascade with them"},
 	"workspace_passkeys":           {Delete, "B19.16: the owner's passkeys' public keys"},
 	"workspace_provider_keys":      {Delete, "B27.26: the workspace's own provider keys (BYOK), sealed; deleting the row is the end of Talyvor's custody"},

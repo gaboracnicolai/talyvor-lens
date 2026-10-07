@@ -70,6 +70,10 @@ var perReplica = map[string]string{
 	"ECB rate refresh": "IDEMPOTENT (B19.12). ecbRates.Refresh fetches the ECB's public file and inserts each " +
 		"published rate ON CONFLICT (rate_date, currency) DO NOTHING — a second replica's refresh inserts zero " +
 		"rows, and a published rate never changes. It moves no money: one GET every three hours per replica.",
+	"room prize close": "IDEMPOTENT BY ROW LOCK (B32.35). ClosePrizes closes each prize past its deadline in a " +
+		"transaction that holds its room's row FOR UPDATE and updates it only WHERE status = 'open', posting the " +
+		"close message in the same transaction; a second replica's update matches no row and posts nothing. It " +
+		"moves no money: a prize that closes charges nothing.",
 }
 
 // perReplicaMatch maps a classification key to the CALL that identifies its goroutine: either the
@@ -95,6 +99,7 @@ var perReplicaMatch = map[string]string{
 	"audit export POST":          "auditExporter.ExportWebhook",
 	"agent schedule run":         "dualToken.RunAgentSchedules",
 	"ECB rate refresh":           "ecbRates.Refresh",
+	"room prize close":           "roomStore.ClosePrizes",
 }
 
 // ⚠ THE GUARD. A goroutine that is neither leader-gated nor classified is one nobody has decided
