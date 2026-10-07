@@ -53,6 +53,12 @@ import (
 // its artifacts, by its owner and its room's live members only; anyone else gets 404 and the catalog never lists it. A
 // member that declares it as a parent records a room_fork edge at the room's remix share. A publish here cannot set
 // visibility room (400).
+//
+// B32.46: every publish and every new version is compared with the approved public listings and the contributions of
+// the rooms its publisher belongs to (internal/market/similarity.go). One at or above LENS_MARKET_SIMILARITY_HOLD to a
+// listing that is neither a declared parent nor the publisher's own is 201 held: scan.similar names the nearest listing,
+// its score and whether it is remixable, and review_reason says how to go on — remix it and declare it as a parent, or
+// wait for a review.
 
 func mountMarketRoutes(r chi.Router, store *market.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {

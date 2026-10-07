@@ -982,6 +982,10 @@ type Config struct {
 	// LineageTotalCapBPS is the most a listing's parents together receive of what it received from a sale (B32.26).
 	// Env: LENS_LINEAGE_TOTAL_CAP_BPS, default 5000 (50%) — a proposal for Nicolai.
 	LineageTotalCapBPS int
+	// MarketSimilarityHold is how similar a new listing version may be to another seller's listing it does not declare
+	// as a parent before it is held for review (B32.46), 0 to 1. Env: LENS_MARKET_SIMILARITY_HOLD, default 0.92 — a
+	// proposal for Nicolai.
+	MarketSimilarityHold float64
 	// RoomMessagesPerMinute is how many messages one member posts in one room in a minute (B32.30). Env:
 	// LENS_ROOM_MESSAGES_PER_MINUTE, default 20 — a proposal for Nicolai.
 	RoomMessagesPerMinute int
@@ -2155,6 +2159,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_LINEAGE_TOTAL_CAP_BPS must be 0 to 10000, got %q", v)
 		}
 		c.LineageTotalCapBPS = n
+	}
+	// B32.46 — the similarity at which a publish is held as an undeclared copy. A malformed value is refused.
+	c.MarketSimilarityHold = 0.92
+	if v := os.Getenv("LENS_MARKET_SIMILARITY_HOLD"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f > 0 && f <= 1) {
+			return nil, fmt.Errorf("config: LENS_MARKET_SIMILARITY_HOLD must be above 0 and at most 1, got %q", v)
+		}
+		c.MarketSimilarityHold = f
 	}
 	// B32.30 — a member's messages a minute in a room. A malformed value is refused.
 	c.RoomMessagesPerMinute = 20
