@@ -182,7 +182,8 @@ func GzipMiddleware(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/v1/proxy/") ||
 			strings.HasPrefix(r.URL.Path, "/oai/") ||
 			strings.HasPrefix(r.URL.Path, "/anthropic/") ||
-			strings.HasPrefix(r.URL.Path, "/mcp") {
+			strings.HasPrefix(r.URL.Path, "/mcp") ||
+			(strings.HasPrefix(r.URL.Path, "/v1/rooms/") && strings.HasSuffix(r.URL.Path, "/events")) { // B32.30
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -253,6 +254,9 @@ func (h *headerCaptureWriter) WriteHeader(status int) {
 	}
 	h.ResponseWriter.WriteHeader(status)
 }
+
+// Unwrap lets http.ResponseController reach the writer beneath, so a stream it carries can be flushed (B32.30).
+func (h *headerCaptureWriter) Unwrap() http.ResponseWriter { return h.ResponseWriter }
 
 func (h *headerCaptureWriter) Write(b []byte) (int, error) {
 	if !h.written {

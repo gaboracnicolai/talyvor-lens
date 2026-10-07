@@ -338,7 +338,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 //
 // 210 → 215 (B32.29): a private room's invites — POST and GET /v1/rooms/{roomID}/invites, DELETE
 // /v1/rooms/{roomID}/invites/{inviteID}, GET /v1/room-invites/{token} and POST /v1/room-invites/{token}/join.
-const undocumentedNonAdminV1Routes = 215
+//
+// 215 → 220 (B32.30): a room's messages — POST and GET /v1/rooms/{roomID}/messages, PATCH and DELETE
+// /v1/rooms/{roomID}/messages/{messageID}, and the event stream GET /v1/rooms/{roomID}/events.
+const undocumentedNonAdminV1Routes = 220
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

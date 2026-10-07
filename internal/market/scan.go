@@ -54,7 +54,8 @@ var (
 	injectionDetector = injection.New(injection.DefaultPolicy())
 )
 
-func scanText(kind string, texts []string) Scan {
+// ScanText is the publish scan of texts for a listing of kind; rooms scan a public room's messages with it (B32.30).
+func ScanText(kind string, texts []string) Scan {
 	var s Scan
 	secrets, personal, injected := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	blocked, warned := false, false

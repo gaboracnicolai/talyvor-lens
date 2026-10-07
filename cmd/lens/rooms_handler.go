@@ -3,11 +3,15 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/reqtrack"
 	"github.com/talyvor/lens/internal/rooms"
 	"github.com/talyvor/lens/internal/storedanswers"
 )
@@ -36,6 +40,22 @@ import (
 //	GET    /v1/room-invites/{token}               what a live link opens: the room and its current terms
 //	POST   /v1/room-invites/{token}/join          {terms_version}   join the link's room, accepting its terms
 //
+// B32.30 — a room's messages (internal/rooms/messages.go):
+//
+//	POST   /v1/rooms/{roomID}/messages               {body}   a member that is not a viewer posts; 201 with the message
+//	GET    /v1/rooms/{roomID}/messages?before=&after=&limit=   a page of messages, oldest first, with more and the room's
+//	                                                 events_cursor; before and after are a message's cursor
+//	PATCH  /v1/rooms/{roomID}/messages/{messageID}   {body}   its author edits a text message
+//	DELETE /v1/rooms/{roomID}/messages/{messageID}   its author, or the room's owner or an editor; a tombstone stays
+//	GET    /v1/rooms/{roomID}/events?after=          Server-Sent Events: the room's events after the cursor (or after
+//	                                                 Last-Event-ID; from now when neither is sent), each with its message,
+//	                                                 read once a second; each stream ends after roomEventStreamLife and the
+//	                                                 client reconnects from its last id
+//
+// A public room's messages are read by everyone and a private room's by its members only; anyone else gets 404. In a
+// public room a message carrying a secret or personal data is 422 with what the scan found, and writes nothing. A
+// member's message past LENS_ROOM_MESSAGES_PER_MINUTE in a room is 429 with Retry-After.
+//
 // A private room answers 404 to everyone but its members and the workspaces its owner named. Joining with a
 // terms_version that is not the room's current one, or joining a room that is locked or closed, is 409. Opening a room
 // past the owner's plan's public_rooms or private_rooms, a member past members_per_room or an agent past
@@ -46,10 +66,18 @@ import (
 func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {
 		var limit *rooms.PlanLimitError
+		var rate *rooms.RateError
+		var refusal *rooms.ScanRefusal
 		switch {
 		case errors.As(err, &limit):
 			writeJSONOK(w, http.StatusPaymentRequired, map[string]any{"error": limit.Detail, "setting": rooms.LimitsSetting,
 				"plan": limit.Plan, "limit": limit.Limit, "max": limit.Max, "allows": limit.Allows})
+		case errors.As(err, &rate):
+			w.Header().Set("Retry-After", strconv.Itoa(int(rate.RetryAfter.Seconds())))
+			writeJSONOK(w, http.StatusTooManyRequests, map[string]any{"error": rate.Error(), "setting": rooms.MessagesPerMinuteSetting,
+				"per_minute": rate.PerMinute})
+		case errors.As(err, &refusal):
+			writeJSONOK(w, http.StatusUnprocessableEntity, map[string]any{"error": refusal.Reason, "scan": refusal.Scan})
 		case errors.Is(err, rooms.ErrInvalid):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, rooms.ErrNotFound):
@@ -275,7 +303,176 @@ func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 		}
 		writeJSONOK(w, status(created), map[string]any{"room_id": roomID, "member": m})
 	}))
+
+	readBody := func(w http.ResponseWriter, req *http.Request) (string, bool) {
+		var in struct {
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 64<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {body}: "+err.Error())
+			return "", false
+		}
+		return in.Body, true
+	}
+	cursor := func(v string) (int64, error) {
+		if v == "" {
+			return 0, nil
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("a cursor is a non-negative integer, got %q", v)
+		}
+		return n, nil
+	}
+	r.Post("/v1/rooms/{roomID}/messages", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, user, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		body, ok := readBody(w, req)
+		if !ok {
+			return
+		}
+		m, err := store.Post(req.Context(), ws, user, chi.URLParam(req, "roomID"), body)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusCreated, m)
+	}))
+	r.Get("/v1/rooms/{roomID}/messages", func(w http.ResponseWriter, req *http.Request) {
+		ws, _ := auth.WorkspaceIdentity(req.Context())
+		q := req.URL.Query()
+		before, err := cursor(q.Get("before"))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "before: "+err.Error())
+			return
+		}
+		after, err := cursor(q.Get("after"))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "after: "+err.Error())
+			return
+		}
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		page, err := store.Messages(req.Context(), ws, chi.URLParam(req, "roomID"), before, after, limit)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, page)
+	})
+	r.Patch("/v1/rooms/{roomID}/messages/{messageID}", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, _, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		body, ok := readBody(w, req)
+		if !ok {
+			return
+		}
+		m, err := store.Edit(req.Context(), ws, chi.URLParam(req, "roomID"), chi.URLParam(req, "messageID"), body)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, m)
+	}))
+	r.Delete("/v1/rooms/{roomID}/messages/{messageID}", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, _, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		m, err := store.Delete(req.Context(), ws, chi.URLParam(req, "roomID"), chi.URLParam(req, "messageID"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, m)
+	}))
+	r.Get("/v1/rooms/{roomID}/events", func(w http.ResponseWriter, req *http.Request) {
+		ctx := req.Context()
+		ws, _ := auth.WorkspaceIdentity(ctx)
+		roomID := chi.URLParam(req, "roomID")
+		from := req.URL.Query().Get("after")
+		if from == "" {
+			from = req.Header.Get("Last-Event-ID")
+		}
+		after, err := cursor(from)
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "after: "+err.Error())
+			return
+		}
+		if from == "" {
+			after, err = store.EventsHead(ctx, ws, roomID)
+		}
+		var events []rooms.Event
+		if err == nil {
+			events, err = store.Events(ctx, ws, roomID, after)
+		}
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		// Meant to stay open, so it is never /healthz's slowest request nor logged as slow (B27.11).
+		reqtrack.MarkLongLived(ctx)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		rc := http.NewResponseController(w)
+		send := func(events []rooms.Event) error {
+			for _, e := range events {
+				data, err := json.Marshal(e)
+				if err != nil {
+					return err
+				}
+				if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", e.Cursor, data); err != nil {
+					return err
+				}
+				after = e.Cursor
+			}
+			return rc.Flush()
+		}
+		if _, err := fmt.Fprintf(w, "retry: %d\n\n", roomEventRetry.Milliseconds()); err != nil {
+			return
+		}
+		if send(events) != nil {
+			return
+		}
+		tick := time.NewTicker(roomEventPoll)
+		defer tick.Stop()
+		end := time.NewTimer(roomEventStreamLife)
+		defer end.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-end.C:
+				return
+			case <-tick.C:
+				events, err := store.Events(ctx, ws, roomID, after)
+				if errors.Is(err, rooms.ErrNotFound) {
+					// Removed from a private room: the stream says so once and ends.
+					_, _ = fmt.Fprint(w, "event: gone\ndata: {}\n\n")
+					_ = rc.Flush()
+					return
+				}
+				if err != nil || send(events) != nil {
+					return
+				}
+			}
+		}
+	})
 }
+
+// A room's event stream reads room_events once a second — no LISTEN, which PgBouncer's transaction pooling cannot
+// hold — and ends before the server's 30-second write timeout and the router's 60-second request timeout; the client
+// reconnects after roomEventRetry from the last id it saw, and loses nothing.
+var (
+	roomEventPoll       = time.Second
+	roomEventStreamLife = 25 * time.Second
+	roomEventRetry      = time.Second
+)
 
 // roomActorOnly admits the workspace's owner or an admin — the rule publishing a listing uses — so an agent's own key
 // never joins its workspace to a room or changes who is in one.

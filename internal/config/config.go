@@ -982,6 +982,9 @@ type Config struct {
 	// LineageTotalCapBPS is the most a listing's parents together receive of what it received from a sale (B32.26).
 	// Env: LENS_LINEAGE_TOTAL_CAP_BPS, default 5000 (50%) — a proposal for Nicolai.
 	LineageTotalCapBPS int
+	// RoomMessagesPerMinute is how many messages one member posts in one room in a minute (B32.30). Env:
+	// LENS_ROOM_MESSAGES_PER_MINUTE, default 20 — a proposal for Nicolai.
+	RoomMessagesPerMinute int
 
 	// MarketPayoutReturnURL / MarketPayoutRefreshURL are where Stripe's seller onboarding returns to when a
 	// seller finishes it, and when its link has expired (B20.5). Env: LENS_MARKET_PAYOUT_RETURN_URL,
@@ -2149,6 +2152,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_LINEAGE_TOTAL_CAP_BPS must be 0 to 10000, got %q", v)
 		}
 		c.LineageTotalCapBPS = n
+	}
+	// B32.30 — a member's messages a minute in a room. A malformed value is refused.
+	c.RoomMessagesPerMinute = 20
+	if v := os.Getenv("LENS_ROOM_MESSAGES_PER_MINUTE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("config: LENS_ROOM_MESSAGES_PER_MINUTE must be a positive integer, got %q", v)
+		}
+		c.RoomMessagesPerMinute = n
 	}
 
 	// D — the Model 2 allowance, in µLXC (W4.6.1 step 2). Default 0 = "no allowance

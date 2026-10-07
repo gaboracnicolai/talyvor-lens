@@ -331,7 +331,8 @@ var w626PopulationDelta = []string{
 	"market_listing_reports", "market_refunds", "market_uses", // B20.2 / B20.4: keyed seller_/buyer_/reporter_workspace_id, classified in the manifest
 	"node_latency_mints",
 	"pool_royalty_mints",
-	"rooms", // B32.28: keyed owner_workspace_id, classified in the manifest
+	"room_messages", // B32.30: keyed author_workspace_id, classified in the manifest
+	"rooms",         // B32.28: keyed owner_workspace_id, classified in the manifest
 	"routing_prediction_mints", "royalty_detector_findings",
 	"test_crossing_reversals", // B26.15: keyed from_/to_workspace_id, classified in the manifest
 	"workspace_configs", "workspaces",

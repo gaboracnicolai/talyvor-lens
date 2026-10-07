@@ -12,7 +12,8 @@
 //
 // How many rooms a workspace opens, and how many members and agents each holds, is its plan's rooms_plan_limits
 // (limits.go). A private room is listed and shown to its members only; a workspace joins one through an invite link
-// or by being named by its owner (invites.go).
+// or by being named by its owner (invites.go). Members post messages, which a public room's scan reads first and every
+// member's event stream receives (messages.go).
 package rooms
 
 import (
@@ -157,9 +158,10 @@ type MemberChange struct {
 
 // Store reads and writes rooms.
 type Store struct {
-	pool     *pgxpool.Pool
-	maxShare int
-	limits   map[string]Limits
+	pool      *pgxpool.Pool
+	maxShare  int
+	limits    map[string]Limits
+	perMinute int // LENS_ROOM_MESSAGES_PER_MINUTE (messages.go)
 }
 
 // NewStore answers a Store whose rooms may ask a fork for at most maxShareBPS of its sales (LENS_LINEAGE_MAX_SHARE_BPS),

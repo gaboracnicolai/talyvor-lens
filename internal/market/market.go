@@ -204,7 +204,7 @@ func checkArtifact(kind string, artifact json.RawMessage, words ...string) (cano
 	}
 	canonical, _ = json.Marshal(obj)
 	h := sha256.Sum256(canonical)
-	scan = scanText(kind, stringsIn(obj, words))
+	scan = ScanText(kind, stringsIn(obj, words))
 	if scan.Refused != "" {
 		return nil, "", scan, &RefusedError{Scan: scan}
 	}

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/rooms"
 )
@@ -323,5 +327,173 @@ func TestRooms_PrivateRoomsInviteLinksAndPlanLimits(t *testing.T) {
 	if code, body := call(freeOwner, http.MethodPost, "/v1/rooms/"+crowded.ID+"/agents", `{"agent_id":"agt_b3229_11"}`); code != http.StatusPaymentRequired ||
 		!strings.Contains(body, "free plan allows 10 agents in a room") {
 		t.Fatalf("the 11th agent = %d %s, want 402 naming the free plan", code, body)
+	}
+}
+
+// B32.30 — in a public room a message carrying an API key is refused with the finding and writes no row; another
+// member's event stream, through the router's gzip and rate-limit-header writers, receives a posted message within two
+// seconds; its author edits it and the owner removes it, leaving a tombstone; a non-member reading a private room's
+// messages gets 404; a member's 21st message in a minute is refused.
+func TestRooms_MessagesScannedStreamedEditedDeletedAndLimited(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const owner, joiner, outsider = "ws-b3230-owner", "ws-b3230-joiner", "ws-b3230-outsider"
+	r := chi.NewRouter()
+	r.Use(api.GzipMiddleware, api.RateLimitHeadersMiddleware)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ws := req.Header.Get("X-Test-Workspace")
+			next.ServeHTTP(w, req.WithContext(auth.WithAuthContext(req.Context(),
+				&auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "user-" + ws, Scopes: []string{auth.ScopeKeys}})))
+		})
+	})
+	mountRoomRoutes(r, rooms.NewStore(pool, 3000))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+	call := func(ws, method, path, body string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+		req.Header.Set("X-Test-Workspace", ws)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	count := func(q string, args ...any) (n int) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, q, args...).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return n
+	}
+	var room rooms.Detail
+	if code, body := call(owner, http.MethodPost, "/v1/workspaces/"+owner+"/rooms", `{"title":"Launch copy"}`); code != http.StatusCreated ||
+		json.Unmarshal([]byte(body), &room) != nil {
+		t.Fatalf("create = %d %s", code, body)
+	}
+	if code, body := call(joiner, http.MethodPost, "/v1/rooms/"+room.ID+"/join", `{"terms_version":1}`); code != http.StatusCreated {
+		t.Fatalf("join = %d %s", code, body)
+	}
+
+	// A public room's message carrying an API key is refused with what the scan found, and writes no row.
+	if code, body := call(joiner, http.MethodPost, "/v1/rooms/"+room.ID+"/messages",
+		`{"body":"try my key sk-proj-a1b2c3d4e5f6g7h8i9j0k1l2m3n4"}`); code != http.StatusUnprocessableEntity ||
+		!strings.Contains(body, `"secrets":["openai_key"]`) || !strings.Contains(body, "contains a secret (openai_key)") {
+		t.Fatalf("a key in a public room = %d %s, want 422 naming openai_key", code, body)
+	}
+	if n := count(`SELECT count(*) FROM room_messages WHERE room_id = $1`, room.ID); n != 0 {
+		t.Fatalf("the refused message wrote %d rows, want 0", n)
+	}
+
+	// The joiner's stream, opened from now, receives the owner's message within two seconds.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/rooms/"+room.ID+"/events", nil)
+	req.Header.Set("X-Test-Workspace", joiner)
+	req.Header.Set("Accept-Encoding", "gzip")
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req.WithContext(streamCtx))
+	if err != nil || resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("open the stream = %v %v", resp, err)
+	}
+	defer resp.Body.Close()
+	lines := bufio.NewReader(resp.Body)
+	if l, err := lines.ReadString('\n'); err != nil || !strings.HasPrefix(l, "retry: ") {
+		t.Fatalf("the stream's first line = %q %v, want its retry", l, err)
+	}
+	sent := time.Now()
+	var msg rooms.Message
+	if code, body := call(owner, http.MethodPost, "/v1/rooms/"+room.ID+"/messages", `{"body":"Draft one is in the doc."}`); code != http.StatusCreated ||
+		json.Unmarshal([]byte(body), &msg) != nil {
+		t.Fatalf("post = %d %s", code, body)
+	}
+	got := make(chan string, 1)
+	go func() {
+		for {
+			l, err := lines.ReadString('\n')
+			if err != nil {
+				got <- "error: " + err.Error()
+				return
+			}
+			if strings.HasPrefix(l, "data: ") && strings.Contains(l, msg.ID) {
+				got <- l
+				return
+			}
+		}
+	}()
+	select {
+	case l := <-got:
+		if !strings.Contains(l, `"kind":"message.posted"`) || !strings.Contains(l, "Draft one is in the doc.") {
+			t.Fatalf("the stream's event = %s, want the posted message", l)
+		}
+		t.Logf("MEASURED: the joiner's stream received the message %v after it was posted", time.Since(sent).Round(time.Millisecond))
+	case <-time.After(2 * time.Second):
+		t.Fatal("the joiner's stream did not receive the posted message within two seconds")
+	}
+	cancel()
+
+	// Its author edits it; another member may not; the owner removes the joiner's message and a tombstone stays.
+	if code, body := call(joiner, http.MethodPatch, "/v1/rooms/"+room.ID+"/messages/"+msg.ID, `{"body":"mine now"}`); code != http.StatusForbidden {
+		t.Fatalf("another member editing = %d %s, want 403", code, body)
+	}
+	if code, body := call(owner, http.MethodPatch, "/v1/rooms/"+room.ID+"/messages/"+msg.ID, `{"body":"Draft two is in the doc."}`); code != http.StatusOK ||
+		!strings.Contains(body, `"edited_at"`) {
+		t.Fatalf("the author editing = %d %s", code, body)
+	}
+	var theirs rooms.Message
+	if code, body := call(joiner, http.MethodPost, "/v1/rooms/"+room.ID+"/messages", `{"body":"Off topic."}`); code != http.StatusCreated ||
+		json.Unmarshal([]byte(body), &theirs) != nil {
+		t.Fatalf("the joiner's post = %d %s", code, body)
+	}
+	if code, body := call(owner, http.MethodDelete, "/v1/rooms/"+room.ID+"/messages/"+theirs.ID, ""); code != http.StatusOK {
+		t.Fatalf("the owner removing = %d %s", code, body)
+	}
+	var body, by string
+	var deleted bool
+	if err := pool.QueryRow(ctx, `SELECT body, deleted_at IS NOT NULL, deleted_by_workspace_id FROM room_messages WHERE id = $1`, theirs.ID).
+		Scan(&body, &deleted, &by); err != nil || body != "" || !deleted || by != owner {
+		t.Fatalf("the removed message's row = %q deleted %v by %q (%v), want an empty tombstone removed by the owner", body, deleted, by, err)
+	}
+	var page rooms.Page
+	if code, b := call(outsider, http.MethodGet, "/v1/rooms/"+room.ID+"/messages", ""); code != http.StatusOK || json.Unmarshal([]byte(b), &page) != nil ||
+		len(page.Messages) != 2 || page.Messages[0].Body != "Draft two is in the doc." || page.Messages[1].DeletedAt == nil || page.EventsCursor != 4 {
+		t.Fatalf("a public room read by anyone = %d %s, want the edited message, the tombstone and events_cursor 4", code, b)
+	}
+
+	// A private room's messages are 404 to a non-member.
+	if _, err := pool.Exec(ctx, `INSERT INTO subscriptions (workspace_id, stripe_subscription_id, stripe_customer_id, price_id,
+		status, livemode, last_event_at, plan, byok) VALUES ($1, 'sub_b3230', 'cus_b3230', 'price_team', 'active', false, NOW(), 'team', false)`,
+		owner); err != nil {
+		t.Fatal(err)
+	}
+	var priv rooms.Detail
+	if code, b := call(owner, http.MethodPost, "/v1/workspaces/"+owner+"/rooms", `{"title":"Pricing","visibility":"private"}`); code != http.StatusCreated ||
+		json.Unmarshal([]byte(b), &priv) != nil {
+		t.Fatalf("private room = %d %s", code, b)
+	}
+	if code, b := call(owner, http.MethodPost, "/v1/rooms/"+priv.ID+"/messages", `{"body":"Our margin target is in the sheet."}`); code != http.StatusCreated {
+		t.Fatalf("a private room's post = %d %s", code, b)
+	}
+	if code, _ := call(outsider, http.MethodGet, "/v1/rooms/"+priv.ID+"/messages", ""); code != http.StatusNotFound {
+		t.Fatalf("a non-member reading the private room's messages = %d, want 404", code)
+	}
+	if code, _ := call(outsider, http.MethodGet, "/v1/rooms/"+priv.ID+"/events?after=0", ""); code != http.StatusNotFound {
+		t.Fatalf("a non-member streaming the private room = %d, want 404", code)
+	}
+
+	// The joiner has posted one message this minute: nineteen more are taken, and the 21st is refused and writes no row.
+	for i := 2; i <= 20; i++ {
+		if code, b := call(joiner, http.MethodPost, "/v1/rooms/"+room.ID+"/messages", fmt.Sprintf(`{"body":"note %d"}`, i)); code != http.StatusCreated {
+			t.Fatalf("message %d = %d %s", i, code, b)
+		}
+	}
+	code, b := call(joiner, http.MethodPost, "/v1/rooms/"+room.ID+"/messages", `{"body":"note 21"}`)
+	if code != http.StatusTooManyRequests || !strings.Contains(b, "LENS_ROOM_MESSAGES_PER_MINUTE") || !strings.Contains(b, `"per_minute":20`) {
+		t.Fatalf("the 21st message = %d %s, want 429 naming LENS_ROOM_MESSAGES_PER_MINUTE", code, b)
+	}
+	if n := count(`SELECT count(*) FROM room_messages WHERE room_id = $1 AND author_workspace_id = $2`, room.ID, joiner); n != 20 {
+		t.Fatalf("the joiner's rows = %d, want 20", n)
 	}
 }
