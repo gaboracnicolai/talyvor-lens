@@ -294,8 +294,8 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if err != nil {
 		return Listing{}, err
 	}
-	fp, err := s.checkCopy(ctx, s.pool, &scan, artifact, workspaceID, d.RoomID, parentIDs(d.Parents), d.Title, d.Description)
-	if err != nil {
+	fp := s.fingerprintOf(ctx, artifact, d.Title, d.Description)
+	if err := s.checkCopy(ctx, s.pool, &scan, fp, workspaceID, d.RoomID, parentIDs(d.Parents)); err != nil {
 		return Listing{}, err
 	}
 	scanJSON, _ := json.Marshal(scan)
@@ -346,6 +346,17 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 // a taken-down listing takes no versions. The new version keeps the parents of the one before it and adds
 // those parents declares (B32.24).
 func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID string, artifact json.RawMessage, changelog string, parents []ParentRef) (Version, error) {
+	// B32.46: fingerprinted before the listing is locked, so the embeddings call never holds its row.
+	var fp *fingerprint
+	if s.similarity != nil {
+		var title, description string
+		err := s.pool.QueryRow(ctx, `SELECT title, description FROM market_listings WHERE id = $1 AND workspace_id = $2`, listingID, workspaceID).
+			Scan(&title, &description)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return Version{}, fmt.Errorf("market: version: %w", err)
+		}
+		fp = s.fingerprintOf(ctx, artifact, title, description)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Version{}, err
@@ -377,8 +388,7 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 	for _, p := range carried {
 		declared = append(declared, p.ListingID)
 	}
-	fp, err := s.checkCopy(ctx, tx, &scan, canonical, workspaceID, roomID, declared, title, description)
-	if err != nil {
+	if err := s.checkCopy(ctx, tx, &scan, fp, workspaceID, roomID, declared); err != nil {
 		return Version{}, err
 	}
 	scanJSON, _ := json.Marshal(scan)

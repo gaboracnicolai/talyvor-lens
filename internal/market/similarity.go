@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -73,24 +74,37 @@ type fingerprint struct {
 	minhash   []int64
 }
 
-// checkCopy fingerprints a version of a listing listingID ("" for a new one) published by publisher — into roomID when
-// it is a room's contribution — declaring parents, and records on scan the nearest listing it copies without declaring
-// it, holding the version when nothing else already holds it. It answers nil when the check is off.
-func (s *Store) checkCopy(ctx context.Context, q rowQuerier, scan *Scan, artifact []byte, publisher, roomID string, parents []string,
-	words ...string) (*fingerprint, error) {
+// embedTimeout bounds the embeddings call one publish waits for; past it the version is compared by wording alone.
+const embedTimeout = 10 * time.Second
+
+// fingerprintOf fingerprints a version's artifact with its listing's words: nil when the check is off, or when the
+// artifact is not a JSON object (checkArtifact refuses it).
+func (s *Store) fingerprintOf(ctx context.Context, artifact []byte, words ...string) *fingerprint {
 	if s.similarity == nil {
-		return nil, nil
+		return nil
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(artifact, &obj); err != nil {
-		return nil, fmt.Errorf("market: fingerprint: %w", err)
+	if json.Unmarshal(artifact, &obj) != nil {
+		return nil
 	}
 	text := strings.Join(valuesIn(obj, words), "\n")
 	fp := &fingerprint{minhash: minHash(text)}
+	ctx, cancel := context.WithTimeout(ctx, embedTimeout)
+	defer cancel()
 	if v, err := s.similarity.embedder.Embed(ctx, truncated(text, maxEmbedBytes)); err != nil {
 		slog.Warn("market: the similarity check compares wording only: the embedder failed", "error", err)
 	} else if unitLength(v) {
 		fp.model, fp.embedding = s.similarity.embedder.Model(), v
+	}
+	return fp
+}
+
+// checkCopy compares fp, a version published by publisher — into roomID when it is a room's contribution — declaring
+// parents, with the listings it may not copy without declaring them, and records on scan the nearest at or above the
+// hold, holding the version when nothing else already holds it. A nil fp compares nothing.
+func (s *Store) checkCopy(ctx context.Context, q rowQuerier, scan *Scan, fp *fingerprint, publisher, roomID string, parents []string) error {
+	if fp == nil {
+		return nil
 	}
 	var embedding any
 	if fp.embedding != nil {
@@ -115,16 +129,16 @@ func (s *Store) checkCopy(ctx context.Context, q rowQuerier, scan *Scan, artifac
 				FROM market_listing_fingerprints f JOIN market_listings l ON l.id = f.listing_id
 				WHERE l.review_status = 'approved' AND l.workspace_id <> $1
 				  AND (l.visibility = 'public' OR (l.visibility = 'room' AND (l.room_id = $2 OR EXISTS (
-						SELECT 1 FROM room_members m WHERE m.room_id = l.room_id AND m.workspace_id = $1))))
+						SELECT 1 FROM room_members m WHERE m.room_id = l.room_id AND m.workspace_id = $1 AND m.removed_at IS NULL))))
 				  AND NOT EXISTS (SELECT 1 FROM kin WHERE kin.id = l.id) AND NOT EXISTS (SELECT 1 FROM mine WHERE mine.id = l.id))
 		SELECT id, title, remix_policy, fork, score FROM scored WHERE score >= $8 ORDER BY score DESC, id LIMIT 1`,
 		publisher, roomID, parents, fp.model, embedding, fp.minhash, float64(minhashSize), s.similarity.hold).
 		Scan(&near.ListingID, &near.Title, &policy, &fork, &near.Score)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fp, nil
+		return nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("market: similarity: %w", err)
+		return fmt.Errorf("market: similarity: %w", err)
 	}
 	near.Score = math.Round(min(near.Score, 1)*10000) / 10000
 	near.Remixable = fork || policy == RemixFree || policy == RemixRoyalty
@@ -132,7 +146,7 @@ func (s *Store) checkCopy(ctx context.Context, q rowQuerier, scan *Scan, artifac
 	if scan.Held == "" {
 		scan.Held = heldAsCopy(near, fork)
 	}
-	return fp, nil
+	return nil
 }
 
 // parentIDs are the listings refs declares.
