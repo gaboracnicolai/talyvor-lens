@@ -25,14 +25,31 @@ import (
 //	PATCH /v1/rooms/{roomID}/members/{ws}    {role, may_spend, remove}   by the owner or an editor; a member may remove itself
 //	POST  /v1/rooms/{roomID}/agents          {agent_id}   one of the caller's agents joins, as the caller's member
 //
-// A private room answers 404 to everyone but its members. Joining with a terms_version that is not the room's current
-// one, or joining a room that is locked or closed, is 409. Acting for a workspace in a room — opening, joining,
-// changing members, bringing an agent — takes the workspace's owner or an admin, as publishing a listing does; reading
-// takes any of its credentials.
+// B32.29 — private rooms, invites and rooms_plan_limits (internal/rooms/limits.go, invites.go):
+//
+//	POST   /v1/rooms/{roomID}/invites             {max_uses, expires_at}  an invite link to a private room, by its owner
+//	                                              or an editor; its token is in this answer only
+//	                                              {workspace_id}          the owner names a workspace, which then sees the
+//	                                              room and joins it with POST /v1/rooms/{roomID}/join
+//	GET    /v1/rooms/{roomID}/invites             the room's invites, without their tokens, for its owner and editors
+//	DELETE /v1/rooms/{roomID}/invites/{inviteID}  revoke one: from then on its link answers 404
+//	GET    /v1/room-invites/{token}               what a live link opens: the room and its current terms
+//	POST   /v1/room-invites/{token}/join          {terms_version}   join the link's room, accepting its terms
+//
+// A private room answers 404 to everyone but its members and the workspaces its owner named. Joining with a
+// terms_version that is not the room's current one, or joining a room that is locked or closed, is 409. Opening a room
+// past the owner's plan's public_rooms or private_rooms, a member past members_per_room or an agent past
+// agents_per_room is 402 naming rooms_plan_limits and the plan. Acting for a workspace in a room — opening, joining,
+// changing members, inviting, bringing an agent — takes the workspace's owner or an admin, as publishing a listing
+// does; reading takes any of its credentials.
 
 func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {
+		var limit *rooms.PlanLimitError
 		switch {
+		case errors.As(err, &limit):
+			writeJSONOK(w, http.StatusPaymentRequired, map[string]any{"error": limit.Detail, "setting": rooms.LimitsSetting,
+				"plan": limit.Plan, "limit": limit.Limit, "max": limit.Max, "allows": limit.Allows})
 		case errors.Is(err, rooms.ErrInvalid):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, rooms.ErrNotFound):
@@ -93,7 +110,20 @@ func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 			writeErr(w, err)
 			return
 		}
-		writeJSONOK(w, http.StatusOK, map[string]any{"rooms": open, "joined": joined})
+		invited, err := store.Invited(req.Context(), ws)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		out := map[string]any{"rooms": open, "joined": joined, "invited": invited}
+		if ws != "" {
+			// What the caller's plan lets it open, beside what it has open, so a new room can say why it cannot be.
+			if out["limits"], err = store.Usage(req.Context(), ws); err != nil {
+				writeErr(w, err)
+				return
+			}
+		}
+		writeJSONOK(w, http.StatusOK, out)
 	})
 	r.Get("/v1/rooms/{roomID}", func(w http.ResponseWriter, req *http.Request) {
 		ws, admin := auth.WorkspaceIdentity(req.Context())
@@ -175,6 +205,75 @@ func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 			return
 		}
 		writeJSONOK(w, status(created), a)
+	}))
+
+	r.Post("/v1/rooms/{roomID}/invites", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, _, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		var in rooms.InviteDraft
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {max_uses, expires_at} or {workspace_id}: "+err.Error())
+			return
+		}
+		inv, created, err := store.CreateInvite(req.Context(), ws, chi.URLParam(req, "roomID"), in)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, status(created), inv)
+	}))
+	r.Get("/v1/rooms/{roomID}/invites", func(w http.ResponseWriter, req *http.Request) {
+		ws, _, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		invites, err := store.Invites(req.Context(), ws, chi.URLParam(req, "roomID"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"invites": invites})
+	})
+	r.Delete("/v1/rooms/{roomID}/invites/{inviteID}", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, _, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		inv, err := store.RevokeInvite(req.Context(), ws, chi.URLParam(req, "roomID"), chi.URLParam(req, "inviteID"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, inv)
+	}))
+	r.Get("/v1/room-invites/{token}", func(w http.ResponseWriter, req *http.Request) {
+		p, err := store.PreviewInvite(req.Context(), chi.URLParam(req, "token"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, p)
+	})
+	r.Post("/v1/room-invites/{token}/join", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, user, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		var in struct {
+			TermsVersion int `json:"terms_version"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {terms_version}: "+err.Error())
+			return
+		}
+		m, roomID, created, err := store.JoinByInvite(req.Context(), ws, user, chi.URLParam(req, "token"), in.TermsVersion)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, status(created), map[string]any{"room_id": roomID, "member": m})
 	}))
 }
 

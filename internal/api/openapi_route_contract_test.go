@@ -335,7 +335,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 // 203 → 210 (B32.28): rooms — POST /v1/workspaces/{wsID}/rooms, GET /v1/rooms, GET /v1/rooms/{roomID}, POST
 // /v1/rooms/{roomID}/join, PUT /v1/rooms/{roomID}/terms, PATCH /v1/rooms/{roomID}/members/{ws} and POST
 // /v1/rooms/{roomID}/agents, beside the undocumented marketplace routes they build on.
-const undocumentedNonAdminV1Routes = 210
+//
+// 210 → 215 (B32.29): a private room's invites — POST and GET /v1/rooms/{roomID}/invites, DELETE
+// /v1/rooms/{roomID}/invites/{inviteID}, GET /v1/room-invites/{token} and POST /v1/room-invites/{token}/join.
+const undocumentedNonAdminV1Routes = 215
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)
