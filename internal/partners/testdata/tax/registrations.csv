@@ -1,0 +1,4 @@
+# Fixture registrations for the Test tax partner's tests: each line is one `lens tax registrations add`.
+jurisdiction,scheme,number,effective_from
+GB,GB VAT,GB000000001,2020-01-01
+EU,EU OSS non-Union,EU826000001,2020-01-01

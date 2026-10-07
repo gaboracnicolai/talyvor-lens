@@ -209,6 +209,14 @@ func main() {
 		}
 		return
 	}
+	// `lens tax` (B32.37): load the tax rates and Talyvor's registrations the tax partner decides from.
+	if len(os.Args) > 1 && os.Args[1] == "tax" {
+		if err := runTax(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	// `lens synthetic-crossings` (B26.15): the money that crossed between a test workspace and a real one before
 	// the wall, and --reverse to give each back.
 	if len(os.Args) > 1 && os.Args[1] == "synthetic-crossings" {

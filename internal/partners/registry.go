@@ -20,6 +20,7 @@ const (
 	ServiceCapital    Service = "capital"
 	ServiceInsurer    Service = "insurer"
 	ServiceAgentToken Service = "agent_token"
+	ServiceTax        Service = "tax"
 )
 
 // Clearances says whether a wallet capability may take live money now: the operator's clearance for it is in
@@ -47,6 +48,7 @@ type Registry struct {
 	capital    *TestCapitalPartner
 	insurer    *TestInsurerPartner
 	agentToken *TestAgentTokenProvider
+	tax        *TestTaxPartner
 }
 
 // NewRegistry is a registry that asks clearances before it hands out a real adapter. With nil clearances it
@@ -54,7 +56,14 @@ type Registry struct {
 func NewRegistry(clearances Clearances) *Registry {
 	return &Registry{clearances: clearances, adapters: map[Service]any{}, account: &TestAccountPartner{}, fx: &TestFXPartner{},
 		broker: &TestBrokerPartner{}, stablecoin: &TestStablecoinPartner{}, kyc: &TestKYCProvider{}, capital: &TestCapitalPartner{},
-		insurer: &TestInsurerPartner{}, agentToken: &TestAgentTokenProvider{}}
+		insurer: &TestInsurerPartner{}, agentToken: &TestAgentTokenProvider{}, tax: &TestTaxPartner{}}
+}
+
+// UseTaxData is where the Test tax partner reads the rates and registrations: a TaxStore.
+func (r *Registry) UseTaxData(d TaxData) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tax = &TestTaxPartner{Data: d}
 }
 
 // Configure sets the real adapter for a service. It is used only once a capability the service serves is
@@ -80,6 +89,8 @@ func (r *Registry) Configure(s Service, adapter any) error {
 		_, ok = adapter.(InsurerPartner)
 	case ServiceAgentToken:
 		_, ok = adapter.(AgentTokenProvider)
+	case ServiceTax:
+		_, ok = adapter.(TaxPartner)
 	default:
 		return fmt.Errorf("partners: no service is called %q", s)
 	}
@@ -154,4 +165,15 @@ func (r *Registry) Insurer(ctx context.Context, capability string) (InsurerPartn
 // AgentToken is the agent-token provider for capability.
 func (r *Registry) AgentToken(ctx context.Context, capability string) (AgentTokenProvider, error) {
 	return pick[AgentTokenProvider](ctx, r, ServiceAgentToken, capability, r.agentToken)
+}
+
+// Tax is the tax partner: the real one once it is configured (B32.45), and the Test one until then. Tax moves no
+// money, so no clearance is asked.
+func (r *Registry) Tax() TaxPartner {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if adapter, ok := r.adapters[ServiceTax]; ok {
+		return adapter.(TaxPartner)
+	}
+	return r.tax
 }
