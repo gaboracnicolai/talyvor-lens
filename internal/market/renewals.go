@@ -96,9 +96,9 @@ func (s *Store) RenewLicences(ctx context.Context, now time.Time, judge economy.
 // renew records d's renewal for the period starting at its ends_at, and moves its ends_at on a period — or reports
 // that the renewal was refused, recording nothing.
 func (s *Store) renew(ctx context.Context, d dueLicence, judge economy.LicenceJudge) (refused bool, err error) {
-	l, err := scanListing(s.pool.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, d.listingID))
+	l, err := visibleListing(ctx, s.pool, d.buyer, d.listingID, "")
 	switch {
-	case errors.Is(err, pgx.ErrNoRows) || (err == nil && (hidden(l, d.buyer) || l.ReviewStatus == ReviewTakenDown)):
+	case errors.Is(err, pgx.ErrNoRows) || (err == nil && l.ReviewStatus == ReviewTakenDown):
 		return true, nil
 	case err != nil:
 		return false, err

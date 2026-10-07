@@ -56,8 +56,8 @@ func (s *Store) Remix(ctx context.Context, workspaceID, listingID string, versio
 		return Remix{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	l, err := scanListing(tx.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1 FOR SHARE`, listingID))
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, workspaceID)) {
+	l, err := visibleListing(ctx, tx, workspaceID, listingID, "FOR SHARE")
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Remix{}, ErrNotFound
 	}
 	if err != nil {

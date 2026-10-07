@@ -13,7 +13,8 @@
 // How many rooms a workspace opens, and how many members and agents each holds, is its plan's rooms_plan_limits
 // (limits.go). A private room is listed and shown to its members only; a workspace joins one through an invite link
 // or by being named by its owner (invites.go). Members post messages, which a public room's scan reads first and every
-// member's event stream receives (messages.go).
+// member's event stream receives (messages.go). Members propose work as contributions, fork each other's with lineage
+// and vote on them, and the owner or an editor accepts or rejects them (contributions.go).
 package rooms
 
 import (
@@ -27,6 +28,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/market"
 )
 
 var (
@@ -161,7 +164,8 @@ type Store struct {
 	pool      *pgxpool.Pool
 	maxShare  int
 	limits    map[string]Limits
-	perMinute int // LENS_ROOM_MESSAGES_PER_MINUTE (messages.go)
+	perMinute int           // LENS_ROOM_MESSAGES_PER_MINUTE (messages.go)
+	market    *market.Store // where contributions are published (contributions.go)
 }
 
 // NewStore answers a Store whose rooms may ask a fork for at most maxShareBPS of its sales (LENS_LINEAGE_MAX_SHARE_BPS),

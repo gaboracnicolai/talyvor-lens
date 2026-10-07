@@ -488,8 +488,8 @@ func (s *Store) RetryParkedUse(ctx context.Context, useID string) error {
 // resolve reads the listing and the version the buyer may use, with its artifact. A held listing is its
 // owner's alone to use; a taken-down one is nobody's.
 func (s *Store) resolve(ctx context.Context, buyer, listingID string, version int) (Listing, map[string]any, int, error) {
-	l, err := scanListing(s.pool.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, listingID))
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, buyer)) {
+	l, err := visibleListing(ctx, s.pool, buyer, listingID, "")
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Listing{}, nil, 0, ErrNotFound
 	}
 	if err != nil {

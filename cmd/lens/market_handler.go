@@ -48,6 +48,11 @@ import (
 // accepts its remix licence (docs/terms/remix.md): one grant per workspace and version, with the share locked, and the
 // version's artifact to edit. Declaring someone else's listing as a parent needs that grant, and its edge carries the
 // grant's share. A listing whose remix_policy is none is never opened (400).
+//
+// B32.31: a room's contribution (visibility room, published through POST /v1/rooms/{roomID}/contributions) is seen, with
+// its artifacts, by its owner and its room's live members only; anyone else gets 404 and the catalog never lists it. A
+// member that declares it as a parent records a room_fork edge at the room's remix share. A publish here cannot set
+// visibility room (400).
 
 func mountMarketRoutes(r chi.Router, store *market.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {

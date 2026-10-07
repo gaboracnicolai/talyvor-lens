@@ -9,6 +9,9 @@ package market
 // market_lineage edge (migration 0206) holding the share the parent's terms gave when it was declared, so a later
 // change to those terms never touches it. A new version keeps the parents of the one before it: a remix cannot drop
 // its originals by publishing again.
+//
+// A room's contribution (B32.31) is built on by the members of its room under the room's terms instead of a remix
+// grant: its edge is a room_fork at the share the room's current terms give the original.
 
 import (
 	"context"
@@ -134,7 +137,8 @@ func (s *Store) SetRemixTerms(ctx context.Context, workspaceID, listingID string
 // declareParents records the parents of childID's version childVersion, published by workspaceID: those of the
 // version before it, carried forward with the share they were given, and the ones refs declares. A ref naming a
 // parent already carried forward moves it to that version and keeps its share. Someone else's listing is declared
-// under the remix grant workspaceID holds for that version (B32.25, remix.go), at the share the grant locked.
+// under the remix grant workspaceID holds for that version (B32.25, remix.go), at the share the grant locked; a room's
+// contribution, by a live member of its room, is a room_fork at the room's remix share (B32.31).
 func (s *Store) declareParents(ctx context.Context, tx pgx.Tx, workspaceID, childID string, childVersion int, refs []ParentRef) ([]Parent, error) {
 	var carried []Parent
 	if childVersion > 1 {
@@ -167,11 +171,17 @@ func (s *Store) declareParents(ctx context.Context, tx pgx.Tx, workspaceID, chil
 		if ref.ListingID == childID {
 			return nil, fmt.Errorf("%w (%s)", ErrLineageCycle, ref.ListingID)
 		}
-		var owner, visibility, review, policy string
+		var owner, visibility, review, policy, roomID string
 		var share, latest int
-		err := tx.QueryRow(ctx, `SELECT workspace_id, visibility, review_status, remix_policy, remix_share_bps, latest_version
-			FROM market_listings WHERE id = $1`, ref.ListingID).Scan(&owner, &visibility, &review, &policy, &share, &latest)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(Listing{WorkspaceID: owner, Visibility: visibility, ReviewStatus: review}, workspaceID)) {
+		err := tx.QueryRow(ctx, `SELECT workspace_id, visibility, review_status, remix_policy, remix_share_bps, latest_version, coalesce(room_id, '')
+			FROM market_listings WHERE id = $1`, ref.ListingID).Scan(&owner, &visibility, &review, &policy, &share, &latest, &roomID)
+		if err == nil {
+			var h bool
+			if h, err = hidden(ctx, tx, Listing{WorkspaceID: owner, Visibility: visibility, ReviewStatus: review, RoomID: roomID}, workspaceID); err == nil && h {
+				err = pgx.ErrNoRows
+			}
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, invalid("parent %s: no such listing", ref.ListingID)
 		}
 		if err != nil {
@@ -190,7 +200,17 @@ func (s *Store) declareParents(ctx context.Context, tx pgx.Tx, workspaceID, chil
 		}
 		version := ref.Version
 		var grant RemixGrant
-		if owner != workspaceID {
+		var fork bool
+		if roomID != "" {
+			var roomShare int
+			if fork, roomShare, err = roomFork(ctx, tx, roomID, workspaceID); err != nil {
+				return nil, err
+			}
+			if fork {
+				share = roomShare
+			}
+		}
+		if owner != workspaceID && !fork {
 			// B32.25: someone else's listing is built on under the remix licence the publisher accepted for the
 			// version declared (version 0: the newest it accepted), at the share locked then.
 			if grant, err = remixGrant(ctx, tx, workspaceID, ref.ListingID, ref.Version); err != nil {
@@ -211,12 +231,16 @@ func (s *Store) declareParents(ctx context.Context, tx pgx.Tx, workspaceID, chil
 			out[i].Version = version
 			continue
 		}
-		if owner != workspaceID {
+		source := LineageDeclared
+		switch {
+		case fork:
+			source = LineageRoomFork
+		case owner != workspaceID:
 			share = grant.ShareBPS
-		} else if policy != RemixRoyalty {
+		case policy != RemixRoyalty:
 			share = 0
 		}
-		out = append(out, Parent{ListingID: ref.ListingID, Version: version, ShareBPS: share, Source: LineageDeclared})
+		out = append(out, Parent{ListingID: ref.ListingID, Version: version, ShareBPS: share, Source: source})
 	}
 	for i := range out {
 		if err := tx.QueryRow(ctx, `INSERT INTO market_lineage (id, child_listing_id, child_version, parent_listing_id, parent_version, share_bps, source)
@@ -226,6 +250,21 @@ func (s *Store) declareParents(ctx context.Context, tx pgx.Tx, workspaceID, chil
 		}
 	}
 	return out, nil
+}
+
+// roomFork answers whether workspaceID is a live member of the room a contribution was made in, and the share of each
+// sale of what it builds on the room's current terms give that contribution (B32.31). A room that is gone forks nothing.
+func roomFork(ctx context.Context, tx pgx.Tx, roomID, workspaceID string) (member bool, shareBPS int, err error) {
+	err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.workspace_id = $2 AND m.removed_at IS NULL),
+			t.remix_share_bps
+		FROM rooms r JOIN room_terms t ON t.room_id = r.id AND t.version = r.terms_version WHERE r.id = $1`, roomID, workspaceID).Scan(&member, &shareBPS)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, fmt.Errorf("market: room fork: %w", err)
+	}
+	return member, shareBPS, nil
 }
 
 // parentsOf reads the parents of one version of a listing, in the order they were declared.
@@ -282,8 +321,8 @@ type Ancestor struct {
 // Lineage reads a listing version's ancestors, up to LENS_LINEAGE_MAX_DEPTH generations, and how many listings descend
 // from it, as viewerWorkspace may see it. Version 0 is the latest.
 func (s *Store) Lineage(ctx context.Context, viewerWorkspace, listingID string, version int) (Lineage, error) {
-	l, err := scanListing(s.pool.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, listingID))
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, viewerWorkspace)) {
+	l, err := visibleListing(ctx, s.pool, viewerWorkspace, listingID, "")
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Lineage{}, ErrNotFound
 	}
 	if err != nil {
@@ -304,7 +343,7 @@ func (s *Store) Lineage(ctx context.Context, viewerWorkspace, listingID string, 
 			SELECT e.id, e.child_listing_id, e.child_version, e.parent_listing_id, e.parent_version, e.share_bps, e.source, e.created_at, up.depth + 1
 			FROM market_lineage e JOIN up ON e.child_listing_id = up.parent_listing_id AND e.child_version = up.parent_version
 			WHERE up.depth < $3)
-		SELECT up.parent_listing_id, up.parent_version, l.title, l.workspace_id, l.visibility, l.review_status,
+		SELECT up.parent_listing_id, up.parent_version, l.title, l.workspace_id, l.visibility, l.review_status, coalesce(l.room_id, ''),
 		       up.child_listing_id, up.child_version, up.share_bps, up.source, up.depth
 		FROM up JOIN market_listings l ON l.id = up.parent_listing_id
 		ORDER BY up.depth, up.created_at, up.id`, listingID, version, out.MaxDepth)
@@ -312,22 +351,28 @@ func (s *Store) Lineage(ctx context.Context, viewerWorkspace, listingID string, 
 		return Lineage{}, fmt.Errorf("market: lineage: %w", err)
 	}
 	defer rows.Close()
+	var seen []Listing // each ancestor as hidden reads it, asked once the rows are read
 	for rows.Next() {
 		var a Ancestor
-		var owner, visibility, review string
-		if err := rows.Scan(&a.ListingID, &a.Version, &a.Title, &owner, &visibility, &review,
+		var l Listing
+		if err := rows.Scan(&a.ListingID, &a.Version, &a.Title, &l.WorkspaceID, &l.Visibility, &l.ReviewStatus, &l.RoomID,
 			&a.ChildListingID, &a.ChildVersion, &a.ShareBPS, &a.Source, &a.Depth); err != nil {
 			return Lineage{}, err
 		}
-		if hidden(Listing{WorkspaceID: owner, Visibility: visibility, ReviewStatus: review}, viewerWorkspace) {
-			a.Title, a.Hidden = "", true
-		}
 		out.Ancestors = append(out.Ancestors, a)
+		seen = append(seen, l)
 	}
 	if err := rows.Err(); err != nil {
 		return Lineage{}, err
 	}
 	rows.Close()
+	for i := range out.Ancestors {
+		if h, err := hidden(ctx, s.pool, seen[i], viewerWorkspace); err != nil {
+			return Lineage{}, fmt.Errorf("market: lineage: %w", err)
+		} else if h {
+			out.Ancestors[i].Title, out.Ancestors[i].Hidden = "", true
+		}
+	}
 	if err := s.pool.QueryRow(ctx, `WITH RECURSIVE down(id) AS (
 			SELECT child_listing_id FROM market_lineage WHERE parent_listing_id = $1
 			UNION
