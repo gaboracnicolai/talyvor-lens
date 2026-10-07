@@ -304,7 +304,12 @@ func CreateRoomAgentTx(ctx context.Context, tx pgx.Tx, workspaceID, name, ownerU
 	return a, nil
 }
 
-// AttachAgentKey makes scopedKeyID one of agentID's keys: from then on its spending is the agent's.
+// ErrRoomWalletKey: a room's wallet spends only through its room, with the one key Lens holds for it (B32.32). Another
+// key would make it an agent the plan does not count.
+var ErrRoomWalletKey = errors.New("economy: a room's wallet spends only through its room, and takes no other key")
+
+// AttachAgentKey makes scopedKeyID one of agentID's keys: from then on its spending is the agent's. A room's wallet
+// takes no other key than the one it was opened with.
 func (s *DualTokenStore) AttachAgentKey(ctx context.Context, workspaceID, agentID, scopedKeyID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -313,6 +318,13 @@ func (s *DualTokenStore) AttachAgentKey(ctx context.Context, workspaceID, agentI
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := lockAgent(ctx, tx, workspaceID, agentID); err != nil {
 		return err
+	}
+	var kind string
+	if err := tx.QueryRow(ctx, `SELECT kind FROM agent_accounts WHERE id = $1`, agentID).Scan(&kind); err != nil {
+		return fmt.Errorf("economy: attach key: %w", err)
+	}
+	if kind == AgentKindRoom {
+		return ErrRoomWalletKey
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO agent_account_keys (scoped_key_id, agent_id) VALUES ($1, $2)`, scopedKeyID, agentID); err != nil {
 		return fmt.Errorf("economy: attach key: %w", err)

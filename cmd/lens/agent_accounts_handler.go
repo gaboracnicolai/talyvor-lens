@@ -291,10 +291,10 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		found, archived := false, false
+		found, archived, room := false, false, false
 		for _, a := range book.Agents {
 			if a.ID == agentID {
-				found, archived = true, a.ArchivedAt != nil
+				found, archived, room = true, a.ArchivedAt != nil, a.Kind == economy.AgentKindRoom
 			}
 		}
 		if !found {
@@ -303,6 +303,10 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		}
 		if archived {
 			writeJSONErr(w, http.StatusConflict, economy.ErrAgentArchived.Error())
+			return
+		}
+		if room { // B32.32: before a key is minted that it would refuse
+			writeJSONErr(w, http.StatusConflict, economy.ErrRoomWalletKey.Error())
 			return
 		}
 		raw, key, err := keys.CreateAPIKey(req.Context(), wsID, in.Name, []string{"proxy"}, nil)

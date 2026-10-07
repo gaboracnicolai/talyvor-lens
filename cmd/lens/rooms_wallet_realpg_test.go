@@ -99,6 +99,15 @@ func TestRooms_TheRoomsWalletItsBudgetAndWhoMaySpendIt(t *testing.T) {
 		}
 	}
 
+	// Nor can it become one: it takes no key but the one Lens holds for it.
+	if code, body := call(owner, http.MethodPost, "/v1/workspaces/"+owner+"/agents/"+wallet+"/keys", `{"name":"mine"}`); code != http.StatusConflict ||
+		!strings.Contains(body, "takes no other key") {
+		t.Fatalf("a key of the owner's own for the room's wallet = %d %s, want 409", code, body)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_account_keys WHERE agent_id = $1`, wallet).Scan(&walletKeys); err != nil || walletKeys != 1 {
+		t.Fatalf("the wallet's keys after a refused one = %d (%v), want 1", walletKeys, err)
+	}
+
 	// Funding it posts as for any agent: one fund entry, the workspace to the wallet.
 	if code, body := call(owner, http.MethodPost, "/v1/workspaces/"+owner+"/agents/"+wallet+"/fund", `{"amount_ulxc":50000000}`); code != http.StatusOK ||
 		!strings.Contains(body, `"balance_ulxc":50000000`) {
