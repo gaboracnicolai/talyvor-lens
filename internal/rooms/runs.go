@@ -58,7 +58,7 @@ func (s *Store) contextMessageCount() int {
 type Payer struct {
 	Pay         string
 	WorkspaceID string
-	AgentID     string   // the room's wallet; "" paying self
+	AgentID     string   // the room's wallet; paying self, the agent acting in the room (B32.36), or ""
 	KeyID       string   // the wallet's key; "" paying self, when the member's own credential calls the models
 	KeyScopes   []string // the wallet key's scopes, as it was issued
 	Spender     *Spender // paying room: the charge's room and member
@@ -131,8 +131,8 @@ func (s *Store) payer(ctx context.Context, ws, roomID, pay string) (Payer, error
 		}
 		return Payer{Pay: PayRoom, WorkspaceID: sp.OwnerWorkspaceID, AgentID: sp.WalletAgentID, KeyID: sp.WalletKeyID,
 			KeyScopes: sp.WalletKeyScopes, Spender: &sp}, nil
-	case PaySelf:
-		return Payer{Pay: PaySelf, WorkspaceID: ws}, nil
+	case PaySelf: // an agent acting in the room pays as itself, under its own rules (B32.36)
+		return Payer{Pay: PaySelf, WorkspaceID: ws, AgentID: agentOf(ctx)}, nil
 	}
 	return Payer{}, invalid(`say who pays: "pay" is "room", the room's budget, or "self"`)
 }
@@ -197,7 +197,7 @@ func (s *Store) Run(ctx context.Context, deps DepsFor, ws, user, roomID string, 
 	if contributionID != "" {
 		refs["contribution_id"] = contributionID
 	}
-	if p.AgentID != "" {
+	if p.Pay == PayRoom {
 		refs["wallet_agent_id"] = p.AgentID
 	}
 	head := fmt.Sprintf("ran %s “%s” %s — %s", article(l.Kind), l.Title, paidBy(p), chargeText(u))
@@ -281,7 +281,7 @@ func (s *Store) Ask(ctx context.Context, deps DepsFor, ws, user, roomID string, 
 	}
 	res := RunResult{Answer: answer, Pay: p.Pay, PayerWorkspaceID: p.WorkspaceID}
 	refs := map[string]any{"run": "ask", "model": in.Model, "pay": p.Pay, "payer_workspace_id": p.WorkspaceID}
-	if p.AgentID != "" {
+	if p.Pay == PayRoom {
 		refs["wallet_agent_id"] = p.AgentID
 	}
 	head := fmt.Sprintf("asked the room's AI %s: %s", paidBy(p), question)
@@ -322,8 +322,8 @@ func (s *Store) postRun(ctx context.Context, ws, user, roomID, head, output stri
 			}
 		}
 		id := "rmsg_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		if out, err = scanMessage(tx.QueryRow(ctx, `INSERT INTO room_messages AS m (id, room_id, author_workspace_id, author_user_id, kind, body, refs, scan)
-			VALUES ($1, $2, $3, $4, 'run', $5, $6, $7) RETURNING `+messageCols, id, roomID, ws, user, body, string(refsJSON), jsonText(scan)), ws); err != nil {
+		if out, err = scanMessage(tx.QueryRow(ctx, `INSERT INTO room_messages AS m (id, room_id, author_workspace_id, author_user_id, author_agent_id, kind, body, refs, scan)
+			VALUES ($1, $2, $3, $4, $5, 'run', $6, $7, $8) RETURNING `+messageCols, id, roomID, ws, user, agentOf(ctx), body, string(refsJSON), jsonText(scan)), ws); err != nil {
 			return err
 		}
 		if err := appendEvent(ctx, tx, roomID, EventPosted, id); err != nil {

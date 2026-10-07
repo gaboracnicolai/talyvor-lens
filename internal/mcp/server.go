@@ -17,6 +17,7 @@ import (
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/market"
 	"github.com/talyvor/lens/internal/reqtrack"
+	"github.com/talyvor/lens/internal/rooms"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/workspace"
@@ -54,6 +55,8 @@ type Server struct {
 	agentBank      AgentBank     // B19.9: the agent tools; nil leaves them out
 	market         *market.Store // B32.23: the market tools; nil leaves them out
 	marketDeps     MarketDeps
+	rooms          *rooms.Store // B32.36: the room tools; nil leaves them out
+	roomDeps       RoomDeps
 }
 
 func New(
@@ -196,6 +199,9 @@ func (s *Server) tools() []map[string]any {
 	if s.market != nil {
 		all = append(all, marketToolDefinitions()...)
 	}
+	if s.rooms != nil {
+		all = append(all, roomToolDefinitions()...)
+	}
 	return all
 }
 
@@ -309,12 +315,12 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, id,
 	case "route_model":
 		result, err = s.toolRouteModel(ctx, params.Arguments)
 	default:
-		known := isWalletTool(params.Name) || (isMarketTool(params.Name) && s.market != nil)
+		known := isWalletTool(params.Name) || (isMarketTool(params.Name) && s.market != nil) || (isRoomTool(params.Name) && s.rooms != nil)
 		if !known || s.agentBank == nil {
 			s.writeRPCError(w, id, rpcErrMethodNotFnd, "unknown tool: "+params.Name)
 			return
 		}
-		result, err = s.callAgentTool(ctx, params.Name, params.Arguments) // B22.11, B32.23: run and logged as the agent tools are
+		result, err = s.callAgentTool(ctx, params.Name, params.Arguments) // B22.11, B32.23, B32.36: run and logged as the agent tools are
 	}
 	var refusal *toolRefusal
 	if errors.As(err, &refusal) {

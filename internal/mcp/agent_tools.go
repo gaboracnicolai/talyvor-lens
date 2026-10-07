@@ -120,6 +120,9 @@ func (s *Server) runAgentTool(ctx context.Context, name, workspaceID, agentID st
 	if isMarketTool(name) { // B32.23
 		return s.runMarketTool(ctx, name, workspaceID, agentID, raw)
 	}
+	if isRoomTool(name) { // B32.36
+		return s.runRoomTool(ctx, name, workspaceID, agentID, raw)
+	}
 	var args struct {
 		ToAgentID  string `json:"to_agent_id"`
 		AmountULXC int64  `json:"amount_ulxc"`
