@@ -4391,7 +4391,10 @@ func run() error {
 		roomStore.SetContextMessages(cfg.RoomContextMessages)     // B32.33: what the room's AI reads
 		mountRoomRoutes(authed, roomStore)
 		// B32.33: runs in a room — a room wallet's model calls go through the proxy in process, as the wallet's key.
-		mountRoomRunRoutes(authed, roomStore, r, roomWalletProxy(p.HandleOpenAI, p.HandleAnthropic), marketMeter, dualToken)
+		roomWallet := roomWalletProxy(p.HandleOpenAI, p.HandleAnthropic)
+		mountRoomRunRoutes(authed, roomStore, r, roomWallet, marketMeter, dualToken)
+		// B32.36: and agents take part in rooms over MCP with their own keys, as their owners' members.
+		mcpServer.SetRooms(roomStore, mcpRoomDeps{lens: r, wallet: roomWallet, meter: marketMeter, agents: dualToken})
 		// B32.35: room prizes, paid as a purchase of the winning contribution; one unawarded at its deadline closes.
 		mountRoomPrizeRoutes(authed, roomStore, marketMeter, dualToken)
 		go func() {

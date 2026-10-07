@@ -215,8 +215,8 @@ func (s *Store) contribute(ctx context.Context, ws, user, roomID, key string, d 
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO room_messages (id, room_id, author_workspace_id, author_user_id, kind, body, refs, scan)
-			VALUES ($1, $2, $3, $4, 'contribution', $5, $6, $7)`, msgID, roomID, ws, user, body, string(refsJSON), jsonText(scan)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO room_messages (id, room_id, author_workspace_id, author_user_id, author_agent_id, kind, body, refs, scan)
+			VALUES ($1, $2, $3, $4, $5, 'contribution', $6, $7, $8)`, msgID, roomID, ws, user, agentOf(ctx), body, string(refsJSON), jsonText(scan)); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO room_contributions (id, room_id, listing_id, version, author_workspace_id, author_user_id, forked_from, message_id)

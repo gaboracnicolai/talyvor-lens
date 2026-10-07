@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/market"
+	"github.com/talyvor/lens/internal/mcp"
 	"github.com/talyvor/lens/internal/rooms"
 	"github.com/talyvor/lens/internal/workspace"
 )
@@ -58,23 +60,39 @@ func roomWalletProxy(openai, anthropic http.HandlerFunc) http.Handler {
 	return r
 }
 
+// roomRunDeps answers what a run paid by each payer needs: a room wallet's model calls go through wallet, the in-process
+// proxy (roomWalletProxy), as the wallet's key; anyone else's through lens with the credential req came in with.
+func roomRunDeps(lens, wallet http.Handler, meter market.Meter, agents marketAgents, req *http.Request) rooms.DepsFor {
+	return func(p rooms.Payer) market.UseDeps {
+		m := meter
+		if k, ok := meter.(stripeByKind); ok {
+			m = k.meterFor(p.WorkspaceID) // B25.6: a test workspace's paid uses go on its Stripe test-mode bill
+		}
+		run := proxyRunner{lens: lens, from: req}
+		if p.KeyID != "" {
+			run = proxyRunner{lens: wallet, from: req, as: &auth.AuthContext{WorkspaceID: p.WorkspaceID, Scopes: p.KeyScopes,
+				AuthMethod: auth.MethodWorkspaceKey, APIKeyID: p.KeyID}}
+		}
+		return market.UseDeps{Runner: run, Meter: m, Agents: agents}
+	}
+}
+
+// mcpRoomDeps gives the MCP room tools (B32.36) what the routes below give a run, with the credential the tool call
+// came in with: an agent paying itself runs on its own key.
+type mcpRoomDeps struct {
+	lens, wallet http.Handler
+	meter        market.Meter
+	agents       marketAgents
+}
+
+func (d mcpRoomDeps) RunDeps(ctx context.Context) rooms.DepsFor {
+	return roomRunDeps(d.lens, d.wallet, d.meter, d.agents, mcp.CallerRequest(ctx))
+}
+
 // mountRoomRunRoutes mounts a room's runs: lens is the router a member's own model calls go through, wallet the
 // in-process proxy a room wallet's go through (roomWalletProxy).
 func mountRoomRunRoutes(r chi.Router, store *rooms.Store, lens, wallet http.Handler, meter market.Meter, agents marketAgents) {
-	depsFor := func(req *http.Request) rooms.DepsFor {
-		return func(p rooms.Payer) market.UseDeps {
-			m := meter
-			if k, ok := meter.(stripeByKind); ok {
-				m = k.meterFor(p.WorkspaceID) // B25.6: a test workspace's paid uses go on its Stripe test-mode bill
-			}
-			run := proxyRunner{lens: lens, from: req}
-			if p.KeyID != "" {
-				run = proxyRunner{lens: wallet, from: req, as: &auth.AuthContext{WorkspaceID: p.WorkspaceID, Scopes: p.KeyScopes,
-					AuthMethod: auth.MethodWorkspaceKey, APIKeyID: p.KeyID}}
-			}
-			return market.UseDeps{Runner: run, Meter: m, Agents: agents}
-		}
-	}
+	depsFor := func(req *http.Request) rooms.DepsFor { return roomRunDeps(lens, wallet, meter, agents, req) }
 	actor := func(w http.ResponseWriter, req *http.Request) (ws, user string, ok bool) {
 		ws, _ = auth.WorkspaceIdentity(req.Context())
 		if ws == "" {

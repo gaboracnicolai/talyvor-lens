@@ -84,6 +84,7 @@ type Message struct {
 	AuthorWorkspaceID    string          `json:"author_workspace_id"`
 	AuthorUserID         string          `json:"author_user_id,omitempty"` // shown to the author's own workspace only
 	AuthorAgentID        string          `json:"author_agent_id,omitempty"`
+	AuthorAgentName      string          `json:"author_agent_name,omitempty"` // an agent's message carries its name (B32.36)
 	Kind                 string          `json:"kind"`
 	Body                 string          `json:"body"`
 	Refs                 json.RawMessage `json:"refs"`
@@ -152,14 +153,15 @@ func scanPublic(body string) ([]byte, error) {
 	return json.Marshal(sc)
 }
 
-const messageCols = `m.id, m.seq, m.room_id, m.author_workspace_id, m.author_user_id, m.author_agent_id, m.kind, m.body, m.refs,
+const messageCols = `m.id, m.seq, m.room_id, m.author_workspace_id, m.author_user_id, m.author_agent_id,
+	COALESCE((SELECT a.name FROM agent_accounts a WHERE a.id = m.author_agent_id), ''), m.kind, m.body, m.refs,
 	m.created_at, m.edited_at, m.deleted_at, m.deleted_by_workspace_id, m.scan`
 
 // scanMessage reads a messageCols row as viewer sees it, after the columns lead is scanned into.
 func scanMessage(row pgx.Row, viewer string, lead ...any) (Message, error) {
 	var m Message
 	var refs, sc []byte
-	if err := row.Scan(append(lead, &m.ID, &m.Cursor, &m.RoomID, &m.AuthorWorkspaceID, &m.AuthorUserID, &m.AuthorAgentID, &m.Kind,
+	if err := row.Scan(append(lead, &m.ID, &m.Cursor, &m.RoomID, &m.AuthorWorkspaceID, &m.AuthorUserID, &m.AuthorAgentID, &m.AuthorAgentName, &m.Kind,
 		&m.Body, &refs, &m.CreatedAt, &m.EditedAt, &m.DeletedAt, &m.DeletedByWorkspaceID, &sc)...); err != nil {
 		return m, err
 	}
@@ -238,8 +240,8 @@ func (s *Store) Post(ctx context.Context, ws, user, roomID, body string) (Messag
 			}
 		}
 		id := "rmsg_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		if out, err = scanMessage(tx.QueryRow(ctx, `INSERT INTO room_messages AS m (id, room_id, author_workspace_id, author_user_id, kind, body, scan)
-			VALUES ($1, $2, $3, $4, 'text', $5, $6) RETURNING `+messageCols, id, roomID, ws, user, body, scan), ws); err != nil {
+		if out, err = scanMessage(tx.QueryRow(ctx, `INSERT INTO room_messages AS m (id, room_id, author_workspace_id, author_user_id, author_agent_id, kind, body, scan)
+			VALUES ($1, $2, $3, $4, $5, 'text', $6, $7) RETURNING `+messageCols, id, roomID, ws, user, agentOf(ctx), body, scan), ws); err != nil {
 			return err
 		}
 		if err := appendEvent(ctx, tx, roomID, EventPosted, id); err != nil {
