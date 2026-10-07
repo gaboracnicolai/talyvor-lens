@@ -168,7 +168,7 @@ func TestIPClaims_AClaimHoldsNewEarningsUntilItIsDecided(t *testing.T) {
 		audited(c.ID, "market.ip_claim.file", "market.ip_claim.upheld")
 	})
 
-	t.Run("a claim deleted with its workspace releases its holds", func(t *testing.T) {
+	t.Run("a claim deleted with its claimant releases its holds, and one deleted with the accused listing keeps them", func(t *testing.T) {
 		listing("lst_b3247_d", seller)
 		c, err := s.FileIPClaim(ctx, claimant, IPClaimFiling{ListingID: "lst_b3247_d", OriginalReference: "https://example.com/third",
 			Evidence: "a copy", GoodFaith: "I believe in good faith that this copies my work."}, filed)
@@ -184,6 +184,21 @@ func TestIPClaims_AClaimHoldsNewEarningsUntilItIsDecided(t *testing.T) {
 		}
 		if j := journal(t, s, "use_b3247_withdrawn"); len(j) != 2 || j[1].Kind != JournalRelease {
 			t.Fatalf("after its claim was deleted, the held use's journal = %+v; want its clear and its release", j)
+		}
+		listing("lst_b3247_e", seller)
+		if _, err := s.FileIPClaim(ctx, claimant, IPClaimFiling{ListingID: "lst_b3247_e", OriginalReference: "https://example.com/fourth",
+			Evidence: "a copy", GoodFaith: "I believe in good faith that this copies my work."}, filed); err != nil {
+			t.Fatal(err)
+		}
+		sale("use_b3247_erased", "lst_b3247_e", filed.Add(time.Hour))
+		if _, err := pool.Exec(ctx, `DELETE FROM market_listings WHERE id = 'lst_b3247_e'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ReleaseDue(ctx, filed.Add(20*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if j := journal(t, s, "use_b3247_erased"); len(j) != 1 {
+			t.Fatalf("after the accused listing was deleted, its held use's journal = %+v; want its clear entry alone, still held", j)
 		}
 	})
 }
