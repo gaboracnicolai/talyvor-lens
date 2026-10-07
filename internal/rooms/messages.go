@@ -193,8 +193,8 @@ func messageErr(op string, err error) error {
 	return fmt.Errorf("rooms: %s: %w", op, err)
 }
 
-// Post writes ws's text message to the room, by user: ws must be a live member that is not a viewer, the room not
-// closed, the message within LENS_ROOM_MESSAGES_PER_MINUTE and, in a public room, passed by the scan.
+// Post writes ws's text message to the room, by user: ws must be a live member that is neither a viewer nor muted, the
+// room open (a locked room is read-only), the message within LENS_ROOM_MESSAGES_PER_MINUTE and, in a public room, passed by the scan.
 func (s *Store) Post(ctx context.Context, ws, user, roomID, body string) (Message, error) {
 	if err := checkBody(body); err != nil {
 		return Message{}, err
@@ -210,13 +210,21 @@ func (s *Store) Post(ctx context.Context, ws, user, roomID, body string) (Messag
 			return err
 		}
 		if !ok {
+			if b, err := banned(ctx, tx, roomID, ws); err != nil {
+				return err
+			} else if b {
+				return errBanned
+			}
 			return forbidden("join the room to post in it")
 		}
 		if me.Role == RoleViewer {
 			return forbidden("a viewer reads the room and does not post in it")
 		}
-		if r.Status == Closed {
-			return fmt.Errorf("%w: the room is closed", ErrConflict)
+		if me.MutedAt != nil {
+			return forbidden("the room's owner or an editor has muted you: you read the room and post nothing in it")
+		}
+		if err := shut(r); err != nil {
+			return err
 		}
 		// Counted under the room's lock, so two posts cannot both take the minute's last message.
 		var recent int
@@ -287,13 +295,15 @@ func (s *Store) Edit(ctx context.Context, ws, roomID, msgID, body string) (Messa
 		if m.DeletedAt != nil {
 			return fmt.Errorf("%w: the message was deleted", ErrConflict)
 		}
-		if r.Status == Closed {
-			return fmt.Errorf("%w: the room is closed", ErrConflict)
+		if err := shut(r); err != nil {
+			return err
 		}
-		if _, ok, err := member(ctx, tx, roomID, ws); err != nil {
+		if me, ok, err := member(ctx, tx, roomID, ws); err != nil {
 			return err
 		} else if !ok {
 			return forbidden("only a member of the room edits its messages")
+		} else if me.MutedAt != nil {
+			return forbidden("the room's owner or an editor has muted you: you read the room and post nothing in it")
 		}
 		if m.Body == body {
 			out = m

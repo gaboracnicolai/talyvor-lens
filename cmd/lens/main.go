@@ -4408,7 +4408,11 @@ func run() error {
 		roomStore.SetKeys(tenantStore)                            // B32.32: each room's wallet and its key
 		dualToken.SetRoomBudgets(roomStore)                       // B32.32: a room wallet's monthly limit, within the plan
 		roomStore.SetContextMessages(cfg.RoomContextMessages)     // B32.33: what the room's AI reads
+		roomStore.SetReportsHide(cfg.RoomReportsHide)             // B32.52: reports that take a public room off the list
 		mountRoomRoutes(authed, roomStore)
+		// B32.52: the operator's queue of reported rooms, and keeping, locking, unlocking or closing one (operator audit).
+		r.Get("/v1/admin/rooms/reports", requireAdminOrModerator(authManager, moderatorKeys, newRoomReportQueueHandler(roomStore)))
+		r.Post("/v1/admin/rooms/{roomID}/moderate", requireAdminOrModerator(authManager, moderatorKeys, newRoomModerateHandler(roomStore)))
 		// B32.33: runs in a room — a room wallet's model calls go through the proxy in process, as the wallet's key.
 		roomWallet := roomWalletProxy(p.HandleOpenAI, p.HandleAnthropic)
 		mountRoomRunRoutes(authed, roomStore, r, roomWallet, marketMeter, dualToken)

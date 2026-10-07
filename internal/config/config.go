@@ -995,6 +995,9 @@ type Config struct {
 	// RoomContextMessages is how many of a room's latest messages its AI reads with a member's question (B32.33). Env:
 	// LENS_ROOM_CONTEXT_MESSAGES, default 30 — a proposal for Nicolai.
 	RoomContextMessages int
+	// RoomReportsHide is how many workspaces' open reports take a public room off the list of rooms until the operator
+	// reviews it (B32.52). Env: LENS_ROOM_REPORTS_HIDE, default 3 — a proposal for Nicolai.
+	RoomReportsHide int
 
 	// MarketPayoutReturnURL / MarketPayoutRefreshURL are where Stripe's seller onboarding returns to when a
 	// seller finishes it, and when its link has expired (B20.5). Env: LENS_MARKET_PAYOUT_RETURN_URL,
@@ -2198,6 +2201,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_ROOM_CONTEXT_MESSAGES must be a positive integer, got %q", v)
 		}
 		c.RoomContextMessages = n
+	}
+	// B32.52 — the workspaces whose open reports take a public room off the list. A malformed value is refused.
+	c.RoomReportsHide = 3
+	if v := os.Getenv("LENS_ROOM_REPORTS_HIDE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("config: LENS_ROOM_REPORTS_HIDE must be a positive integer, got %q", v)
+		}
+		c.RoomReportsHide = n
 	}
 
 	// D — the Model 2 allowance, in µLXC (W4.6.1 step 2). Default 0 = "no allowance

@@ -97,7 +97,8 @@ type RunResult struct {
 	MessageError     string      `json:"message_error,omitempty"`
 }
 
-// runner answers the room ws runs in: ws must be a live member that is not a viewer, and the room not closed. A private
+// runner answers the room ws runs in: ws must be a live member that is not a viewer, and the room open — a locked room
+// is read-only and a closed one runs nothing on its wallet (B32.52). A private
 // room answers ErrNotFound to a workspace that is not a member.
 func runner(ctx context.Context, tx pgx.Tx, ws, roomID string) (Room, error) {
 	if err := readable(ctx, tx, ws, roomID); err != nil {
@@ -115,8 +116,8 @@ func runner(ctx context.Context, tx pgx.Tx, ws, roomID string) (Room, error) {
 		return r, forbidden("join the room to run things in it")
 	case me.Role == RoleViewer:
 		return r, forbidden("a viewer reads the room and does not run things in it")
-	case r.Status == Closed:
-		return r, fmt.Errorf("%w: the room is closed", ErrConflict)
+	case shut(r) != nil:
+		return r, shut(r)
 	}
 	return r, nil
 }

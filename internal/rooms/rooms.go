@@ -117,6 +117,8 @@ type Member struct {
 	TermsCurrent bool       `json:"terms_current"` // false: the room's terms changed since it accepted them
 	JoinedAt     time.Time  `json:"joined_at"`
 	RemovedAt    *time.Time `json:"removed_at,omitempty"`
+	MutedAt      *time.Time `json:"muted_at,omitempty"`  // muted: it reads the room and posts nothing (B32.52)
+	BannedAt     *time.Time `json:"banned_at,omitempty"` // banned: removed, and does not join again until unbanned
 }
 
 // Agent is an agent in a room, there as its workspace's.
@@ -136,6 +138,9 @@ type Detail struct {
 	Me      *Member  `json:"me"` // nil: the caller is not a member
 	// Wallet is the room's budget, shown to its members (B32.32); nil to anyone else, or while the room has none.
 	Wallet *Wallet `json:"wallet,omitempty"`
+	// UnderReview: a public room off the public list, reported by LENS_ROOM_REPORTS_HIDE workspaces, until the operator
+	// reviews it (B32.52).
+	UnderReview bool `json:"under_review,omitempty"`
 }
 
 // Draft is POST /v1/workspaces/{ws}/rooms.
@@ -155,11 +160,13 @@ type TermsDraft struct {
 	SpendPolicy           string `json:"spend_policy"` // owner_only (default) or members_with_spend
 }
 
-// MemberChange is PATCH /v1/rooms/{id}/members/{ws}; a nil field is left as it is.
+// MemberChange is PATCH /v1/rooms/{id}/members/{ws}; a nil field is left as it is. Muted and Banned are sent alone.
 type MemberChange struct {
 	Role     *string `json:"role"`
 	MaySpend *bool   `json:"may_spend"`
 	Remove   bool    `json:"remove"`
+	Muted    *bool   `json:"muted"`  // B32.52: mute or unmute a member
+	Banned   *bool   `json:"banned"` // B32.52: ban a member — it is removed — or unban it
 }
 
 // Store reads and writes rooms.
@@ -172,6 +179,7 @@ type Store struct {
 	keys      Keys          // issues each room wallet's key (wallet.go); nil, rooms have no wallet
 
 	contextMessages int // LENS_ROOM_CONTEXT_MESSAGES (runs.go)
+	reportsHideAt   int // LENS_ROOM_REPORTS_HIDE (reports.go)
 }
 
 // NewStore answers a Store whose rooms may ask a fork for at most maxShareBPS of its sales (LENS_LINEAGE_MAX_SHARE_BPS),
@@ -317,11 +325,12 @@ func collectRooms(rows pgx.Rows, err error) ([]Room, error) {
 	return out, rows.Err()
 }
 
-// OpenPublic is the list of open chats: the open public rooms, latest activity first, of one topic when topic is set.
+// OpenPublic is the list of open chats: the open public rooms, latest activity first, of one topic when topic is set. A
+// room reported by LENS_ROOM_REPORTS_HIDE workspaces is left off until the operator reviews it (reports.go).
 func (s *Store) OpenPublic(ctx context.Context, topic string) ([]Room, error) {
 	rooms, err := collectRooms(s.pool.Query(ctx, `SELECT `+roomCols+` FROM rooms r
-		WHERE r.visibility = 'public' AND r.status = 'open' AND ($1 = '' OR lower(r.topic) = lower($1))
-		ORDER BY r.last_activity_at DESC, r.id LIMIT $2`, strings.TrimSpace(topic), listLimit))
+		WHERE r.visibility = 'public' AND r.status = 'open' AND ($1 = '' OR lower(r.topic) = lower($1)) AND `+openReporters+` < $3
+		ORDER BY r.last_activity_at DESC, r.id LIMIT $2`, strings.TrimSpace(topic), listLimit, s.reportsHide()))
 	if err != nil {
 		return nil, fmt.Errorf("rooms: list: %w", err)
 	}
@@ -342,11 +351,13 @@ func (s *Store) Joined(ctx context.Context, ws string) ([]Room, error) {
 	return rooms, nil
 }
 
-const memberCols = `m.workspace_id, m.user_id, m.role, m.may_spend, m.terms_version, m.terms_version = r.terms_version, m.joined_at, m.removed_at`
+const memberCols = `m.workspace_id, m.user_id, m.role, m.may_spend, m.terms_version, m.terms_version = r.terms_version, m.joined_at, m.removed_at,
+	m.muted_at, m.banned_at`
 
 func scanMember(row pgx.Row) (Member, error) {
 	var m Member
-	err := row.Scan(&m.WorkspaceID, &m.UserID, &m.Role, &m.MaySpend, &m.TermsVersion, &m.TermsCurrent, &m.JoinedAt, &m.RemovedAt)
+	err := row.Scan(&m.WorkspaceID, &m.UserID, &m.Role, &m.MaySpend, &m.TermsVersion, &m.TermsCurrent, &m.JoinedAt, &m.RemovedAt,
+		&m.MutedAt, &m.BannedAt)
 	return m, err
 }
 
@@ -416,8 +427,9 @@ func (s *Store) get(ctx context.Context, viewer string, admin bool, roomID strin
 	var d Detail
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var wallet *string
-		r, err := scanRoom(tx.QueryRow(ctx, `SELECT `+roomCols+`, r.wallet_agent_id FROM rooms r WHERE r.id = $1`, roomID),
-			&wallet)
+		var reporters int
+		r, err := scanRoom(tx.QueryRow(ctx, `SELECT `+roomCols+`, r.wallet_agent_id, `+openReporters+` FROM rooms r WHERE r.id = $1`, roomID),
+			&wallet, &reporters)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("%w: no such room", ErrNotFound)
 		}
@@ -436,6 +448,7 @@ func (s *Store) get(ctx context.Context, viewer string, admin bool, roomID strin
 			}
 		}
 		d.Room = r
+		d.UnderReview = r.Visibility == Public && r.Status == Open && reporters >= s.reportsHide()
 		if isMember {
 			d.Me = &me
 		}
@@ -534,10 +547,13 @@ func (s *Store) admit(ctx context.Context, tx pgx.Tx, r Room, ws, user string, t
 		return m, false, fmt.Errorf("%w: the room's terms are at version %d; read them and join with terms_version %d",
 			ErrConflict, r.TermsVersion, r.TermsVersion)
 	}
-	var existed bool
-	if err := tx.QueryRow(ctx, `SELECT removed_at IS NULL FROM room_members WHERE room_id = $1 AND workspace_id = $2`,
-		r.ID, ws).Scan(&existed); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	var existed, isBanned bool
+	if err := tx.QueryRow(ctx, `SELECT removed_at IS NULL, banned_at IS NOT NULL FROM room_members WHERE room_id = $1 AND workspace_id = $2`,
+		r.ID, ws).Scan(&existed, &isBanned); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return m, false, err
+	}
+	if isBanned {
+		return m, false, errBanned
 	}
 	if !existed {
 		p, err := s.LimitsOf(ctx, tx, r.OwnerWorkspaceID)
@@ -631,8 +647,14 @@ func (s *Store) SetTerms(ctx context.Context, actor, roomID string, d TermsDraft
 // may_spend or removes it; only the owner makes or unmakes an editor; nobody changes the owner; a viewer is never
 // given may_spend, and a member made a viewer loses it. Any member but the owner may remove itself.
 func (s *Store) ChangeMember(ctx context.Context, actor, roomID, target string, c MemberChange) (Member, error) {
+	if c.Muted != nil || c.Banned != nil {
+		if c.Role != nil || c.MaySpend != nil || c.Remove || (c.Muted != nil && c.Banned != nil) {
+			return Member{}, invalid("mute or ban a member on its own, not with another change")
+		}
+		return s.moderateMember(ctx, actor, roomID, target, c)
+	}
 	if c.Role == nil && c.MaySpend == nil && !c.Remove {
-		return Member{}, invalid("say what changes: role, may_spend or remove")
+		return Member{}, invalid("say what changes: role, may_spend, remove, muted or banned")
 	}
 	if c.Remove && (c.Role != nil || c.MaySpend != nil) {
 		return Member{}, invalid("remove a member, or change its role or may_spend, not both")
@@ -711,6 +733,73 @@ func (s *Store) ChangeMember(ctx context.Context, actor, roomID, target string, 
 			return err
 		}
 		out, _, err = member(ctx, tx, roomID, target)
+		return err
+	})
+	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrForbidden) {
+		err = fmt.Errorf("rooms: member: %w", err)
+	}
+	return out, err
+}
+
+// moderateMember mutes or unmutes, or bans or unbans, target as actor (B32.52): the room's owner or an editor does it,
+// only the owner to an editor, and nobody to the owner. A banned member is removed, with its agents, and refused when it
+// joins again; unbanned, it may join again itself.
+func (s *Store) moderateMember(ctx context.Context, actor, roomID, target string, c MemberChange) (Member, error) {
+	var out Member
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := lockRoom(ctx, tx, actor, roomID); err != nil {
+			return err
+		}
+		me, ok, err := member(ctx, tx, roomID, actor)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: no such room", ErrNotFound)
+		}
+		// Any row of target's, live or removed: an unban reaches a member that is no longer in the room.
+		read := func() (Member, error) {
+			return scanMember(tx.QueryRow(ctx, `SELECT `+memberCols+` FROM room_members m JOIN rooms r ON r.id = m.room_id
+				WHERE m.room_id = $1 AND m.workspace_id = $2`, roomID, target))
+		}
+		them, err := read()
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: that workspace is not a member of this room", ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		switch {
+		case me.Role != RoleOwner && me.Role != RoleEditor:
+			return forbidden("only the room's owner or an editor mutes or bans a member")
+		case them.Role == RoleOwner:
+			return invalid("the room's owner is not muted or banned")
+		case me.Role == RoleEditor && them.Role == RoleEditor:
+			return forbidden("only the room's owner mutes or bans an editor")
+		}
+		switch {
+		case c.Muted != nil:
+			if them.RemovedAt != nil {
+				return fmt.Errorf("%w: that workspace is not a member of this room", ErrNotFound)
+			}
+			_, err = tx.Exec(ctx, `UPDATE room_members SET muted_at = CASE WHEN $3 THEN COALESCE(muted_at, now()) END
+				WHERE room_id = $1 AND workspace_id = $2`, roomID, target, *c.Muted)
+		case *c.Banned:
+			if _, err := tx.Exec(ctx, `DELETE FROM room_member_agents WHERE room_id = $1 AND workspace_id = $2`, roomID, target); err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `UPDATE room_members SET banned_at = COALESCE(banned_at, now()), removed_at = COALESCE(removed_at, now()),
+				may_spend = false WHERE room_id = $1 AND workspace_id = $2`, roomID, target)
+		default:
+			_, err = tx.Exec(ctx, `UPDATE room_members SET banned_at = NULL WHERE room_id = $1 AND workspace_id = $2`, roomID, target)
+		}
+		if err != nil {
+			return err
+		}
+		if err := touch(ctx, tx, roomID); err != nil {
+			return err
+		}
+		out, err = read()
 		return err
 	})
 	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrForbidden) {
