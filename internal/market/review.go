@@ -314,14 +314,16 @@ func (s *Store) RefundTakenDown(ctx context.Context, refunder Refunder) (refunde
 }
 
 // refundUses writes a refund for every billed use of listingID (every taken-down listing when "") that ran
-// and whose earning, if it has cleared, was still inside its holdback when the listing came down.
+// and whose earning, if it has cleared, was still inside its holdback when the listing came down — its 14 days
+// not over, or kept there by a hold (B32.17).
 func (s *Store) refundUses(ctx context.Context, listingID string) (int, error) {
 	rows, err := s.pool.Query(ctx, `SELECT u.id FROM market_uses u
 		JOIN market_listings l ON l.id = u.listing_id
 		LEFT JOIN market_earnings e ON e.use_id = u.id AND e.kind = 'sale'
 		WHERE l.review_status = 'taken_down' AND ($1 = '' OR l.id = $1)
 		  AND u.charge = 'billed' AND u.ran_at IS NOT NULL
-		  AND (e.use_id IS NULL OR e.payable_at > l.taken_down_at)
+		  AND (e.use_id IS NULL OR e.payable_at > l.taken_down_at
+		       OR EXISTS (SELECT 1 FROM market_holds h WHERE h.use_id = u.id AND h.released_at IS NULL))
 		  AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = u.id)
 		ORDER BY u.used_at, u.id LIMIT 1000`, listingID)
 	if err != nil {

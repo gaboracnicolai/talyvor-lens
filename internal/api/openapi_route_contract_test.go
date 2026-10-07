@@ -348,7 +348,8 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 // 226 → 228 (B32.33): runs in a room — POST /v1/rooms/{roomID}/runs and POST /v1/rooms/{roomID}/ask.
 //
 // 228 → 231 (B32.35): room prizes — POST and GET /v1/rooms/{roomID}/prizes, POST .../prizes/{prizeID}/award.
-const undocumentedNonAdminV1Routes = 231
+// 231 → 234 (B32.47): IP claims — POST and GET /v1/workspaces/{wsID}/marketplace/ip-claims, POST .../ip-claims/{claimID}/counter.
+const undocumentedNonAdminV1Routes = 234
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

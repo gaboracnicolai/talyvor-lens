@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -28,6 +29,9 @@ import (
 //	GET  /v1/marketplace/listings/{id}                             a listing and its versions (artifacts for its owner only)
 //	GET  /v1/marketplace/listings/{id}/lineage?version=            B32.24: its ancestors with each edge's share, and its remixes
 //	POST /v1/marketplace/listings/{id}/reports                     {reason, details}   B20.4: report a listing
+//	POST /v1/workspaces/{wsID}/marketplace/ip-claims               {listing_id, original_listing_id | original_reference, evidence, good_faith}
+//	GET  /v1/workspaces/{wsID}/marketplace/ip-claims               B32.47: claims against its listings, and claims it filed
+//	POST /v1/workspaces/{wsID}/marketplace/ip-claims/{id}/counter  {statement}   B32.47: the seller's counter-notice
 //
 // A listing is sold through its offers (internal/market/offers.go): per_use, buy, rent or subscribe, each under a
 // personal, commercial or enterprise licence, at a price in µUSD. A publish may carry them ("offers"); without them a
@@ -59,6 +63,12 @@ import (
 // listing that is neither a declared parent nor the publisher's own is 201 held: scan.similar names the nearest listing,
 // its score and whether it is remixable, and review_reason says how to go on — remix it and declare it as a parent, or
 // wait for a review.
+//
+// B32.47: a workspace that believes a listing copies its work files an IP claim (internal/market/ipclaims.go). The
+// listing stays up; every billed use of it from then on is held, its earnings kept in holdback until the claim is
+// decided. The seller finds it under "against" in their claims and may counter it until its counter_by
+// (LENS_IP_COUNTER_DAYS after filing); the operator then decides it (POST /v1/admin/marketplace/ip-claims/{id}/decide).
+// Filing and countering take the workspace's owner or an admin.
 
 func mountMarketRoutes(r chi.Router, store *market.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {
@@ -209,6 +219,42 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 		}
 		writeJSONOK(w, http.StatusOK, lineage)
 	})
+	r.Post("/v1/workspaces/{wsID}/marketplace/ip-claims", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in market.IPClaimFiling
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 32<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {listing_id, original_listing_id or original_reference, evidence, good_faith}: "+err.Error())
+			return
+		}
+		c, err := store.FileIPClaim(req.Context(), chi.URLParam(req, "wsID"), in, time.Now())
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusCreated, c)
+	}))
+	r.Get("/v1/workspaces/{wsID}/marketplace/ip-claims", func(w http.ResponseWriter, req *http.Request) {
+		against, filed, err := store.IPClaims(req.Context(), chi.URLParam(req, "wsID"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"against": against, "filed": filed})
+	})
+	r.Post("/v1/workspaces/{wsID}/marketplace/ip-claims/{claimID}/counter", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Statement string `json:"statement"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 32<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {statement}: "+err.Error())
+			return
+		}
+		c, err := store.CounterIPClaim(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "claimID"), in.Statement, time.Now())
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, c)
+	}))
 	r.Post("/v1/marketplace/listings/{listingID}/reports", func(w http.ResponseWriter, req *http.Request) {
 		reporter, _ := auth.WorkspaceIdentity(req.Context())
 		if reporter == "" {
@@ -242,8 +288,13 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 //	POST /v1/admin/marketplace/listings/{id}/approve         keep it up: release a hold, resolve its reports as kept
 //	POST /v1/admin/marketplace/listings/{id}/takedown        {reason}   take it down and refund its uses inside the holdback
 //
+//	GET  /v1/admin/marketplace/ip-claims?status=             B32.47: undecided IP claims, oldest first (or those in status)
+//	POST /v1/admin/marketplace/ip-claims/{id}/decide         {outcome: upheld|attributed|rejected, share_bps, reason, actor}
+//
 // A takedown answers with the refunds it wrote (market_refunds rows); a buyer's credit Stripe did not
-// accept is named in credit_error and retried by refundTakenDownMarketUses.
+// accept is named in credit_error and retried by refundTakenDownMarketUses. An IP claim is decided once the seller
+// has countered it or their counter window is over; the operator is the one X-Talyvor-Operator names, or the body's
+// actor, and the decision is recorded under that name in the operator audit trail.
 
 func writeMarketAdminErr(w http.ResponseWriter, err error) {
 	switch {
@@ -334,6 +385,41 @@ func newMarketTakedownHandler(store *market.Store, refunder market.Refunder) htt
 			return
 		}
 		writeJSONOK(w, http.StatusOK, t)
+	})
+}
+
+func newMarketIPClaimQueueHandler(store *market.Store) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		claims, err := store.IPClaimQueue(req.Context(), req.URL.Query().Get("status"))
+		if err != nil {
+			writeMarketAdminErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"claims": claims})
+	})
+}
+
+func newMarketIPClaimDecideHandler(store *market.Store, refunder market.Refunder) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			market.IPClaimDecision
+			Actor string `json:"actor"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {outcome, share_bps, reason, actor}: "+err.Error())
+			return
+		}
+		actor, ok := contractActor(req, in.Actor)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, "actor in the body is not the operator "+moderatorOperatorHeader+" names")
+			return
+		}
+		out, err := store.DecideIPClaim(req.Context(), refunder, chi.URLParam(req, "claimID"), actor, in.IPClaimDecision, time.Now())
+		if err != nil {
+			writeMarketAdminErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, out)
 	})
 }
 

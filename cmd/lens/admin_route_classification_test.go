@@ -80,6 +80,8 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/marketplace/review":                               "B20.4: the marketplace's held and reported listings, with what reporters wrote about them. requireAdminOrModerator: the global key or a B20.13 moderator key, never the operator read key.",
 	"/v1/admin/marketplace/listings/{listingID}/approve":         "B20.4: releases a held listing to every buyer.",
 	"/v1/admin/marketplace/listings/{listingID}/takedown":        "B20.4: TAKES A LISTING DOWN AND REFUNDS ITS BUYERS. Moves money.",
+	"/v1/admin/marketplace/ip-claims":                            "B32.47: the undecided IP claims, with the claimant's evidence and the seller's counter-notice. requireAdminOrModerator, never the operator read key.",
+	"/v1/admin/marketplace/ip-claims/{claimID}/decide":           "B32.47: DECIDES AN IP CLAIM — upheld takes the listing down and refunds its buyers, attributed pays the claimant a royalty on every sale, rejected releases the held earnings. Moves money.",
 	"/v1/admin/marketplace/parked-uses/{useID}/retry":            "B27.19: puts a parked use back in the metering queue, onto its buyer's bill. Moves money.",
 	"/v1/admin/operator-audit/record":                            "B27.28: appends to the append-only operator audit trail. A write is a write even when it is not money; the web app writes it on its moderator key.",
 
