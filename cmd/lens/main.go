@@ -97,6 +97,7 @@ import (
 	"github.com/talyvor/lens/internal/oracle"
 	"github.com/talyvor/lens/internal/outputverify"
 	"github.com/talyvor/lens/internal/pairverify"
+	"github.com/talyvor/lens/internal/partners"
 	"github.com/talyvor/lens/internal/passkey"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/plans"
@@ -127,6 +128,7 @@ import (
 	"github.com/talyvor/lens/internal/storedanswers"
 	"github.com/talyvor/lens/internal/tare"
 	"github.com/talyvor/lens/internal/tare/kompress"
+	"github.com/talyvor/lens/internal/taxprofile"
 	"github.com/talyvor/lens/internal/templates"
 	"github.com/talyvor/lens/internal/tenant"
 	"github.com/talyvor/lens/internal/webpush"
@@ -1846,6 +1848,15 @@ func run() error {
 		})
 	}
 	stripeKinds := newStripeByKind(wsManager.GetSynthetic, billing.LiveKey(cfg.StripeSecretKey), testBillingSvc != nil, liveSide, testSide)
+	// B32.38 — a buyer's tax profile, its tax id checked with the tax partner (the Test one until B32.45), and where
+	// the buyer resolves to: the declaration weighed against its Stripe customer's billing and card countries.
+	partnerRegistry := partners.NewRegistry(dualToken)
+	partnerRegistry.UseTaxData(partners.NewTaxStore(pool))
+	taxProfiles := taxprofile.NewStore(pool, partnerRegistry)
+	if cfg.BillingEnabled {
+		taxProfiles.SetStripe(taxStripeByKind{isTest: wsManager.GetSynthetic, mainKeyLive: billing.LiveKey(cfg.StripeSecretKey),
+			live: liveStripe, test: testStripe})
+	}
 	// Every workspace's bill is picked per workspace: in Stripe, or for a test workspace on a Lens with none in
 	// Stripe, kept by Lens (B17.15). A workspace with neither is refused a paid use and a company payment.
 	var marketMeter market.Meter = stripeKinds
@@ -2314,6 +2325,8 @@ func run() error {
 	r.Post("/v1/admin/marketplace/collections/{collectionID}/feature", requireAdminOrModerator(authManager, moderatorKeys, newMarketFeatureCollectionHandler(marketStore)))
 	// B26.3 — the billed uses Stripe refused too often to keep retrying, with its reason. market_handler.go.
 	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
+	// B32.38 — the buyer tax profiles whose Stripe evidence contradicts the declared country. tax_profile_handler.go.
+	r.Get("/v1/admin/tax-profiles/flagged", requireAdminOrOperatorRead(authManager, newTaxProfilesFlaggedHandler(taxProfiles)))
 	// B27.19 — an operator retries one: the global key or a moderator key, recorded under the operator's name.
 	r.Post("/v1/admin/marketplace/parked-uses/{useID}/retry", requireAdminOrModerator(authManager, moderatorKeys, newMarketParkedUseRetryHandler(marketStore)))
 	// B32.10 — the operator puts a workspace on an Enterprise contract, with its fees, or ends one; each is
@@ -4407,6 +4420,7 @@ func run() error {
 		mountCashOutRoutes(authed, dualToken)                                           // B22.9
 		mountMarketRoutes(authed, marketStore)                                          // B20.1
 		mountMarketDiscoveryRoutes(authed, marketStore)                                 // B32.50
+		mountTaxProfileRoutes(authed, taxProfiles)                                      // B32.38
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5
 			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})

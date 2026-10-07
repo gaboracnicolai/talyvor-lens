@@ -65,6 +65,25 @@ func (l *LiveStripe) CreateCustomer(ctx context.Context, workspaceID string) (st
 	return c.ID, nil
 }
 
+// CustomerCountries is the country of a customer's billing address and of the card that is its default payment
+// method, in one read — the evidence of where a buyer is (B32.38). Each is "" where the customer has none.
+func (l *LiveStripe) CustomerCountries(ctx context.Context, customerID string) (billingCountry, cardCountry string, err error) {
+	params := &stripe.CustomerParams{}
+	params.Context = ctx
+	params.AddExpand("invoice_settings.default_payment_method")
+	c, err := customer.Client{B: l.backend(), Key: l.key}.Get(customerID, params)
+	if err != nil {
+		return "", "", err
+	}
+	if c.Address != nil {
+		billingCountry = c.Address.Country
+	}
+	if c.InvoiceSettings != nil && c.InvoiceSettings.DefaultPaymentMethod != nil && c.InvoiceSettings.DefaultPaymentMethod.Card != nil {
+		cardCountry = c.InvoiceSettings.DefaultPaymentMethod.Card.Country
+	}
+	return billingCountry, cardCountry, nil
+}
+
 // CreateCheckoutSession creates a one-off (mode=payment) Checkout Session for a
 // single USD line item, stamping workspace_id / lxc_amount / usd_cents into the
 // session metadata the webhook later re-verifies (never trusts as truth).
