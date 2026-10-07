@@ -285,6 +285,13 @@ func TestRooms_PrivateRoomsInviteLinksAndPlanLimits(t *testing.T) {
 	if n := count(`SELECT uses FROM room_invites WHERE room_id = $1 AND workspace_id = $2`, priv.ID, named); n != 1 {
 		t.Fatalf("the named invite's uses = %d, want 1", n)
 	}
+	// Removed, it cannot come back on the invite it already used.
+	if code, body := call(owner, http.MethodPatch, "/v1/rooms/"+priv.ID+"/members/"+named, `{"remove":true}`); code != http.StatusOK {
+		t.Fatalf("remove the named member = %d %s", code, body)
+	}
+	if code, _ := call(named, http.MethodPost, "/v1/rooms/"+priv.ID+"/join", `{"terms_version":1}`); code != http.StatusNotFound {
+		t.Fatalf("a removed member rejoining the private room = %d, want 404", code)
+	}
 
 	// A Free owner's room holds 50 members, the owner included: the 51st is refused and writes no row.
 	code, body = open(freeOwner, "Crowded", "public")

@@ -454,8 +454,8 @@ func (s *Store) Get(ctx context.Context, viewer string, admin bool, roomID strin
 
 // Join makes ws a member of the room under the terms version it accepted, which must be the room's current one. A
 // member joining again accepts the current version; a removed member joining again is a member again. A private room
-// takes a workspace its owner named, which uses the invite; anyone else joins it through an invite link
-// (JoinByInvite). created is false when ws was already a member.
+// takes a workspace its owner named; anyone else joins it through an invite link (JoinByInvite). created is false
+// when ws was already a member.
 func (s *Store) Join(ctx context.Context, ws, user, roomID string, termsVersion int) (m Member, created bool, err error) {
 	if termsVersion < 1 {
 		return Member{}, false, invalid("joining accepts the room's terms: send the terms_version you read from GET /v1/rooms/{id}")
@@ -465,13 +465,7 @@ func (s *Store) Join(ctx context.Context, ws, user, roomID string, termsVersion 
 		if err != nil {
 			return err
 		}
-		if m, created, err = s.admit(ctx, tx, r, ws, user, termsVersion); err != nil || !created || r.Visibility != Private {
-			return err
-		}
-		// A new member of a private room came in on its named invite: that invite is used.
-		_, err = tx.Exec(ctx, `UPDATE room_invites SET uses = uses + 1 WHERE id = (SELECT id FROM room_invites
-			WHERE room_id = $1 AND workspace_id = $2 AND $2 <> '' AND revoked_at IS NULL AND uses < max_uses
-			ORDER BY created_at LIMIT 1)`, roomID, ws)
+		m, created, err = s.admit(ctx, tx, r, ws, user, termsVersion)
 		return err
 	})
 	return m, created, joinErr(err)
@@ -486,7 +480,8 @@ func joinErr(err error) error {
 }
 
 // admit makes ws a member of r, locked for update, under termsVersion: r must be open, the version current, and a new
-// member must fit within the room owner's members_per_room.
+// member must fit within the room owner's members_per_room. A new member uses every invite naming it, however it
+// came in, so none is left to let it back in once it is removed.
 func (s *Store) admit(ctx context.Context, tx pgx.Tx, r Room, ws, user string, termsVersion int) (m Member, created bool, err error) {
 	if r.Status != Open {
 		return m, false, fmt.Errorf("%w: the room is %s and takes no new members", ErrConflict, r.Status)
@@ -524,6 +519,12 @@ func (s *Store) admit(ctx context.Context, tx pgx.Tx, r Room, ws, user string, t
 			joined_at = CASE WHEN room_members.removed_at IS NULL THEN room_members.joined_at ELSE now() END,
 			removed_at = NULL`, r.ID, ws, user, termsVersion); err != nil {
 		return m, false, err
+	}
+	if !existed {
+		if _, err := tx.Exec(ctx, `UPDATE room_invites SET uses = max_uses WHERE room_id = $1 AND workspace_id = $2
+			AND $2 <> '' AND revoked_at IS NULL AND uses < max_uses`, r.ID, ws); err != nil {
+			return m, false, err
+		}
 	}
 	if err := touch(ctx, tx, r.ID); err != nil {
 		return m, false, err
