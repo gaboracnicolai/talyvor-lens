@@ -131,6 +131,8 @@ var Manifest = map[string]Entry{
 	"market_licences":           {Retain, "B32.19: audit-guarded (0202, only status, ends_at and auto_renew change): keys `buyer_workspace_id`: each licence a workspace bought, rented or subscribed to — what its billed purchase on market_uses paid for"},
 	"test_crossing_reversals":   {Retain, "B26.15: keys `from_workspace_id`+`to_workspace_id`; audit-guarded (0177, append-only): each crossing between a test workspace and a real one that the operator reversed, naming the original row; financial-record retention"},
 	"market_payouts":            {Retain, "B20.5: audit-guarded (0153, append-only but for its Stripe transfer): each payout of a seller's earnings, in money through Stripe or in credits"},
+	"money_entries":             {Retain, "B30.2: audit-guarded (0221, append-only): every movement of money in pounds, euros, dollars and USDC, by idempotency key; its money_postings are append-only too; financial-record retention"},
+	"money_accounts":            {Retain, "B30.2: each account in pounds, euros, dollars or USDC; the append-only money_postings reference it by foreign key, so an account with money moved is closed, never deleted; financial-record retention"},
 
 	// token_events is audit-guarded TOO, but migration 0055's trigger carries a sanctioned
 	// exception: DELETE is permitted while the retention-bypass session flag is set — the flag the
