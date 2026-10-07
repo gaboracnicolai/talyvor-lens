@@ -986,6 +986,9 @@ type Config struct {
 	// as a parent before it is held for review (B32.46), 0 to 1. Env: LENS_MARKET_SIMILARITY_HOLD, default 0.92 — a
 	// proposal for Nicolai.
 	MarketSimilarityHold float64
+	// IPCounterDays is how many days after an IP claim is filed its seller may counter it (B32.47). Env:
+	// LENS_IP_COUNTER_DAYS, default 10 — a proposal for Nicolai.
+	IPCounterDays int
 	// RoomMessagesPerMinute is how many messages one member posts in one room in a minute (B32.30). Env:
 	// LENS_ROOM_MESSAGES_PER_MINUTE, default 20 — a proposal for Nicolai.
 	RoomMessagesPerMinute int
@@ -2168,6 +2171,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_MARKET_SIMILARITY_HOLD must be above 0 and at most 1, got %q", v)
 		}
 		c.MarketSimilarityHold = f
+	}
+	// B32.47 — the days a seller has to counter an IP claim. A malformed value is refused.
+	c.IPCounterDays = 10
+	if v := os.Getenv("LENS_IP_COUNTER_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("config: LENS_IP_COUNTER_DAYS must be a positive integer, got %q", v)
+		}
+		c.IPCounterDays = n
 	}
 	// B32.30 — a member's messages a minute in a room. A malformed value is refused.
 	c.RoomMessagesPerMinute = 20

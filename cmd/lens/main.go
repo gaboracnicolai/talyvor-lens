@@ -1778,6 +1778,7 @@ func run() error {
 		marketEmbedder = embedder.NewHashedEmbedder()
 	}
 	marketStore.SetSimilarity(marketEmbedder, cfg.MarketSimilarityHold)
+	marketStore.SetIPCounterDays(cfg.IPCounterDays) // B32.47
 	// The real workspaces' Stripe (B25.6: a test workspace's is on the test-mode key, below).
 	liveSide := stripeSide{cards: agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)} // B19.12
 	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {
@@ -2293,6 +2294,10 @@ func run() error {
 	r.Get("/v1/admin/marketplace/review", requireAdminOrModerator(authManager, moderatorKeys, newMarketReviewQueueHandler(marketStore)))
 	r.Post("/v1/admin/marketplace/listings/{listingID}/approve", requireAdminOrModerator(authManager, moderatorKeys, newMarketApproveHandler(marketStore)))
 	r.Post("/v1/admin/marketplace/listings/{listingID}/takedown", requireAdminOrModerator(authManager, moderatorKeys, newMarketTakedownHandler(marketStore, marketRefunder)))
+	// B32.47 — IP claims: the operator's queue, and the decision (upheld takes the listing down with its refunds,
+	// attributed adds a claim edge and releases the holds, rejected releases them), recorded in the operator audit trail.
+	r.Get("/v1/admin/marketplace/ip-claims", requireAdminOrModerator(authManager, moderatorKeys, newMarketIPClaimQueueHandler(marketStore)))
+	r.Post("/v1/admin/marketplace/ip-claims/{claimID}/decide", requireAdminOrModerator(authManager, moderatorKeys, newMarketIPClaimDecideHandler(marketStore, marketRefunder)))
 	// B26.3 — the billed uses Stripe refused too often to keep retrying, with its reason. market_handler.go.
 	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
 	// B27.19 — an operator retries one: the global key or a moderator key, recorded under the operator's name.

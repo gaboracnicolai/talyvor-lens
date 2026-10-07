@@ -170,6 +170,8 @@ type Store struct {
 	lineageTotalCap *int // nil: DefaultLineageTotalCapBPS (B32.26)
 
 	similarity *similarityCheck // nil: no version is fingerprinted or held as a copy (B32.46, similarity.go)
+
+	ipCounterDays *int // nil: DefaultIPCounterDays; how long a seller has to counter an IP claim (B32.47)
 }
 
 func (s *Store) now() time.Time {
