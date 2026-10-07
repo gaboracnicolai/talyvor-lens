@@ -90,8 +90,10 @@ func contributor(ctx context.Context, tx pgx.Tx, ws, roomID string) (Room, Terms
 		return r, t, forbidden("join the room to contribute to it")
 	case me.Role == RoleViewer:
 		return r, t, forbidden("a viewer reads the room and does not contribute to it")
-	case r.Status == Closed:
-		return r, t, fmt.Errorf("%w: the room is closed", ErrConflict)
+	case me.MutedAt != nil:
+		return r, t, forbidden("the room's owner or an editor has muted you: you read the room and post nothing in it")
+	case shut(r) != nil:
+		return r, t, shut(r)
 	case !me.TermsCurrent:
 		return r, t, fmt.Errorf("%w: the room's terms are at version %d and you accepted version %d: read them and accept them with "+
 			"POST /v1/rooms/%s/join {\"terms_version\": %d} before you contribute", ErrConflict, r.TermsVersion, me.TermsVersion, roomID, r.TermsVersion)
@@ -381,8 +383,8 @@ func (s *Store) Vote(ctx context.Context, ws, roomID, id string, value int) (Con
 			return forbidden("join the room to vote in it")
 		case me.Role == RoleViewer:
 			return forbidden("a viewer reads the room and does not vote in it")
-		case r.Status == Closed:
-			return fmt.Errorf("%w: the room is closed", ErrConflict)
+		case shut(r) != nil:
+			return shut(r)
 		}
 		if _, err := readContribution(ctx, tx, ws, roomID, id); err != nil {
 			return err
@@ -414,8 +416,8 @@ func (s *Store) Decide(ctx context.Context, ws, user, roomID, id, status string)
 			return err
 		case !ok || (me.Role != RoleOwner && me.Role != RoleEditor):
 			return forbidden("only the room's owner or an editor accepts or rejects a contribution")
-		case r.Status == Closed:
-			return fmt.Errorf("%w: the room is closed", ErrConflict)
+		case shut(r) != nil:
+			return shut(r)
 		}
 		c, err := readContribution(ctx, tx, ws, roomID, id)
 		if err != nil {

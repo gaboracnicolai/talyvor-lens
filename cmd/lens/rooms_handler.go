@@ -86,6 +86,20 @@ import (
 // (/v1/workspaces/{ws}/agents/{wallet}/fund and /rules); a monthly limit above the plan's room_budget_max_usd, or none
 // on a plan that sets one, is 402 naming rooms_plan_limits and the plan. Its approvals reach the owner's.
 //
+// B32.52 — reports, mutes and bans (internal/rooms/reports.go):
+//
+//	POST  /v1/rooms/{roomID}/reports                        {reason, details}   report the room
+//	POST  /v1/rooms/{roomID}/messages/{messageID}/reports   {reason, details}   report one of its messages
+//	PATCH /v1/rooms/{roomID}/members/{ws}                   {muted: true|false} or {banned: true|false}, by the owner or an
+//	                                                        editor: a muted member posts nothing; a banned one is removed
+//	                                                        and its join is 403 until it is unbanned
+//
+// The reason is malicious, injection, secret, personal_data, infringing, misleading, harassment, spam or other; a report is
+// 201, or 200 with already_reported while the same workspace's report of it is still open. Anyone who can read the room
+// reports it. A public room with LENS_ROOM_REPORTS_HIDE open reports from different workspaces leaves GET /v1/rooms, and
+// GET /v1/rooms/{roomID} says under_review, until the operator reviews it (POST /v1/admin/rooms/{roomID}/moderate). A
+// locked room is read-only: posting, editing, contributing, voting and running in it are 409; a closed room takes nothing.
+//
 // A private room answers 404 to everyone but its members and the workspaces its owner named. Joining with a
 // terms_version that is not the room's current one, or joining a room that is locked or closed, is 409. Opening a room
 // past the owner's plan's public_rooms or private_rooms, a member past members_per_room or an agent past
@@ -204,6 +218,28 @@ func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 		}
 		writeJSONOK(w, http.StatusOK, room)
 	})
+	report := func(w http.ResponseWriter, req *http.Request, messageID string) {
+		reporter, _ := auth.WorkspaceIdentity(req.Context())
+		if reporter == "" {
+			writeJSONErr(w, http.StatusForbidden, "a report needs a workspace's credential")
+			return
+		}
+		var in rooms.ReportDraft
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {reason, details}: "+err.Error())
+			return
+		}
+		rep, err := store.Report(req.Context(), reporter, chi.URLParam(req, "roomID"), messageID, in)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, status(!rep.AlreadyMade), rep)
+	}
+	r.Post("/v1/rooms/{roomID}/reports", func(w http.ResponseWriter, req *http.Request) { report(w, req, "") })
+	r.Post("/v1/rooms/{roomID}/messages/{messageID}/reports", func(w http.ResponseWriter, req *http.Request) {
+		report(w, req, chi.URLParam(req, "messageID"))
+	})
 	r.Post("/v1/rooms/{roomID}/join", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
 		ws, user, ok := actor(w, req)
 		if !ok {
@@ -247,7 +283,7 @@ func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 		}
 		var in rooms.MemberChange
 		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4<<10)).Decode(&in); err != nil {
-			writeJSONErr(w, http.StatusBadRequest, "body must be {role, may_spend, remove}: "+err.Error())
+			writeJSONErr(w, http.StatusBadRequest, "body must be {role, may_spend, remove} or {muted} or {banned}: "+err.Error())
 			return
 		}
 		m, err := store.ChangeMember(req.Context(), ws, chi.URLParam(req, "roomID"), chi.URLParam(req, "ws"), in)
@@ -627,4 +663,57 @@ func roomActorOnly(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, req)
 	}
+}
+
+// B32.52 — the operator's half of room safety, registered in main.go behind requireAdminOrModerator:
+//
+//	GET  /v1/admin/rooms/reports              the rooms with an open report, most reporters first, each with its reports
+//	                                          and whether it is off the public list
+//	POST /v1/admin/rooms/{roomID}/moderate    {action: keep|lock|unlock|close, reason, actor}   keep resolves the room's
+//	                                          open reports as kept and puts it back on the list; lock makes it read-only and
+//	                                          close closes it, each resolving them; unlock opens a locked room again
+//
+// The operator is the one X-Talyvor-Operator names, or the body's actor; every action is an operator_audit row, written
+// with it. Locking or closing a room that is not open, or unlocking one that is not locked, is 409.
+
+func newRoomReportQueueHandler(store *rooms.Store) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		q, err := store.ReportQueue(req.Context())
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"rooms": q, "hide_at": store.ReportsHide(), "setting": rooms.ReportsHideSetting})
+	})
+}
+
+func newRoomModerateHandler(store *rooms.Store) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			rooms.Moderation
+			Actor string `json:"actor"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 8<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {action, reason, actor}: "+err.Error())
+			return
+		}
+		actor, ok := contractActor(req, in.Actor)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, "actor in the body is not the operator "+moderatorOperatorHeader+" names")
+			return
+		}
+		out, err := store.Moderate(req.Context(), actor, chi.URLParam(req, "roomID"), in.Moderation)
+		switch {
+		case err == nil:
+			writeJSONOK(w, http.StatusOK, out)
+		case errors.Is(err, rooms.ErrInvalid):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, rooms.ErrNotFound):
+			writeJSONErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, rooms.ErrConflict):
+			writeJSONErr(w, http.StatusConflict, err.Error())
+		default:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		}
+	})
 }
