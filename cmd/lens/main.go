@@ -1854,6 +1854,10 @@ func run() error {
 	go haComps.leader.Run(ctx, "market-release-holdback", 30*time.Second, func(lctx context.Context) {
 		releaseMarketHoldbacks(lctx, marketStore)
 	})
+	// B32.50: each night, the listings' daily stats and trending scores.
+	go haComps.leader.Run(ctx, "market-discovery-stats", 30*time.Second, func(lctx context.Context) {
+		refreshMarketDiscovery(lctx, marketStore)
+	})
 	if cfg.BillingEnabled {
 		go haComps.leader.Run(ctx, "market-payouts", 30*time.Second, func(lctx context.Context) {
 			payMarketSellers(lctx, marketStore, stripeKinds)
@@ -2298,6 +2302,8 @@ func run() error {
 	// attributed adds a claim edge and releases the holds, rejected releases them), recorded in the operator audit trail.
 	r.Get("/v1/admin/marketplace/ip-claims", requireAdminOrModerator(authManager, moderatorKeys, newMarketIPClaimQueueHandler(marketStore)))
 	r.Post("/v1/admin/marketplace/ip-claims/{claimID}/decide", requireAdminOrModerator(authManager, moderatorKeys, newMarketIPClaimDecideHandler(marketStore, marketRefunder)))
+	// B32.50: the operator marks a public collection featured, listed first.
+	r.Post("/v1/admin/marketplace/collections/{collectionID}/feature", requireAdminOrModerator(authManager, moderatorKeys, newMarketFeatureCollectionHandler(marketStore)))
 	// B26.3 — the billed uses Stripe refused too often to keep retrying, with its reason. market_handler.go.
 	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
 	// B27.19 — an operator retries one: the global key or a moderator key, recorded under the operator's name.
@@ -4392,6 +4398,7 @@ func run() error {
 		mountSimTradingRoutes(authed, dualToken)                                        // B22.8
 		mountCashOutRoutes(authed, dualToken)                                           // B22.9
 		mountMarketRoutes(authed, marketStore)                                          // B20.1
+		mountMarketDiscoveryRoutes(authed, marketStore)                                 // B32.50
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5
 			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})

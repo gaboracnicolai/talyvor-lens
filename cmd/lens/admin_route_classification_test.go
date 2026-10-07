@@ -83,6 +83,7 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/marketplace/ip-claims":                            "B32.47: the undecided IP claims, with the claimant's evidence and the seller's counter-notice. requireAdminOrModerator, never the operator read key.",
 	"/v1/admin/marketplace/ip-claims/{claimID}/decide":           "B32.47: DECIDES AN IP CLAIM — upheld takes the listing down and refunds its buyers, attributed pays the claimant a royalty on every sale, rejected releases the held earnings. Moves money.",
 	"/v1/admin/marketplace/parked-uses/{useID}/retry":            "B27.19: puts a parked use back in the metering queue, onto its buyer's bill. Moves money.",
+	"/v1/admin/marketplace/collections/{collectionID}/feature":   "B32.50: features a public collection, listed first in the marketplace, and writes an operator audit row. A write.",
 	"/v1/admin/operator-audit/record":                            "B27.28: appends to the append-only operator audit trail. A write is a write even when it is not money; the web app writes it on its moderator key.",
 
 	// ⚠ MEASURED, AND THE PROVISIONAL CLASSIFICATION WAS WRONG. The W1.3 groundwork report listed
