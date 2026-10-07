@@ -151,8 +151,8 @@ func (s *DualTokenStore) OpenMoneyAccount(ctx context.Context, a MoneyAccount) (
 	return a, nil
 }
 
-// PostMoney moves money: it writes e and its postings in one transaction and answers the entry as recorded. A
-// posting of zero is left out — a fee that is 0 moves nothing. Live money is first asked of e.Capability, which
+// PostMoney moves money between e.WorkspaceID's accounts: it writes e and its postings in one transaction and answers
+// the entry as recorded. A posting of zero is left out — a fee that is 0 moves nothing. Live money is first asked of e.Capability, which
 // refuses it with a *CapabilityRefusal while it is uncleared, and then nothing is written. The same idempotency key
 // again answers the entry it first wrote, or ErrIdempotencyKeyReused when the movement differs. An entry that does
 // not sum to zero in each currency is refused when it commits, with ErrMoneyUnbalanced.
@@ -181,8 +181,8 @@ func (s *DualTokenStore) PostMoney(ctx context.Context, e MoneyEntry) (MoneyEntr
 func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, error) {
 	c, ok := CapabilityByKey(e.Capability)
 	switch {
-	case !ok:
-		return MoneyEntry{}, fmt.Errorf("economy: no wallet capability is called %q", e.Capability)
+	case !ok || !b30[c.Key]:
+		return MoneyEntry{}, fmt.Errorf("economy: money in currencies moves only for a money capability (B30), not %q", e.Capability)
 	case e.WorkspaceID == "":
 		return MoneyEntry{}, errors.New("economy: a money entry needs a workspace")
 	case e.IdempotencyKey == "":
@@ -226,8 +226,10 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, erro
 		}
 	}
 
-	// Each account is held open until tx ends: a freeze or a close waits for the money already moving.
-	rows, err := tx.Query(ctx, `SELECT id, currency, status FROM money_accounts WHERE id = ANY($1) FOR SHARE`, ids)
+	// Each account is the entry's workspace's — another's is not found — and is held open until tx ends: a freeze
+	// or a close waits for the money already moving.
+	rows, err := tx.Query(ctx, `SELECT id, currency, status FROM money_accounts WHERE id = ANY($1) AND workspace_id = $2 FOR SHARE`,
+		ids, e.WorkspaceID)
 	if err != nil {
 		return MoneyEntry{}, fmt.Errorf("economy: post money: %w", err)
 	}

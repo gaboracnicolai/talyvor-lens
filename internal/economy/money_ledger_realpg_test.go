@@ -289,7 +289,8 @@ func TestMoneyLedger_LiveMoneyAsksTheCapability(t *testing.T) {
 }
 
 // The same idempotency key again answers the entry it wrote and moves no money twice; the key used for a different
-// movement is refused; a posting to a closed account, or in another currency than its account's, is refused.
+// movement is refused; a posting to a closed account, to another workspace's account, or in another currency than
+// its account's is refused, and so is money moved for a capability that is not a money one.
 func TestMoneyLedger_ARetryMovesMoneyOnce(t *testing.T) {
 	pool := supplyPool(t)
 	ctx := context.Background()
@@ -328,6 +329,15 @@ func TestMoneyLedger_ARetryMovesMoneyOnce(t *testing.T) {
 	}
 	if _, err := move("in-closed", 5_00, closed.ID); !errors.Is(err, ErrMoneyAccountNotOpen) {
 		t.Fatalf("money into a closed account = %v; want ErrMoneyAccountNotOpen", err)
+	}
+	theirs := openMoney(t, s, "ws-b302-someone-else", CurrencyUSD, MoneyCompany)
+	if _, err := move("in-theirs", 5_00, theirs.ID); !errors.Is(err, ErrMoneyAccountNotFound) {
+		t.Fatalf("money into another workspace's account = %v; want ErrMoneyAccountNotFound", err)
+	}
+	if _, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityBuyListings, Kind: "payment_in",
+		IdempotencyKey: "in-green", Funding: FundingLive, Postings: []MoneyPosting{
+			{AccountID: company.ID, AmountMinor: 5_00}, {AccountID: partner.ID, AmountMinor: -5_00}}}); err == nil {
+		t.Fatal("live money moved for a capability that is not a money capability")
 	}
 	if n := moneyCount(t, pool, `SELECT count(*) FROM money_entries`); n != 1 {
 		t.Fatalf("%d entries; want only the first", n)
