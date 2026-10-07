@@ -111,6 +111,7 @@ import (
 	"github.com/talyvor/lens/internal/reqtrack"
 	"github.com/talyvor/lens/internal/retry"
 	"github.com/talyvor/lens/internal/roi"
+	"github.com/talyvor/lens/internal/rooms"
 	"github.com/talyvor/lens/internal/routedecision"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/routing"
@@ -4379,6 +4380,7 @@ func run() error {
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5
 			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})
+		mountRoomRoutes(authed, rooms.NewStore(pool, cfg.LineageMaxShareBPS)) // B32.28
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
 		// See internal/storedanswers.
