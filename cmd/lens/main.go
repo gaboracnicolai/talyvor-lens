@@ -4383,7 +4383,9 @@ func run() error {
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
 		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5
 			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})
-		mountRoomRoutes(authed, rooms.NewStore(pool, cfg.LineageMaxShareBPS)) // B32.28
+		roomStore := rooms.NewStore(pool, cfg.LineageMaxShareBPS) // B32.28
+		roomStore.SetMessagesPerMinute(cfg.RoomMessagesPerMinute) // B32.30
+		mountRoomRoutes(authed, roomStore)
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
 		// See internal/storedanswers.
