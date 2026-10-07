@@ -68,7 +68,8 @@ func marketToolDefinitions() []map[string]any {
 			map[string]any{"text": str("words in its title or description"), "kind": str("prompt, skill, agent, evaluation or pipeline"),
 				"capability": str("what it should do, e.g. summarise"), "licence": str("sold under this licence: personal, commercial or enterprise"),
 				"max_price_usd_micros": num("one use costs at most this, in µUSD (1 USD = 1,000,000)")}),
-		tool("market_listing", "One listing: what each version needs (input, variables, model) and every offer with its licence terms.",
+		tool("market_listing", "One listing: what each version needs (input, variables, model), every offer with its licence terms, and its trust "+
+			"summary: whether the publisher is verified, reviews from paying buyers, eval score, IP claims, the originals it credits and its remixes.",
 			map[string]any{"listing_id": listing}, "listing_id"),
 		tool("market_license", "Buy, rent or subscribe to a listing through one of its offers, within your rules. Its uses are then covered. "+
 			"Send the same idempotency_key again to retry without buying twice.",
@@ -129,6 +130,12 @@ func (s *Server) runMarketTool(ctx context.Context, name, ws, agent string, raw 
 	return res, err
 }
 
+// listingWithTrust is market_listing's answer: the listing, and its trust summary beside it.
+type listingWithTrust struct {
+	market.Listing
+	Trust market.Trust `json:"trust"`
+}
+
 func (s *Server) marketTool(ctx context.Context, name, ws, agent string, a marketArgs) (any, error) {
 	switch name {
 	case "market_search":
@@ -136,7 +143,12 @@ func (s *Server) marketTool(ctx context.Context, name, ws, agent string, a marke
 			MaxPriceUSDMicros: a.MaxPriceUSDMicros})
 		return map[string]any{"listings": found}, err
 	case "market_listing":
-		return s.market.Get(ctx, ws, a.ListingID)
+		l, err := s.market.Get(ctx, ws, a.ListingID)
+		if err != nil {
+			return nil, err
+		}
+		trust, err := s.market.Trust(ctx, ws, a.ListingID) // B32.49: the trust panel's read, as GET …/listings/{id}/trust gives it
+		return listingWithTrust{l, trust}, err
 	case "market_license":
 		lic, _, err := s.market.License(ctx, s.marketDeps.LicenceDeps(ctx, ws), ws, agent, a.ListingID, a.IdempotencyKey,
 			market.LicenceRequest{OfferID: a.OfferID, Version: a.Version, AutoRenew: a.AutoRenew})
