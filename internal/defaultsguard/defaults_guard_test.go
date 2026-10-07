@@ -113,6 +113,7 @@ var shipped = map[string]recorded{
 	"market.DefaultLineageMaxDepth":               {market.DefaultLineageMaxDepth, 5, "generations the lineage read walks up (B32.24)"},
 	"market.DefaultLineageTotalCapBPS":            {market.DefaultLineageTotalCapBPS, 5000, "most a listing's parents together receive of a sale (B32.26)"},
 	"market.DefaultSimilarityHold":                {market.DefaultSimilarityHold, 0.92, "how similar an undeclared copy may be before it is held (B32.46)"},
+	"market.DefaultIPCounterDays":                 {market.DefaultIPCounterDays, 10, "days a seller has to counter an IP claim (B32.47)"},
 	"mining.DefaultPatternEarnCapPerWorkspace":    {mining.DefaultPatternEarnCapPerWorkspace, 50_000, "pattern earn cap"},
 	"modelwatch.DefaultInterval":                  {modelwatch.DefaultInterval, time.Hour, "model-watch interval"},
 	"modelwatch.DefaultApplyInterval":             {modelwatch.DefaultApplyInterval, 5 * time.Minute, "how soon every replica applies a confirmed price or a retirement"},
