@@ -168,6 +168,8 @@ type Store struct {
 	lineageMaxShare *int // nil: DefaultLineageMaxShareBPS (B32.24)
 	lineageMaxDepth *int // nil: DefaultLineageMaxDepth (B32.24)
 	lineageTotalCap *int // nil: DefaultLineageTotalCapBPS (B32.26)
+
+	similarity *similarityCheck // nil: no version is fingerprinted or held as a copy (B32.46, similarity.go)
 }
 
 func (s *Store) now() time.Time {
@@ -292,6 +294,10 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if err != nil {
 		return Listing{}, err
 	}
+	fp, err := s.checkCopy(ctx, s.pool, &scan, artifact, workspaceID, d.RoomID, parentIDs(d.Parents), d.Title, d.Description)
+	if err != nil {
+		return Listing{}, err
+	}
 	scanJSON, _ := json.Marshal(scan)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -322,6 +328,9 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 		VALUES ($1, 1, $2, $3, $4, $5) RETURNING created_at`, l.ID, string(artifact), sum, d.Changelog, string(scanJSON)).Scan(&v.CreatedAt); err != nil {
 		return Listing{}, fmt.Errorf("market: publish: %w", err)
 	}
+	if err := writeFingerprint(ctx, tx, l.ID, 1, fp); err != nil {
+		return Listing{}, err
+	}
 	if l.Offers, err = writeOffers(ctx, tx, l.ID, offers); err != nil {
 		return Listing{}, err
 	}
@@ -342,10 +351,10 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 		return Version{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var kind, title, description, review string
+	var kind, title, description, review, roomID string
 	var latest int
-	err = tx.QueryRow(ctx, `SELECT kind, title, description, latest_version, review_status FROM market_listings WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
-		listingID, workspaceID).Scan(&kind, &title, &description, &latest, &review)
+	err = tx.QueryRow(ctx, `SELECT kind, title, description, latest_version, review_status, coalesce(room_id, '') FROM market_listings
+		WHERE id = $1 AND workspace_id = $2 FOR UPDATE`, listingID, workspaceID).Scan(&kind, &title, &description, &latest, &review, &roomID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Version{}, ErrNotFound
 	}
@@ -359,11 +368,27 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 	if err != nil {
 		return Version{}, err
 	}
+	// B32.46: the parents it declares and those it carries forward may be copied.
+	carried, err := parentsOf(ctx, tx, listingID, latest)
+	if err != nil {
+		return Version{}, err
+	}
+	declared := parentIDs(parents)
+	for _, p := range carried {
+		declared = append(declared, p.ListingID)
+	}
+	fp, err := s.checkCopy(ctx, tx, &scan, canonical, workspaceID, roomID, declared, title, description)
+	if err != nil {
+		return Version{}, err
+	}
 	scanJSON, _ := json.Marshal(scan)
 	v := Version{Version: latest + 1, ArtifactSHA256: sum, Changelog: changelog, Scan: scan, Needs: needsOf(kind, canonical), Artifact: canonical}
 	if err := tx.QueryRow(ctx, `INSERT INTO market_listing_versions (listing_id, version, artifact, artifact_sha256, changelog, scan)
 		VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`, listingID, v.Version, string(canonical), sum, changelog, string(scanJSON)).Scan(&v.CreatedAt); err != nil {
 		return Version{}, fmt.Errorf("market: version: %w", err)
+	}
+	if err := writeFingerprint(ctx, tx, listingID, v.Version, fp); err != nil {
+		return Version{}, err
 	}
 	if v.Parents, err = s.declareParents(ctx, tx, workspaceID, listingID, v.Version, parents); err != nil {
 		return Version{}, err

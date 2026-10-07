@@ -47,6 +47,7 @@ type Scan struct {
 	Injection     []string `json:"injection,omitempty"` // the patterns that matched
 	Refused       string   `json:"refused,omitempty"`   // why it may not be published; empty when it may
 	Held          string   `json:"held,omitempty"`      // why a person must review it before anyone else may use it (B20.4)
+	Similar       *Similar `json:"similar,omitempty"`   // B32.46: the listing it copies without declaring it as a parent (similarity.go)
 }
 
 var (

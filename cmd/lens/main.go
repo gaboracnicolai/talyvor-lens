@@ -1771,6 +1771,13 @@ func run() error {
 	marketStore.SetLineageLimits(cfg.LineageMaxShareBPS, cfg.LineageMaxDepth) // B32.24
 	marketStore.SetLineageTotalCap(cfg.LineageTotalCapBPS)                    // B32.26
 	dualToken.SetListingCharger(marketStore)                                  // B19.17: a schedule may pay a marketplace listing
+	// B32.46: each version is fingerprinted with the embeddings API, or — without a key to reach it — the offline hashed
+	// embedder, and one at or above LENS_MARKET_SIMILARITY_HOLD to another seller's listing it does not declare is held.
+	var marketEmbedder market.Embedder = openAIEmbedder
+	if cfg.OpenAIAPIKey == "" && cfg.EmbeddingBaseURL == "" {
+		marketEmbedder = embedder.NewHashedEmbedder()
+	}
+	marketStore.SetSimilarity(marketEmbedder, cfg.MarketSimilarityHold)
 	// The real workspaces' Stripe (B25.6: a test workspace's is on the test-mode key, below).
 	liveSide := stripeSide{cards: agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)} // B19.12
 	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {
