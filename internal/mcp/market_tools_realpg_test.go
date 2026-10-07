@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -128,6 +129,15 @@ func TestMarketTools_AnAgentSearchesRentsAndUsesWithinItsRules(t *testing.T) {
 		t.Fatalf("searching for the adder = %v; want exactly it", found)
 	}
 	listing, _ := call("market_listing", `{"listing_id":"`+adder.ID+`"}`, false)
+	// B32.49: market_listing carries the trust panel's summary, as the trust read gives it.
+	trust, err := store.Trust(ctx, buyer, adder.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want map[string]any
+	if raw, _ := json.Marshal(trust); json.Unmarshal(raw, &want) != nil || !reflect.DeepEqual(listing["trust"], any(want)) {
+		t.Fatalf("market_listing's trust = %v; want the trust read's %v", listing["trust"], want)
+	}
 	offer := map[string]string{}
 	for _, o := range listing["offers"].([]any) {
 		o := o.(map[string]any)

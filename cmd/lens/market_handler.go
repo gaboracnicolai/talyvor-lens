@@ -28,6 +28,9 @@ import (
 //	GET  /v1/marketplace/listings?kind=                            the public catalog
 //	GET  /v1/marketplace/listings/{id}                             a listing and its versions (artifacts for its owner only)
 //	GET  /v1/marketplace/listings/{id}/lineage?version=            B32.24: its ancestors with each edge's share, and its remixes
+//	GET  /v1/marketplace/listings/{id}/trust                       B32.49: verified publisher, reviews, eval score, claims and lineage
+//	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/review    {rating, text}   B32.49: a paying buyer's review
+//	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/reviews/{reviewID}/reply {reply}   B32.49: the seller's reply
 //	POST /v1/marketplace/listings/{id}/reports                     {reason, details}   B20.4: report a listing
 //	POST /v1/workspaces/{wsID}/marketplace/ip-claims               {listing_id, original_listing_id | original_reference, evidence, good_faith}
 //	GET  /v1/workspaces/{wsID}/marketplace/ip-claims               B32.47: claims against its listings, and claims it filed
@@ -69,6 +72,13 @@ import (
 // decided. The seller finds it under "against" in their claims and may counter it until its counter_by
 // (LENS_IP_COUNTER_DAYS after filing); the operator then decides it (POST /v1/admin/marketplace/ip-claims/{id}/decide).
 // Filing and countering take the workspace's owner or an admin.
+//
+// B32.49: the trust panel (internal/market/trust.go) is one read of what a buyer weighs: whether the publisher is
+// verified (payouts enabled, no IP claim upheld against its listings in 12 months), the reviews of buyers who paid for a
+// use or a licence and are not linked to the seller, the eval score of the latest version, the claims against the
+// listing, and the originals and remixes the lineage read gives. Only such a buyer may review a listing (403 otherwise),
+// once, rewriting it as often as it likes; the seller may reply to each review. Both take the workspace's owner or an
+// admin.
 
 func mountMarketRoutes(r chi.Router, store *market.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {
@@ -82,6 +92,8 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, market.ErrTakenDown):
 			writeJSONErr(w, http.StatusGone, err.Error())
+		case errors.Is(err, market.ErrNotReviewer):
+			writeJSONErr(w, http.StatusForbidden, err.Error())
 		default:
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		}
@@ -219,6 +231,43 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 		}
 		writeJSONOK(w, http.StatusOK, lineage)
 	})
+	r.Get("/v1/marketplace/listings/{listingID}/trust", func(w http.ResponseWriter, req *http.Request) {
+		viewer, _ := auth.WorkspaceIdentity(req.Context())
+		trust, err := store.Trust(req.Context(), viewer, chi.URLParam(req, "listingID"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, trust)
+	})
+	r.Put("/v1/workspaces/{wsID}/marketplace/listings/{listingID}/review", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in market.ReviewInput
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {rating, text}: "+err.Error())
+			return
+		}
+		review, err := store.Review(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "listingID"), in)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, review)
+	}))
+	r.Put("/v1/workspaces/{wsID}/marketplace/listings/{listingID}/reviews/{reviewID}/reply", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
+		var in struct {
+			Reply string `json:"reply"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {reply}: "+err.Error())
+			return
+		}
+		review, err := store.ReplyToReview(req.Context(), chi.URLParam(req, "wsID"), chi.URLParam(req, "listingID"), chi.URLParam(req, "reviewID"), in.Reply)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, review)
+	}))
 	r.Post("/v1/workspaces/{wsID}/marketplace/ip-claims", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
 		var in market.IPClaimFiling
 		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 32<<10)).Decode(&in); err != nil {
