@@ -4388,7 +4388,10 @@ func run() error {
 		roomStore.SetMarket(marketStore)                          // B32.31
 		roomStore.SetKeys(tenantStore)                            // B32.32: each room's wallet and its key
 		dualToken.SetRoomBudgets(roomStore)                       // B32.32: a room wallet's monthly limit, within the plan
+		roomStore.SetContextMessages(cfg.RoomContextMessages)     // B32.33: what the room's AI reads
 		mountRoomRoutes(authed, roomStore)
+		// B32.33: runs in a room — a room wallet's model calls go through the proxy in process, as the wallet's key.
+		mountRoomRunRoutes(authed, roomStore, r, roomWalletProxy(p.HandleOpenAI, p.HandleAnthropic), marketMeter, dualToken)
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
 		// See internal/storedanswers.

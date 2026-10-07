@@ -985,6 +985,9 @@ type Config struct {
 	// RoomMessagesPerMinute is how many messages one member posts in one room in a minute (B32.30). Env:
 	// LENS_ROOM_MESSAGES_PER_MINUTE, default 20 — a proposal for Nicolai.
 	RoomMessagesPerMinute int
+	// RoomContextMessages is how many of a room's latest messages its AI reads with a member's question (B32.33). Env:
+	// LENS_ROOM_CONTEXT_MESSAGES, default 30 — a proposal for Nicolai.
+	RoomContextMessages int
 
 	// MarketPayoutReturnURL / MarketPayoutRefreshURL are where Stripe's seller onboarding returns to when a
 	// seller finishes it, and when its link has expired (B20.5). Env: LENS_MARKET_PAYOUT_RETURN_URL,
@@ -2161,6 +2164,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_ROOM_MESSAGES_PER_MINUTE must be a positive integer, got %q", v)
 		}
 		c.RoomMessagesPerMinute = n
+	}
+	// B32.33 — the room's latest messages its AI reads. A malformed value is refused.
+	c.RoomContextMessages = 30
+	if v := os.Getenv("LENS_ROOM_CONTEXT_MESSAGES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("config: LENS_ROOM_CONTEXT_MESSAGES must be a positive integer, got %q", v)
+		}
+		c.RoomContextMessages = n
 	}
 
 	// D — the Model 2 allowance, in µLXC (W4.6.1 step 2). Default 0 = "no allowance
