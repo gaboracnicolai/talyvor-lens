@@ -9,6 +9,10 @@
 // it; only the owner makes or unmakes an editor, and nobody changes the owner. A viewer is never given may_spend. A
 // member's agents join only as that member's, and leave with it. A removed member's row stays, with removed_at, so
 // what it contributed stays its own.
+//
+// How many rooms a workspace opens, and how many members and agents each holds, is its plan's rooms_plan_limits
+// (limits.go). A private room is listed and shown to its members only; a workspace joins one through an invite link
+// or by being named by its owner (invites.go).
 package rooms
 
 import (
@@ -155,11 +159,13 @@ type MemberChange struct {
 type Store struct {
 	pool     *pgxpool.Pool
 	maxShare int
+	limits   map[string]Limits
 }
 
-// NewStore answers a Store whose rooms may ask a fork for at most maxShareBPS of its sales (LENS_LINEAGE_MAX_SHARE_BPS).
+// NewStore answers a Store whose rooms may ask a fork for at most maxShareBPS of its sales (LENS_LINEAGE_MAX_SHARE_BPS),
+// under the rooms_plan_limits this process runs with.
 func NewStore(pool *pgxpool.Pool, maxShareBPS int) *Store {
-	return &Store{pool: pool, maxShare: maxShareBPS}
+	return &Store{pool: pool, maxShare: maxShareBPS, limits: CurrentLimits()}
 }
 
 func (s *Store) checkTerms(d TermsDraft) (TermsDraft, error) {
@@ -222,6 +228,22 @@ func (s *Store) Create(ctx context.Context, ws, user string, d Draft) (Detail, e
 	}
 	id := "room_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// One room at a time per owner, so two creates cannot both take its last room.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('rooms:create:' || $1))`, ws); err != nil {
+			return err
+		}
+		p, err := s.LimitsOf(ctx, tx, ws)
+		if err != nil {
+			return err
+		}
+		var owned int64
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM rooms WHERE owner_workspace_id = $1 AND visibility = $2 AND status <> 'closed'`,
+			ws, d.Visibility).Scan(&owned); err != nil {
+			return err
+		}
+		if err := s.refuse(p, d.Visibility+"_rooms", "your", owned); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO rooms (id, owner_workspace_id, title, topic, description, visibility)
 			VALUES ($1, $2, $3, $4, $5, $6)`, id, ws, d.Title, d.Topic, d.Description, d.Visibility); err != nil {
 			return err
@@ -230,10 +252,13 @@ func (s *Store) Create(ctx context.Context, ws, user string, d Draft) (Detail, e
 			VALUES ($1, 1, $2, $3, $4, $5)`, id, d.Terms.SplitRule, d.Terms.RemixShareBPS, d.Terms.DefaultPriceUSDMicros, d.Terms.SpendPolicy); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, workspace_id, user_id, role, may_spend, terms_version)
+		_, err = tx.Exec(ctx, `INSERT INTO room_members (room_id, workspace_id, user_id, role, may_spend, terms_version)
 			VALUES ($1, $2, $3, 'owner', true, 1)`, id, ws, user)
 		return err
 	})
+	if errors.Is(err, ErrPlanLimit) {
+		return Detail{}, err
+	}
 	if err != nil {
 		return Detail{}, fmt.Errorf("rooms: create: %w", err)
 	}
@@ -309,18 +334,33 @@ func member(ctx context.Context, q pgx.Tx, roomID, ws string) (m Member, ok bool
 	return m, err == nil, err
 }
 
-// lockRoom reads the room for update and answers ErrNotFound when viewer may not see it: a private room is seen by its
-// members only.
-func lockRoom(ctx context.Context, tx pgx.Tx, viewer, roomID string) (Room, error) {
+// mayEnter reports whether ws may see a private room: it is a member, or the owner named it in an invite still live.
+func mayEnter(ctx context.Context, tx pgx.Tx, roomID, ws string) (bool, error) {
+	var ok bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM room_members WHERE room_id = $1 AND workspace_id = $2 AND removed_at IS NULL)
+		OR EXISTS (SELECT 1 FROM room_invites WHERE room_id = $1 AND workspace_id = $2 AND $2 <> ''
+			AND revoked_at IS NULL AND uses < max_uses)`, roomID, ws).Scan(&ok)
+	return ok, err
+}
+
+// lockRoomAny reads the room for update, whoever may see it.
+func lockRoomAny(ctx context.Context, tx pgx.Tx, roomID string) (Room, error) {
 	r, err := scanRoom(tx.QueryRow(ctx, `SELECT `+roomCols+` FROM rooms r WHERE r.id = $1 FOR UPDATE`, roomID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, fmt.Errorf("%w: no such room", ErrNotFound)
 	}
+	return r, err
+}
+
+// lockRoom reads the room for update and answers ErrNotFound when viewer may not see it: a private room is seen by its
+// members, and by a workspace its owner named.
+func lockRoom(ctx context.Context, tx pgx.Tx, viewer, roomID string) (Room, error) {
+	r, err := lockRoomAny(ctx, tx, roomID)
 	if err != nil {
 		return r, err
 	}
 	if r.Visibility == Private {
-		if _, ok, err := member(ctx, tx, roomID, viewer); err != nil {
+		if ok, err := mayEnter(ctx, tx, roomID, viewer); err != nil {
 			return r, err
 		} else if !ok {
 			return r, fmt.Errorf("%w: no such room", ErrNotFound)
@@ -350,7 +390,11 @@ func (s *Store) Get(ctx context.Context, viewer string, admin bool, roomID strin
 			return err
 		}
 		if r.Visibility == Private && !isMember && !admin {
-			return fmt.Errorf("%w: no such room", ErrNotFound)
+			if named, err := mayEnter(ctx, tx, roomID, viewer); err != nil {
+				return err
+			} else if !named {
+				return fmt.Errorf("%w: no such room", ErrNotFound)
+			}
 		}
 		d.Room = r
 		if isMember {
@@ -409,8 +453,9 @@ func (s *Store) Get(ctx context.Context, viewer string, admin bool, roomID strin
 }
 
 // Join makes ws a member of the room under the terms version it accepted, which must be the room's current one. A
-// member joining again accepts the current version; a removed member joining again is a member again. created is
-// false when ws was already a member.
+// member joining again accepts the current version; a removed member joining again is a member again. A private room
+// takes a workspace its owner named; anyone else joins it through an invite link (JoinByInvite). created is false
+// when ws was already a member.
 func (s *Store) Join(ctx context.Context, ws, user, roomID string, termsVersion int) (m Member, created bool, err error) {
 	if termsVersion < 1 {
 		return Member{}, false, invalid("joining accepts the room's terms: send the terms_version you read from GET /v1/rooms/{id}")
@@ -420,40 +465,72 @@ func (s *Store) Join(ctx context.Context, ws, user, roomID string, termsVersion 
 		if err != nil {
 			return err
 		}
-		if r.Status != Open {
-			return fmt.Errorf("%w: the room is %s and takes no new members", ErrConflict, r.Status)
-		}
-		if termsVersion != r.TermsVersion {
-			return fmt.Errorf("%w: the room's terms are at version %d; read them and join with terms_version %d",
-				ErrConflict, r.TermsVersion, r.TermsVersion)
-		}
-		var existed bool
-		if err := tx.QueryRow(ctx, `SELECT removed_at IS NULL FROM room_members WHERE room_id = $1 AND workspace_id = $2`,
-			roomID, ws).Scan(&existed); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		// A returning member comes back as a member with no budget, whatever it was before it was removed.
-		if _, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, workspace_id, user_id, role, may_spend, terms_version)
-			VALUES ($1, $2, $3, 'member', false, $4)
-			ON CONFLICT (room_id, workspace_id) DO UPDATE SET terms_version = EXCLUDED.terms_version,
-				user_id = CASE WHEN room_members.removed_at IS NULL THEN room_members.user_id ELSE EXCLUDED.user_id END,
-				role = CASE WHEN room_members.removed_at IS NULL THEN room_members.role ELSE 'member' END,
-				may_spend = room_members.may_spend AND room_members.removed_at IS NULL,
-				joined_at = CASE WHEN room_members.removed_at IS NULL THEN room_members.joined_at ELSE now() END,
-				removed_at = NULL`, roomID, ws, user, termsVersion); err != nil {
-			return err
-		}
-		created = !existed
-		if err := touch(ctx, tx, roomID); err != nil {
-			return err
-		}
-		m, _, err = member(ctx, tx, roomID, ws)
+		m, created, err = s.admit(ctx, tx, r, ws, user, termsVersion)
 		return err
 	})
-	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrInvalid) {
-		err = fmt.Errorf("rooms: join: %w", err)
+	return m, created, joinErr(err)
+}
+
+func joinErr(err error) error {
+	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrInvalid) &&
+		!errors.Is(err, ErrPlanLimit) {
+		return fmt.Errorf("rooms: join: %w", err)
 	}
-	return m, created, err
+	return err
+}
+
+// admit makes ws a member of r, locked for update, under termsVersion: r must be open, the version current, and a new
+// member must fit within the room owner's members_per_room. A new member uses every invite naming it, however it
+// came in, so none is left to let it back in once it is removed.
+func (s *Store) admit(ctx context.Context, tx pgx.Tx, r Room, ws, user string, termsVersion int) (m Member, created bool, err error) {
+	if r.Status != Open {
+		return m, false, fmt.Errorf("%w: the room is %s and takes no new members", ErrConflict, r.Status)
+	}
+	if termsVersion != r.TermsVersion {
+		return m, false, fmt.Errorf("%w: the room's terms are at version %d; read them and join with terms_version %d",
+			ErrConflict, r.TermsVersion, r.TermsVersion)
+	}
+	var existed bool
+	if err := tx.QueryRow(ctx, `SELECT removed_at IS NULL FROM room_members WHERE room_id = $1 AND workspace_id = $2`,
+		r.ID, ws).Scan(&existed); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return m, false, err
+	}
+	if !existed {
+		p, err := s.LimitsOf(ctx, tx, r.OwnerWorkspaceID)
+		if err != nil {
+			return m, false, err
+		}
+		// Counted now, under the room's lock: r's count was read before the lock was granted.
+		var members int64
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM room_members WHERE room_id = $1 AND removed_at IS NULL`, r.ID).Scan(&members); err != nil {
+			return m, false, err
+		}
+		if err := s.refuse(p, "members_per_room", "the room owner's", members); err != nil {
+			return m, false, err
+		}
+	}
+	// A returning member comes back as a member with no budget, whatever it was before it was removed.
+	if _, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, workspace_id, user_id, role, may_spend, terms_version)
+		VALUES ($1, $2, $3, 'member', false, $4)
+		ON CONFLICT (room_id, workspace_id) DO UPDATE SET terms_version = EXCLUDED.terms_version,
+			user_id = CASE WHEN room_members.removed_at IS NULL THEN room_members.user_id ELSE EXCLUDED.user_id END,
+			role = CASE WHEN room_members.removed_at IS NULL THEN room_members.role ELSE 'member' END,
+			may_spend = room_members.may_spend AND room_members.removed_at IS NULL,
+			joined_at = CASE WHEN room_members.removed_at IS NULL THEN room_members.joined_at ELSE now() END,
+			removed_at = NULL`, r.ID, ws, user, termsVersion); err != nil {
+		return m, false, err
+	}
+	if !existed {
+		if _, err := tx.Exec(ctx, `UPDATE room_invites SET uses = max_uses WHERE room_id = $1 AND workspace_id = $2
+			AND $2 <> '' AND revoked_at IS NULL AND uses < max_uses`, r.ID, ws); err != nil {
+			return m, false, err
+		}
+	}
+	if err := touch(ctx, tx, r.ID); err != nil {
+		return m, false, err
+	}
+	m, _, err = member(ctx, tx, r.ID, ws)
+	return m, !existed, err
 }
 
 // SetTerms gives the room a new terms version, written by its owner, who accepts it as it writes it. Terms the same
@@ -628,6 +705,21 @@ func (s *Store) AddAgent(ctx context.Context, ws, roomID, agentID string) (a Age
 		} else if err != nil {
 			return err
 		}
+		var there bool
+		var agents int64
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM room_member_agents WHERE room_id = $1 AND agent_id = $2),
+			(SELECT count(*) FROM room_member_agents WHERE room_id = $1)`, roomID, agentID).Scan(&there, &agents); err != nil {
+			return err
+		}
+		if !there {
+			p, err := s.LimitsOf(ctx, tx, r.OwnerWorkspaceID)
+			if err != nil {
+				return err
+			}
+			if err := s.refuse(p, "agents_per_room", "the room owner's", agents); err != nil {
+				return err
+			}
+		}
 		tag, err := tx.Exec(ctx, `INSERT INTO room_member_agents (room_id, agent_id, workspace_id) VALUES ($1, $2, $3)
 			ON CONFLICT (room_id, agent_id) DO NOTHING`, roomID, agentID, ws)
 		if err != nil {
@@ -642,7 +734,8 @@ func (s *Store) AddAgent(ctx context.Context, ws, roomID, agentID string) (a Age
 		a.AgentID, a.WorkspaceID = agentID, ws
 		return tx.QueryRow(ctx, `SELECT joined_at FROM room_member_agents WHERE room_id = $1 AND agent_id = $2`, roomID, agentID).Scan(&a.JoinedAt)
 	})
-	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrConflict) {
+	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrConflict) &&
+		!errors.Is(err, ErrPlanLimit) {
 		err = fmt.Errorf("rooms: agent: %w", err)
 	}
 	return a, created, err

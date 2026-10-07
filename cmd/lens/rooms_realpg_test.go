@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -151,5 +152,176 @@ func TestRooms_CreateJoinUnderTermsRolesAndTheOpenList(t *testing.T) {
 	}
 	if code, _ := call(joiner, http.MethodPost, "/v1/rooms/"+closed.ID+"/join", `{"terms_version":1}`); code != http.StatusConflict {
 		t.Fatalf("join a closed room = %d, want 409", code)
+	}
+}
+
+// B32.29 — a Free workspace's fourth public room and its first private room are refused naming rooms_plan_limits, and
+// with a team subscription both open; a private room is 404 to a non-member; an invite link admits a member until it
+// is revoked and then answers 404; a workspace the owner names sees the room and joins it; the 51st member and the
+// 11th agent of a Free owner's room are refused.
+func TestRooms_PrivateRoomsInviteLinksAndPlanLimits(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const owner, guest, late, named, freeOwner = "ws-b3229-owner", "ws-b3229-guest", "ws-b3229-late", "ws-b3229-named", "ws-b3229-free"
+	r := chi.NewRouter()
+	mountRoomRoutes(r, rooms.NewStore(pool, 3000))
+	call := func(ws, method, path, body string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(auth.WithAuthContext(req.Context(),
+			&auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "user-" + ws, Scopes: []string{auth.ScopeKeys}}))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+	open := func(ws, title, visibility string) (int, string) {
+		t.Helper()
+		return call(ws, http.MethodPost, "/v1/workspaces/"+ws+"/rooms", `{"title":"`+title+`","visibility":"`+visibility+`"}`)
+	}
+	count := func(q string, args ...any) (n int) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, q, args...).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return n
+	}
+
+	// Free: three public rooms, then the fourth and the first private one are refused naming the setting and the plan.
+	for _, title := range []string{"One", "Two", "Three"} {
+		if code, body := open(owner, title, "public"); code != http.StatusCreated {
+			t.Fatalf("free public room %s = %d %s", title, code, body)
+		}
+	}
+	if code, body := open(owner, "Four", "public"); code != http.StatusPaymentRequired ||
+		!strings.Contains(body, "rooms_plan_limits") || !strings.Contains(body, "free plan allows 3 public rooms") {
+		t.Fatalf("free fourth public room = %d %s, want 402 naming rooms_plan_limits and the free plan", code, body)
+	}
+	if code, body := open(owner, "Secret", "private"); code != http.StatusPaymentRequired ||
+		!strings.Contains(body, "rooms_plan_limits") || !strings.Contains(body, "free plan allows 0 private rooms") {
+		t.Fatalf("free private room = %d %s, want 402 naming rooms_plan_limits and the free plan", code, body)
+	}
+	if n := count(`SELECT count(*) FROM rooms WHERE owner_workspace_id = $1`, owner); n != 3 {
+		t.Fatalf("rooms after the refusals = %d, want 3", n)
+	}
+
+	// On a team subscription both open.
+	if _, err := pool.Exec(ctx, `INSERT INTO subscriptions (workspace_id, stripe_subscription_id, stripe_customer_id, price_id,
+		status, livemode, last_event_at, plan, byok) VALUES ($1, 'sub_b3229', 'cus_b3229', 'price_team', 'active', false, NOW(), 'team', false)`,
+		owner); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := open(owner, "Four", "public"); code != http.StatusCreated {
+		t.Fatalf("team fourth public room = %d %s", code, body)
+	}
+	code, body := open(owner, "Secret", "private")
+	var priv rooms.Detail
+	if err := json.Unmarshal([]byte(body), &priv); code != http.StatusCreated || err != nil || priv.Visibility != rooms.Private {
+		t.Fatalf("team private room = %d %s", code, body)
+	}
+
+	// A private room is 404 to a non-member, absent from the open list, and cannot be joined without an invite.
+	if code, _ := call(guest, http.MethodGet, "/v1/rooms/"+priv.ID, ""); code != http.StatusNotFound {
+		t.Fatalf("a non-member reading the private room = %d, want 404", code)
+	}
+	if _, body := call(guest, http.MethodGet, "/v1/rooms", ""); strings.Contains(body, priv.ID) {
+		t.Fatalf("the open list shows the private room to a non-member: %s", body)
+	}
+	if code, _ := call(guest, http.MethodPost, "/v1/rooms/"+priv.ID+"/join", `{"terms_version":1}`); code != http.StatusNotFound {
+		t.Fatalf("joining the private room without an invite = %d, want 404", code)
+	}
+
+	// An invite link shows the room and its terms, admits a member and counts the use.
+	expires := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	code, body = call(owner, http.MethodPost, "/v1/rooms/"+priv.ID+"/invites", `{"max_uses":5,"expires_at":"`+expires+`"}`)
+	var link rooms.Invite
+	if err := json.Unmarshal([]byte(body), &link); code != http.StatusCreated || err != nil || link.Token == "" {
+		t.Fatalf("invite link = %d %s", code, body)
+	}
+	if code, body := call(guest, http.MethodGet, "/v1/room-invites/"+link.Token, ""); code != http.StatusOK ||
+		!strings.Contains(body, priv.ID) || !strings.Contains(body, `"uses_left":5`) {
+		t.Fatalf("the link's preview = %d %s, want the room and 5 uses left", code, body)
+	}
+	if code, body := call(guest, http.MethodPost, "/v1/room-invites/"+link.Token+"/join", `{"terms_version":1}`); code != http.StatusCreated {
+		t.Fatalf("join by the link = %d %s, want 201", code, body)
+	}
+	if n := count(`SELECT count(*) FROM room_members WHERE room_id = $1 AND workspace_id = $2 AND removed_at IS NULL`, priv.ID, guest); n != 1 {
+		t.Fatalf("the guest's membership rows = %d, want 1", n)
+	}
+	if n := count(`SELECT uses FROM room_invites WHERE id = $1`, link.ID); n != 1 {
+		t.Fatalf("the link's uses = %d, want 1", n)
+	}
+	if code, _ := call(guest, http.MethodGet, "/v1/rooms/"+priv.ID, ""); code != http.StatusOK {
+		t.Fatalf("the new member reading the private room = %d, want 200", code)
+	}
+	if _, body := call(owner, http.MethodGet, "/v1/rooms/"+priv.ID+"/invites", ""); strings.Contains(body, link.Token) {
+		t.Fatalf("the invite list shows a link's token: %s", body)
+	}
+
+	// Revoked, the link answers 404 and admits nobody.
+	if code, body := call(owner, http.MethodDelete, "/v1/rooms/"+priv.ID+"/invites/"+link.ID, ""); code != http.StatusOK ||
+		!strings.Contains(body, `"live":false`) {
+		t.Fatalf("revoke = %d %s", code, body)
+	}
+	if code, _ := call(late, http.MethodGet, "/v1/room-invites/"+link.Token, ""); code != http.StatusNotFound {
+		t.Fatalf("a revoked link's preview = %d, want 404", code)
+	}
+	if code, _ := call(late, http.MethodPost, "/v1/room-invites/"+link.Token+"/join", `{"terms_version":1}`); code != http.StatusNotFound {
+		t.Fatalf("joining by a revoked link = %d, want 404", code)
+	}
+	if n := count(`SELECT count(*) FROM room_members WHERE room_id = $1 AND workspace_id = $2`, priv.ID, late); n != 0 {
+		t.Fatalf("a revoked link wrote %d membership rows, want 0", n)
+	}
+
+	// The owner names a workspace: it is invited, sees the room and joins it, which uses its invite.
+	if code, body := call(owner, http.MethodPost, "/v1/rooms/"+priv.ID+"/invites", `{"workspace_id":"`+named+`"}`); code != http.StatusCreated {
+		t.Fatalf("name a workspace = %d %s", code, body)
+	}
+	if _, body := call(named, http.MethodGet, "/v1/rooms", ""); !strings.Contains(body, `"invited":[{"id":"`+priv.ID+`"`) {
+		t.Fatalf("the named workspace's list = %s, want the room among its invitations", body)
+	}
+	if code, body := call(named, http.MethodPost, "/v1/rooms/"+priv.ID+"/join", `{"terms_version":1}`); code != http.StatusCreated {
+		t.Fatalf("the named workspace joining = %d %s, want 201", code, body)
+	}
+	if n := count(`SELECT uses FROM room_invites WHERE room_id = $1 AND workspace_id = $2`, priv.ID, named); n != 1 {
+		t.Fatalf("the named invite's uses = %d, want 1", n)
+	}
+	// Removed, it cannot come back on the invite it already used.
+	if code, body := call(owner, http.MethodPatch, "/v1/rooms/"+priv.ID+"/members/"+named, `{"remove":true}`); code != http.StatusOK {
+		t.Fatalf("remove the named member = %d %s", code, body)
+	}
+	if code, _ := call(named, http.MethodPost, "/v1/rooms/"+priv.ID+"/join", `{"terms_version":1}`); code != http.StatusNotFound {
+		t.Fatalf("a removed member rejoining the private room = %d, want 404", code)
+	}
+
+	// A Free owner's room holds 50 members, the owner included: the 51st is refused and writes no row.
+	code, body = open(freeOwner, "Crowded", "public")
+	var crowded rooms.Detail
+	if err := json.Unmarshal([]byte(body), &crowded); code != http.StatusCreated || err != nil {
+		t.Fatalf("free room = %d %s", code, body)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO room_members (room_id, workspace_id, role, terms_version)
+		SELECT $1, 'ws-b3229-filler-' || g, 'member', 1 FROM generate_series(1, 49) g`, crowded.ID); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := call(late, http.MethodPost, "/v1/rooms/"+crowded.ID+"/join", `{"terms_version":1}`); code != http.StatusPaymentRequired ||
+		!strings.Contains(body, "rooms_plan_limits") || !strings.Contains(body, "free plan allows 50 members in a room") {
+		t.Fatalf("the 51st member = %d %s, want 402 naming rooms_plan_limits and the free plan", code, body)
+	}
+	if n := count(`SELECT count(*) FROM room_members WHERE room_id = $1 AND removed_at IS NULL`, crowded.ID); n != 50 {
+		t.Fatalf("members after the refusal = %d, want 50", n)
+	}
+
+	// ... and 10 agents: the 11th is refused.
+	if _, err := pool.Exec(ctx, `INSERT INTO agent_accounts (id, workspace_id, name)
+		SELECT 'agt_b3229_' || g, $1, 'Bot ' || g FROM generate_series(1, 11) g`, freeOwner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO room_member_agents (room_id, agent_id, workspace_id)
+		SELECT $1, 'agt_b3229_' || g, $2 FROM generate_series(1, 10) g`, crowded.ID, freeOwner); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := call(freeOwner, http.MethodPost, "/v1/rooms/"+crowded.ID+"/agents", `{"agent_id":"agt_b3229_11"}`); code != http.StatusPaymentRequired ||
+		!strings.Contains(body, "free plan allows 10 agents in a room") {
+		t.Fatalf("the 11th agent = %d %s, want 402 naming the free plan", code, body)
 	}
 }
