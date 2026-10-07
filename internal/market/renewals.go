@@ -197,12 +197,12 @@ func (s *Store) CancelLicence(ctx context.Context, buyerWorkspaceID, licenceID s
 }
 
 // FailInvoice ends as unpaid every licence the buyer's marketplace invoice that Stripe gave up on was to pay for — a
-// purchase, rent, subscription or renewal used within [periodStart, periodEnd) and not cleared: each runs to its
+// purchase, rent, subscription, renewal or room prize used within [periodStart, periodEnd) and not cleared: each runs to its
 // ends_at (a bought one, which has none, ends now) and renews no more. It answers how many it ended; a replay ends none.
 func (s *Store) FailInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd time.Time) (int, error) {
 	tag, err := s.pool.Exec(ctx, `UPDATE market_licences c SET status = 'unpaid', auto_renew = false
 		WHERE c.buyer_workspace_id = $1 AND c.status IN ('active', 'expired')
-		  AND EXISTS (SELECT 1 FROM market_uses u WHERE u.licence_id = c.id AND u.use_kind IN ('buy', 'rent', 'subscribe', 'renewal')
+		  AND EXISTS (SELECT 1 FROM market_uses u WHERE u.licence_id = c.id AND u.use_kind IN ('buy', 'rent', 'subscribe', 'renewal', 'prize')
 		              AND u.charge = 'billed' AND u.cleared_at IS NULL AND u.used_at >= $2 AND u.used_at < $3)`,
 		buyerWorkspaceID, periodStart, periodEnd)
 	if err != nil {

@@ -4392,6 +4392,24 @@ func run() error {
 		mountRoomRoutes(authed, roomStore)
 		// B32.33: runs in a room — a room wallet's model calls go through the proxy in process, as the wallet's key.
 		mountRoomRunRoutes(authed, roomStore, r, roomWalletProxy(p.HandleOpenAI, p.HandleAnthropic), marketMeter, dualToken)
+		// B32.35: room prizes, paid as a purchase of the winning contribution; one unawarded at its deadline closes.
+		mountRoomPrizeRoutes(authed, roomStore, marketMeter, dualToken)
+		go func() {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-t.C:
+					if n, err := roomStore.ClosePrizes(ctx, "", now); err != nil {
+						slog.Warn("rooms: closing prizes past their deadline failed", slog.String("err", err.Error()))
+					} else if n > 0 {
+						slog.Info("rooms: prizes closed at their deadline without a winner", slog.Int("closed", n))
+					}
+				}
+			}
+		}()
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.
 		// See internal/storedanswers.
