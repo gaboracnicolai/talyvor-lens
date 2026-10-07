@@ -1,0 +1,6 @@
+# Fixture rates for the Test tax partner's tests: `lens tax rates import` reads the same format.
+jurisdiction,currency,rate_source,registration_from_first_sale,union,tax_code,rate_bps,valid_from,valid_to,source
+GB,GBP,ecb,false,,digital_service,2000,2011-01-04,,fixture: GB standard rate
+DE,EUR,ecb,true,EU,digital_service,1600,2020-07-01,2021-01-01,fixture: DE reduced standard rate in 2020
+DE,EUR,ecb,true,EU,digital_service,1900,2007-01-01,,fixture: DE standard rate
+FR,EUR,ecb,true,EU,digital_service,2000,2014-01-01,,fixture: FR standard rate

@@ -1,0 +1,7 @@
+# The Test tax partner's fixture list: well-formed VAT numbers it reports as never issued, as a tax authority
+# would. One normalised number a line, with its country's prefix.
+GB999999999
+DE999999999
+FR99999999999
+IE9999999W
+NL999999999B99
