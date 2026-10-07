@@ -119,6 +119,12 @@ func TestRooms_ReportsHideARoom_BanMute_AndTheOperatorLocksAndCloses(t *testing.
 	if !listed(room.ID) {
 		t.Fatal("a kept room is not back on GET /v1/rooms")
 	}
+	for _, ws := range reporters {
+		must(http.StatusCreated, ws, http.MethodPost, "/v1/rooms/"+room.ID+"/reports", `{"reason":"spam"}`)
+	}
+	if !listed(room.ID) {
+		t.Fatal("the reporters a room was kept against hid it again")
+	}
 
 	// The owner bans the troll: its post and its join are refused. It mutes quiet: its post is refused.
 	must(http.StatusOK, owner, http.MethodPatch, "/v1/rooms/"+room.ID+"/members/"+troll, `{"banned":true}`)
@@ -131,6 +137,10 @@ func TestRooms_ReportsHideARoom_BanMute_AndTheOperatorLocksAndCloses(t *testing.
 	must(http.StatusOK, owner, http.MethodPatch, "/v1/rooms/"+room.ID+"/members/"+quiet, `{"muted":true}`)
 	if code, out := call(quiet, http.MethodPost, "/v1/rooms/"+room.ID+"/messages", `{"body":"hello?"}`); code != http.StatusForbidden || !strings.Contains(out, "muted") {
 		t.Fatalf("a muted member's post = %d %s, want 403 naming the mute", code, out)
+	}
+	if code, out := call(quiet, http.MethodPost, "/v1/rooms/"+room.ID+"/contributions",
+		`{"kind":"prompt","title":"Muted","artifact":{"template":"x","model":"gpt-4o-mini"}}`); code != http.StatusForbidden {
+		t.Fatalf("a muted member's contribution = %d %s, want 403", code, out)
 	}
 
 	// Locked, the room is read-only; unlocked, a member posts again.

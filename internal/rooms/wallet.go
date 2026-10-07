@@ -155,6 +155,8 @@ func whyNotSpend(r Room, t Terms, me Member) string {
 	switch {
 	case r.Status == Closed:
 		return "the room is closed, and its budget is spent no more"
+	case r.Status == Locked:
+		return "Talyvor has locked the room: it is read-only, and its budget is not spent until it is unlocked"
 	case me.Role == RoleOwner:
 		return ""
 	case t.SpendPolicy != SpendMembersWithSpend:
@@ -245,7 +247,7 @@ func (sp Spender) Context(ctx context.Context) context.Context {
 }
 
 // MaySpend answers the wallet actor spends from when it charges something to the room, or refuses: the room must be
-// open or locked, actor its owner or — under members_with_spend — a member given may_spend, and the room's wallet must
+// open, actor its owner or — under members_with_spend — a member given may_spend, and the room's wallet must
 // have a monthly limit the owner's plan allows. A private room answers ErrNotFound to a workspace that is not a member.
 func (s *Store) MaySpend(ctx context.Context, actor, roomID string) (Spender, error) {
 	sp := Spender{RoomID: roomID, ActorWorkspaceID: actor}

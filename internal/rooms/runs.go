@@ -116,6 +116,8 @@ func runner(ctx context.Context, tx pgx.Tx, ws, roomID string) (Room, error) {
 		return r, forbidden("join the room to run things in it")
 	case me.Role == RoleViewer:
 		return r, forbidden("a viewer reads the room and does not run things in it")
+	case me.MutedAt != nil:
+		return r, forbidden("the room's owner or an editor has muted you: you read the room and post nothing in it")
 	case shut(r) != nil:
 		return r, shut(r)
 	}

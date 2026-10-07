@@ -90,6 +90,8 @@ func contributor(ctx context.Context, tx pgx.Tx, ws, roomID string) (Room, Terms
 		return r, t, forbidden("join the room to contribute to it")
 	case me.Role == RoleViewer:
 		return r, t, forbidden("a viewer reads the room and does not contribute to it")
+	case me.MutedAt != nil:
+		return r, t, forbidden("the room's owner or an editor has muted you: you read the room and post nothing in it")
 	case shut(r) != nil:
 		return r, t, shut(r)
 	case !me.TermsCurrent:

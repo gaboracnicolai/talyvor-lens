@@ -609,8 +609,8 @@ func (s *Store) SetTerms(ctx context.Context, actor, roomID string, d TermsDraft
 		if r.OwnerWorkspaceID != actor {
 			return forbidden("only the room's owner changes its terms")
 		}
-		if r.Status == Closed {
-			return fmt.Errorf("%w: the room is closed", ErrConflict)
+		if err := shut(r); err != nil {
+			return err
 		}
 		read := func(v int) error {
 			return tx.QueryRow(ctx, `SELECT version, split_rule, remix_share_bps, default_price_usd_micros, spend_policy, created_at

@@ -19,7 +19,8 @@ import (
 // A workspace that can read a room reports it, or one of its messages, for one of the marketplace's report reasons or
 // harassment or spam; while its report of one thing is open, reporting it again changes nothing. A public room with
 // LENS_ROOM_REPORTS_HIDE open reports from different workspaces leaves the public list of rooms (OpenPublic) until the
-// operator reviews it. The operator keeps the room, locks it — read-only: no messages, contributions, votes or runs —,
+// operator reviews it; once the operator has kept it, the reports of the workspaces it was kept against do not hide it
+// again. The operator keeps the room, locks it — read-only: no messages, contributions, votes or runs —,
 // unlocks it, or closes it: a closed room takes nothing and its wallet is spent no more (whyNotSpend). Keeping, locking
 // and closing resolve every open report of the room and its messages. Each operator action writes its operator_audit row
 // in the same transaction, and locking, unlocking and closing tell the room with a system message.
@@ -84,8 +85,11 @@ func (s *Store) reportsHide() int {
 	return s.reportsHideAt
 }
 
-// openReporters counts the workspaces with an open report of room r or of one of its messages.
-const openReporters = `(SELECT count(DISTINCT rr.reporter_workspace_id) FROM room_reports rr WHERE rr.room_id = r.id AND rr.resolved_at IS NULL)`
+// openReporters counts the workspaces with an open report of room r or of one of its messages. A workspace whose report of
+// the room the operator has already kept it against does not count again: the same reporters do not hide it twice.
+const openReporters = `(SELECT count(DISTINCT rr.reporter_workspace_id) FROM room_reports rr WHERE rr.room_id = r.id AND rr.resolved_at IS NULL
+	AND NOT EXISTS (SELECT 1 FROM room_reports k WHERE k.room_id = rr.room_id AND k.reporter_workspace_id = rr.reporter_workspace_id
+		AND k.resolution = 'kept'))`
 
 // Report records ws's report of the room, or of its message msgID when that is set. ws must be able to read the room:
 // anyone a public room, a member a private one; anyone else gets ErrNotFound.
@@ -149,7 +153,8 @@ type ReportedEntry struct {
 func (s *Store) ReportQueue(ctx context.Context) ([]ReportedRoom, error) {
 	out := []ReportedRoom{}
 	err := readTx(ctx, s, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+roomCols+`, `+openReporters+` AS reporters FROM rooms r
+		rows, err := tx.Query(ctx, `SELECT `+roomCols+`, (SELECT count(DISTINCT rr.reporter_workspace_id) FROM room_reports rr
+				WHERE rr.room_id = r.id AND rr.resolved_at IS NULL) AS reporters, `+openReporters+` FROM rooms r
 			WHERE EXISTS (SELECT 1 FROM room_reports rr WHERE rr.room_id = r.id AND rr.resolved_at IS NULL)
 			ORDER BY reporters DESC, r.last_activity_at DESC, r.id LIMIT $1`, listLimit)
 		if err != nil {
@@ -157,11 +162,12 @@ func (s *Store) ReportQueue(ctx context.Context) ([]ReportedRoom, error) {
 		}
 		for rows.Next() {
 			var q ReportedRoom
-			if q.Room, err = scanRoom(rows, &q.Reporters); err != nil {
+			var counted int
+			if q.Room, err = scanRoom(rows, &q.Reporters, &counted); err != nil {
 				rows.Close()
 				return err
 			}
-			q.Hidden = q.Room.Visibility == Public && q.Reporters >= s.reportsHide()
+			q.Hidden = q.Room.Visibility == Public && q.Room.Status == Open && counted >= s.reportsHide()
 			out = append(out, q)
 		}
 		rows.Close()
