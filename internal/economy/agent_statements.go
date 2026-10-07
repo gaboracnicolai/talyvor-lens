@@ -33,6 +33,8 @@ type StatementLine struct {
 	BalanceAfterULXC int64     `json:"balance_after_ulxc"`
 	// Label names a platform fee line, with its rate: "Platform fee 3%" (B32.11). Empty on every other kind.
 	Label string `json:"label,omitempty"`
+	// Memo is what the posting was for, in words: on a room's wallet, the room and the member who spent (B32.32).
+	Memo string `json:"memo,omitempty"`
 }
 
 // StatementAccount is one account's totals over the period: Opening + In − Out = Closing.
@@ -183,7 +185,7 @@ func (s *DualTokenStore) periodStatement(ctx context.Context, workspaceID, accou
 		SELECT p.id, p.entry_id::text, p.created_at, p.account, p.kind, p.amount_ulxc,
 		       COALESCE((SELECT o.account FROM agent_postings o WHERE o.entry_id = p.entry_id AND o.id <> p.id ORDER BY o.id LIMIT 1), ''),
 		       p.ref,
-		       sum(p.amount_ulxc) OVER (PARTITION BY p.account ORDER BY p.created_at, p.id)::bigint, p.fee_bps
+		       sum(p.amount_ulxc) OVER (PARTITION BY p.account ORDER BY p.created_at, p.id)::bigint, p.fee_bps, COALESCE(p.memo, '')
 		  FROM agent_postings p
 		 WHERE p.workspace_id = $1 AND ($2 = '' OR p.account = $2) AND p.created_at >= $3 AND p.created_at < $4
 		 ORDER BY p.created_at, p.id`, workspaceID, account, from, to)
@@ -195,7 +197,7 @@ func (s *DualTokenStore) periodStatement(ctx context.Context, workspaceID, accou
 		var l StatementLine
 		var running int64
 		var feeBPS *int64
-		if err := rows.Scan(&l.PostingID, &l.EntryID, &l.At, &l.Account, &l.Kind, &l.AmountULXC, &l.Counterparty, &l.Ref, &running, &feeBPS); err != nil {
+		if err := rows.Scan(&l.PostingID, &l.EntryID, &l.At, &l.Account, &l.Kind, &l.AmountULXC, &l.Counterparty, &l.Ref, &running, &feeBPS, &l.Memo); err != nil {
 			return st, err
 		}
 		if l.Kind == LXCTypePlatformFee && feeBPS != nil {

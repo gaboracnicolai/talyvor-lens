@@ -145,6 +145,10 @@ func (s *DualTokenStore) RollbackAgentRules(ctx context.Context, workspaceID, ag
 	if err != nil {
 		return r, fmt.Errorf("economy: roll back agent rules: %w", err)
 	}
+	// B32.32: an earlier version of a room wallet's rules is judged as the rules saved now are.
+	if err := s.checkRoomBudget(ctx, tx, workspaceID, agentID, r.MonthlyLimitULXC); err != nil {
+		return r, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return r, fmt.Errorf("economy: roll back agent rules: %w", err)
 	}

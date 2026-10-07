@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,7 +58,12 @@ type Agent struct {
 	// keys revoked, and refused every movement of its own from then on (agent_lifecycle.go).
 	Description string     `json:"description"`
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
+	// Kind is agent, or room for a room's wallet (B32.32): its owner funds it and sets its rules as any agent's.
+	Kind string `json:"kind"`
 }
+
+// AgentKindRoom is a room's wallet (B32.32). It does not count toward the agents a plan allows.
+const AgentKindRoom = "room"
 
 // AgentBook reconciles a workspace with its agents: WorkspaceBalanceULXC (lxc_balances) =
 // UnallocatedULXC + AllocatedULXC, AllocatedULXC = Σ agent balances and pots (B22.7), and SpentULXC is the
@@ -80,12 +86,33 @@ type leg struct {
 	amount  int64
 }
 
+type postingMemoKey struct{}
+
+// WithPostingMemo carries what the postings a movement writes are for, in words (B32.32): a charge on a room names the
+// room and the member who spent, so the room wallet's statement says whose each spend was.
+func WithPostingMemo(ctx context.Context, memo string) context.Context {
+	return context.WithValue(ctx, postingMemoKey{}, memo)
+}
+
+// insertPosting writes one posting: cols and args without the memo, which is added when ctx carries one, so a posting
+// without one is written exactly as it was before postings had memos.
+func insertPosting(ctx context.Context, tx pgx.Tx, cols string, args ...any) error {
+	if memo, _ := ctx.Value(postingMemoKey{}).(string); memo != "" {
+		cols, args = cols+", memo", append(args, memo)
+	}
+	params := make([]string, len(args))
+	for i := range args {
+		params[i] = fmt.Sprintf("$%d", i+1)
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO agent_postings (`+cols+`) VALUES (`+strings.Join(params, ", ")+`)`, args...)
+	return err
+}
+
 // postEntry writes one balanced entry. The deferred trigger refuses the commit if it does not balance.
 func postEntry(ctx context.Context, tx pgx.Tx, workspaceID, kind, ref string, legs ...leg) error {
 	entry := uuid.New()
 	for _, l := range legs {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO agent_postings (entry_id, workspace_id, account, amount_ulxc, kind, ref) VALUES ($1, $2, $3, $4, $5, $6)`,
+		if err := insertPosting(ctx, tx, `entry_id, workspace_id, account, amount_ulxc, kind, ref`,
 			entry, workspaceID, l.account, l.amount, kind, ref); err != nil {
 			return fmt.Errorf("economy: post %s: %w", kind, err)
 		}
@@ -101,8 +128,7 @@ func postModelEntry(ctx context.Context, tx pgx.Tx, workspaceID, kind, ref, mode
 	}
 	entry := uuid.New()
 	for _, l := range legs {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO agent_postings (entry_id, workspace_id, account, amount_ulxc, kind, ref, model) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		if err := insertPosting(ctx, tx, `entry_id, workspace_id, account, amount_ulxc, kind, ref, model`,
 			entry, workspaceID, l.account, l.amount, kind, ref, model); err != nil {
 			return fmt.Errorf("economy: post %s: %w", kind, err)
 		}
@@ -232,8 +258,8 @@ func (s *DualTokenStore) CreateAgent(ctx context.Context, workspaceID, name, own
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	// B32.12: no more agents than the workspace's plan allows (LENS_PLAN_GATES); an archived agent is retired
-	// for good and does not count. Counted under the workspace's lock, so two creates cannot both take the last
-	// place.
+	// for good and does not count, nor does a room's wallet (B32.32). Counted under the workspace's lock, so two
+	// creates cannot both take the last place.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('agents:' || $1, 0))`, workspaceID); err != nil {
 		return Agent{}, fmt.Errorf("economy: lock the workspace's agents: %w", err)
 	}
@@ -242,14 +268,14 @@ func (s *DualTokenStore) CreateAgent(ctx context.Context, workspaceID, name, own
 		return Agent{}, err
 	}
 	var n int64
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_accounts WHERE workspace_id = $1 AND archived_at IS NULL`,
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_accounts WHERE workspace_id = $1 AND archived_at IS NULL AND kind = 'agent'`,
 		workspaceID).Scan(&n); err != nil {
 		return Agent{}, fmt.Errorf("economy: count agents: %w", err)
 	}
 	if !plans.Within(n+1, plan.Agents) {
 		return Agent{}, plan.RefuseCount(plans.Current(), "agents", plan.Agents)
 	}
-	a := Agent{ID: "agt_" + uuid.NewString(), Name: name, Keys: []string{}, OwnerUserID: ownerUserID}
+	a := Agent{ID: "agt_" + uuid.NewString(), Name: name, Keys: []string{}, OwnerUserID: ownerUserID, Kind: "agent"}
 	err = tx.QueryRow(ctx, `INSERT INTO agent_accounts (id, workspace_id, name, owner_user_id) VALUES ($1, $2, $3, $4) RETURNING created_at`,
 		a.ID, workspaceID, name, ownerUserID).Scan(&a.CreatedAt)
 	if err != nil {
@@ -258,7 +284,32 @@ func (s *DualTokenStore) CreateAgent(ctx context.Context, workspaceID, name, own
 	return a, tx.Commit(ctx)
 }
 
-// AttachAgentKey makes scopedKeyID one of agentID's keys: from then on its spending is the agent's.
+// CreateRoomAgentTx creates a room's wallet in tx, the transaction that opens the room (B32.32): an agent account of
+// kind room in workspaceID — the room owner's — named name, owned by ownerUserID, with scopedKeyID, a proxy-scoped key
+// of that workspace's, as its one key. It does not count toward the agents the workspace's plan allows. ownerUserID is
+// "" when the room was opened by a credential that names no person: the room is not refused for that, and its wallet,
+// like any agent without an owner, holds no balance until a person of the workspace claims it (B19.11).
+func CreateRoomAgentTx(ctx context.Context, tx pgx.Tx, workspaceID, name, ownerUserID, scopedKeyID string) (Agent, error) {
+	if workspaceID == "" || name == "" || scopedKeyID == "" {
+		return Agent{}, errors.New("economy: a room's wallet needs a workspace, a name and a key")
+	}
+	a := Agent{ID: "agt_" + uuid.NewString(), Name: name, Keys: []string{scopedKeyID}, OwnerUserID: ownerUserID, Kind: AgentKindRoom}
+	if err := tx.QueryRow(ctx, `INSERT INTO agent_accounts (id, workspace_id, name, owner_user_id, kind) VALUES ($1, $2, $3, $4, 'room')
+		RETURNING created_at`, a.ID, workspaceID, name, ownerUserID).Scan(&a.CreatedAt); err != nil {
+		return Agent{}, fmt.Errorf("economy: create a room's wallet: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_account_keys (scoped_key_id, agent_id) VALUES ($1, $2)`, scopedKeyID, a.ID); err != nil {
+		return Agent{}, fmt.Errorf("economy: attach a room wallet's key: %w", err)
+	}
+	return a, nil
+}
+
+// ErrRoomWalletKey: a room's wallet spends only through its room, with the one key Lens holds for it (B32.32). Another
+// key would make it an agent the plan does not count.
+var ErrRoomWalletKey = errors.New("economy: a room's wallet spends only through its room, and takes no other key")
+
+// AttachAgentKey makes scopedKeyID one of agentID's keys: from then on its spending is the agent's. A room's wallet
+// takes no other key than the one it was opened with.
 func (s *DualTokenStore) AttachAgentKey(ctx context.Context, workspaceID, agentID, scopedKeyID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -267,6 +318,13 @@ func (s *DualTokenStore) AttachAgentKey(ctx context.Context, workspaceID, agentI
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := lockAgent(ctx, tx, workspaceID, agentID); err != nil {
 		return err
+	}
+	var kind string
+	if err := tx.QueryRow(ctx, `SELECT kind FROM agent_accounts WHERE id = $1`, agentID).Scan(&kind); err != nil {
+		return fmt.Errorf("economy: attach key: %w", err)
+	}
+	if kind == AgentKindRoom {
+		return ErrRoomWalletKey
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO agent_account_keys (scoped_key_id, agent_id) VALUES ($1, $2)`, scopedKeyID, agentID); err != nil {
 		return fmt.Errorf("economy: attach key: %w", err)
@@ -447,7 +505,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 		}
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT a.id, a.name, a.description, a.archived_at, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id, COALESCE(a.handle, ''),
+		SELECT a.id, a.name, a.kind, a.description, a.archived_at, a.created_at, a.paused_at, a.paused_reason, a.owner_user_id, COALESCE(a.handle, ''),
 		       COALESCE((SELECT b.balance_ulxc FROM agent_account_balances b WHERE b.workspace_id = a.workspace_id AND b.account = 'agent:' || a.id), 0)::bigint,
 		       COALESCE((SELECT sum(amount_ulxc) FROM agent_postings p WHERE p.workspace_id = a.workspace_id AND p.account = 'agent:' || a.id
 		                   AND p.kind IN ('spend', 'hold', 'settle', 'release', 'card', 'platform_fee')), 0)::bigint,
@@ -462,7 +520,7 @@ func (s *DualTokenStore) AgentBook(ctx context.Context, workspaceID string) (Age
 	for rows.Next() {
 		var a Agent
 		var spendLegs int64
-		if err := rows.Scan(&a.ID, &a.Name, &a.Description, &a.ArchivedAt, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.Handle, &a.BalanceULXC, &spendLegs, &a.Keys, &a.PotsULXC); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Kind, &a.Description, &a.ArchivedAt, &a.CreatedAt, &a.PausedAt, &a.PausedReason, &a.OwnerUserID, &a.Handle, &a.BalanceULXC, &spendLegs, &a.Keys, &a.PotsULXC); err != nil {
 			return book, err
 		}
 		a.SpentULXC = -spendLegs

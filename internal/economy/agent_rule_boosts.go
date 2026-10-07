@@ -143,6 +143,12 @@ func (s *DualTokenStore) BoostAgentRule(ctx context.Context, workspaceID, agentI
 	case b.Value <= current:
 		return b, fmt.Errorf("%w: the agent's %s is %s, so a boost must raise it above that", ErrAgentRule, name, ruleAmount(b.Rule, current))
 	}
+	// B32.32: a room wallet's monthly limit is not raised past what the room owner's plan allows, even for a while.
+	if b.Rule == "monthly_limit_ulxc" {
+		if err := s.checkRoomBudget(ctx, s.pool, workspaceID, agentID, b.Value); err != nil {
+			return b, err
+		}
+	}
 	b.RaisedFrom, b.CreatedBy = *field(&r), rulesChangeFrom(ctx).by
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO agent_rule_boosts (agent_id, workspace_id, rule, raised_from, value, until, created_by)

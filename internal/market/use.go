@@ -89,6 +89,10 @@ type UseRequest struct {
 	// B32.23: the most this use may cost, in µUSD — a pipeline's billed steps included. Above it nothing runs and no
 	// row is written. nil: no cap; 0: only a use that costs nothing.
 	MaxPriceUSDMicros *int64 `json:"max_price_usd_micros,omitempty"`
+	// B32.32: a charge on a room records the room and the member who spent; the buyer is the room's owner and the
+	// agent its wallet. Set by the room's run (internal/rooms Spender), never by the buyer's request body.
+	RoomID           string `json:"-"`
+	ActorWorkspaceID string `json:"-"`
 }
 
 // CaseResult is one evaluation case's outcome.
@@ -196,10 +200,10 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 		}
 		// Stamped by the clock a licence's periods are (B32.20): a rent's or subscription's included uses count per period.
 		if err := tx.QueryRow(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge,
-				licence_id, person_id, used_at, use_kind)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, $12) RETURNING used_at`,
+				licence_id, person_id, used_at, use_kind, room_id, actor_workspace_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, $12, $13, $14) RETURNING used_at`,
 			u.ID, l.ID, version, l.WorkspaceID, buyerWorkspaceID, agentID, u.PriceULXC, u.Charge, u.LicenceID, req.Person, s.now(),
-			useKind(u.Charge)).Scan(&u.UsedAt); err != nil {
+			useKind(u.Charge), req.RoomID, req.ActorWorkspaceID).Scan(&u.UsedAt); err != nil {
 			return err
 		}
 		for _, st := range steps {
@@ -207,9 +211,10 @@ func (s *Store) Use(ctx context.Context, deps UseDeps, buyerWorkspaceID, agentID
 				continue
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO market_uses (id, listing_id, version, seller_workspace_id, buyer_workspace_id, agent_id, price_ulxc, charge, used_at,
-					use_kind)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-				st.UseID, st.ListingID, st.Version, st.seller, buyerWorkspaceID, agentID, st.PriceULXC, st.Charge, u.UsedAt, useKind(st.Charge)); err != nil {
+					use_kind, room_id, actor_workspace_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+				st.UseID, st.ListingID, st.Version, st.seller, buyerWorkspaceID, agentID, st.PriceULXC, st.Charge, u.UsedAt, useKind(st.Charge),
+				req.RoomID, req.ActorWorkspaceID); err != nil {
 				return err
 			}
 			ids = append(ids, st.UseID)

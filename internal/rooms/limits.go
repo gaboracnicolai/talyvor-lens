@@ -140,7 +140,7 @@ var ErrPlanLimit = errors.New("rooms: past the plan's rooms_plan_limits")
 // plan that would allow more.
 type PlanLimitError struct {
 	Plan   string `json:"plan"`
-	Limit  string `json:"limit"` // public_rooms, private_rooms, members_per_room or agents_per_room
+	Limit  string `json:"limit"` // public_rooms, private_rooms, members_per_room, agents_per_room or room_budget_max_usd
 	Max    int64  `json:"max"`
 	Allows string `json:"allows,omitempty"` // the next plan that allows more; "" when only a contract would
 	Detail string `json:"detail"`

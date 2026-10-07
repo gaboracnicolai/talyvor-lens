@@ -338,6 +338,9 @@ type DualTokenStore struct {
 	liveStripe bool
 	// B32.11: the platform fee's rate on a workspace's AI spend; nil, no fee.
 	platformFee PlatformFeeResolver
+	// B32.32: what judges a room wallet's monthly limit against the room owner's plan; nil, a room wallet's rules
+	// cannot be saved.
+	roomBudgets RoomBudgets
 }
 
 // NewDualTokenStore wraps a real pool.

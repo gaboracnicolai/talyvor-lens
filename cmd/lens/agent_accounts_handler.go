@@ -291,10 +291,10 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		found, archived := false, false
+		found, archived, room := false, false, false
 		for _, a := range book.Agents {
 			if a.ID == agentID {
-				found, archived = true, a.ArchivedAt != nil
+				found, archived, room = true, a.ArchivedAt != nil, a.Kind == economy.AgentKindRoom
 			}
 		}
 		if !found {
@@ -303,6 +303,10 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 		}
 		if archived {
 			writeJSONErr(w, http.StatusConflict, economy.ErrAgentArchived.Error())
+			return
+		}
+		if room { // B32.32: before a key is minted that it would refuse
+			writeJSONErr(w, http.StatusConflict, economy.ErrRoomWalletKey.Error())
 			return
 		}
 		raw, key, err := keys.CreateAPIKey(req.Context(), wsID, in.Name, []string{"proxy"}, nil)
@@ -353,6 +357,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 
 	writeRules := func(w http.ResponseWriter, rules economy.AgentRules, err error) {
 		switch {
+		case writeRoomPlanLimit(w, err): // B32.32: a room wallet's monthly limit past its owner's plan
 		case errors.Is(err, economy.ErrAgentNotFound), errors.Is(err, economy.ErrRulesVersionNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, economy.ErrAgentRule):
@@ -441,6 +446,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 	// B28.308: a boost raises a limit until a time; the rules judge it at each request's time, so it reverts by itself.
 	writeBoosts := func(w http.ResponseWriter, status int, body any, err error) {
 		switch {
+		case writeRoomPlanLimit(w, err): // B32.32: a room wallet's monthly limit past its owner's plan
 		case errors.Is(err, economy.ErrAgentNotFound), errors.Is(err, economy.ErrBoostNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, economy.ErrAgentRule):
