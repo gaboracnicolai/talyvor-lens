@@ -60,6 +60,7 @@ type Payer struct {
 	WorkspaceID string
 	AgentID     string   // the room's wallet; "" paying self
 	KeyID       string   // the wallet's key; "" paying self, when the member's own credential calls the models
+	KeyScopes   []string // the wallet key's scopes, as it was issued
 	Spender     *Spender // paying room: the charge's room and member
 }
 
@@ -128,7 +129,8 @@ func (s *Store) payer(ctx context.Context, ws, roomID, pay string) (Payer, error
 		if err != nil {
 			return Payer{}, err
 		}
-		return Payer{Pay: PayRoom, WorkspaceID: sp.OwnerWorkspaceID, AgentID: sp.WalletAgentID, KeyID: sp.WalletKeyID, Spender: &sp}, nil
+		return Payer{Pay: PayRoom, WorkspaceID: sp.OwnerWorkspaceID, AgentID: sp.WalletAgentID, KeyID: sp.WalletKeyID,
+			KeyScopes: sp.WalletKeyScopes, Spender: &sp}, nil
 	case PaySelf:
 		return Payer{Pay: PaySelf, WorkspaceID: ws}, nil
 	}

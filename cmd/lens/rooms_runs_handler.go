@@ -43,6 +43,10 @@ func roomWalletProxy(openai, anthropic http.HandlerFunc) http.Handler {
 				writeJSONErr(w, http.StatusUnauthorized, "a room wallet's model call carries the wallet's key")
 				return
 			}
+			if !actx.HasScope(auth.ScopeProxy) {
+				writeJSONErr(w, http.StatusForbidden, "forbidden: missing scope "+auth.ScopeProxy)
+				return
+			}
 			req.Header.Set("X-Talyvor-Workspace", actx.WorkspaceID)
 			ctx := auth.WithAPIKey(req.Context(), &auth.APIKey{ID: "global", WorkspaceID: actx.WorkspaceID, Name: actx.AuthMethod,
 				Active: true, CreatedAt: time.Now().UTC()})
@@ -65,7 +69,7 @@ func mountRoomRunRoutes(r chi.Router, store *rooms.Store, lens, wallet http.Hand
 			}
 			run := proxyRunner{lens: lens, from: req}
 			if p.KeyID != "" {
-				run = proxyRunner{lens: wallet, from: req, as: &auth.AuthContext{WorkspaceID: p.WorkspaceID, Scopes: []string{auth.ScopeProxy},
+				run = proxyRunner{lens: wallet, from: req, as: &auth.AuthContext{WorkspaceID: p.WorkspaceID, Scopes: p.KeyScopes,
 					AuthMethod: auth.MethodWorkspaceKey, APIKeyID: p.KeyID}}
 			}
 			return market.UseDeps{Runner: run, Meter: m, Agents: agents}

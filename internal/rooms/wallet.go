@@ -232,7 +232,8 @@ type Spender struct {
 	WalletAgentID    string `json:"wallet_agent_id"`
 	ActorWorkspaceID string `json:"actor_workspace_id"`
 	// WalletKeyID is the wallet's key, which nobody holds: a run on the room makes its model calls with it (B32.33).
-	WalletKeyID string `json:"-"`
+	WalletKeyID     string   `json:"-"`
+	WalletKeyScopes []string `json:"-"`
 }
 
 // Memo is what the wallet's postings for the charge carry: the room and the member who spent.
@@ -289,9 +290,9 @@ func (s *Store) MaySpend(ctx context.Context, actor, roomID string) (Spender, er
 		if err := s.judgeBudget(p, b.MonthlyLimitULXC); err != nil {
 			return err
 		}
-		err = tx.QueryRow(ctx, `SELECT a.scoped_key_id FROM agent_account_keys a JOIN workspace_api_keys k ON k.id::text = a.scoped_key_id
+		err = tx.QueryRow(ctx, `SELECT a.scoped_key_id, k.scopes FROM agent_account_keys a JOIN workspace_api_keys k ON k.id::text = a.scoped_key_id
 			WHERE a.agent_id = $1 AND k.workspace_id = $2 AND (k.expires_at IS NULL OR k.expires_at > now())
-			ORDER BY a.created_at LIMIT 1`, *wallet, r.OwnerWorkspaceID).Scan(&sp.WalletKeyID)
+			ORDER BY a.created_at LIMIT 1`, *wallet, r.OwnerWorkspaceID).Scan(&sp.WalletKeyID, &sp.WalletKeyScopes)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("%w: the room's wallet has no key to spend with", ErrConflict)
 		}
