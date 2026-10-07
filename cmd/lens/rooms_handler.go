@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talyvor/lens/internal/auth"
+	"github.com/talyvor/lens/internal/market"
 	"github.com/talyvor/lens/internal/reqtrack"
 	"github.com/talyvor/lens/internal/rooms"
 	"github.com/talyvor/lens/internal/storedanswers"
@@ -56,6 +58,26 @@ import (
 // public room a message carrying a secret or personal data is 422 with what the scan found, and writes nothing. A
 // member's message past LENS_ROOM_MESSAGES_PER_MINUTE in a room is 429 with Retry-After.
 //
+// B32.31 — contributions: propose, fork with lineage, vote (internal/rooms/contributions.go):
+//
+//	POST  /v1/rooms/{roomID}/contributions        {kind, title, description, artifact, changelog, price_usd_micros, parents}
+//	                                              a member that is not a viewer publishes a listing to the room — its
+//	                                              price the room's default unless given — and the room gets a
+//	                                              contribution message; 201 with the contribution
+//	GET   /v1/rooms/{roomID}/contributions        the room's contributions, newest first, each with its tally and the
+//	                                              caller's vote, for its members
+//	GET   /v1/rooms/{roomID}/contributions/{id}   one, with its listing and the artifact of each version, for its members
+//	POST  /v1/rooms/{roomID}/contributions/{id}/fork   {title, description, artifact, changelog, price_usd_micros}  the
+//	                                              caller's own contribution built on it — the artifact as it is unless
+//	                                              given — whose lineage pays the original the room's remix share
+//	PUT   /v1/rooms/{roomID}/contributions/{id}/vote   {value: 1 or -1}   a member's vote; its next replaces it
+//	PATCH /v1/rooms/{roomID}/contributions/{id}   {status: accepted or rejected}   by the room's owner or an editor
+//
+// A contribution is a marketplace listing with visibility room: the publish scan and review apply (422 with what the
+// scan found), its owner and the room's members see it and open its artifact, anyone else gets 404, and the catalog
+// never lists it. A member whose accepted terms are not the room's current ones is 409 until it accepts them.
+// Contributing and forking take an Idempotency-Key, as publishing a listing does.
+//
 // A private room answers 404 to everyone but its members and the workspaces its owner named. Joining with a
 // terms_version that is not the room's current one, or joining a room that is locked or closed, is 409. Opening a room
 // past the owner's plan's public_rooms or private_rooms, a member past members_per_room or an agent past
@@ -68,6 +90,7 @@ func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 		var limit *rooms.PlanLimitError
 		var rate *rooms.RateError
 		var refusal *rooms.ScanRefusal
+		var refused *market.RefusedError
 		switch {
 		case errors.As(err, &limit):
 			writeJSONOK(w, http.StatusPaymentRequired, map[string]any{"error": limit.Detail, "setting": rooms.LimitsSetting,
@@ -78,9 +101,11 @@ func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 				"per_minute": rate.PerMinute})
 		case errors.As(err, &refusal):
 			writeJSONOK(w, http.StatusUnprocessableEntity, map[string]any{"error": refusal.Reason, "scan": refusal.Scan})
-		case errors.Is(err, rooms.ErrInvalid):
+		case errors.As(err, &refused):
+			writeJSONOK(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error(), "scan": refused.Scan})
+		case errors.Is(err, rooms.ErrInvalid), errors.Is(err, market.ErrInvalid):
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, rooms.ErrNotFound):
+		case errors.Is(err, rooms.ErrNotFound), errors.Is(err, market.ErrNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, rooms.ErrForbidden):
 			writeJSONErr(w, http.StatusForbidden, err.Error())
@@ -463,6 +488,107 @@ func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 			}
 		}
 	})
+
+	// readDraft reads a contribution's body and its Idempotency-Key.
+	readDraft := func(w http.ResponseWriter, req *http.Request) (d rooms.ContributionDraft, key string, ok bool) {
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, market.MaxArtifactBytes+64<<10)).Decode(&d); err != nil && !errors.Is(err, io.EOF) {
+			writeJSONErr(w, http.StatusBadRequest, "body must be the contribution: "+err.Error())
+			return d, "", false
+		}
+		if key = req.Header.Get("Idempotency-Key"); len(key) > 128 {
+			writeJSONErr(w, http.StatusBadRequest, "the Idempotency-Key must be at most 128 characters")
+			return d, "", false
+		}
+		return d, key, true
+	}
+	r.Post("/v1/rooms/{roomID}/contributions", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, user, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		d, key, ok := readDraft(w, req)
+		if !ok {
+			return
+		}
+		c, created, err := store.Contribute(req.Context(), ws, user, chi.URLParam(req, "roomID"), key, d)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, status(created), c)
+	}))
+	r.Get("/v1/rooms/{roomID}/contributions", func(w http.ResponseWriter, req *http.Request) {
+		ws, _ := auth.WorkspaceIdentity(req.Context())
+		cs, err := store.Contributions(req.Context(), ws, chi.URLParam(req, "roomID"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, map[string]any{"contributions": cs})
+	})
+	r.Get("/v1/rooms/{roomID}/contributions/{contributionID}", func(w http.ResponseWriter, req *http.Request) {
+		ws, _ := auth.WorkspaceIdentity(req.Context())
+		c, err := store.ReadContribution(req.Context(), ws, chi.URLParam(req, "roomID"), chi.URLParam(req, "contributionID"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, c)
+	})
+	r.Post("/v1/rooms/{roomID}/contributions/{contributionID}/fork", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, user, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		d, key, ok := readDraft(w, req)
+		if !ok {
+			return
+		}
+		c, created, err := store.Fork(req.Context(), ws, user, chi.URLParam(req, "roomID"), chi.URLParam(req, "contributionID"), key, d)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, status(created), c)
+	}))
+	r.Put("/v1/rooms/{roomID}/contributions/{contributionID}/vote", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, _, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		var in struct {
+			Value int `json:"value"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {value: 1 or -1}: "+err.Error())
+			return
+		}
+		c, err := store.Vote(req.Context(), ws, chi.URLParam(req, "roomID"), chi.URLParam(req, "contributionID"), in.Value)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, c)
+	}))
+	r.Patch("/v1/rooms/{roomID}/contributions/{contributionID}", roomActorOnly(func(w http.ResponseWriter, req *http.Request) {
+		ws, user, ok := actor(w, req)
+		if !ok {
+			return
+		}
+		var in struct {
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<10)).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "body must be {status: accepted or rejected}: "+err.Error())
+			return
+		}
+		c, err := store.Decide(req.Context(), ws, user, chi.URLParam(req, "roomID"), chi.URLParam(req, "contributionID"), in.Status)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSONOK(w, http.StatusOK, c)
+	}))
 }
 
 // A room's event stream reads room_events once a second — no LISTEN, which PgBouncer's transaction pooling cannot

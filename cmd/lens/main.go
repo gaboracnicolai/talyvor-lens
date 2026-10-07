@@ -4385,6 +4385,7 @@ func run() error {
 			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})
 		roomStore := rooms.NewStore(pool, cfg.LineageMaxShareBPS) // B32.28
 		roomStore.SetMessagesPerMinute(cfg.RoomMessagesPerMinute) // B32.30
+		roomStore.SetMarket(marketStore)                          // B32.31
 		mountRoomRoutes(authed, roomStore)
 
 		// B21.3 — a workspace deletes its stored answers, or asks Talyvor to delete everything.

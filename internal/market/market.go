@@ -58,7 +58,8 @@ type Listing struct {
 	Title           string    `json:"title"`
 	Description     string    `json:"description"`
 	PricePerUseULXC int64     `json:"price_per_use_ulxc"` // 0 is free
-	Visibility      string    `json:"visibility"`         // public | unlisted | private
+	Visibility      string    `json:"visibility"`         // public | unlisted | private | room
+	RoomID          string    `json:"room_id,omitempty"`  // a room's contribution: the room whose members see it (B32.31)
 	LatestVersion   int       `json:"latest_version"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
@@ -133,6 +134,9 @@ type Draft struct {
 	RemixPolicy     string          `json:"remix_policy"`    // none (default) | free | royalty
 	RemixShareBPS   int             `json:"remix_share_bps"` // royalty: 1 to LENS_LINEAGE_MAX_SHARE_BPS
 	Parents         []ParentRef     `json:"parents"`         // the listings it builds on (lineage.go)
+	// RoomID publishes the listing as a room's contribution, seen by its owner and the room's members only (B32.31).
+	// internal/rooms sets it once it has checked the publisher is a member; a request body never does.
+	RoomID string `json:"-"`
 }
 
 // draftOffers is the set of offers a draft publishes, its price per use folded in.
@@ -270,10 +274,14 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 		return Listing{}, err
 	}
 	d.PricePerUseULXC, _ = perUseULXC(offers)
-	if d.Visibility == "" {
+	switch {
+	case d.RoomID != "":
+		d.Visibility = VisibilityRoom
+	case d.Visibility == "":
 		d.Visibility = "public"
-	}
-	if d.Visibility != "public" && d.Visibility != "unlisted" && d.Visibility != "private" {
+	case d.Visibility == VisibilityRoom:
+		return Listing{}, invalid("a room's listing is published as a contribution to the room: POST /v1/rooms/{id}/contributions")
+	case d.Visibility != "public" && d.Visibility != "unlisted" && d.Visibility != "private":
 		return Listing{}, invalid("visibility must be public, unlisted or private")
 	}
 	terms, err := s.checkRemixTerms(RemixTerms{Policy: d.RemixPolicy, ShareBPS: d.RemixShareBPS})
@@ -291,17 +299,17 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	l := Listing{ID: "lst_" + uuid.NewString(), WorkspaceID: workspaceID, Kind: d.Kind, Title: d.Title, Description: d.Description,
-		PricePerUseULXC: d.PricePerUseULXC, Visibility: d.Visibility, LatestVersion: 1, ReviewStatus: ReviewApproved,
+		PricePerUseULXC: d.PricePerUseULXC, Visibility: d.Visibility, RoomID: d.RoomID, LatestVersion: 1, ReviewStatus: ReviewApproved,
 		RemixPolicy: terms.Policy, RemixShareBPS: terms.ShareBPS}
 	if scan.Held != "" {
 		l.ReviewStatus, l.ReviewReason = ReviewHeld, scan.Held
 	}
 	err = tx.QueryRow(ctx, `INSERT INTO market_listings (id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, review_status, review_reason, publish_key,
-			remix_policy, remix_share_bps)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), $11, $12)
+			remix_policy, remix_share_bps, room_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), $11, $12, NULLIF($13, ''))
 		ON CONFLICT (workspace_id, publish_key) WHERE publish_key IS NOT NULL DO NOTHING RETURNING created_at, updated_at`,
 		l.ID, workspaceID, d.Kind, d.Title, d.Description, d.PricePerUseULXC, d.Visibility, l.ReviewStatus, l.ReviewReason, key,
-		l.RemixPolicy, l.RemixShareBPS).Scan(&l.CreatedAt, &l.UpdatedAt)
+		l.RemixPolicy, l.RemixShareBPS, d.RoomID).Scan(&l.CreatedAt, &l.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Listing{}, errKeyTaken
 	}
@@ -372,12 +380,16 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 	return v, tx.Commit(ctx)
 }
 
-const listingColumns = `id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, latest_version, created_at, updated_at, review_status, review_reason, remix_policy, remix_share_bps`
+const listingColumns = `id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, latest_version, created_at, updated_at, review_status, review_reason, remix_policy, remix_share_bps, room_id`
 
 func scanListing(row pgx.Row) (Listing, error) {
 	var l Listing
+	var room *string
 	err := row.Scan(&l.ID, &l.WorkspaceID, &l.Kind, &l.Title, &l.Description, &l.PricePerUseULXC, &l.Visibility, &l.LatestVersion, &l.CreatedAt, &l.UpdatedAt,
-		&l.ReviewStatus, &l.ReviewReason, &l.RemixPolicy, &l.RemixShareBPS)
+		&l.ReviewStatus, &l.ReviewReason, &l.RemixPolicy, &l.RemixShareBPS, &room)
+	if room != nil {
+		l.RoomID = *room
+	}
 	return l, err
 }
 
@@ -477,22 +489,58 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) ([]Listing, error) {
 	return out, nil
 }
 
-// hidden says whether viewer may not see l: a private listing, or one held or taken down, is its owner's alone.
-func hidden(l Listing, viewer string) bool {
-	return l.WorkspaceID != viewer && (l.Visibility == "private" || l.ReviewStatus != ReviewApproved)
+// VisibilityRoom is a room's contribution (B32.31): seen by its owner and its room's live members, never in the catalog.
+const VisibilityRoom = "room"
+
+// rowQuerier is a pool or a transaction.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// hidden says whether viewer may not see l: a private listing, or one held or taken down, is its owner's alone, and a
+// room's contribution is its owner's and its room's live members' — one EXISTS query, asked of a room's listing only.
+func hidden(ctx context.Context, q rowQuerier, l Listing, viewer string) (bool, error) {
+	switch {
+	case l.WorkspaceID == viewer:
+		return false, nil
+	case l.Visibility == "private" || l.ReviewStatus != ReviewApproved:
+		return true, nil
+	case l.Visibility != VisibilityRoom:
+		return false, nil
+	}
+	var member bool
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM room_members WHERE room_id = $1 AND workspace_id = $2 AND removed_at IS NULL)`,
+		l.RoomID, viewer).Scan(&member)
+	return !member, err
+}
+
+// visibleListing reads a listing as viewer may see it, its row locked by lock (a FOR clause, or ""): pgx.ErrNoRows
+// when there is none or viewer may not see it.
+func visibleListing(ctx context.Context, q rowQuerier, viewer, listingID, lock string) (Listing, error) {
+	l, err := scanListing(q.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1 `+lock, listingID))
+	if err != nil {
+		return l, err
+	}
+	if h, err := hidden(ctx, q, l, viewer); err != nil {
+		return l, err
+	} else if h {
+		return l, pgx.ErrNoRows
+	}
+	return l, nil
 }
 
 // Get reads a listing and its versions as viewerWorkspace sees it: a private, held or taken-down listing
-// only by its owner, and each version's artifact only for its owner.
+// only by its owner, and each version's artifact only for its owner — or, a room's contribution, for its room's
+// members too, who build on it together (B32.31).
 func (s *Store) Get(ctx context.Context, viewerWorkspace, listingID string) (Listing, error) {
-	l, err := scanListing(s.pool.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, listingID))
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, viewerWorkspace)) {
+	l, err := visibleListing(ctx, s.pool, viewerWorkspace, listingID, "")
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Listing{}, ErrNotFound
 	}
 	if err != nil {
 		return Listing{}, fmt.Errorf("market: listing: %w", err)
 	}
-	owner := l.WorkspaceID == viewerWorkspace
+	owner := l.WorkspaceID == viewerWorkspace || l.Visibility == VisibilityRoom
 	offers, err := activeOffers(ctx, s.pool, listingID)
 	if err != nil {
 		return Listing{}, err

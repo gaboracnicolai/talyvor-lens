@@ -62,8 +62,8 @@ func (s *Store) payable(ctx context.Context, q interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	querier
 }, buyer, listingID string) (Listing, int64, string, error) {
-	l, err := scanListing(q.QueryRow(ctx, `SELECT `+listingColumns+` FROM market_listings WHERE id = $1`, listingID))
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hidden(l, buyer)) {
+	l, err := visibleListing(ctx, q, buyer, listingID, "")
+	if errors.Is(err, pgx.ErrNoRows) {
 		return l, 0, "there is no such listing", nil
 	}
 	if err != nil {

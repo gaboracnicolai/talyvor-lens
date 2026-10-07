@@ -158,10 +158,14 @@ func (s *Store) ReviewQueue(ctx context.Context) ([]QueueItem, error) {
 	for rows.Next() {
 		var q QueueItem
 		var reasons []string
+		var room *string
 		l := &q.Listing
 		if err := rows.Scan(&l.ID, &l.WorkspaceID, &l.Kind, &l.Title, &l.Description, &l.PricePerUseULXC, &l.Visibility, &l.LatestVersion,
-			&l.CreatedAt, &l.UpdatedAt, &l.ReviewStatus, &l.ReviewReason, &l.RemixPolicy, &l.RemixShareBPS, &q.OpenReports, &reasons, &q.Details); err != nil {
+			&l.CreatedAt, &l.UpdatedAt, &l.ReviewStatus, &l.ReviewReason, &l.RemixPolicy, &l.RemixShareBPS, &room, &q.OpenReports, &reasons, &q.Details); err != nil {
 			return nil, err
+		}
+		if room != nil {
+			l.RoomID = *room
 		}
 		q.Reasons = byFrequency(reasons)
 		out = append(out, q)
