@@ -167,6 +167,25 @@ func TestIPClaims_AClaimHoldsNewEarningsUntilItIsDecided(t *testing.T) {
 		}
 		audited(c.ID, "market.ip_claim.file", "market.ip_claim.upheld")
 	})
+
+	t.Run("a claim deleted with its workspace releases its holds", func(t *testing.T) {
+		listing("lst_b3247_d", seller)
+		c, err := s.FileIPClaim(ctx, claimant, IPClaimFiling{ListingID: "lst_b3247_d", OriginalReference: "https://example.com/third",
+			Evidence: "a copy", GoodFaith: "I believe in good faith that this copies my work."}, filed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sale("use_b3247_withdrawn", "lst_b3247_d", filed.Add(time.Hour))
+		if _, err := pool.Exec(ctx, `DELETE FROM market_ip_claims WHERE claimant_workspace_id = $1 AND id = $2`, claimant, c.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ReleaseDue(ctx, filed.Add(20*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if j := journal(t, s, "use_b3247_withdrawn"); len(j) != 2 || j[1].Kind != JournalRelease {
+			t.Fatalf("after its claim was deleted, the held use's journal = %+v; want its clear and its release", j)
+		}
+	})
 }
 
 func journal(t *testing.T, s *Store, ref string) []JournalEntry {

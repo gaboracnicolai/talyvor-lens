@@ -48,3 +48,14 @@ END $$;
 CREATE OR REPLACE TRIGGER market_ip_claims_hold_use AFTER INSERT ON market_uses
     FOR EACH ROW WHEN (NEW.charge = 'billed') EXECUTE FUNCTION market_ip_claims_hold_use();
 CREATE INDEX IF NOT EXISTS idx_market_holds_opened_by ON market_holds (opened_by) WHERE released_at IS NULL;
+
+-- A claim deleted with its claimant's or its listing's workspace (internal/tenantdata) holds nothing any more: its
+-- open holds are released, and the release job moves their earnings once their 14 days are over.
+CREATE OR REPLACE FUNCTION market_ip_claims_release_holds() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE market_holds SET released_at = now(), decision = 'ip_claim withdrawn (' || OLD.id || ')'
+     WHERE opened_by = OLD.id AND reason = 'ip_claim' AND released_at IS NULL;
+    RETURN OLD;
+END $$;
+CREATE OR REPLACE TRIGGER market_ip_claims_release_holds BEFORE DELETE ON market_ip_claims
+    FOR EACH ROW EXECUTE FUNCTION market_ip_claims_release_holds();
