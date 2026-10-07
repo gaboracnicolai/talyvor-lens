@@ -47,8 +47,8 @@ const (
 const (
 	// MaxMessage is the longest message body, in characters.
 	MaxMessage = 8000
-	// DefaultMessagesPerMinute is LENS_ROOM_MESSAGES_PER_MINUTE's default.
-	DefaultMessagesPerMinute = 20
+	// defaultMessagesPerMinute is LENS_ROOM_MESSAGES_PER_MINUTE's default.
+	defaultMessagesPerMinute = 20
 	// MessagesPerMinuteSetting names the setting a refusal names.
 	MessagesPerMinuteSetting = "LENS_ROOM_MESSAGES_PER_MINUTE"
 
@@ -114,14 +114,14 @@ type Event struct {
 // SetMessagesPerMinute sets LENS_ROOM_MESSAGES_PER_MINUTE; below 1 it is the default.
 func (s *Store) SetMessagesPerMinute(n int) {
 	if n < 1 {
-		n = DefaultMessagesPerMinute
+		n = defaultMessagesPerMinute
 	}
 	s.perMinute = n
 }
 
 func (s *Store) messagesPerMinute() int {
 	if s.perMinute < 1 {
-		return DefaultMessagesPerMinute
+		return defaultMessagesPerMinute
 	}
 	return s.perMinute
 }
