@@ -349,6 +349,9 @@ func (d mcpMarketDeps) LicenceDeps(_ context.Context, wsID string) market.Licenc
 type proxyRunner struct {
 	lens http.Handler
 	from *http.Request
+	// as, when set, is the credential the calls are made with instead of the caller's: a room wallet's key, whose
+	// plaintext nobody holds (B32.33). lens is then roomWalletProxy, which takes the identity from the request's context.
+	as *auth.AuthContext
 }
 
 // runError is a model call the proxy did not answer with a 2xx.
@@ -390,9 +393,13 @@ func (p proxyRunner) Run(ctx context.Context, model string, messages []market.Me
 	}
 	req.RemoteAddr = p.from.RemoteAddr
 	req.Header.Set("Content-Type", "application/json")
-	for _, h := range []string{"Authorization", "X-Talyvor-Key", "X-Api-Key"} {
-		if v := p.from.Header.Get(h); v != "" {
-			req.Header.Set(h, v)
+	if p.as != nil {
+		req = req.WithContext(auth.WithAuthContext(ctx, p.as))
+	} else {
+		for _, h := range []string{"Authorization", "X-Talyvor-Key", "X-Api-Key"} {
+			if v := p.from.Header.Get(h); v != "" {
+				req.Header.Set(h, v)
+			}
 		}
 	}
 	req.Header.Set("X-Talyvor-Feature", "marketplace")

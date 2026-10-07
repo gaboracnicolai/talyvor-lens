@@ -170,6 +170,8 @@ type Store struct {
 	perMinute int           // LENS_ROOM_MESSAGES_PER_MINUTE (messages.go)
 	market    *market.Store // where contributions are published (contributions.go)
 	keys      Keys          // issues each room wallet's key (wallet.go); nil, rooms have no wallet
+
+	contextMessages int // LENS_ROOM_CONTEXT_MESSAGES (runs.go)
 }
 
 // NewStore answers a Store whose rooms may ask a fork for at most maxShareBPS of its sales (LENS_LINEAGE_MAX_SHARE_BPS),
