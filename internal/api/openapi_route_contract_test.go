@@ -351,7 +351,10 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 // 231 → 234 (B32.47): IP claims — POST and GET /v1/workspaces/{wsID}/marketplace/ip-claims, POST .../ip-claims/{claimID}/counter.
 // 234 → 237 (B32.49): the trust panel — GET /v1/marketplace/listings/{listingID}/trust, PUT
 // /v1/workspaces/{wsID}/marketplace/listings/{listingID}/review and PUT .../reviews/{reviewID}/reply.
-const undocumentedNonAdminV1Routes = 237
+// 237 → 246 (B32.50): discovery — GET /v1/marketplace/search, GET /v1/marketplace/capabilities, PUT
+// /v1/workspaces/{wsID}/marketplace/listings/{listingID}/capabilities, GET /v1/marketplace/collections and
+// .../collections/{collectionID}, and GET, POST, PUT and DELETE /v1/workspaces/{wsID}/marketplace/collections[/{collectionID}].
+const undocumentedNonAdminV1Routes = 246
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)

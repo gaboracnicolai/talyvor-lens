@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -68,6 +67,7 @@ type Listing struct {
 	RemixPolicy     string    `json:"remix_policy"`            // none | free | royalty (lineage.go)
 	RemixShareBPS   int       `json:"remix_share_bps"`         // a royalty's share of each remix's sales
 	Offers          []Offer   `json:"offers"`                  // how it is sold (offers.go); none: it is free
+	Capabilities    []string  `json:"capabilities"`            // what it can do, from market_capabilities (B32.50)
 	Versions        []Version `json:"versions,omitempty"`
 }
 
@@ -134,6 +134,7 @@ type Draft struct {
 	RemixPolicy     string          `json:"remix_policy"`    // none (default) | free | royalty
 	RemixShareBPS   int             `json:"remix_share_bps"` // royalty: 1 to LENS_LINEAGE_MAX_SHARE_BPS
 	Parents         []ParentRef     `json:"parents"`         // the listings it builds on (lineage.go)
+	Capabilities    []string        `json:"capabilities"`    // what it can do, from market_capabilities (B32.50)
 	// RoomID publishes the listing as a room's contribution, seen by its owner and the room's members only (B32.31).
 	// internal/rooms sets it once it has checked the publisher is a member; a request body never does.
 	RoomID string `json:"-"`
@@ -292,6 +293,10 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if err != nil {
 		return Listing{}, err
 	}
+	caps, err := checkCapabilities(ctx, s.pool, d.Capabilities)
+	if err != nil {
+		return Listing{}, err
+	}
 	artifact, sum, scan, err := checkArtifact(d.Kind, d.Artifact, d.Title, d.Description, d.Changelog)
 	if err != nil {
 		return Listing{}, err
@@ -336,6 +341,10 @@ func (s *Store) publish(ctx context.Context, workspaceID, key string, d Draft) (
 	if l.Offers, err = writeOffers(ctx, tx, l.ID, offers); err != nil {
 		return Listing{}, err
 	}
+	if err := writeCapabilities(ctx, tx, l.ID, caps); err != nil {
+		return Listing{}, err
+	}
+	l.Capabilities = caps
 	if v.Parents, err = s.declareParents(ctx, tx, workspaceID, l.ID, 1, d.Parents); err != nil {
 		return Listing{}, err
 	}
@@ -419,11 +428,12 @@ func (s *Store) PublishVersion(ctx context.Context, workspaceID, listingID strin
 
 const listingColumns = `id, workspace_id, kind, title, description, price_per_use_ulxc, visibility, latest_version, created_at, updated_at, review_status, review_reason, remix_policy, remix_share_bps, room_id`
 
-func scanListing(row pgx.Row) (Listing, error) {
+// scanListing reads listingColumns, then into extra any columns the query selects after them.
+func scanListing(row pgx.Row, extra ...any) (Listing, error) {
 	var l Listing
 	var room *string
-	err := row.Scan(&l.ID, &l.WorkspaceID, &l.Kind, &l.Title, &l.Description, &l.PricePerUseULXC, &l.Visibility, &l.LatestVersion, &l.CreatedAt, &l.UpdatedAt,
-		&l.ReviewStatus, &l.ReviewReason, &l.RemixPolicy, &l.RemixShareBPS, &room)
+	err := row.Scan(append([]any{&l.ID, &l.WorkspaceID, &l.Kind, &l.Title, &l.Description, &l.PricePerUseULXC, &l.Visibility, &l.LatestVersion, &l.CreatedAt, &l.UpdatedAt,
+		&l.ReviewStatus, &l.ReviewReason, &l.RemixPolicy, &l.RemixShareBPS, &room}, extra...)...)
 	if room != nil {
 		l.RoomID = *room
 	}
@@ -450,12 +460,8 @@ func (s *Store) list(ctx context.Context, where string, args ...any) ([]Listing,
 		return nil, err
 	}
 	rows.Close()
-	offers, err := activeOffers(ctx, s.pool, ids...)
-	if err != nil {
+	if err := s.withOffersAndCapabilities(ctx, ids, func(i int) *Listing { return &out[i] }); err != nil {
 		return nil, err
-	}
-	for i := range out {
-		out[i].Offers = orNone(offers[out[i].ID])
 	}
 	return out, nil
 }
@@ -483,45 +489,25 @@ func (s *Store) Catalog(ctx context.Context, kind string) ([]Listing, error) {
 
 // SearchQuery is what a buyer looks for in the catalog (B32.23). Each field set narrows it.
 type SearchQuery struct {
-	Text              string // every word in the title or description
+	Text              string // the words to search the title and description for
 	Kind              string
-	Capability        string // what it should do; until listings declare capabilities (B32.50), matched like Text
+	Capability        string // what it should do: one of market_capabilities (B32.50)
 	Licence           string // sold under this licence
 	MaxPriceUSDMicros *int64 // one use costs at most this: free, or a per_use commercial offer at or under it
 }
 
-// MaxSearchResults is the most listings Search answers.
+// MaxSearchResults is the most listings Search answers, and a page of Discover.
 const MaxSearchResults = 50
 
-// Search reads the public listings the review approved that q matches, newest first.
+// Search reads the first page of what Discover finds for q: by relevance with words, by trending without (B32.50).
 func (s *Store) Search(ctx context.Context, q SearchQuery) ([]Listing, error) {
-	where, args := `visibility = 'public' AND review_status = 'approved'`, []any{}
-	if q.Kind != "" {
-		args = append(args, q.Kind)
-		where += fmt.Sprintf(` AND kind = $%d`, len(args))
-	}
-	for _, word := range strings.Fields(q.Text + " " + q.Capability) {
-		args = append(args, "%"+strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(word)+"%")
-		where += fmt.Sprintf(` AND (title ILIKE $%[1]d OR description ILIKE $%[1]d)`, len(args))
-	}
-	all, err := s.list(ctx, where, args...)
+	page, err := s.Discover(ctx, DiscoverQuery{Q: q.Text, Kind: q.Kind, Capability: q.Capability, Licence: q.Licence, MaxPricePerUse: q.MaxPriceUSDMicros})
 	if err != nil {
 		return nil, err
 	}
-	out := []Listing{}
-	for _, l := range all {
-		if q.Licence != "" && !slices.ContainsFunc(l.Offers, func(o Offer) bool { return o.Licence == q.Licence }) {
-			continue
-		}
-		if q.MaxPriceUSDMicros != nil {
-			price, perUse := perUseULXC(l.Offers)
-			if (!perUse && len(l.Offers) > 0) || price/ulxcPerUSDMicro > *q.MaxPriceUSDMicros {
-				continue
-			}
-		}
-		if out = append(out, l); len(out) == MaxSearchResults {
-			break
-		}
+	out := make([]Listing, len(page.Listings))
+	for i, h := range page.Listings {
+		out[i] = h.Listing
 	}
 	return out, nil
 }
@@ -583,6 +569,11 @@ func (s *Store) Get(ctx context.Context, viewerWorkspace, listingID string) (Lis
 		return Listing{}, err
 	}
 	l.Offers = orNone(offers[listingID])
+	caps, err := listingCapabilities(ctx, s.pool, listingID)
+	if err != nil {
+		return Listing{}, err
+	}
+	l.Capabilities = orNoCapabilities(caps[listingID])
 	parents, err := versionParents(ctx, s.pool, listingID, 0)
 	if err != nil {
 		return Listing{}, err

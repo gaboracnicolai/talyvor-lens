@@ -66,7 +66,7 @@ func marketToolDefinitions() []map[string]any {
 	return []map[string]any{
 		tool("market_search", "Search the Talyvor marketplace: prompts, skills, agents and pipelines other owners sell, with their offers.",
 			map[string]any{"text": str("words in its title or description"), "kind": str("prompt, skill, agent, evaluation or pipeline"),
-				"capability": str("what it should do, e.g. summarise"), "licence": str("sold under this licence: personal, commercial or enterprise"),
+				"capability": str("what it should do: one of GET /v1/marketplace/capabilities, e.g. summarize or extract"), "licence": str("sold under this licence: personal, commercial or enterprise"),
 				"max_price_usd_micros": num("one use costs at most this, in µUSD (1 USD = 1,000,000)")}),
 		tool("market_listing", "One listing: what each version needs (input, variables, model), every offer with its licence terms, and its trust "+
 			"summary: whether the publisher is verified, reviews from paying buyers, eval score, IP claims, the originals it credits and its remixes.",
