@@ -150,9 +150,7 @@ func postAgentFee(ctx context.Context, tx pgx.Tx, scopedKeyID string, fee, bps i
 func postFeeEntry(ctx context.Context, tx pgx.Tx, workspaceID, agentID string, fee, bps int64, ref, model string) error {
 	entry := uuid.New()
 	for _, l := range []leg{{agentAccount(agentID), -fee}, {"spend", fee}} {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO agent_postings (entry_id, workspace_id, account, amount_ulxc, kind, ref, model, fee_bps)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		if err := insertPosting(ctx, tx, `entry_id, workspace_id, account, amount_ulxc, kind, ref, model, fee_bps`,
 			entry, workspaceID, l.account, l.amount, LXCTypePlatformFee, ref, nullIfEmpty(modelCapKey(model)), bps); err != nil {
 			return fmt.Errorf("economy: post %s: %w", LXCTypePlatformFee, err)
 		}

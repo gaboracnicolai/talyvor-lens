@@ -353,6 +353,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 
 	writeRules := func(w http.ResponseWriter, rules economy.AgentRules, err error) {
 		switch {
+		case writeRoomPlanLimit(w, err): // B32.32: a room wallet's monthly limit past its owner's plan
 		case errors.Is(err, economy.ErrAgentNotFound), errors.Is(err, economy.ErrRulesVersionNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, economy.ErrAgentRule):
@@ -441,6 +442,7 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 	// B28.308: a boost raises a limit until a time; the rules judge it at each request's time, so it reverts by itself.
 	writeBoosts := func(w http.ResponseWriter, status int, body any, err error) {
 		switch {
+		case writeRoomPlanLimit(w, err): // B32.32: a room wallet's monthly limit past its owner's plan
 		case errors.Is(err, economy.ErrAgentNotFound), errors.Is(err, economy.ErrBoostNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, economy.ErrAgentRule):

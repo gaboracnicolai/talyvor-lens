@@ -14,7 +14,8 @@
 // (limits.go). A private room is listed and shown to its members only; a workspace joins one through an invite link
 // or by being named by its owner (invites.go). Members post messages, which a public room's scan reads first and every
 // member's event stream receives (messages.go). Members propose work as contributions, fork each other's with lineage
-// and vote on them, and the owner or an editor accepts or rejects them (contributions.go).
+// and vote on them, and the owner or an editor accepts or rejects them (contributions.go). A room has a wallet, whose
+// monthly limit is its budget, spent by its owner and the members it lets spend (wallet.go).
 package rooms
 
 import (
@@ -133,6 +134,8 @@ type Detail struct {
 	Members []Member `json:"members"`
 	Agents  []Agent  `json:"agents"`
 	Me      *Member  `json:"me"` // nil: the caller is not a member
+	// Wallet is the room's budget, shown to its members (B32.32); nil to anyone else, or while the room has none.
+	Wallet *Wallet `json:"wallet,omitempty"`
 }
 
 // Draft is POST /v1/workspaces/{ws}/rooms.
@@ -166,6 +169,7 @@ type Store struct {
 	limits    map[string]Limits
 	perMinute int           // LENS_ROOM_MESSAGES_PER_MINUTE (messages.go)
 	market    *market.Store // where contributions are published (contributions.go)
+	keys      Keys          // issues each room wallet's key (wallet.go); nil, rooms have no wallet
 }
 
 // NewStore answers a Store whose rooms may ask a fork for at most maxShareBPS of its sales (LENS_LINEAGE_MAX_SHARE_BPS),
@@ -233,6 +237,14 @@ func (s *Store) Create(ctx context.Context, ws, user string, d Draft) (Detail, e
 		return Detail{}, err
 	}
 	id := "room_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	// B32.32: the room's wallet spends with a key of the owner's workspace, issued first because its store is not this
+	// transaction's; it is revoked again when the room is not opened.
+	keyID := ""
+	if s.keys != nil {
+		if keyID, err = s.issueWalletKey(ctx, ws, d.Title); err != nil {
+			return Detail{}, err
+		}
+	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		// One room at a time per owner, so two creates cannot both take its last room.
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('rooms:create:' || $1))`, ws); err != nil {
@@ -258,10 +270,15 @@ func (s *Store) Create(ctx context.Context, ws, user string, d Draft) (Detail, e
 			VALUES ($1, 1, $2, $3, $4, $5)`, id, d.Terms.SplitRule, d.Terms.RemixShareBPS, d.Terms.DefaultPriceUSDMicros, d.Terms.SpendPolicy); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO room_members (room_id, workspace_id, user_id, role, may_spend, terms_version)
-			VALUES ($1, $2, $3, 'owner', true, 1)`, id, ws, user)
-		return err
+		if _, err = tx.Exec(ctx, `INSERT INTO room_members (room_id, workspace_id, user_id, role, may_spend, terms_version)
+			VALUES ($1, $2, $3, 'owner', true, 1)`, id, ws, user); err != nil || keyID == "" {
+			return err
+		}
+		return openWallet(ctx, tx, id, ws, user, d.Title, keyID)
 	})
+	if err != nil && keyID != "" {
+		s.revokeWalletKey(ctx, keyID)
+	}
 	if errors.Is(err, ErrPlanLimit) {
 		return Detail{}, err
 	}
@@ -274,10 +291,11 @@ func (s *Store) Create(ctx context.Context, ws, user string, d Draft) (Detail, e
 const roomCols = `r.id, r.owner_workspace_id, r.title, r.topic, r.description, r.visibility, r.status, r.terms_version,
 	(SELECT count(*) FROM room_members m WHERE m.room_id = r.id AND m.removed_at IS NULL), r.created_at, r.last_activity_at`
 
-func scanRoom(row pgx.Row) (Room, error) {
+// scanRoom scans roomCols, then any more columns the query selects into more.
+func scanRoom(row pgx.Row, more ...any) (Room, error) {
 	var r Room
-	err := row.Scan(&r.ID, &r.OwnerWorkspaceID, &r.Title, &r.Topic, &r.Description, &r.Visibility, &r.Status,
-		&r.TermsVersion, &r.MemberCount, &r.CreatedAt, &r.LastActivityAt)
+	err := row.Scan(append([]any{&r.ID, &r.OwnerWorkspaceID, &r.Title, &r.Topic, &r.Description, &r.Visibility, &r.Status,
+		&r.TermsVersion, &r.MemberCount, &r.CreatedAt, &r.LastActivityAt}, more...)...)
 	return r, err
 }
 
@@ -380,11 +398,24 @@ func touch(ctx context.Context, tx pgx.Tx, roomID string) error {
 	return err
 }
 
-// Get answers the room as viewer sees it.
+// Get answers the room as viewer sees it. A room opened before rooms had wallets gets its wallet when its owner reads it.
 func (s *Store) Get(ctx context.Context, viewer string, admin bool, roomID string) (Detail, error) {
+	d, err := s.get(ctx, viewer, admin, roomID)
+	if err == nil && d.Wallet == nil && d.Me != nil && d.Me.Role == RoleOwner && s.keys != nil {
+		if err := s.ensureWallet(ctx, roomID); err != nil {
+			return Detail{}, err
+		}
+		return s.get(ctx, viewer, admin, roomID)
+	}
+	return d, err
+}
+
+func (s *Store) get(ctx context.Context, viewer string, admin bool, roomID string) (Detail, error) {
 	var d Detail
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		r, err := scanRoom(tx.QueryRow(ctx, `SELECT `+roomCols+` FROM rooms r WHERE r.id = $1`, roomID))
+		var wallet *string
+		r, err := scanRoom(tx.QueryRow(ctx, `SELECT `+roomCols+`, r.wallet_agent_id FROM rooms r WHERE r.id = $1`, roomID),
+			&wallet)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("%w: no such room", ErrNotFound)
 		}
@@ -410,6 +441,11 @@ func (s *Store) Get(ctx context.Context, viewer string, admin bool, roomID strin
 			FROM room_terms WHERE room_id = $1 AND version = $2`, roomID, r.TermsVersion).Scan(&d.Terms.Version, &d.Terms.SplitRule,
 			&d.Terms.RemixShareBPS, &d.Terms.DefaultPriceUSDMicros, &d.Terms.SpendPolicy, &d.Terms.CreatedAt); err != nil {
 			return err
+		}
+		if wallet != nil && d.Me != nil {
+			if d.Wallet, err = s.readWallet(ctx, tx, r, *wallet, d.Terms, me); err != nil {
+				return err
+			}
 		}
 		rows, err := tx.Query(ctx, `SELECT `+memberCols+` FROM room_members m JOIN rooms r ON r.id = m.room_id
 			WHERE m.room_id = $1 AND m.removed_at IS NULL
@@ -705,8 +741,9 @@ func (s *Store) AddAgent(ctx context.Context, ws, roomID, agentID string) (a Age
 		if r.Status != Open {
 			return fmt.Errorf("%w: the room is %s and takes no new members", ErrConflict, r.Status)
 		}
-		if err := tx.QueryRow(ctx, `SELECT name FROM agent_accounts WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
-			agentID, ws).Scan(&a.Name); errors.Is(err, pgx.ErrNoRows) {
+		// A room's wallet is a room's budget, not a member's agent (B32.32).
+		if err := tx.QueryRow(ctx, `SELECT name FROM agent_accounts WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL
+			AND kind = 'agent'`, agentID, ws).Scan(&a.Name); errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("%w: no such agent in your workspace", ErrNotFound)
 		} else if err != nil {
 			return err

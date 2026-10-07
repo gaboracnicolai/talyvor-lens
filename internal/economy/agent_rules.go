@@ -363,6 +363,10 @@ func (s *DualTokenStore) SetAgentRules(ctx context.Context, workspaceID, agentID
 		return r, fmt.Errorf("economy: set agent rules: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// B32.32: a room wallet's monthly limit is the room's budget, at most what the room owner's plan allows.
+	if err := s.checkRoomBudget(ctx, tx, workspaceID, agentID, r.MonthlyLimitULXC); err != nil {
+		return r, err
+	}
 	// $14 to $23 are NULL when absent, which keeps the stored caps, payees and licence rules; a zero or an empty list
 	// clears one.
 	var hourly, weekly, rpm, commitment int64

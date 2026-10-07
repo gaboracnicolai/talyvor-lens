@@ -78,6 +78,14 @@ import (
 // never lists it. A member whose accepted terms are not the room's current ones is 409 until it accepts them.
 // Contributing and forking take an Idempotency-Key, as publishing a listing does.
 //
+// B32.32 — the room's budget (internal/rooms/wallet.go). Opening a room opens its wallet: an agent of the owner's
+// workspace, kind room, named "Room: <title>", with one proxy-scoped key nobody holds. GET /v1/rooms/{roomID} shows its
+// members the wallet: its balance, its monthly limit — the room's budget — and what has been spent of it this month, its
+// limit per request, its approval amount, the most the owner's plan allows, the spend policy and whether the caller may
+// spend it, with why not. The owner funds it and sets its rules through Agent Wallets' own routes
+// (/v1/workspaces/{ws}/agents/{wallet}/fund and /rules); a monthly limit above the plan's room_budget_max_usd, or none
+// on a plan that sets one, is 402 naming rooms_plan_limits and the plan. Its approvals reach the owner's.
+//
 // A private room answers 404 to everyone but its members and the workspaces its owner named. Joining with a
 // terms_version that is not the room's current one, or joining a room that is locked or closed, is 409. Opening a room
 // past the owner's plan's public_rooms or private_rooms, a member past members_per_room or an agent past
@@ -85,16 +93,25 @@ import (
 // changing members, inviting, bringing an agent — takes the workspace's owner or an admin, as publishing a listing
 // does; reading takes any of its credentials.
 
+// writeRoomPlanLimit writes a refusal under rooms_plan_limits as 402 naming the setting, the plan, the limit and the plan
+// that allows more, and answers whether err was one. A room wallet's rules are refused with it too (B32.32).
+func writeRoomPlanLimit(w http.ResponseWriter, err error) bool {
+	var limit *rooms.PlanLimitError
+	if !errors.As(err, &limit) {
+		return false
+	}
+	writeJSONOK(w, http.StatusPaymentRequired, map[string]any{"error": limit.Detail, "setting": rooms.LimitsSetting,
+		"plan": limit.Plan, "limit": limit.Limit, "max": limit.Max, "allows": limit.Allows})
+	return true
+}
+
 func mountRoomRoutes(r chi.Router, store *rooms.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {
-		var limit *rooms.PlanLimitError
 		var rate *rooms.RateError
 		var refusal *rooms.ScanRefusal
 		var refused *market.RefusedError
 		switch {
-		case errors.As(err, &limit):
-			writeJSONOK(w, http.StatusPaymentRequired, map[string]any{"error": limit.Detail, "setting": rooms.LimitsSetting,
-				"plan": limit.Plan, "limit": limit.Limit, "max": limit.Max, "allows": limit.Allows})
+		case writeRoomPlanLimit(w, err):
 		case errors.As(err, &rate):
 			w.Header().Set("Retry-After", strconv.Itoa(int(rate.RetryAfter.Seconds())))
 			writeJSONOK(w, http.StatusTooManyRequests, map[string]any{"error": rate.Error(), "setting": rooms.MessagesPerMinuteSetting,

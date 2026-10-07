@@ -40,7 +40,7 @@ func newWorkspacePlanHandler(db plans.Querier) http.HandlerFunc {
 			return
 		}
 		var agents int64
-		if err := db.QueryRow(req.Context(), `SELECT count(*) FROM agent_accounts WHERE workspace_id = $1 AND archived_at IS NULL`,
+		if err := db.QueryRow(req.Context(), `SELECT count(*) FROM agent_accounts WHERE workspace_id = $1 AND archived_at IS NULL AND kind = 'agent'`,
 			wsID).Scan(&agents); err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
