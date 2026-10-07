@@ -421,6 +421,12 @@ func capabilityCleared(ctx context.Context, q pgxDB, key string) (bool, error) {
 	return cleared, nil
 }
 
+// CapabilityCleared reports whether capability key has a clearance in force for the country the use comes from
+// (WithUseCountry): the partners registry asks it before it hands out a real partner (B30.3).
+func (s *DualTokenStore) CapabilityCleared(ctx context.Context, key string) (bool, error) {
+	return capabilityCleared(ctx, s.pool, key)
+}
+
 // capabilityLive reports whether capability c may take live money for workspaceID: an AMBER or RED one once it is
 // cleared (capabilityCleared), a GREEN one always — and, B32.12, neither an AMBER or RED one nor any B30
 // registers while the workspace's plan keeps money capabilities on test money, a clearance or not; the plan's
