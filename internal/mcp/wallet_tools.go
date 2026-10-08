@@ -336,7 +336,7 @@ func (s *Server) walletTool(ctx context.Context, bank WalletBank, name, ws, agen
 		return bank.CancelSimOrder(ctx, ws, agent, a.PortfolioID, a.OrderID)
 	case "wallet_credential": // B30.5
 		if s.credentials == nil {
-			return nil, errors.New("Know Your Agent credentials are not configured")
+			return nil, errors.New("the Know Your Agent credentials are not configured")
 		}
 		c, err := s.credentials.Current(ctx, ws, agent)
 		var standing *kya.StandingError
