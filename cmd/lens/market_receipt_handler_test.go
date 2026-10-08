@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/market"
 )
 
@@ -27,16 +28,19 @@ func (f fakeReceipts) ReceiptsOf(context.Context, string) ([]market.ReceiptSumma
 	return []market.ReceiptSummary{{ID: f.r.ID, Number: f.r.Number}}, nil
 }
 
-// B32.40 — a receipt is read as JSON, as its page (?format=html) and as its PDF (Accept: application/pdf); another
-// workspace's receipt, or one that does not exist, is 404.
+// B32.40 — the workspace's owner reads a receipt as JSON, as its page (?format=html) and as its PDF (Accept:
+// application/pdf); another workspace's receipt is 404, and an agent's key — not the owner — is 403.
 func TestMarketReceiptRoutes_AnswerJSONHTMLAndPDF(t *testing.T) {
 	r := chi.NewRouter()
 	rc := market.Receipt{ID: "rcpt_1", Number: "2026-000001", BuyerWorkspaceID: "ws-1", InvoiceID: "in_1", IssuedAt: time.Now(), PaidAt: time.Now(),
 		Supplier: market.Supplier{LegalName: "TALYVOR LTD"}, Lines: []market.ReceiptLine{{Description: "Adder — rental", NetUSDMicros: 10_000_000,
 			RateBps: 2000, TaxUSDMicros: 2_000_000}}, NetUSDMicros: 10_000_000, TaxUSDMicros: 2_000_000, GrossUSDMicros: 12_000_000}
 	mountMarketReceiptRoutes(r, fakeReceipts{rc})
+	owner := &auth.AuthContext{WorkspaceID: "ws-1", AuthMethod: auth.MethodJWT, UserID: "owner", Scopes: []string{auth.ScopeKeys}}
+	caller := owner
 	get := func(path, accept string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req = req.WithContext(auth.WithAuthContext(req.Context(), caller))
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
@@ -61,5 +65,9 @@ func TestMarketReceiptRoutes_AnswerJSONHTMLAndPDF(t *testing.T) {
 	}
 	if w := get("/v1/workspaces/ws-1/marketplace/receipts", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "rcpt_1") {
 		t.Fatalf("list = %d %s", w.Code, w.Body.String())
+	}
+	caller = &auth.AuthContext{WorkspaceID: "ws-1", AuthMethod: auth.MethodWorkspaceKey, APIKeyID: "agent"}
+	if w := get(one, ""); w.Code != http.StatusForbidden {
+		t.Fatalf("an agent's key reading a receipt = %d; want 403", w.Code)
 	}
 }
