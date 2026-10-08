@@ -145,5 +145,8 @@ func (s *DualTokenStore) ArchiveAgent(ctx context.Context, workspaceID, agentID 
 		agentID).Scan(&out.ArchivedAt); err != nil {
 		return out, fmt.Errorf("economy: archive agent: %w", err)
 	}
+	if err := revokeAgentKYA(ctx, tx, agentID, KYARevokedArchived); err != nil { // B30.5
+		return out, err
+	}
 	return out, tx.Commit(ctx)
 }

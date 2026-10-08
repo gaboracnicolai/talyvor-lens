@@ -47,9 +47,10 @@ type AgentRulesVersion struct {
 }
 
 // recordRulesVersion records the agent's rules as tx has left them as its next version, unless they are its latest.
-// The change holds the agent_rules row locked, so concurrent changes are numbered in the order they commit.
+// The change holds the agent_rules row locked, so concurrent changes are numbered in the order they commit. A new
+// version revokes the agent's Know Your Agent credential, whose limits it changed (B30.5).
 func recordRulesVersion(ctx context.Context, tx pgx.Tx, agentID string, c rulesChange) error {
-	_, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		WITH cur AS (SELECT workspace_id, to_jsonb(r) - 'agent_id' - 'workspace_id' - 'updated_at' AS rules
 		               FROM agent_rules r WHERE agent_id = $1),
 		     latest AS (SELECT version, rules FROM agent_rules_versions WHERE agent_id = $1 ORDER BY version DESC LIMIT 1)
@@ -58,6 +59,9 @@ func recordRulesVersion(ctx context.Context, tx pgx.Tx, agentID string, c rulesC
 		 WHERE cur.rules IS DISTINCT FROM (SELECT rules FROM latest)`, agentID, c.by, c.what)
 	if err != nil {
 		return fmt.Errorf("economy: record agent rules version: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		return revokeAgentKYA(ctx, tx, agentID, KYARevokedRules)
 	}
 	return nil
 }

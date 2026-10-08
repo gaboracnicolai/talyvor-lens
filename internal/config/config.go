@@ -595,6 +595,14 @@ type Config struct {
 	// nodes have pinned (which would make honest nodes fail challenges).
 	POVIChallengeKey string
 
+	// KYASigningKey is the base64 Ed25519 seed or private key every agent's Know Your Agent credential is signed with
+	// (env: LENS_KYA_SIGNING_KEY, B30.5). Empty makes one per start: what it signed stays verifiable until it expires,
+	// as the JWKS publishes every key an unexpired credential was signed with, but production sets one.
+	KYASigningKey string
+
+	// KYACredentialTTL is how long a Know Your Agent credential is valid (env: LENS_KYA_CREDENTIAL_TTL). Default 24h.
+	KYACredentialTTL time.Duration
+
 	// TrustfulComputeMintEnabled gates the LEGACY trust-based compute mint
 	// (ComputeMiner.RecordServedRequest mints LENS per served request with no
 	// receipt, on a caller-asserted token count, with no idempotency). Env:
@@ -1960,6 +1968,21 @@ func Load() (*Config, error) {
 		if err != nil || (len(raw) != ed25519.SeedSize && len(raw) != ed25519.PrivateKeySize) {
 			return nil, fmt.Errorf("invalid LENS_POVI_CHALLENGE_KEY: must be base64 of an ed25519 32-byte seed or 64-byte private key")
 		}
+	}
+	c.KYASigningKey = os.Getenv("LENS_KYA_SIGNING_KEY")
+	if c.KYASigningKey != "" {
+		raw, err := base64.StdEncoding.DecodeString(c.KYASigningKey)
+		if err != nil || (len(raw) != ed25519.SeedSize && len(raw) != ed25519.PrivateKeySize) {
+			return nil, fmt.Errorf("invalid LENS_KYA_SIGNING_KEY: must be base64 of an ed25519 32-byte seed or 64-byte private key")
+		}
+	}
+	c.KYACredentialTTL = 24 * time.Hour
+	if v := os.Getenv("LENS_KYA_CREDENTIAL_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LENS_KYA_CREDENTIAL_TTL (must be a positive duration): %s", v)
+		}
+		c.KYACredentialTTL = d
 	}
 	// HA fail-closed: with LENS_HA_ENABLED every replica must share STABLE
 	// signing keys. Ephemeral per-replica keys "work" at startup and break

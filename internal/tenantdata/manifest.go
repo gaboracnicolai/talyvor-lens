@@ -213,6 +213,7 @@ var Manifest = map[string]Entry{
 	"agent_rules":                  {Delete, ""},
 	"agent_rules_versions":         {Delete, "B28.307: every version of an agent's rules and the credential that changed them"},
 	"agent_rule_boosts":            {Delete, "B28.308: an agent's limits raised until a time, and the credential that raised them"},
+	"kya_credentials":              {Delete, "B30.5: each Know Your Agent credential issued to the workspace's agents, the key that signed it and whether it is revoked; one deleted before it expires leaves only its id on the revocation list (kya_revocation_tombstones)"},
 	"agent_cards":                  {Delete, "B19.12: an agent's test-mode card — Stripe's card and cardholder ids, last 4, expiry"},
 	"agent_approvals":              {Delete, ""},
 	"agent_lxc_subbudgets":         {Delete, ""},
