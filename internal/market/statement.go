@@ -21,6 +21,9 @@ import (
 // week; and ends with Stripe's fees. Its lines sum to the net its payout paid — 0 in a week without one, when it is
 // all carried forward. The VAT Talyvor collected from the buyers of those sales is shown for information only: it
 // was never the seller's, and is not a line.
+//
+// To a seller who agreed to self-billing, the week's payout is also a self-billed invoice from them to Talyvor (B32.43,
+// selfbill.go): the statement carries it, and the VAT the seller charged on it is a line, paid with the payout.
 
 // The lines of a statement, in order.
 const (
@@ -31,6 +34,7 @@ const (
 	LineRoyaltiesReceived = "royalties_received"
 	LineRefunds           = "refunds"
 	LineCredits           = "credits"
+	LineSupplyVAT         = "supply_vat"
 	LineOther             = "other"
 	LineCarriedForward    = "carried_forward"
 	LineStripeFees        = "stripe_fees"
@@ -57,6 +61,9 @@ type Statement struct {
 	// VATCollectedUSDMicros is, for information, the VAT Talyvor collected from the buyers of the sales released this
 	// week, owed to the tax authorities and not part of the net.
 	VATCollectedUSDMicros int64 `json:"vat_collected_usd_micros"`
+	// SelfBilledInvoice is the week's payout as a self-billed invoice from the seller to Talyvor: nil when the seller
+	// has not agreed to self-billing, or was not paid (B32.43).
+	SelfBilledInvoice *SelfBill `json:"self_billed_invoice"`
 }
 
 // StatementSummary is one week a seller was paid in, for the list of their statements.
@@ -96,17 +103,18 @@ func (s *Store) SellerStatement(ctx context.Context, workspaceID, period string)
 	available := SellerAvailable(workspaceID)
 	// Every posting on the seller's available balance: before the week, and in it by the kind of entry it is in. A
 	// debit is positive, so what the seller has is the negative of the postings' sum.
-	var before, released, reversed, credits, paid, other, fees int64
+	var before, released, reversed, credits, paid, selfBilled, other, fees int64
 	if err := s.pool.QueryRow(ctx, `SELECT
 		COALESCE(sum(p.amount_usd_micros) FILTER (WHERE j.created_at < $2), 0)::bigint,
 		COALESCE(sum(p.amount_usd_micros) FILTER (WHERE j.created_at >= $2 AND j.kind = 'release'), 0)::bigint,
 		COALESCE(sum(p.amount_usd_micros) FILTER (WHERE j.created_at >= $2 AND j.kind = 'reversal'), 0)::bigint,
 		COALESCE(sum(p.amount_usd_micros) FILTER (WHERE j.created_at >= $2 AND j.kind = 'credits'), 0)::bigint,
 		COALESCE(sum(p.amount_usd_micros) FILTER (WHERE j.created_at >= $2 AND j.kind = 'payout'), 0)::bigint,
-		COALESCE(sum(p.amount_usd_micros) FILTER (WHERE j.created_at >= $2 AND j.kind NOT IN ('release', 'reversal', 'credits', 'payout')), 0)::bigint
+		COALESCE(sum(p.amount_usd_micros) FILTER (WHERE j.created_at >= $2 AND j.kind = 'self_bill'), 0)::bigint,
+		COALESCE(sum(p.amount_usd_micros) FILTER (WHERE j.created_at >= $2 AND j.kind NOT IN ('release', 'reversal', 'credits', 'payout', 'self_bill')), 0)::bigint
 		FROM market_journal_postings p JOIN market_journal_entries j ON j.id = p.entry_id
 		WHERE p.account = $1 AND j.created_at < $3`, available, from, to).
-		Scan(&before, &released, &reversed, &credits, &paid, &other); err != nil {
+		Scan(&before, &released, &reversed, &credits, &paid, &selfBilled, &other); err != nil {
 		return st, fmt.Errorf("market: statement %s: %w", period, err)
 	}
 	// Stripe's fees, from the payout's own entry.
@@ -139,27 +147,43 @@ func (s *Store) SellerStatement(ctx context.Context, workspaceID, period string)
 		{LineRefunds, "Refunds and chargebacks", -reversed},
 		{LineCredits, "Taken as Talyvor credits", -credits},
 	}
-	if other != 0 {
-		st.Lines = append(st.Lines, StatementLine{LineOther, "Other adjustments", -other})
-	}
-	st.Lines = append(st.Lines,
-		StatementLine{LineCarriedForward, "Carried forward to next week", before + released + reversed + credits + paid + other},
-		StatementLine{LineStripeFees, "Stripe's fees, at cost", -fees})
-	for _, l := range st.Lines {
-		st.NetUSDMicros += l.AmountUSDMicros
-	}
 	var p Payout
-	err = s.pool.QueryRow(ctx, `SELECT id, method, month, period, gross_usd_micros, account_fee_usd_micros, payout_fee_usd_micros, net_usd_micros,
-		       credits_ulxc, COALESCE(stripe_transfer_id, ''), paid_at, last_error, created_at
+	err = s.pool.QueryRow(ctx, `SELECT id, method, month, period, gross_usd_micros, vat_usd_micros, account_fee_usd_micros, payout_fee_usd_micros,
+		       net_usd_micros, credits_ulxc, COALESCE(stripe_transfer_id, ''), paid_at, last_error, created_at
 		FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND period = $2`, workspaceID, period).
-		Scan(&p.ID, &p.Method, &p.Month, &p.Period, &p.GrossUSDMicros, &p.AccountFeeUSDMicros, &p.PayoutFeeUSDMicros, &p.NetUSDMicros,
-			&p.CreditsULXC, &p.StripeTransferID, &p.PaidAt, &p.LastError, &p.CreatedAt)
+		Scan(&p.ID, &p.Method, &p.Month, &p.Period, &p.GrossUSDMicros, &p.VATUSDMicros, &p.AccountFeeUSDMicros, &p.PayoutFeeUSDMicros,
+			&p.NetUSDMicros, &p.CreditsULXC, &p.StripeTransferID, &p.PaidAt, &p.LastError, &p.CreatedAt)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
 		return st, fmt.Errorf("market: statement %s: %w", period, err)
 	default:
 		st.Payout = &p
+		bill, err := s.SelfBillOf(ctx, workspaceID, p.ID)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+		case err != nil:
+			return st, fmt.Errorf("market: statement %s: %w", period, err)
+		default:
+			st.SelfBilledInvoice = &bill
+		}
+	}
+	// The VAT on the seller's supply, paid with the payout (B32.43).
+	if st.SelfBilledInvoice != nil || selfBilled != 0 {
+		label := "VAT on your supply"
+		if st.SelfBilledInvoice != nil && !st.SelfBilledInvoice.VATEnabled {
+			label = VATUnderReview
+		}
+		st.Lines = append(st.Lines, StatementLine{LineSupplyVAT, label, -selfBilled})
+	}
+	if other != 0 {
+		st.Lines = append(st.Lines, StatementLine{LineOther, "Other adjustments", -other})
+	}
+	st.Lines = append(st.Lines,
+		StatementLine{LineCarriedForward, "Carried forward to next week", before + released + reversed + credits + paid + selfBilled + other},
+		StatementLine{LineStripeFees, "Stripe's fees, at cost", -fees})
+	for _, l := range st.Lines {
+		st.NetUSDMicros += l.AmountUSDMicros
 	}
 	return st, nil
 }

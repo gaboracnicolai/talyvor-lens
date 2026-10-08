@@ -128,6 +128,7 @@ var Manifest = map[string]Entry{
 	"agent_tool_calls":          {Retain, "B19.9: audit-guarded (0145, append-only): every call an agent made to its wallet tools; the record of what it asked and was refused"},
 	"market_earnings":           {Retain, "B20.2: audit-guarded (0149, append-only): a seller's share of each cleared use — money owed to them, paid out by B20.5"},
 	"market_receipts":           {Retain, "B32.40: audit-guarded (0225, append-only): Talyvor's VAT receipt for each paid marketplace bill — a tax document kept as issued"},
+	"market_self_bills":         {Retain, "B32.43: audit-guarded (0228, append-only): the self-billed invoice for each weekly payout, from the seller to Talyvor — a tax document kept as issued"},
 	"market_refunds":            {Retain, "B20.4: audit-guarded (0152, append-only but for its Stripe credit): each refunded use of a taken-down listing — money given back to its buyer and taken from its seller"},
 	"market_licences":           {Retain, "B32.19: audit-guarded (0202, only status, ends_at and auto_renew change): keys `buyer_workspace_id`: each licence a workspace bought, rented or subscribed to — what its billed purchase on market_uses paid for"},
 	"test_crossing_reversals":   {Retain, "B26.15: keys `from_workspace_id`+`to_workspace_id`; audit-guarded (0177, append-only): each crossing between a test workspace and a real one that the operator reversed, naming the original row; financial-record retention"},

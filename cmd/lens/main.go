@@ -2003,6 +2003,11 @@ func run() error {
 	// it, and the tax also in the buyer's currency at the ECB's reference rate.
 	marketStore.SetReceipts(market.Receipts{Supplier: market.Supplier{LegalName: cfg.SupplierLegalName, Address: cfg.SupplierAddress,
 		VATNumber: cfg.SupplierVATNumber}, Buyers: taxProfiles, Rates: ecbRates})
+	// B32.43 — to a seller who agreed to self-billing each weekly payout is also a self-billed invoice from them to
+	// Talyvor, with the VAT on their supply worked out by the tax partner and paid on top — at zero, "under review",
+	// until LENS_SELF_BILLING_VAT is set.
+	marketStore.SetSelfBilling(market.SelfBilling{Partners: partnerRegistry, Customer: market.Supplier{LegalName: cfg.SupplierLegalName,
+		Address: cfg.SupplierAddress, VATNumber: cfg.SupplierVATNumber}, VAT: cfg.SelfBillingVAT})
 	go func() {
 		t := time.NewTicker(3 * time.Hour)
 		defer t.Stop()
