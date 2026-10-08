@@ -16,8 +16,8 @@ import (
 func TestPayOut_SelfBilledInvoicesCarryTheSellersVAT(t *testing.T) {
 	pool := migratedDB(t)
 	ctx := context.Background()
-	const gb, de, plain, review, buyer = "ws-b3243-gb", "ws-b3243-de", "ws-b3243-plain", "ws-b3243-review", "ws-b3243-buyer"
-	m := newTaxedMarket(t, pool, true, []string{gb, de, plain, review, buyer})
+	const gb, de, plain, review, stale, buyer = "ws-b3243-gb", "ws-b3243-de", "ws-b3243-plain", "ws-b3243-review", "ws-b3243-stale", "ws-b3243-buyer"
+	m := newTaxedMarket(t, pool, true, []string{gb, de, plain, review, stale, buyer})
 	s := m.store
 	talyvor := Supplier{LegalName: "TALYVOR LTD", Address: "71-75 Shelton Street, London WC2H 9JQ", VATNumber: "GB123456789"}
 	s.SetSelfBilling(SelfBilling{Partners: s.tax.Partners, Customer: talyvor, VAT: true})
@@ -41,6 +41,8 @@ func TestPayOut_SelfBilledInvoicesCarryTheSellersVAT(t *testing.T) {
 	seller(de, "entity", "Adler Agenten GmbH", "DE", "DE123456789")
 	seller(plain, "individual", "Ana", "GB", "")
 	seller(review, "entity", "Heron Tools Ltd", "GB", "GB345678901")
+	// stale's number was stored as valid, but is not when the invoice is issued: it is checked again then.
+	seller(stale, "entity", "Stale Numbers Ltd", "GB", "GB999999999")
 
 	// Each earns $100.00: a sale of 117,647,059 µUSD, of which the seller's 85% is 100,000,000 µUSD.
 	clear := func(useID, ws string, paid time.Time) {
@@ -57,6 +59,7 @@ func TestPayOut_SelfBilledInvoicesCarryTheSellersVAT(t *testing.T) {
 	clear("use_b3243_gb", gb, time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC))
 	clear("use_b3243_de", de, time.Date(2026, 8, 20, 13, 0, 0, 0, time.UTC))
 	clear("use_b3243_plain", plain, time.Date(2026, 8, 20, 14, 0, 0, 0, time.UTC))
+	clear("use_b3243_stale", stale, time.Date(2026, 8, 20, 15, 0, 0, 0, time.UTC))
 	clear("use_b3243_review", review, time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)) // available only by week 2
 
 	// Monday 7 September 2026 (2026-W37), with VAT on; the Monday after, with it off.
@@ -158,6 +161,15 @@ func TestPayOut_SelfBilledInvoicesCarryTheSellersVAT(t *testing.T) {
 	}
 	if p.vat != 0 || bill.Treatment != "not_registered" || bill.VATUSDMicros != 0 || bill.Supplier.Name != "Ana Seller" || bill.Supplier.VATNumber != "" {
 		t.Fatalf("unregistered seller's payout %+v and invoice %+v, want no VAT", p, bill)
+	}
+
+	// A VAT number no longer valid when the invoice is issued: no VAT, and no number printed.
+	p = payoutOf(stale)
+	if bill, err = s.SelfBillOf(ctx, stale, p.id); err != nil {
+		t.Fatal(err)
+	}
+	if p.vat != 0 || bill.Treatment != "not_registered" || bill.VATUSDMicros != 0 || bill.Supplier.VATNumber != "" {
+		t.Fatalf("stale VAT number: payout %+v and invoice %+v, want no VAT", p, bill)
 	}
 
 	// With LENS_SELF_BILLING_VAT off, a GB VAT-registered seller's invoice is at zero VAT, under review, and nothing is

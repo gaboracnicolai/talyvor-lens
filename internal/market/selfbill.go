@@ -137,6 +137,18 @@ func (s *Store) selfBillFor(ctx context.Context, q queryRower, workspaceID, payo
 		b.Treatment, b.Note = TaxUnknownLocation, "No VAT: your country is missing from your tax details"
 	default:
 		partner := cfg.Partners.Tax()
+		// The seller's VAT number is checked again now, in the country they supply from: VAT is paid only on a number
+		// valid there when the invoice is issued, not on the answer given when it was saved.
+		vatValid, b.Supplier.VATNumber = false, ""
+		if vatNumber != "" {
+			v, err := partner.ValidateTaxID(ctx, b.Supplier.Country, vatNumber)
+			if err != nil {
+				return nil, fmt.Errorf("market: check %s's VAT number: %w", workspaceID, err)
+			}
+			if v.Valid {
+				vatValid, b.Supplier.VATNumber = true, v.Number
+			}
+		}
 		customer := partners.TaxParty{ID: partners.SupplierTalyvor, Country: SupplierCountry, Business: true}
 		if cfg.Customer.VATNumber != "" {
 			v, err := partner.ValidateTaxID(ctx, SupplierCountry, cfg.Customer.VATNumber)
