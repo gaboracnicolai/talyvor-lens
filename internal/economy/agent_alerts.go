@@ -113,13 +113,20 @@ func watchAgentSpend(ctx context.Context, tx pgx.Tx, workspaceID, agentID string
 			agentID, reason); err != nil {
 			return fmt.Errorf("economy: pause agent: %w", err)
 		}
+		return revokeAgentKYA(ctx, tx, agentID, KYARevokedFrozen) // B30.5
 	}
 	return nil
 }
 
-// PauseAgent pauses an agent: every movement it makes is refused until ResumeAgent.
+// PauseAgent pauses an agent: every movement it makes is refused until ResumeAgent, and its Know Your Agent
+// credential is revoked (B30.5).
 func (s *DualTokenStore) PauseAgent(ctx context.Context, workspaceID, agentID, reason string) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE agent_accounts SET paused_at = COALESCE(paused_at, now()), paused_reason = $3
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: pause agent: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `UPDATE agent_accounts SET paused_at = COALESCE(paused_at, now()), paused_reason = $3
 		WHERE id = $1 AND workspace_id = $2`, agentID, workspaceID, reason)
 	if err != nil {
 		return fmt.Errorf("economy: pause agent: %w", err)
@@ -127,16 +134,28 @@ func (s *DualTokenStore) PauseAgent(ctx context.Context, workspaceID, agentID, r
 	if tag.RowsAffected() == 0 {
 		return ErrAgentNotFound
 	}
-	return nil
+	if err := revokeAgentKYA(ctx, tx, agentID, KYARevokedFrozen); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
-// PauseAllAgents pauses every agent in a workspace, those it creates later included, until ResumeAllAgents.
+// PauseAllAgents pauses every agent in a workspace, those it creates later included, until ResumeAllAgents, and
+// revokes each one's Know Your Agent credential (B30.5).
 func (s *DualTokenStore) PauseAllAgents(ctx context.Context, workspaceID, reason string) error {
-	if _, err := s.pool.Exec(ctx, `INSERT INTO agent_workspace_pauses (workspace_id, reason) VALUES ($1, $2)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("economy: pause every agent: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_workspace_pauses (workspace_id, reason) VALUES ($1, $2)
 		ON CONFLICT (workspace_id) DO UPDATE SET reason = EXCLUDED.reason`, workspaceID, reason); err != nil {
 		return fmt.Errorf("economy: pause every agent: %w", err)
 	}
-	return nil
+	if err := revokeWorkspaceKYA(ctx, tx, workspaceID, KYARevokedFrozen); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ResumeAllAgents lifts PauseAllAgents. An agent paused on its own stays paused.

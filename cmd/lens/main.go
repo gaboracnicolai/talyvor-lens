@@ -81,6 +81,7 @@ import (
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/keel"
 	"github.com/talyvor/lens/internal/keypool"
+	"github.com/talyvor/lens/internal/kya"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/market"
@@ -1757,6 +1758,16 @@ func run() error {
 	// one-way LENS->LXC conversion + LXC spend path.
 	rateEngine := economy.NewRateEngine(tokenLedger, pool)
 	dualToken := economy.NewDualTokenStore(tokenLedger, pool, rateEngine)
+	// B30.5: every agent's Know Your Agent credential, signed with Ed25519.
+	kyaKey, kyaEphemeral, err := kya.ParseKey(cfg.KYASigningKey)
+	if err != nil {
+		return fmt.Errorf("LENS_KYA_SIGNING_KEY: %w", err)
+	}
+	if kyaEphemeral {
+		logger.Warn("LENS_KYA_SIGNING_KEY is not set: agent credentials are signed with a key made at this start — set a fixed one in production",
+			"kid", kyaKey.Kid())
+	}
+	kyaSvc := kya.New(dualToken, kyaKey, cfg.KYACredentialTTL)
 
 	// U18b billing (fiat Stripe → LXC credit). Constructed unconditionally so the
 	// route handler method values are valid; the routes themselves register only
@@ -2332,6 +2343,9 @@ func run() error {
 				"keys": []any{auth.PublicKeyToJWK(pub, auth.JWTKid)},
 			})
 		})
+
+		// B30.5: Know Your Agent — the keys agent credentials are signed with, the revocation list, and verify.
+		mountKYAPublicRoutes(pub, kyaSvc)
 	})
 
 	// /metrics exposes Prometheus telemetry — gated to admin key so internal
@@ -2464,6 +2478,7 @@ func run() error {
 	// additionally force the acted-on workspace to the verified caller (effectiveWorkspace).
 	mcpServer := mcp.New(pool, l, alertManager, wsManager, sessionTracker, lensVersion)
 	mcpServer.SetAgentBank(dualToken) // B19.9: agents use their wallets with their own keys
+	mcpServer.SetCredentials(kyaSvc)  // B30.5: and show their Know Your Agent credential
 	// B32.23: and shop the marketplace with them — search, license, use within a max price, cancel.
 	mcpServer.SetMarket(marketStore, mcpMarketDeps{lens: r, meter: marketMeter, agents: dualToken})
 	// B19.16: approvals signed with the owner's passkey; a web push per approval filed when a VAPID key is set.
@@ -4471,6 +4486,7 @@ func run() error {
 		mountTaxProfileRoutes(authed, taxProfiles)                                      // B32.38
 		mountSellerTaxRoutes(authed, sellerTax)                                         // B32.41
 		mountVerificationRoutes(authed, dualToken, partnerRegistry.Verification)        // B30.4
+		mountKYAAgentRoutes(authed, kyaSvc, dualToken)                                  // B30.5
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
 		mountMarketReceiptRoutes(authed, marketStore)                                   // B32.40
 		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5

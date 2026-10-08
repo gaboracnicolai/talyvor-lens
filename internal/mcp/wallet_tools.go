@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/talyvor/lens/internal/economy"
+	"github.com/talyvor/lens/internal/kya"
 	"github.com/talyvor/lens/internal/workspace"
 )
 
@@ -49,6 +50,14 @@ type WalletBank interface {
 	PlaceSimOrder(ctx context.Context, workspaceID, agentID, portfolioID string, in economy.SimOrderInput) (economy.SimOrder, error)
 	CancelSimOrder(ctx context.Context, workspaceID, agentID, portfolioID, orderID string) (economy.SimOrder, error)
 }
+
+// CredentialIssuer gives an agent its Know Your Agent credential (B30.5).
+type CredentialIssuer interface {
+	Current(ctx context.Context, workspaceID, agentID string) (kya.Credential, error)
+}
+
+// SetCredentials lets agents show their Know Your Agent credential with wallet_credential (B30.5).
+func (s *Server) SetCredentials(c CredentialIssuer) { s.credentials = c }
 
 // walletRefusals are the store's answers that say no to what the agent asked, rather than that Lens failed.
 var walletRefusals = []error{
@@ -121,6 +130,8 @@ func walletToolDefinitions() []map[string]any {
 			"portfolio_id", "instrument", "side", "type", "quantity_micros"),
 		tool("wallet_order_cancel", "Cancel an open order in one of your simulated portfolios.",
 			map[string]any{"portfolio_id": str("the portfolio"), "order_id": str("the order")}, "portfolio_id", "order_id"),
+		tool("wallet_credential", "Your Know Your Agent credential: a signed token any platform can check against Talyvor's published keys. "+
+			"It says who you are, who answers for you and how far they are verified, what you may do with live money and your limits.", none),
 	}
 }
 
@@ -323,6 +334,16 @@ func (s *Server) walletTool(ctx context.Context, bank WalletBank, name, ws, agen
 			QuantityMicros: a.QuantityMicros, LimitPriceUSD: a.LimitPriceUSD, Mode: a.Mode})
 	case "wallet_order_cancel":
 		return bank.CancelSimOrder(ctx, ws, agent, a.PortfolioID, a.OrderID)
+	case "wallet_credential": // B30.5
+		if s.credentials == nil {
+			return nil, errors.New("Know Your Agent credentials are not configured")
+		}
+		c, err := s.credentials.Current(ctx, ws, agent)
+		var standing *kya.StandingError
+		if errors.As(err, &standing) {
+			return nil, &toolRefusal{standing.Error()}
+		}
+		return c, err
 	}
 	return nil, &toolRefusal{"unknown wallet tool: " + name}
 }

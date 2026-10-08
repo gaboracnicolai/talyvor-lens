@@ -52,8 +52,9 @@ type Server struct {
 	sessionTracker *session.SessionTracker
 	router         *router.Router
 	version        string
-	agentBank      AgentBank     // B19.9: the agent tools; nil leaves them out
-	market         *market.Store // B32.23: the market tools; nil leaves them out
+	agentBank      AgentBank        // B19.9: the agent tools; nil leaves them out
+	credentials    CredentialIssuer // B30.5: wallet_credential; nil refuses it
+	market         *market.Store    // B32.23: the market tools; nil leaves them out
 	marketDeps     MarketDeps
 	rooms          *rooms.Store // B32.36: the room tools; nil leaves them out
 	roomDeps       RoomDeps

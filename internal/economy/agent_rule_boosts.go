@@ -162,7 +162,7 @@ func (s *DualTokenStore) BoostAgentRule(ctx context.Context, workspaceID, agentI
 	if err != nil {
 		return b, fmt.Errorf("economy: boost agent rule: %w", err)
 	}
-	return b, nil
+	return b, revokeAgentKYA(ctx, s.pool, agentID, KYARevokedRules) // B30.5: its credential states the limit
 }
 
 // EndAgentBoost ends the agent's boost on rule now, before its time: the limit is the rules' again.
@@ -173,7 +173,7 @@ func (s *DualTokenStore) EndAgentBoost(ctx context.Context, workspaceID, agentID
 		return fmt.Errorf("economy: end agent boost: %w", err)
 	}
 	if tag.RowsAffected() > 0 {
-		return nil
+		return revokeAgentKYA(ctx, s.pool, agentID, KYARevokedRules) // B30.5: its credential states the limit
 	}
 	if _, err := s.GetAgentRules(ctx, workspaceID, agentID); err != nil {
 		return err
