@@ -147,6 +147,18 @@ func (r *Registry) KYC(ctx context.Context, capability string) (KYCProvider, err
 	return pick[KYCProvider](ctx, r, ServiceKYC, capability, r.kyc)
 }
 
+// Verification is the provider the verification levels' checks go to (B30.4): the real one once it is configured,
+// the Test one until then. A check moves no money, so no clearance is asked; a pass by the Test provider counts for
+// test money only (economy.WorkspaceVerification).
+func (r *Registry) Verification() KYCProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if adapter, ok := r.adapters[ServiceKYC]; ok {
+		return adapter.(KYCProvider)
+	}
+	return r.kyc
+}
+
 // Screening is the screening provider for capability.
 func (r *Registry) Screening(ctx context.Context, capability string) (ScreeningProvider, error) {
 	return pick[ScreeningProvider](ctx, r, ServiceScreening, capability, TestScreeningProvider{})

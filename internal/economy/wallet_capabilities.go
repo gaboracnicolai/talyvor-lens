@@ -48,11 +48,12 @@ const (
 	ClassRed   CapabilityClass = "RED"
 )
 
-// Capability is one thing a wallet can do.
+// Capability is one thing a wallet can do, and the verification level its live money needs (B30.4).
 type Capability struct {
-	Key   string          `json:"capability"`
-	Name  string          `json:"name"`
-	Class CapabilityClass `json:"class"`
+	Key   string            `json:"capability"`
+	Name  string            `json:"name"`
+	Class CapabilityClass   `json:"class"`
+	Level VerificationLevel `json:"level_needed"`
 }
 
 // The capabilities whose class code enforces today.
@@ -66,45 +67,47 @@ const (
 	CapabilityLineageRoyalties = "lineage_royalties"
 )
 
-// Capabilities is every wallet capability and its class, as Nicolai decided them on 28 Sep 2026.
+// Capabilities is every wallet capability and its class, as Nicolai decided them on 28 Sep 2026, and the verification
+// level its live money needs (B30.4): currency accounts, payments, FX and trading L2; credit and merchant acceptance
+// L3; spending on Talyvor itself and moving money inside one owner's own wallets L0.
 var Capabilities = []Capability{
-	{"spend_on_talyvor", "Spending on Talyvor", ClassGreen},
-	{CapabilityBuyListings, "Buying marketplace listings", ClassGreen},
-	{CapabilityRentAndSubscribe, "Renting and subscribing to marketplace listings", ClassGreen},
-	{CapabilityLineageRoyalties, "Royalties to the authors of remixed listings, paid from marketplace sales", ClassGreen},
-	{"move_between_own_agents", "Moving money between one owner's own agents", ClassGreen},
-	{"rules_approvals_statements_pots", "Rules, approvals, statements and pots", ClassGreen},
-	{"company_credit_line", "Talyvor's credit line to companies, for Talyvor services", ClassGreen},
-	{CapabilityPayAnotherOwner, "Sending and requesting money between different owners", ClassAmber},
-	{"loans_between_companies", "Loans between companies", ClassAmber},
-	{"escrow", "Escrow between agents", ClassAmber},
-	{"cash_out", "Cashing credits out as money", ClassRed},
-	{"credit_involving_a_person", "Any loan or credit involving a private user", ClassRed},
-	{"interest_and_yield", "Interest or yield", ClassRed},
-	{"invest_and_trade", "Investing and trading real assets", ClassRed},
-	{CapabilityAgentCard, "Cards", ClassRed},
+	{"spend_on_talyvor", "Spending on Talyvor", ClassGreen, LevelSignedIn},
+	{CapabilityBuyListings, "Buying marketplace listings", ClassGreen, LevelSignedIn},
+	{CapabilityRentAndSubscribe, "Renting and subscribing to marketplace listings", ClassGreen, LevelSignedIn},
+	{CapabilityLineageRoyalties, "Royalties to the authors of remixed listings, paid from marketplace sales", ClassGreen, LevelSignedIn},
+	{"move_between_own_agents", "Moving money between one owner's own agents", ClassGreen, LevelSignedIn},
+	{"rules_approvals_statements_pots", "Rules, approvals, statements and pots", ClassGreen, LevelSignedIn},
+	{"company_credit_line", "Talyvor's credit line to companies, for Talyvor services", ClassGreen, LevelSignedIn},
+	{CapabilityPayAnotherOwner, "Sending and requesting money between different owners", ClassAmber, LevelIdentity},
+	{"loans_between_companies", "Loans between companies", ClassAmber, LevelCompany},
+	{"escrow", "Escrow between agents", ClassAmber, LevelIdentity},
+	{"cash_out", "Cashing credits out as money", ClassRed, LevelIdentity},
+	{"credit_involving_a_person", "Any loan or credit involving a private user", ClassRed, LevelCompany},
+	{"interest_and_yield", "Interest or yield", ClassRed, LevelIdentity},
+	{"invest_and_trade", "Investing and trading real assets", ClassRed, LevelIdentity},
+	{CapabilityAgentCard, "Cards", ClassRed, LevelIdentity},
 
 	// B30.1 — money and markets for AI agents (Nicolai, 5 Oct 2026: build everything now; real money only once
 	// licensed). invest_and_trade above stays, for simulated trading.
-	{CapabilityCurrencyAccounts, "Accounts in pounds, euros, dollars and USDC", ClassRed},
-	{CapabilityAccountDetails, "Account details others can pay into", ClassRed},
-	{CapabilityPaymentsIn, "Receiving money from outside Talyvor", ClassRed},
-	{CapabilityPaymentsOut, "Paying people and companies outside Talyvor", ClassRed},
-	{CapabilityPayByBank, "Topping up by a payment from your own bank", ClassAmber},
-	{CapabilityFX, "Converting between currencies", ClassRed},
-	{CapabilityStablecoins, "Stablecoin balances and transfers", ClassRed},
-	{CapabilityX402, "Paying and being paid over HTTP 402", ClassRed},
-	{CapabilityMerchantAcceptance, "Accepting payments from agents as a business", ClassRed},
-	{CapabilityB2BCredit, "Credit lines and loans to companies", ClassAmber},
-	{CapabilitySellerAdvances, "Advances against marketplace earnings", ClassAmber},
-	{CapabilityLendingMarketplace, "Companies lending to companies through the marketplace", ClassAmber},
-	{CapabilityTradeEquities, "Trading shares through a broker partner", ClassRed},
-	{CapabilityTradeCrypto, "Trading crypto through a broker partner", ClassRed},
-	{CapabilityTradePrediction, "Prediction-market trading", ClassRed},
-	{CapabilityTreasurySweep, "Idle money in a money-market fund", ClassRed},
-	{CapabilityPriceLock, "Prepaid usage at today's prices", ClassAmber},
-	{CapabilityCover, "Cover for agent mistakes", ClassRed},
-	{CapabilityPayoutsToPeople, "Paying people for tasks", ClassRed},
+	{CapabilityCurrencyAccounts, "Accounts in pounds, euros, dollars and USDC", ClassRed, LevelIdentity},
+	{CapabilityAccountDetails, "Account details others can pay into", ClassRed, LevelIdentity},
+	{CapabilityPaymentsIn, "Receiving money from outside Talyvor", ClassRed, LevelIdentity},
+	{CapabilityPaymentsOut, "Paying people and companies outside Talyvor", ClassRed, LevelIdentity},
+	{CapabilityPayByBank, "Topping up by a payment from your own bank", ClassAmber, LevelIdentity},
+	{CapabilityFX, "Converting between currencies", ClassRed, LevelIdentity},
+	{CapabilityStablecoins, "Stablecoin balances and transfers", ClassRed, LevelIdentity},
+	{CapabilityX402, "Paying and being paid over HTTP 402", ClassRed, LevelIdentity},
+	{CapabilityMerchantAcceptance, "Accepting payments from agents as a business", ClassRed, LevelCompany},
+	{CapabilityB2BCredit, "Credit lines and loans to companies", ClassAmber, LevelCompany},
+	{CapabilitySellerAdvances, "Advances against marketplace earnings", ClassAmber, LevelCompany},
+	{CapabilityLendingMarketplace, "Companies lending to companies through the marketplace", ClassAmber, LevelCompany},
+	{CapabilityTradeEquities, "Trading shares through a broker partner", ClassRed, LevelIdentity},
+	{CapabilityTradeCrypto, "Trading crypto through a broker partner", ClassRed, LevelIdentity},
+	{CapabilityTradePrediction, "Prediction-market trading", ClassRed, LevelIdentity},
+	{CapabilityTreasurySweep, "Idle money in a money-market fund", ClassRed, LevelIdentity},
+	{CapabilityPriceLock, "Prepaid usage at today's prices", ClassAmber, LevelIdentity},
+	{CapabilityCover, "Cover for agent mistakes", ClassRed, LevelIdentity},
+	{CapabilityPayoutsToPeople, "Paying people for tasks", ClassRed, LevelIdentity},
 }
 
 // The B30 capabilities. Each is asked at the point its money moves.
@@ -186,22 +189,29 @@ func lotFunding(ledgerType string, amount int64, metadata map[string]interface{}
 var ErrCapabilityNotCleared = errors.New("economy: this capability takes test money only until Talyvor records a clearance")
 
 // CapabilityRefusal says which capability refused live money, and its class — or, when the capability is
-// cleared but the workspace's plan keeps it on test money (B32.12), the plan's refusal.
+// cleared but the workspace's plan keeps it on test money (B32.12), the plan's refusal; or, when the workspace's
+// verification keeps it out (B30.4), the level it needs, or the limit it is over.
 type CapabilityRefusal struct {
 	Capability Capability
 	Plan       *plans.Refusal
+	Level      *LevelRefusal
 }
 
 func (e *CapabilityRefusal) Error() string {
-	if e.Plan != nil {
+	switch {
+	case e.Plan != nil:
 		return e.Plan.Error()
+	case e.Level != nil:
+		return e.Level.message(e.Capability)
 	}
 	return fmt.Sprintf("%s is class %s: it takes test money only until Talyvor records a clearance for it, and this would use real money",
 		e.Capability.Name, e.Capability.Class)
 }
 
-// Is makes a refusal an ErrCapabilityNotCleared.
-func (e *CapabilityRefusal) Is(target error) bool { return target == ErrCapabilityNotCleared }
+// Is makes a refusal an ErrCapabilityNotCleared, and a verification level's an ErrVerificationNeeded too.
+func (e *CapabilityRefusal) Is(target error) bool {
+	return target == ErrCapabilityNotCleared || (target == ErrVerificationNeeded && e.Level != nil)
+}
 
 // Unwrap is the plan's refusal, when the plan refused.
 func (e *CapabilityRefusal) Unwrap() error {
@@ -427,26 +437,30 @@ func (s *DualTokenStore) CapabilityCleared(ctx context.Context, key string) (boo
 	return capabilityCleared(ctx, s.pool, key)
 }
 
-// capabilityLive reports whether capability c may take live money for workspaceID: an AMBER or RED one once it is
-// cleared (capabilityCleared), a GREEN one always — and, B32.12, neither an AMBER or RED one nor any B30
-// registers while the workspace's plan keeps money capabilities on test money, a clearance or not; the plan's
-// refusal says so then.
-func capabilityLive(ctx context.Context, q pgxDB, workspaceID string, c Capability) (bool, *plans.Refusal, error) {
+// capabilityLive says why capability c may not take live money for workspaceID — nil when it may: an AMBER or RED
+// one once it is cleared (capabilityCleared), a GREEN one always — and, B32.12, neither an AMBER or RED one nor any
+// B30 registers while the workspace's plan keeps money capabilities on test money, a clearance or not; and, B30.4,
+// not while the workspace's live verification level is below the one c needs, or no limit is set for it.
+func capabilityLive(ctx context.Context, q pgxDB, workspaceID string, c Capability) (*CapabilityRefusal, error) {
 	if c.Class != ClassGreen {
 		if cleared, err := capabilityCleared(ctx, q, c.Key); err != nil || !cleared {
-			return false, nil, err
+			return &CapabilityRefusal{Capability: c}, err
 		}
 	} else if !b30[c.Key] {
-		return true, nil, nil
+		return nil, nil
 	}
 	plan, err := plans.Of(ctx, q, workspaceID)
 	if err != nil {
-		return false, nil, err
+		return nil, err
 	}
 	if !plan.LiveMoney {
-		return false, plan.RefuseLiveMoney(plans.Current(), c.Name), nil
+		return &CapabilityRefusal{Capability: c, Plan: plan.RefuseLiveMoney(plans.Current(), c.Name)}, nil
 	}
-	return true, nil, nil
+	level, err := levelRefusal(ctx, q, workspaceID, c)
+	if err != nil || level == nil {
+		return nil, err
+	}
+	return &CapabilityRefusal{Capability: c, Level: level}, nil
 }
 
 // spendForCapability judges a spend of amount µLXC of workspaceID's credits on capability key, in tx. A
@@ -462,8 +476,8 @@ func spendForCapability(ctx context.Context, tx pgx.Tx, workspaceID, key string,
 	if amount <= 0 {
 		return 0, nil
 	}
-	live, byPlan, err := capabilityLive(ctx, tx, workspaceID, c)
-	if err != nil || live {
+	refusal, err := capabilityLive(ctx, tx, workspaceID, c)
+	if err != nil || refusal == nil {
 		return 0, err
 	}
 	have, err := testFundedULXC(ctx, tx, workspaceID)
@@ -479,7 +493,7 @@ func spendForCapability(ctx context.Context, tx pgx.Tx, workspaceID, key string,
 			return 0, err
 		}
 		if !test {
-			return 0, &CapabilityRefusal{Capability: c, Plan: byPlan}
+			return 0, refusal
 		}
 		take = have
 	}
@@ -500,7 +514,7 @@ func testWorkspace(ctx context.Context, q pgxDB, workspaceID string) (bool, erro
 
 // requireBilledCapability judges money on workspaceID's Stripe bill for capability key: real money when the key
 // is live, which an uncleared AMBER or RED capability refuses, and so does a cleared one on a plan that keeps it
-// on test money (B32.12).
+// on test money (B32.12), or below the verification level it needs (B30.4).
 func (s *DualTokenStore) requireBilledCapability(ctx context.Context, q pgxDB, workspaceID, key string) error {
 	c, ok := CapabilityByKey(key)
 	if !ok {
@@ -509,11 +523,14 @@ func (s *DualTokenStore) requireBilledCapability(ctx context.Context, q pgxDB, w
 	if !s.liveStripe {
 		return nil
 	}
-	live, byPlan, err := capabilityLive(ctx, q, workspaceID, c)
-	if err != nil || live {
+	refusal, err := capabilityLive(ctx, q, workspaceID, c)
+	if err != nil {
 		return err
 	}
-	return &CapabilityRefusal{Capability: c, Plan: byPlan}
+	if refusal != nil {
+		return refusal
+	}
+	return nil
 }
 
 // RequireBilledCapability asks capability key whether money on workspaceID's Stripe bill may be taken for it: the

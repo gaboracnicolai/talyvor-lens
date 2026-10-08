@@ -217,12 +217,12 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, erro
 	}
 
 	if e.Funding == FundingLive {
-		live, byPlan, err := capabilityLive(ctx, tx, e.WorkspaceID, c)
+		refusal, err := capabilityLive(ctx, tx, e.WorkspaceID, c)
 		if err != nil {
 			return MoneyEntry{}, err
 		}
-		if !live {
-			return MoneyEntry{}, &CapabilityRefusal{Capability: c, Plan: byPlan}
+		if refusal != nil {
+			return MoneyEntry{}, refusal
 		}
 	}
 
@@ -270,6 +270,16 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, erro
 		n := len(args)
 		fmt.Fprintf(&sql, "($1, %d, $%d, $%d, $%d, $2)", i+1, n+1, n+2, n+3)
 		args = append(args, p.AccountID, p.AmountMinor, postings[i].Currency)
+	}
+	// B30.4: live money moves within the limit for one movement at the workspace's verification level.
+	if e.Funding == FundingLive {
+		over, err := overLevelLimit(ctx, tx, e.WorkspaceID, c, postings)
+		if err != nil {
+			return MoneyEntry{}, err
+		}
+		if over != nil {
+			return MoneyEntry{}, &CapabilityRefusal{Capability: c, Level: over}
+		}
 	}
 	if _, err := tx.Exec(ctx, sql.String(), args...); err != nil {
 		return MoneyEntry{}, fmt.Errorf("economy: post money: %w", err)

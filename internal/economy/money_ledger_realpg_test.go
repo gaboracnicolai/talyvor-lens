@@ -143,6 +143,7 @@ func TestMoneyLedger_AThousandRandomEntriesKeepEveryBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 	planGatesOnPlan(t, pool, ws, "team", false) // live money needs a plan with live money, and a clearance
+	liveVerified(t, pool, ws)                   // and, B30.4, a verification level
 	if _, err := s.ClearCapability(gb, CapabilityCurrencyAccounts, "nicolai", ClearanceTerms{Reference: "B30.2 test",
 		Licence: "EMI-900123", Partner: "Test Payments Ltd", Countries: []string{"GB"}, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
@@ -244,6 +245,7 @@ func TestMoneyLedger_LiveMoneyAsksTheCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	planGatesOnPlan(t, pool, ws, "team", false)
+	liveVerified(t, pool, ws)
 	company, partner := openMoney(t, s, ws, CurrencyUSDC, MoneyCompany), openMoney(t, s, ws, CurrencyUSDC, MoneyPartner)
 	in := func(key, funding string) (MoneyEntry, error) {
 		return s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Kind: "payment_in",
