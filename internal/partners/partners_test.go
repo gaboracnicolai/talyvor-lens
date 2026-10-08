@@ -214,6 +214,34 @@ func TestKYCProvider_SuccessFailureReturnAndPending(t *testing.T) {
 	}
 }
 
+// B30.4 — a contact check confirms an email and a phone and answers by the email; a company check names its
+// directors and answers by the company's and its people's names together, so a director on a sanctions list fails it.
+func TestKYCProvider_ContactAndCompanyChecks(t *testing.T) {
+	ctx := context.Background()
+	p := &TestKYCProvider{}
+	if _, err := p.StartCheck(ctx, KYCRequest{ID: "c0", Subject: KYCContact, Email: "ada@example.com"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a contact check without a phone: %v", err)
+	}
+	if r := must(p.StartCheck(ctx, KYCRequest{ID: "c1", Subject: KYCContact, Email: "ada@example.com", Phone: "+447700900123"})); r.Status != StatusCompleted {
+		t.Fatalf("a contact check: %+v", r)
+	}
+	if r := must(p.StartCheck(ctx, KYCRequest{ID: "c2", Subject: KYCContact, Email: "testfail@example.com", Phone: "+447700900123"})); r.Status != StatusFailed {
+		t.Fatalf("a contact check on a TESTFAIL email: %+v", r)
+	}
+	if _, err := p.StartCheck(ctx, KYCRequest{ID: "co1", Subject: KYCCompany, Name: "Acme Ltd", CompanyNumber: "01234567"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a company check naming no directors: %v", err)
+	}
+	co := KYCRequest{ID: "co2", Subject: KYCCompany, Name: "Acme Ltd", Country: "GB", CompanyNumber: "01234567",
+		Directors: []string{"Ada Lovelace"}, SignificantControl: []string{"Charles Babbage"}}
+	if r := must(p.StartCheck(ctx, co)); r.Status != StatusCompleted {
+		t.Fatalf("a company check: %+v", r)
+	}
+	co.ID, co.SignificantControl = "co3", []string{"Grace TESTSANCTION"}
+	if r := must(p.StartCheck(ctx, co)); r.Status != StatusFailed {
+		t.Fatalf("a company controlled by a sanctioned person: %+v", r)
+	}
+}
+
 // A screening is an answer now, with nothing to come back: clear, a hit, held for review (pending), or unavailable.
 func TestScreeningProvider_ClearHitReviewAndUnavailable(t *testing.T) {
 	ctx := context.Background()

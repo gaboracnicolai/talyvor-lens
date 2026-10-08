@@ -186,7 +186,7 @@ func (s *DualTokenStore) OfferLoan(ctx context.Context, workspaceID, lenderAgent
 	// B22.1: uncleared, an AMBER loan is made of test-funded credits only — refused now, naming the class,
 	// when the lender's are not enough.
 	if c, _ := CapabilityByKey(CapabilityCompanyLoans); c.Class != ClassGreen {
-		cleared, byPlan, err := capabilityLive(ctx, tx, workspaceID, c)
+		refusal, err := capabilityLive(ctx, tx, workspaceID, c)
 		if err != nil {
 			return Loan{}, err
 		}
@@ -194,14 +194,14 @@ func (s *DualTokenStore) OfferLoan(ctx context.Context, workspaceID, lenderAgent
 		if err != nil {
 			return Loan{}, err
 		}
-		if !cleared && have < terms.PrincipalULXC {
+		if refusal != nil && have < terms.PrincipalULXC {
 			// B25.3: a test lender's credits are test money, whatever funded them.
 			test, err := testWorkspace(ctx, tx, workspaceID)
 			if err != nil {
 				return Loan{}, err
 			}
 			if !test {
-				return Loan{}, &CapabilityRefusal{Capability: c, Plan: byPlan}
+				return Loan{}, refusal
 			}
 		}
 	}

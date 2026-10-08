@@ -154,6 +154,7 @@ func TestB3212_WhatEachPlanUnlocks(t *testing.T) {
 	if took, err := spend("ws-b3212-free-test", FundingTest); err != nil || took != 10_000_000 {
 		t.Fatalf("test money for a cleared B30 capability on free took %d test-funded µLXC, %v; want all 10 LXC of it", took, err)
 	}
+	liveVerified(t, pool, "ws-b3212-team") // B30.4: FX needs L2 for live money
 	if took, err := spend("ws-b3212-team", FundingLive); err != nil || took != 0 {
 		t.Fatalf("live money for a cleared B30 capability on team took %d test-funded µLXC, %v; want live money, none test-funded", took, err)
 	}

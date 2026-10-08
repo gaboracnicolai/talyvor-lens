@@ -73,3 +73,35 @@ docker compose exec lens /lens clearances log
   audit log, and each row records who, when and the reference.
 - A revoke stops real money from the capability's next use.
 - A GREEN capability cannot be cleared, because it has nothing to clear.
+
+## Verification levels (B30.4)
+
+Live money for a capability also needs the workspace's owner to be verified to the level that capability
+needs. Each capability lists its level as `level_needed` in `GET /v1/wallets/capabilities`.
+
+| Level | Meaning | Needed by |
+|---|---|---|
+| L0 | signed in | spending on Talyvor, buying and renting listings, moving money between your own agents |
+| L1 | email and phone confirmed | nothing on its own; the identity check needs it first |
+| L2 | identity checked | currency accounts, payments in and out, FX, trading, cards, paying other owners |
+| L3 | company checked: its number, directors and people with significant control | credit, advances, lending, merchant acceptance |
+
+- The owner reaches each level through `POST /v1/workspaces/{ws}/verification/contact`, `/identity` and
+  `/company`, in that order. `GET /v1/workspaces/{ws}/verification` shows the level and every check.
+- Each check goes to the verification provider. Lens keeps the level, the method (which provider checked),
+  the status, the date and the provider's reference as evidence. It never keeps a document, a date of birth,
+  an email or a phone number.
+- The record is append-only (`workspace_verifications`). If a provider later withdraws a pass, a new row is
+  added and the level drops.
+- A pass by the Test provider shows on the record and counts for test money only. Live money is judged by
+  `live_level`, which counts only the checks a real provider passed. With test money, every level can try
+  every capability.
+- Each level's live limits are set by Nicolai and nobody else. Until he sets them, no level takes live money.
+
+```
+lens verification-limits                                   each level, the capabilities that need it, and its limits
+lens verification-limits set L2 GBP 1000.00 <reference>    the most one movement of live money may move at L2, in GBP
+```
+
+A level with no limit of its own in a currency uses the highest limit set at a lower level. A limit of 0 means
+no live money in that currency at that level.

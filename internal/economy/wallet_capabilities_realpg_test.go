@@ -101,6 +101,7 @@ func TestWalletClasses_AmberAndRedTakeTestMoneyUntilCleared(t *testing.T) {
 	// The operator clears cards on a partner's reference: live credits go through, test money is left alone — on a
 	// plan with live money (B32.12; free keeps it on test money even cleared).
 	planGatesOnPlan(t, pool, ws, "team", false)
+	liveVerified(t, pool, ws) // B30.4: cards need L2 for live money
 	if _, err := s.ClearCapability(ctx, CapabilityAgentCard, "nicolai", ClearanceTerms{Reference: "issuing partner PA-1",
 		Licence: "EMI-900001", Partner: "Issuer Ltd", Countries: []string{"GB"}, ExpiresAt: time.Now().Add(24 * time.Hour)}); err != nil {
 		t.Fatal(err)

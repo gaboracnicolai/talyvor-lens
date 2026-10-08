@@ -97,6 +97,7 @@ func TestB30Capabilities_TestMoneyOnlyUntilClearedForTheCountry(t *testing.T) {
 	payments, _ := CapabilityByKey(CapabilityPaymentsOut)
 	const liveWS = "ws-b301-live-" + CapabilityPaymentsOut
 	planGatesOnPlan(t, pool, liveWS, "team", false) // B32.12: a plan with live money, which a cleared capability needs
+	liveVerified(t, pool, liveWS)                   // B30.4: and a verification level
 	if _, err := s.ClearCapability(gb, CapabilityPaymentsOut, "nicolai", ClearanceTerms{Reference: "partner agreement PA-7",
 		Licence: "EMI-900123", Partner: "Test Payments Ltd", Countries: []string{"ie"}, ExpiresAt: time.Now().Add(24 * time.Hour)}); err != nil {
 		t.Fatal(err)

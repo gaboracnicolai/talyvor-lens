@@ -189,6 +189,14 @@ func main() {
 		}
 		return
 	}
+	// `lens verification-limits` (B30.4): the most one movement of live money may move at each verification level.
+	if len(os.Args) > 1 && os.Args[1] == "verification-limits" {
+		if err := runVerificationLimits(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	// `lens credit-lines` (B22.4): mark company workspaces and set, pause or resume their credit lines.
 	if len(os.Args) > 1 && os.Args[1] == "credit-lines" {
 		if err := runCreditLines(os.Args[2:]); err != nil {
@@ -4462,6 +4470,7 @@ func run() error {
 		mountMarketDiscoveryRoutes(authed, marketStore)                                 // B32.50
 		mountTaxProfileRoutes(authed, taxProfiles)                                      // B32.38
 		mountSellerTaxRoutes(authed, sellerTax)                                         // B32.41
+		mountVerificationRoutes(authed, dualToken, partnerRegistry.Verification)        // B30.4
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
 		mountMarketReceiptRoutes(authed, marketStore)                                   // B32.40
 		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5
