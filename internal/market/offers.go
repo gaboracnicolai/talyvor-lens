@@ -59,6 +59,7 @@ type Offer struct {
 	Seats          *int      `json:"seats,omitempty"`         // enterprise: at least 1
 	TrialUses      int       `json:"trial_uses,omitempty"`    // per_use (B32.21)
 	Terms          string    `json:"terms,omitempty"`         // what the licence allows, as LicenceTerms says
+	Display        *Display  `json:"display,omitempty"`       // the price in the buyer's currency, on a read (B32.51, display.go)
 	CreatedAt      time.Time `json:"created_at,omitzero"`
 }
 

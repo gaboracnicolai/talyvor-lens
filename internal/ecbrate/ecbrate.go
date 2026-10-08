@@ -192,34 +192,63 @@ type Converted struct {
 // day on or before `at` (UTC): amount = usdMicros ÷ 10⁶ × (currency per EUR) ÷ (USD per EUR), rounded half-up to the
 // currency's minor unit.
 func (b *Book) FromUSD(ctx context.Context, usdMicros int64, currency string, at time.Time) (Converted, error) {
+	r, err := b.USDRate(ctx, currency, at)
+	if err != nil {
+		return Converted{}, err
+	}
+	return r.Convert(usdMicros), nil
+}
+
+// USDRate is one day's rate from US dollars into a currency, read once to convert many amounts (B32.51: every offer of
+// a catalog page).
+type USDRate struct {
+	currency string
+	rate     *big.Rat // units of the currency per US dollar
+	date     *time.Time
+	source   string
+}
+
+// USDRate reads the rate FromUSD converts at: that of the latest ECB day on or before `at` (UTC).
+func (b *Book) USDRate(ctx context.Context, currency string, at time.Time) (USDRate, error) {
 	ccy := strings.ToUpper(currency)
 	if ccy == "USD" {
-		return Converted{Currency: ccy, AmountMinor: roundHalfUp(new(big.Rat).SetFrac64(usdMicros, 10_000)), Rate: "1", Source: "none"}, nil
+		return USDRate{currency: ccy, rate: big.NewRat(1, 1), source: "none"}, nil
 	}
 	date, usd, err := b.perEUR(ctx, "USD", at.UTC())
 	if err != nil {
-		return Converted{}, err
+		return USDRate{}, err
 	}
 	per := "1"
 	if ccy != "EUR" {
 		var d time.Time
 		if d, per, err = b.perEUR(ctx, ccy, date); err != nil {
-			return Converted{}, err
+			return USDRate{}, err
 		}
 		if !d.Equal(date) {
-			return Converted{}, fmt.Errorf("%w: the ECB's %s rate for %s is missing", ErrNoRate, ccy, date.Format("2006-01-02"))
+			return USDRate{}, fmt.Errorf("%w: the ECB's %s rate for %s is missing", ErrNoRate, ccy, date.Format("2006-01-02"))
 		}
 	}
 	usdRat, _ := new(big.Rat).SetString(usd)
 	perRat, _ := new(big.Rat).SetString(per)
-	rate := new(big.Rat).Quo(perRat, usdRat)
+	return USDRate{currency: ccy, rate: new(big.Rat).Quo(perRat, usdRat), date: &date, source: "ecb"}, nil
+}
+
+// Date is the ECB day the rate is from; nil for USD.
+func (r USDRate) Date() *time.Time { return r.date }
+
+// Convert prices usdMicros at the rate, rounded half-up to the currency's minor unit.
+func (r USDRate) Convert(usdMicros int64) Converted {
 	scale := int64(1)
-	for range minorDigits(ccy) {
+	for range minorDigits(r.currency) {
 		scale *= 10
 	}
 	v := new(big.Rat).SetFrac64(usdMicros*scale, 1_000_000)
-	v.Mul(v, rate)
-	return Converted{Currency: ccy, AmountMinor: roundHalfUp(v), Rate: rate.FloatString(6), RateDate: &date, Source: "ecb"}, nil
+	v.Mul(v, r.rate)
+	c := Converted{Currency: r.currency, AmountMinor: roundHalfUp(v), Rate: r.rate.FloatString(6), RateDate: r.date, Source: r.source}
+	if r.source == "none" {
+		c.Rate = "1"
+	}
+	return c
 }
 
 // minorDigits is how many decimal places the currency's minor unit has (ISO 4217): none for the yen, the won and the
