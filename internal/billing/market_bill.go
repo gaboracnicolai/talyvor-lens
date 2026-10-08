@@ -28,11 +28,15 @@ import (
 // ErrNoMarketBill: the marketplace bill is not configured (LENS_MARKET_BILL_PRICE_ID).
 var ErrNoMarketBill = errors.New("billing: no marketplace bill is configured (LENS_MARKET_BILL_PRICE_ID)")
 
+// ErrNoMarketTax: a use owes tax, but the marketplace bill has no tax line to put it on (LENS_MARKET_TAX_PRICE_ID).
+var ErrNoMarketTax = errors.New("billing: the marketplace bill has no tax line (LENS_MARKET_TAX_PRICE_ID)")
+
 // marketStripeAPI is the marketplace bill's half of the Stripe seam. *LiveStripe satisfies it.
 type marketStripeAPI interface {
 	CreateMarketSubscription(ctx context.Context, customerID, priceID, workspaceID string) (subscriptionID string, err error)
 	SendMeterEvent(ctx context.Context, eventName, customerID, identifier string, value int64, at time.Time) error
 	CreditMarketUse(ctx context.Context, customerID, subscriptionID string, cents float64, description, idempotencyKey string) (creditID string, err error)
+	AddMarketSubscriptionItem(ctx context.Context, subscriptionID, priceID string) error
 }
 
 // MarketClearer clears the uses a paid marketplace invoice carried. *market.Store satisfies it.
@@ -52,6 +56,45 @@ type MarketFailer interface {
 func (s *Service) WithMarketBill(api marketStripeAPI, priceID, eventName string, clearer MarketClearer) *Service {
 	s.marketStripe, s.marketPrice, s.marketEvent, s.marketClearer = api, priceID, eventName, clearer
 	return s
+}
+
+// WithMarketTax bills each use's tax as its own line (B32.39): metered as eventName onto an item of priceID that the
+// buyer's marketplace subscription gains the first time it owes tax.
+func (s *Service) WithMarketTax(eventName, priceID string) *Service {
+	s.marketTaxEvent, s.marketTaxPrice = eventName, priceID
+	return s
+}
+
+// MeterMarketTax puts one billed use's tax of ulxc µLXC on the buyer's marketplace bill, beside the use: identified
+// "tax-" plus the use id, so a retry never bills it twice.
+func (s *Service) MeterMarketTax(ctx context.Context, workspaceID, useID string, ulxc int64, at time.Time) error {
+	if s.marketStripe == nil || s.marketPrice == "" {
+		return ErrNoMarketBill
+	}
+	if s.marketTaxPrice == "" || s.marketTaxEvent == "" {
+		return ErrNoMarketTax
+	}
+	customerID, err := s.ensureMarketBill(ctx, workspaceID)
+	if err != nil {
+		return fmt.Errorf("billing: marketplace bill for %s: %w", workspaceID, err)
+	}
+	var subscriptionID, taxPrice string
+	if err := s.pool.QueryRow(ctx, `SELECT stripe_subscription_id, COALESCE(tax_price_id, '') FROM market_bills WHERE workspace_id = $1`,
+		workspaceID).Scan(&subscriptionID, &taxPrice); err != nil {
+		return fmt.Errorf("billing: marketplace bill for %s: %w", workspaceID, err)
+	}
+	if taxPrice != s.marketTaxPrice {
+		if err := s.marketStripe.AddMarketSubscriptionItem(ctx, subscriptionID, s.marketTaxPrice); err != nil {
+			return fmt.Errorf("billing: tax line on the marketplace bill of %s: %w", workspaceID, err)
+		}
+		if _, err := s.pool.Exec(ctx, `UPDATE market_bills SET tax_price_id = $2 WHERE workspace_id = $1`, workspaceID, s.marketTaxPrice); err != nil {
+			return fmt.Errorf("billing: tax line on the marketplace bill of %s: %w", workspaceID, err)
+		}
+	}
+	if err := s.marketStripe.SendMeterEvent(ctx, s.marketTaxEvent, customerID, "tax-"+useID, ulxc, at); err != nil {
+		return fmt.Errorf("billing: meter the tax of use %s: %w", useID, err)
+	}
+	return nil
 }
 
 // MeterMarketUse puts one billed use of ulxc µLXC on the buyer's marketplace bill.
@@ -82,6 +125,20 @@ func (s *Service) CreditMarketRefund(ctx context.Context, workspaceID, useID str
 		return "", fmt.Errorf("billing: marketplace bill for %s: %w", workspaceID, err)
 	}
 	return s.marketStripe.CreditMarketUse(ctx, customerID, subscriptionID, float64(ulxc)/float64(ulxcPerCent), description, "market-refund-"+useID)
+}
+
+// CreditMarketRefundTax gives a buyer back the tax of one refunded use, ulxc µLXC, as its own negative line (B32.39),
+// idempotent on the use.
+func (s *Service) CreditMarketRefundTax(ctx context.Context, workspaceID, useID string, ulxc int64, description string) (string, error) {
+	if s.marketStripe == nil || s.marketPrice == "" {
+		return "", ErrNoMarketBill
+	}
+	var customerID, subscriptionID string
+	if err := s.pool.QueryRow(ctx, `SELECT stripe_customer_id, stripe_subscription_id FROM market_bills WHERE workspace_id = $1`,
+		workspaceID).Scan(&customerID, &subscriptionID); err != nil {
+		return "", fmt.Errorf("billing: marketplace bill for %s: %w", workspaceID, err)
+	}
+	return s.marketStripe.CreditMarketUse(ctx, customerID, subscriptionID, float64(ulxc)/float64(ulxcPerCent), description, "market-refund-tax-"+useID)
 }
 
 // ensureMarketBill returns the customer whose marketplace subscription the workspace's uses are metered

@@ -173,6 +173,9 @@ type Store struct {
 	similarity *similarityCheck // nil: no version is fingerprinted or held as a copy (B32.46, similarity.go)
 
 	ipCounterDays *int // nil: DefaultIPCounterDays; how long a seller has to counter an IP claim (B32.47)
+
+	tax        *Tax // nil: no billed use carries tax (B32.39, tax.go)
+	liveStripe bool // Lens's Stripe key is live: a sale Talyvor cannot account for the tax on is refused (B32.39)
 }
 
 func (s *Store) now() time.Time {

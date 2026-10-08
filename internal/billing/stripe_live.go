@@ -16,6 +16,7 @@ import (
 	"github.com/stripe/stripe-go/v81/paymentintent"
 	"github.com/stripe/stripe-go/v81/price"
 	"github.com/stripe/stripe-go/v81/subscription"
+	"github.com/stripe/stripe-go/v81/subscriptionitem"
 )
 
 // LiveStripe is the production stripeAPI implementation. It is NOT exercised by
@@ -421,6 +422,20 @@ func (l *LiveStripe) CreateMarketSubscription(ctx context.Context, customerID, p
 		return "", err
 	}
 	return sub.ID, nil
+}
+
+// AddMarketSubscriptionItem adds the metered tax price to a marketplace subscription (B32.39), so the tax meter's
+// events are invoiced as their own line. Idempotent on the subscription and the price.
+func (l *LiveStripe) AddMarketSubscriptionItem(ctx context.Context, subscriptionID, priceID string) error {
+	params := &stripe.SubscriptionItemParams{
+		Subscription:      stripe.String(subscriptionID),
+		Price:             stripe.String(priceID),
+		ProrationBehavior: stripe.String("none"),
+	}
+	params.Context = ctx
+	params.SetIdempotencyKey("market-bill-tax-" + subscriptionID + "-" + priceID)
+	_, err := subscriptionitem.Client{B: l.backend(), Key: l.key}.New(params)
+	return err
 }
 
 // CreditMarketUse puts a NEGATIVE line of cents (a decimal: a use's price may be a fraction of a cent) on

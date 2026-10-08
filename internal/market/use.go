@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	stripe "github.com/stripe/stripe-go/v81"
 
+	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/fees"
 	"github.com/talyvor/lens/internal/workspace"
@@ -348,6 +349,9 @@ func (s *Store) chargeFor(ctx context.Context, l Listing, buyer string) (string,
 	if linked {
 		return ChargeLinked, 0, nil
 	}
+	if err := s.sellable(ctx, buyer); err != nil {
+		return "", 0, err
+	}
 	return ChargeBilled, price, nil
 }
 
@@ -362,6 +366,9 @@ const (
 // other than 401/403 (Lens's own key), 409 (a request in flight) and 429 (slow down), which would refuse
 // every use alike. "" when it did not: Stripe unreachable, or our side.
 func meterRefusal(err error) string {
+	if errors.Is(err, billing.ErrNoMarketTax) { // B32.39: its bill cannot carry its tax — only this use's, never every use's
+		return err.Error()
+	}
 	var se *stripe.Error
 	if !errors.As(err, &se) || se.HTTPStatusCode < 400 || se.HTTPStatusCode >= 500 {
 		return ""
@@ -380,31 +387,50 @@ func meterRefusal(err error) string {
 	return reason
 }
 
-// meter puts one use on its buyer's bill. A use Stripe refuses records the reason, counts the refusal and
-// waits out its backoff before MeterPending tries it again; its MaxMeterRefusals-th refusal parks it.
+// meter puts one use on its buyer's bill, and then its tax beside it (B32.39) — each once: the price is metered_at
+// when Stripe has it, the tax tax_metered_at (or when it is found to be nothing), so a retry sends only what is
+// missing, and a tax that cannot be worked out or billed yet never holds the price back. A use Stripe refuses records
+// the reason, counts the refusal and waits out its backoff before MeterPending tries it again; its
+// MaxMeterRefusals-th refusal parks it.
 func (s *Store) meter(ctx context.Context, m Meter, useID, buyer string, ulxc int64, at time.Time) error {
-	if err := m.MeterMarketUse(ctx, buyer, useID, ulxc, at); err != nil {
-		if reason := meterRefusal(err); reason != "" {
-			if _, uerr := s.pool.Exec(ctx, `UPDATE market_uses SET meter_refusals = meter_refusals + 1, meter_refused_reason = $2,
-				meter_retry_at = now() + make_interval(secs => $3 * power(3, meter_refusals)),
-				meter_parked_at = CASE WHEN meter_refusals + 1 >= $4 THEN now() END
-				WHERE id = $1 AND metered_at IS NULL`, useID, reason, MeterRefusalBackoff.Seconds(), MaxMeterRefusals); uerr != nil {
-				return errors.Join(err, uerr)
-			}
-		}
-		return err
+	var priceBilled, taxBilled bool
+	if err := s.pool.QueryRow(ctx, `SELECT metered_at IS NOT NULL, tax_metered_at IS NOT NULL FROM market_uses WHERE id = $1`, useID).
+		Scan(&priceBilled, &taxBilled); err != nil {
+		return fmt.Errorf("market: meter %s: %w", useID, err)
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE market_uses SET metered_at = now() WHERE id = $1 AND metered_at IS NULL`, useID)
+	var err error
+	if !priceBilled {
+		if err = m.MeterMarketUse(ctx, buyer, useID, ulxc, at); err == nil {
+			_, err = s.pool.Exec(ctx, `UPDATE market_uses SET metered_at = now() WHERE id = $1 AND metered_at IS NULL`, useID)
+		}
+	}
+	if err == nil && !taxBilled {
+		var tax *TaxLine
+		if tax, err = s.taxUse(ctx, useID, buyer, ulxc, at); err == nil {
+			err = meterTax(ctx, m, tax, buyer, useID, at)
+		}
+		if err == nil {
+			_, err = s.pool.Exec(ctx, `UPDATE market_uses SET tax_metered_at = now() WHERE id = $1 AND tax_metered_at IS NULL`, useID)
+		}
+	}
+	if reason := meterRefusal(err); reason != "" {
+		if _, uerr := s.pool.Exec(ctx, `UPDATE market_uses SET meter_refusals = meter_refusals + 1, meter_refused_reason = $2,
+			meter_retry_at = now() + make_interval(secs => $3 * power(3, meter_refusals)),
+			meter_parked_at = CASE WHEN meter_refusals + 1 >= $4 THEN now() END
+			WHERE id = $1 AND (metered_at IS NULL OR tax_metered_at IS NULL)`, useID, reason, MeterRefusalBackoff.Seconds(), MaxMeterRefusals); uerr != nil {
+			return errors.Join(err, uerr)
+		}
+	}
 	return err
 }
 
-// MeterPending bills the uses that ran but whose meter event Stripe has not yet accepted — a Stripe outage
-// when they were used. Each keeps its id as the meter event's identifier, so none is billed twice. A use
-// Stripe refuses is skipped and every other use still billed; one refused too often stays parked
+// MeterPending bills the uses that ran but whose meter event — or tax meter event (B32.39) — Stripe has not yet
+// accepted: a Stripe outage when they were used. Each keeps its id as the meter event's identifier, so none is
+// billed twice. A use Stripe refuses is skipped and every other use still billed; one refused too often stays parked
 // (ParkedUses). Stripe unreachable stops the pass: the next one tries again.
 func (s *Store) MeterPending(ctx context.Context, m Meter, olderThan time.Duration) (int, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, buyer_workspace_id, price_ulxc, used_at FROM market_uses
-		WHERE charge = 'billed' AND metered_at IS NULL AND ran_at IS NOT NULL AND ran_at < now() - make_interval(secs => $1)
+		WHERE charge = 'billed' AND (metered_at IS NULL OR tax_metered_at IS NULL) AND ran_at IS NOT NULL AND ran_at < now() - make_interval(secs => $1)
 		  AND meter_parked_at IS NULL AND (meter_retry_at IS NULL OR meter_retry_at <= now())
 		  AND NOT EXISTS (SELECT 1 FROM market_refunds r WHERE r.use_id = market_uses.id) -- refunded before it was billed: never billed
 		ORDER BY used_at LIMIT 200`, olderThan.Seconds())
@@ -458,7 +484,7 @@ type ParkedUse struct {
 // ParkedUses lists every parked use still off its buyer's bill, most recently parked first.
 func (s *Store) ParkedUses(ctx context.Context) ([]ParkedUse, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, listing_id, buyer_workspace_id, price_ulxc, used_at, meter_refusals, meter_refused_reason, meter_parked_at
-		FROM market_uses WHERE meter_parked_at IS NOT NULL AND metered_at IS NULL ORDER BY meter_parked_at DESC, id`)
+		FROM market_uses WHERE meter_parked_at IS NOT NULL AND (metered_at IS NULL OR tax_metered_at IS NULL) ORDER BY meter_parked_at DESC, id`)
 	if err != nil {
 		return nil, fmt.Errorf("market: parked uses: %w", err)
 	}
@@ -480,7 +506,7 @@ var ErrNotParked = errors.New("market: no such parked use")
 // Its refusals are kept: Stripe refusing it once more parks it again.
 func (s *Store) RetryParkedUse(ctx context.Context, useID string) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE market_uses SET meter_parked_at = NULL, meter_retry_at = NULL
-		WHERE id = $1 AND meter_parked_at IS NOT NULL AND metered_at IS NULL`, useID)
+		WHERE id = $1 AND meter_parked_at IS NOT NULL AND (metered_at IS NULL OR tax_metered_at IS NULL)`, useID)
 	if err != nil {
 		return fmt.Errorf("market: retry parked use: %w", err)
 	}
@@ -700,7 +726,19 @@ func (s *Store) ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID st
 					return err
 				}
 			}
-			if err := postClearTx(ctx, tx, c.id, gross, gross-share, payees[0].Funding, paidAt, payees...); err != nil {
+			// B32.39: the invoice collected the use's tax beside its price, once it was metered; it is owed to the tax
+			// authority.
+			var jurisdiction string
+			var tax int64
+			if err := tx.QueryRow(ctx, `SELECT t.jurisdiction, t.tax_usd_micros FROM market_tax_lines t JOIN market_uses u ON u.id = t.use_id
+				WHERE t.use_id = $1 AND u.tax_metered_at IS NOT NULL`, c.id).
+				Scan(&jurisdiction, &tax); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if tax > 0 {
+				payees = append(payees, Posting{Account: AccountTax(jurisdiction), AmountUSDMicros: -tax, Funding: payees[0].Funding})
+			}
+			if err := postClearTx(ctx, tx, c.id, gross+tax, gross-share, payees[0].Funding, paidAt, payees...); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE market_uses SET cleared_invoice_id = $2, cleared_at = $3 WHERE id = $1`, c.id, invoiceID, paidAt); err != nil {
@@ -835,15 +873,25 @@ type BillLine struct {
 	// A payment to another company's agent (B19.15): the agent paid, and the memo.
 	PayeeAgentID string `json:"payee_agent_id,omitempty"`
 	Memo         string `json:"memo,omitempty"`
+	// B32.39: the tax on the line, on top of its price — none until the use is metered.
+	TaxUSDMicros    int64  `json:"tax_usd_micros"`
+	TaxRateBps      int    `json:"tax_rate_bps"`
+	TaxJurisdiction string `json:"tax_jurisdiction,omitempty"`
+	TaxTreatment    string `json:"tax_treatment,omitempty"`
+	TaxNote         string `json:"tax_note,omitempty"`
 }
 
 // Bill is a buyer's marketplace uses billed in one month (UTC). The totals are what the buyer owes for
-// them: a refunded use is listed, and counts in RefundedULXC instead.
+// them: a refunded use is listed, and counts in RefundedULXC instead. TotalULXC and TotalUSDMicros are the prices
+// before tax; the net, tax and gross totals are what the buyer pays, its tax included (B32.39).
 type Bill struct {
 	Month          string     `json:"month"`
 	TotalULXC      int64      `json:"total_ulxc"`
 	TotalUSDMicros int64      `json:"total_usd_micros"`
 	RefundedULXC   int64      `json:"refunded_ulxc"`
+	NetUSDMicros   int64      `json:"net_usd_micros"`
+	TaxUSDMicros   int64      `json:"tax_usd_micros"`
+	GrossUSDMicros int64      `json:"gross_usd_micros"`
 	Lines          []BillLine `json:"lines"`
 }
 
@@ -852,9 +900,11 @@ func (s *Store) MonthBill(ctx context.Context, buyerWorkspaceID string, month ti
 	from := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
 	b := Bill{Month: from.Format("2006-01"), Lines: []BillLine{}}
 	rows, err := s.pool.Query(ctx, `SELECT u.id, u.listing_id, COALESCE(l.title, 'Payment to ' || a.name, ''), u.agent_id, u.price_ulxc, u.used_at, u.cleared_at,
-		       r.refunded_at, u.payee_agent_id, u.memo
+		       r.refunded_at, u.payee_agent_id, u.memo, COALESCE(t.tax_usd_micros, 0), COALESCE(t.rate_bps, 0), COALESCE(t.jurisdiction, ''),
+		       COALESCE(t.treatment, ''), COALESCE(t.note, '')
 		FROM market_uses u LEFT JOIN market_listings l ON l.id = u.listing_id LEFT JOIN market_refunds r ON r.use_id = u.id
 		LEFT JOIN agent_accounts a ON a.id = u.payee_agent_id AND u.payee_agent_id <> ''
+		LEFT JOIN market_tax_lines t ON t.use_id = u.id
 		WHERE u.buyer_workspace_id = $1 AND u.charge = 'billed' AND u.ran_at IS NOT NULL AND u.used_at >= $2 AND u.used_at < $3
 		ORDER BY u.used_at, u.id`, buyerWorkspaceID, from, from.AddDate(0, 1, 0))
 	if err != nil {
@@ -864,16 +914,19 @@ func (s *Store) MonthBill(ctx context.Context, buyerWorkspaceID string, month ti
 	for rows.Next() {
 		var x BillLine
 		if err := rows.Scan(&x.UseID, &x.ListingID, &x.Title, &x.AgentID, &x.PriceULXC, &x.UsedAt, &x.Cleared, &x.Refunded,
-			&x.PayeeAgentID, &x.Memo); err != nil {
+			&x.PayeeAgentID, &x.Memo, &x.TaxUSDMicros, &x.TaxRateBps, &x.TaxJurisdiction, &x.TaxTreatment, &x.TaxNote); err != nil {
 			return b, err
 		}
 		if x.Refunded != nil {
 			b.RefundedULXC += x.PriceULXC
 		} else {
 			b.TotalULXC += x.PriceULXC
+			b.NetUSDMicros += x.PriceULXC / ulxcPerUSDMicro
+			b.TaxUSDMicros += x.TaxUSDMicros
 		}
 		b.Lines = append(b.Lines, x)
 	}
 	b.TotalUSDMicros = b.TotalULXC / ulxcPerUSDMicro
+	b.GrossUSDMicros = b.NetUSDMicros + b.TaxUSDMicros
 	return b, rows.Err()
 }

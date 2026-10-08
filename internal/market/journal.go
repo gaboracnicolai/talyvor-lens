@@ -18,9 +18,9 @@ import (
 // do not sum to zero per currency, and refuses any change to a posting. market_journal_balances keeps each
 // account's total in the same transaction.
 //
-//   - clear: a paid invoice clears a use — +gross stripe:clearing, −fee revenue:market_fee, −share
-//     seller:<ws>:holdback for each payee: the seller and every ancestor its royalties pay (B32.26). ClearInvoice
-//     posts it beside the earnings.
+//   - clear: a paid invoice clears a use — +gross+tax stripe:clearing, −fee revenue:market_fee, −share
+//     seller:<ws>:holdback for each payee: the seller and every ancestor its royalties pay (B32.26), and −tax
+//     tax:<jurisdiction> (B32.39). ClearInvoice posts it beside the earnings.
 //   - reversal: a refund or chargeback of a cleared use posts the exact mirror of its clear entry. A trigger on
 //     market_refunds posts it in the transaction that writes the refund, so every writer of one —
 //     ReverseInvoice, refundUses, a test-money crossing's reversal — is journalled without being touched. Once
@@ -107,11 +107,12 @@ func PostJournalTx(ctx context.Context, tx pgx.Tx, kind, ref, fundedBy string, a
 	return id, nil
 }
 
-// postClearTx journals the clearing of one use: the buyer paid gross, Talyvor keeps fee, and the rest waits in the
-// holdback of each of its payees — the seller, and the ancestors its lineage royalties pay (B32.26).
-func postClearTx(ctx context.Context, tx pgx.Tx, useID string, gross, fee int64, fundedBy string, at time.Time, payees ...Posting) error {
+// postClearTx journals the clearing of one use: the buyer paid collected (the price and its tax), Talyvor keeps fee,
+// and the rest waits in the holdback of each of its payees — the seller, and the ancestors its lineage royalties pay
+// (B32.26) — or is owed to the tax authority (B32.39).
+func postClearTx(ctx context.Context, tx pgx.Tx, useID string, collected, fee int64, fundedBy string, at time.Time, payees ...Posting) error {
 	_, err := PostJournalTx(ctx, tx, JournalClear, useID, fundedBy, at, append([]Posting{
-		{Account: AccountStripeClearing, AmountUSDMicros: gross},
+		{Account: AccountStripeClearing, AmountUSDMicros: collected},
 		{Account: AccountMarketFee, AmountUSDMicros: -fee}}, payees...)...)
 	return err
 }

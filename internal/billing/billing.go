@@ -125,6 +125,9 @@ type Service struct {
 	marketPrice   string
 	marketEvent   string
 	marketClearer MarketClearer
+	// B32.39 — each billed use's tax, metered as its own line (market_bill.go). Unset ⇒ a use with tax cannot be billed.
+	marketTaxEvent string
+	marketTaxPrice string
 	// B20.5 — seller payouts (connect.go). Unset ⇒ disputes are acknowledged and ignored.
 	connectStripe connectStripeAPI
 	marketPayouts MarketPayouts

@@ -124,6 +124,9 @@ func (s *Store) renew(ctx context.Context, d dueLicence, judge economy.LicenceJu
 		if err := judge.RequireBilledCapability(ctx, d.buyer, economy.CapabilityRentAndSubscribe); err != nil {
 			return refusal(err), ignoreRefusal(err)
 		}
+		if err := s.sellable(ctx, d.buyer); err != nil { // B32.39
+			return refusal(err), ignoreRefusal(err)
+		}
 	}
 	version := l.LatestVersion
 	if d.pinned != nil {
@@ -165,7 +168,8 @@ func refusal(err error) bool {
 	var need *economy.ApprovalNeededError
 	return errors.As(err, &need) || errors.Is(err, economy.ErrAgentRule) || errors.Is(err, economy.ErrAgentFunds) ||
 		errors.Is(err, economy.ErrApprovalRequired) || errors.Is(err, economy.ErrAgentNotFound) || errors.Is(err, economy.ErrAgentOwnerless) ||
-		errors.Is(err, economy.ErrOwnerUnverified) || errors.Is(err, economy.ErrCapabilityNotCleared) || errors.Is(err, workspace.ErrMoneyWall)
+		errors.Is(err, economy.ErrOwnerUnverified) || errors.Is(err, economy.ErrCapabilityNotCleared) || errors.Is(err, workspace.ErrMoneyWall) ||
+		errors.Is(err, ErrNotSoldHere)
 }
 
 // ignoreRefusal is err, unless it is a refusal.

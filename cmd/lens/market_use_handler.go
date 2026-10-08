@@ -102,7 +102,7 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 		switch {
 		case errors.As(err, &need):
 			writeJSONOK(w, http.StatusForbidden, map[string]any{"error": err.Error(), "approval_id": need.ApprovalID})
-		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, workspace.ErrMoneyWall):
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, workspace.ErrMoneyWall), errors.Is(err, market.ErrNotSoldHere):
 			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case errors.Is(err, market.ErrNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())
@@ -164,7 +164,8 @@ func mountMarketUseRoutes(r chi.Router, store *market.Store, lens http.Handler, 
 		switch {
 		case errors.As(err, &need):
 			writeJSONOK(w, http.StatusForbidden, map[string]any{"error": err.Error(), "approval_id": need.ApprovalID})
-		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, workspace.ErrMoneyWall), errors.Is(err, economy.ErrCapabilityNotCleared):
+		case errors.Is(err, economy.ErrAgentRule), errors.Is(err, workspace.ErrMoneyWall), errors.Is(err, economy.ErrCapabilityNotCleared),
+			errors.Is(err, market.ErrNotSoldHere):
 			writeJSONErr(w, http.StatusForbidden, err.Error())
 		case errors.Is(err, market.ErrNotFound):
 			writeJSONErr(w, http.StatusNotFound, err.Error())

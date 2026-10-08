@@ -89,6 +89,8 @@ func (k stripeByKind) billFor(wsID string) (*billing.Service, error) {
 type marketBill interface {
 	market.Meter
 	market.Refunder
+	market.TaxMeter    // B32.39: each use's tax, its own line
+	market.TaxRefunder // and credited back with its refund
 }
 
 // lensKeptBill is a test workspace's marketplace bill when Lens has none in Stripe for anyone (B17.15). Its
@@ -102,6 +104,14 @@ func (lensKeptBill) MeterMarketUse(context.Context, string, string, int64, time.
 
 func (lensKeptBill) CreditMarketRefund(_ context.Context, _, useID string, _ int64, _ string) (string, error) {
 	return "lens_kept_" + useID, nil
+}
+
+func (lensKeptBill) MeterMarketTax(context.Context, string, string, int64, time.Time) error {
+	return nil
+}
+
+func (lensKeptBill) CreditMarketRefundTax(_ context.Context, _, useID string, _ int64, _ string) (string, error) {
+	return "lens_kept_tax_" + useID, nil
 }
 
 // billOf is the bill wsID's paid uses go on, or nil and why not.
@@ -141,6 +151,24 @@ func (k stripeByKind) CreditMarketRefund(ctx context.Context, buyerWorkspaceID, 
 		return "", errors.Join(market.ErrNoBill, err)
 	}
 	return b.CreditMarketRefund(ctx, buyerWorkspaceID, useID, ulxc, description)
+}
+
+// MeterMarketTax puts a use's tax on its buyer's bill: market.TaxMeter, for the pass that bills pending uses (B32.39).
+func (k stripeByKind) MeterMarketTax(ctx context.Context, buyerWorkspaceID, useID string, ulxc int64, at time.Time) error {
+	b, err := k.billOf(buyerWorkspaceID)
+	if b == nil {
+		return errors.Join(market.ErrNoBill, err)
+	}
+	return b.MeterMarketTax(ctx, buyerWorkspaceID, useID, ulxc, at)
+}
+
+// CreditMarketRefundTax credits a refunded use's tax on its buyer's bill: market.TaxRefunder (B32.39).
+func (k stripeByKind) CreditMarketRefundTax(ctx context.Context, buyerWorkspaceID, useID string, ulxc int64, description string) (string, error) {
+	b, err := k.billOf(buyerWorkspaceID)
+	if b == nil {
+		return "", errors.Join(market.ErrNoBill, err)
+	}
+	return b.CreditMarketRefundTax(ctx, buyerWorkspaceID, useID, ulxc, description)
 }
 
 // errNoCompanyBill refuses a payment to another company's agent from a company with no marketplace bill.
