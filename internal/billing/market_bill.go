@@ -45,6 +45,12 @@ type MarketClearer interface {
 	ClearInvoice(ctx context.Context, buyerWorkspaceID, invoiceID string, periodStart, periodEnd, paidAt time.Time, livemode bool) (int, error)
 }
 
+// MarketReceipter issues Talyvor's receipt for a paid marketplace invoice once its uses have cleared (B32.40), answering
+// its id ("" when the invoice cleared no use); a replay answers the receipt already issued. *market.Store satisfies it.
+type MarketReceipter interface {
+	IssueMarketReceipt(ctx context.Context, buyerWorkspaceID, invoiceID string, paidAt time.Time, livemode bool, stripeTotalCents *int64) (string, error)
+}
+
 // MarketFailer ends what a marketplace invoice Stripe gave up on was to pay for (B32.20): the licences it carried end
 // unpaid. *market.Store satisfies it.
 type MarketFailer interface {
@@ -173,6 +179,7 @@ func (s *Service) ensureMarketBill(ctx context.Context, workspaceID string) (str
 // subscription under parent.subscription_details) are understood.
 type marketInvoice struct {
 	ID           string          `json:"id"`
+	Total        *int64          `json:"total"` // in cents, its tax lines included: what the buyer's receipt adds up to (B32.40)
 	Subscription json.RawMessage `json:"subscription"`
 	Parent       struct {
 		SubscriptionDetails struct {
@@ -332,6 +339,14 @@ func (s *Service) handleInvoicePaid(w http.ResponseWriter, ctx context.Context, 
 		s.fail(w, "market clear", event.ID, err)
 		return
 	}
-	s.log.Info("billing webhook: marketplace invoice paid", "invoice", inv.ID, "workspace", workspaceID, "uses_cleared", n)
+	receipt := ""
+	if r, ok := s.marketClearer.(MarketReceipter); ok { // B32.40: Talyvor, the supplier, gives the buyer its receipt
+		if receipt, err = r.IssueMarketReceipt(ctx, workspaceID, inv.ID, paidAt, event.Livemode, inv.Total); err != nil {
+			s.fail(w, "market receipt", event.ID, err)
+			return
+		}
+	}
+	s.log.Info("billing webhook: marketplace invoice paid", "invoice", inv.ID, "workspace", workspaceID, "uses_cleared", n,
+		"receipt", receipt)
 	w.WriteHeader(http.StatusOK)
 }

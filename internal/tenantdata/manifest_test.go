@@ -327,11 +327,13 @@ var w626PopulationDelta = []string{
 	"distill_royalty_basis", "distill_royalty_mints", "distill_serve_attribution",
 	"eval_contribution_mints", "eval_correctness_attestations",
 	"market_earnings",
-	"market_ip_claims",                         // B32.47: keyed claimant_workspace_id, classified in the manifest
-	"market_licences",                          // B32.19: keyed buyer_workspace_id, classified in the manifest
-	"market_listing_reports", "market_refunds", // B20.2 / B20.4: keyed seller_/buyer_/reporter_workspace_id, classified in the manifest
-	"market_reviews", // B32.49: keyed buyer_workspace_id, classified in the manifest
-	"market_uses",    // B20.2: keyed seller_/buyer_workspace_id, classified in the manifest
+	"market_ip_claims",       // B32.47: keyed claimant_workspace_id, classified in the manifest
+	"market_licences",        // B32.19: keyed buyer_workspace_id, classified in the manifest
+	"market_listing_reports", // B20.2: keyed reporter_workspace_id, classified in the manifest
+	"market_receipts",        // B32.40: keyed buyer_workspace_id, classified in the manifest
+	"market_refunds",         // B20.4: keyed seller_/buyer_workspace_id, classified in the manifest
+	"market_reviews",         // B32.49: keyed buyer_workspace_id, classified in the manifest
+	"market_uses",            // B20.2: keyed seller_/buyer_workspace_id, classified in the manifest
 	"node_latency_mints",
 	"pool_royalty_mints",
 	"room_contributions", // B32.31: keyed author_workspace_id, classified in the manifest

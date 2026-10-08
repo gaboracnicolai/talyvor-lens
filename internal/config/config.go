@@ -980,6 +980,14 @@ type Config struct {
 	MarketTaxMeterEvent        string
 	StripeTestMarketTaxPriceID string
 
+	// SupplierLegalName, SupplierAddress and SupplierVATNumber are what Talyvor's marketplace receipts print for the
+	// supplier (B32.40). Env: LENS_SUPPLIER_LEGAL_NAME and LENS_SUPPLIER_ADDRESS, default the company and registered
+	// office as the public register has them; LENS_SUPPLIER_VAT_NUMBER, default EMPTY — then every receipt reads "VAT
+	// registration pending" and is a Preview.
+	SupplierLegalName string
+	SupplierAddress   string
+	SupplierVATNumber string
+
 	// MarketTrialMax is the most free trial uses one per_use offer may give each buyer (B32.21). Env:
 	// LENS_MARKET_TRIAL_MAX, default 5 — a proposal for Nicolai; 0 lets no offer give any.
 	MarketTrialMax int
@@ -1336,6 +1344,9 @@ func Load() (*Config, error) {
 		MarketTaxPriceID:           getEnv("LENS_MARKET_TAX_PRICE_ID", ""),
 		MarketTaxMeterEvent:        getEnv("LENS_MARKET_TAX_METER_EVENT", "talyvor_marketplace_tax"),
 		StripeTestMarketTaxPriceID: getEnv("LENS_STRIPE_TEST_MARKET_TAX_PRICE_ID", ""),
+		SupplierLegalName:          getEnv("LENS_SUPPLIER_LEGAL_NAME", "TALYVOR LTD"),
+		SupplierAddress:            getEnv("LENS_SUPPLIER_ADDRESS", "71-75 Shelton Street, Covent Garden, London, United Kingdom, WC2H 9JQ"),
+		SupplierVATNumber:          getEnv("LENS_SUPPLIER_VAT_NUMBER", ""),
 		MarketPayoutReturnURL:      getEnv("LENS_MARKET_PAYOUT_RETURN_URL", "https://app.talyvor.com/marketplace/selling?payouts=connected"),
 		MarketPayoutRefreshURL:     getEnv("LENS_MARKET_PAYOUT_REFRESH_URL", "https://app.talyvor.com/marketplace/selling?payouts=expired"),
 		BillingSuccessURL:          getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),

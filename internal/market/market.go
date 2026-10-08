@@ -176,6 +176,8 @@ type Store struct {
 
 	tax        *Tax // nil: no billed use carries tax (B32.39, tax.go)
 	liveStripe bool // Lens's Stripe key is live: a sale Talyvor cannot account for the tax on is refused (B32.39)
+
+	receipts *Receipts // nil: a paid marketplace bill gets no receipt (B32.40, receipts.go)
 }
 
 func (s *Store) now() time.Time {

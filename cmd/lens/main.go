@@ -1990,6 +1990,10 @@ func run() error {
 	// quotes every instrument from it, so the rates are fetched at start and every three hours (the ECB
 	// publishes once a working day).
 	ecbRates := ecbrate.New(pool, ecbrate.DailyURL)
+	// B32.40 — every paid marketplace bill gets Talyvor's receipt, as the supplier: the buyer as its tax profile names
+	// it, and the tax also in the buyer's currency at the ECB's reference rate.
+	marketStore.SetReceipts(market.Receipts{Supplier: market.Supplier{LegalName: cfg.SupplierLegalName, Address: cfg.SupplierAddress,
+		VATNumber: cfg.SupplierVATNumber}, Buyers: taxProfiles, Rates: ecbRates})
 	go func() {
 		t := time.NewTicker(3 * time.Hour)
 		defer t.Stop()
@@ -4429,6 +4433,7 @@ func run() error {
 		mountMarketDiscoveryRoutes(authed, marketStore)                                 // B32.50
 		mountTaxProfileRoutes(authed, taxProfiles)                                      // B32.38
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
+		mountMarketReceiptRoutes(authed, marketStore)                                   // B32.40
 		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5
 			marketPayoutURLs{refresh: cfg.MarketPayoutRefreshURL, ret: cfg.MarketPayoutReturnURL})
 		roomStore := rooms.NewStore(pool, cfg.LineageMaxShareBPS) // B32.28
