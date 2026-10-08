@@ -88,14 +88,46 @@ func newScreeningDecideHandler(cases screeningCases, release bool) http.Handler 
 	})
 }
 
+// operatorAlerter delivers an alert to the operator: *modelwatch.WebhookNotifier, at LENS_OPERATOR_ALERT_WEBHOOK_URL.
+type operatorAlerter interface {
+	NotifyAs(ctx context.Context, kind, source, subject, body string) error
+}
+
+// sanctionsListAlert alerts the operator when a sanctions list does not download: at once, again when what failed
+// changes, and otherwise once a day while it keeps failing (a failed list is retried each hour).
+type sanctionsListAlert struct {
+	sink    operatorAlerter // nil when no sink is configured: the failure is only logged
+	lastMsg string
+	lastAt  time.Time
+}
+
+func (a *sanctionsListAlert) failed(ctx context.Context, err error, now time.Time) {
+	slog.Error("screening: a sanctions list did not download; the copy already loaded stays in force", "err", err)
+	msg := err.Error()
+	if msg == a.lastMsg && now.Sub(a.lastAt) < 24*time.Hour {
+		return
+	}
+	if a.sink == nil {
+		slog.Error("screening: no operator alert sink is configured (LENS_OPERATOR_ALERT_WEBHOOK_URL and LENS_OPERATOR_ALERT_WEBHOOK_SECRET); nobody is told the sanctions list is stale")
+		return
+	}
+	if nerr := a.sink.NotifyAs(ctx, "sanctions_list_stale", "lens/internal/screening",
+		"A sanctions list did not download",
+		"Payments are still screened, against the copy already loaded. "+msg+". See GET /v1/admin/screening."); nerr != nil {
+		slog.Error("screening: the operator alert did not send", "err", nerr)
+		return
+	}
+	a.lastMsg, a.lastAt = msg, now
+}
+
 // refreshSanctionsLists keeps the sanctions lists current: each is downloaded once a day, and a failed download keeps
-// the copy in force and is logged as an error, and shown stale at GET /v1/admin/screening, until one succeeds.
-func refreshSanctionsLists(ctx context.Context, store *screening.Store) {
+// the copy in force, alerts the operator, and is shown stale at GET /v1/admin/screening until one succeeds.
+func refreshSanctionsLists(ctx context.Context, store *screening.Store, alert *sanctionsListAlert) {
 	t := time.NewTicker(10 * time.Minute)
 	defer t.Stop()
 	for {
 		if err := store.RefreshDue(ctx); err != nil {
-			slog.Error("screening: a sanctions list did not download; the copy already loaded stays in force", "err", err)
+			alert.failed(ctx, err, time.Now())
 		}
 		select {
 		case <-ctx.Done():

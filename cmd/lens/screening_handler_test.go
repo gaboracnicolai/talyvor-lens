@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -93,5 +95,38 @@ func TestScreeningHandlers_TheOperatorSeesTheListsAndDecidesAHeldCase(t *testing
 	}
 	if len(f.decided) != 1 {
 		t.Fatalf("decided %v", f.decided)
+	}
+}
+
+type fakeAlerter struct{ sent []string }
+
+func (f *fakeAlerter) NotifyAs(_ context.Context, kind, _, _, body string) error {
+	f.sent = append(f.sent, kind+": "+body)
+	return nil
+}
+
+// A sanctions list that does not download alerts the operator at once, not again each hour while the same failure
+// lasts, again a day later, and again at once when what failed changes.
+func TestSanctionsListFailureAlertsTheOperator(t *testing.T) {
+	sink := &fakeAlerter{}
+	a := &sanctionsListAlert{sink: sink}
+	start := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
+	uk := errors.New("UK: download: HTTP 503")
+
+	a.failed(context.Background(), uk, start)
+	if len(sink.sent) != 1 || !strings.HasPrefix(sink.sent[0], "sanctions_list_stale: ") || !strings.Contains(sink.sent[0], "UK: download: HTTP 503") {
+		t.Fatalf("the first failure must alert, naming the list: %q", sink.sent)
+	}
+	a.failed(context.Background(), uk, start.Add(time.Hour))
+	if len(sink.sent) != 1 {
+		t.Fatalf("the same failure an hour later must not alert again: %d alerts", len(sink.sent))
+	}
+	a.failed(context.Background(), uk, start.Add(25*time.Hour))
+	if len(sink.sent) != 2 {
+		t.Fatalf("a failure lasting a day must alert again: %d alerts", len(sink.sent))
+	}
+	a.failed(context.Background(), errors.New("OFAC: it is not the list"), start.Add(26*time.Hour))
+	if len(sink.sent) != 3 {
+		t.Fatalf("a different failure must alert at once: %d alerts", len(sink.sent))
 	}
 }

@@ -1892,8 +1892,14 @@ func run() error {
 	partnerRegistry.UseScreeningList(screeningLists)
 	screener := screening.NewScreener(pool, partnerRegistry)
 	dualToken.SetScreener(screener)
+	sanctionsAlert := &sanctionsListAlert{}
+	if sink, err := modelwatch.NewWebhookNotifier(cfg.OperatorAlertWebhookURL, cfg.OperatorAlertWebhookSecret); err != nil {
+		slog.Error("screening: LENS_OPERATOR_ALERT_WEBHOOK_URL is invalid; a sanctions list that does not download is only logged", slog.String("err", err.Error()))
+	} else if sink != nil {
+		sanctionsAlert.sink = sink
+	}
 	go haComps.leader.Run(ctx, "sanctions-lists", 30*time.Second, func(lctx context.Context) {
-		refreshSanctionsLists(lctx, screeningLists)
+		refreshSanctionsLists(lctx, screeningLists, sanctionsAlert)
 	})
 	taxProfiles := taxprofile.NewStore(pool, partnerRegistry)
 	if cfg.BillingEnabled {
