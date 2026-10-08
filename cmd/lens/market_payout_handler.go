@@ -19,6 +19,9 @@ import (
 //	POST /v1/workspaces/{wsID}/marketplace/payouts/connect  {country, email}  a link to Stripe's onboarding (creating the
 //	                                                       account, with email — the signed-in person's — as its contact)
 //	POST /v1/workspaces/{wsID}/marketplace/payouts/credits  take the available balance as Talyvor credits, 1:1
+//	GET  /v1/workspaces/{wsID}/marketplace/statements       the weeks the seller was paid in (B32.42); ?period=2026-W41
+//	                                                       that week's statement: sales, Talyvor's fee, royalties paid
+//	                                                       and received, refunds, credits, Stripe's fees and the net
 //
 // connectFor is the Connect client a workspace's seller account is made and paid with — a test workspace's in
 // Stripe test mode (B25.6). nil (billing is off, or no test-mode key for a test workspace): the seller cannot
@@ -90,12 +93,33 @@ func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connectFor conne
 			writeJSONOK(w, http.StatusCreated, p)
 		}
 	}))
+	r.Get("/v1/workspaces/{wsID}/marketplace/statements", func(w http.ResponseWriter, req *http.Request) {
+		wsID, period := chi.URLParam(req, "wsID"), req.URL.Query().Get("period")
+		if period == "" {
+			list, err := store.SellerStatements(req.Context(), wsID)
+			if err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]any{"statements": list})
+			return
+		}
+		st, err := store.SellerStatement(req.Context(), wsID, period)
+		switch {
+		case errors.Is(err, market.ErrInvalid):
+			writeJSONErr(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSONOK(w, http.StatusOK, st)
+		}
+	})
 }
 
-// payMarketSellers is the monthly payout run, asked every hour: a seller is paid at most once a month, as
-// soon as their available balance reaches the minimum, and a transfer Stripe did not accept is retried. A
-// test seller is paid in Stripe test mode (B25.6).
-func payMarketSellers(ctx context.Context, store *market.Store, kinds stripeByKind) {
+// payMarketSellers is the weekly payout run (B32.42), asked every hour: on payday (LENS_MARKET_PAYOUT_WEEKDAY, UTC)
+// a seller is paid once their available balance has reached the minimum, at most once a week; every hour a transfer
+// Stripe did not accept is retried. A test seller is paid in Stripe test mode (B25.6).
+func payMarketSellers(ctx context.Context, store *market.Store, kinds stripeByKind, payday time.Weekday) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
@@ -103,7 +127,8 @@ func payMarketSellers(ctx context.Context, store *market.Store, kinds stripeByKi
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if n, err := kinds.payOut(ctx, store, time.Now()); err != nil {
+			now := time.Now()
+			if n, err := kinds.payOut(ctx, store, now, now.UTC().Weekday() == payday); err != nil {
 				slog.Warn("market: paying sellers", "paid", n, "err", err)
 			} else if n > 0 {
 				slog.Info("market: paid sellers", "paid", n)

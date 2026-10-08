@@ -1010,6 +1010,9 @@ type Config struct {
 	// SellerTaxReminderDays is the days between the requests to a seller with earnings for incomplete tax details
 	// (B32.41). Env: LENS_SELLER_TAX_REMINDER_DAYS, default 30 — a proposal for Nicolai.
 	SellerTaxReminderDays int
+	// MarketPayoutWeekday is the day of the week, UTC, sellers are paid on (B32.42). Env: LENS_MARKET_PAYOUT_WEEKDAY,
+	// MON to SUN, default MON.
+	MarketPayoutWeekday time.Weekday
 	// RoomMessagesPerMinute is how many messages one member posts in one room in a minute (B32.30). Env:
 	// LENS_ROOM_MESSAGES_PER_MINUTE, default 20 — a proposal for Nicolai.
 	RoomMessagesPerMinute int
@@ -2219,6 +2222,16 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_SELLER_TAX_REMINDER_DAYS must be a positive integer, got %q", v)
 		}
 		c.SellerTaxReminderDays = n
+	}
+	// B32.42 — the day of the week sellers are paid on. A malformed value is refused.
+	c.MarketPayoutWeekday = time.Monday
+	if v := os.Getenv("LENS_MARKET_PAYOUT_WEEKDAY"); v != "" {
+		d, ok := map[string]time.Weekday{"MON": time.Monday, "TUE": time.Tuesday, "WED": time.Wednesday, "THU": time.Thursday,
+			"FRI": time.Friday, "SAT": time.Saturday, "SUN": time.Sunday}[strings.ToUpper(strings.TrimSpace(v))]
+		if !ok {
+			return nil, fmt.Errorf("config: LENS_MARKET_PAYOUT_WEEKDAY must be MON, TUE, WED, THU, FRI, SAT or SUN, got %q", v)
+		}
+		c.MarketPayoutWeekday = d
 	}
 	// B32.30 — a member's messages a minute in a room. A malformed value is refused.
 	c.RoomMessagesPerMinute = 20

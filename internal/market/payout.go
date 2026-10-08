@@ -19,9 +19,11 @@ import (
 //   - A seller connects a Stripe Express account through Stripe's onboarding link; Stripe collects their
 //     identity, bank and tax details, and Lens records what Stripe says of the account (market_sellers).
 //   - A seller's AVAILABLE balance is every share they earned whose 14-day holdback has passed and that no
-//     refund reversed, less every payout. Once a month, a connected seller whose available balance has
+//     refund reversed, less every payout. Once a week (B32.42), a connected seller whose available balance has
 //     reached US$25 is paid it: one market_payouts row, then one Stripe transfer of it less Stripe's fees
-//     at cost — $2 for an account paid in a month, and 0.25% + $0.25 for the payout — every fee shown.
+//     at cost — $2 on the seller's first payout of a calendar month, and 0.25% + $0.25 on every payout — every
+//     fee shown. A seller under US$25 is carried to the next week. Each payout has a statement of its week
+//     (statement.go).
 //   - A seller may instead take their available balance as Talyvor credits, 1:1, at any time: one
 //     market_payouts row and one lxc_ledger row, committed together.
 //   - A buyer's refund or chargeback reverses the earnings of the uses it paid for (a market_refunds row
@@ -37,7 +39,8 @@ import (
 const (
 	// PayoutMinimumUSDMicros: a seller is paid in money once their available balance reaches US$25.
 	PayoutMinimumUSDMicros = 25_000_000
-	// Stripe's Connect fees, deducted at cost: $2 per account paid in a month, and 0.25% + $0.25 per payout.
+	// Stripe's Connect fees, deducted at cost: $2 per account paid in a month — on its first payout of the month —
+	// and 0.25% + $0.25 per payout.
 	stripeAccountFeeCents   = 200
 	stripePayoutFixedCents  = 25
 	stripePayoutBasisPoints = 25
@@ -77,15 +80,19 @@ type Crediter interface {
 	CreditLXCTx(ctx context.Context, tx pgx.Tx, workspaceID string, lxcAmount int64, reason string, metadata map[string]interface{}) (int64, error)
 }
 
-// PayoutFees splits a payout of grossCents into Stripe's fees and what the seller receives. The payout fee
-// is 0.25% of what is paid out plus $0.25, so net is solved for: net + 0.25%·net = gross − $2 − $0.25,
-// rounded down to the cent (the fee carries the fraction).
-func PayoutFees(grossCents int64) (accountFeeCents, payoutFeeCents, netCents int64) {
-	netCents = (grossCents - stripeAccountFeeCents - stripePayoutFixedCents) * 10_000 / (10_000 + stripePayoutBasisPoints)
+// PayoutFees splits a payout of grossCents into Stripe's fees and what the seller receives. The account fee,
+// $2, is taken on the seller's first payout of a calendar month (firstOfMonth) only. The payout fee is 0.25% of
+// what is paid out plus $0.25, so net is solved for: net + 0.25%·net = gross − account fee − $0.25, rounded
+// down to the cent (the fee carries the fraction).
+func PayoutFees(grossCents int64, firstOfMonth bool) (accountFeeCents, payoutFeeCents, netCents int64) {
+	if firstOfMonth {
+		accountFeeCents = stripeAccountFeeCents
+	}
+	netCents = (grossCents - accountFeeCents - stripePayoutFixedCents) * 10_000 / (10_000 + stripePayoutBasisPoints)
 	if netCents < 0 {
 		netCents = 0
 	}
-	return stripeAccountFeeCents, grossCents - stripeAccountFeeCents - netCents, netCents
+	return accountFeeCents, grossCents - accountFeeCents - netCents, netCents
 }
 
 // Payout is one market_payouts row.
@@ -93,6 +100,7 @@ type Payout struct {
 	ID                  string     `json:"id"`
 	Method              string     `json:"method"`
 	Month               string     `json:"month"`
+	Period              string     `json:"period"` // the ISO week it was made in, such as 2026-W41 (B32.42)
 	GrossUSDMicros      int64      `json:"gross_usd_micros"`
 	AccountFeeUSDMicros int64      `json:"account_fee_usd_micros"`
 	PayoutFeeUSDMicros  int64      `json:"payout_fee_usd_micros"`
@@ -120,8 +128,9 @@ type Payouts struct {
 	OwedUSDMicros       int64                   `json:"owed_usd_micros"` // reversed after being paid: recovered from future earnings
 	PaidOutUSDMicros    int64                   `json:"paid_out_usd_micros"`
 	MinimumUSDMicros    int64                   `json:"minimum_usd_micros"`
-	PaidThisMonth       bool                    `json:"paid_this_month"`
-	Quote               PayoutQuote             `json:"quote"` // a money payout of the available balance
+	PaidThisMonth       bool                    `json:"paid_this_month"` // Stripe's account fee is already taken this month
+	PaidThisWeek        bool                    `json:"paid_this_week"`  // the seller is next paid next week (B32.42)
+	Quote               PayoutQuote             `json:"quote"`           // a money payout of the available balance
 	Payouts             []Payout                `json:"payouts"`
 }
 
@@ -179,6 +188,12 @@ func lockSeller(ctx context.Context, tx pgx.Tx, workspaceID string) error {
 }
 
 func monthOf(t time.Time) string { return t.UTC().Format("2006-01") }
+
+// weekOf is t's ISO week, UTC, such as 2026-W41: the period of a payout made at t (B32.42).
+func weekOf(t time.Time) string {
+	y, w := t.UTC().ISOWeek()
+	return fmt.Sprintf("%04d-W%02d", y, w)
+}
 
 // ConnectSeller gives the seller a link to Stripe's onboarding for their connected account, creating the
 // account the first time. country (ISO 3166-1 alpha-2, "" for the platform's) is fixed once it exists.
@@ -292,15 +307,17 @@ func (s *Store) SellerPayouts(ctx context.Context, api ConnectStripe, workspaceI
 	}
 	p.InHoldbackUSDMicros, p.PaidOutUSDMicros = inHoldback, paid
 	p.AvailableUSDMicros, p.OwedUSDMicros = max(released-paid, 0), max(paid-released, 0)
-	gross := p.AvailableUSDMicros / usdMicrosPerCent
-	if accountFee, payoutFee, net := PayoutFees(gross); net > 0 {
-		p.Quote = PayoutQuote{gross * usdMicrosPerCent, accountFee * usdMicrosPerCent, payoutFee * usdMicrosPerCent, net * usdMicrosPerCent}
-	}
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND month = $2)`,
-		workspaceID, monthOf(now)).Scan(&p.PaidThisMonth); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT
+		EXISTS (SELECT 1 FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND month = $2),
+		EXISTS (SELECT 1 FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND period = $3)`,
+		workspaceID, monthOf(now), weekOf(now)).Scan(&p.PaidThisMonth, &p.PaidThisWeek); err != nil {
 		return p, fmt.Errorf("market: payouts: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, method, month, gross_usd_micros, account_fee_usd_micros, payout_fee_usd_micros, net_usd_micros,
+	gross := p.AvailableUSDMicros / usdMicrosPerCent
+	if accountFee, payoutFee, net := PayoutFees(gross, !p.PaidThisMonth); net > 0 {
+		p.Quote = PayoutQuote{gross * usdMicrosPerCent, accountFee * usdMicrosPerCent, payoutFee * usdMicrosPerCent, net * usdMicrosPerCent}
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, method, month, period, gross_usd_micros, account_fee_usd_micros, payout_fee_usd_micros, net_usd_micros,
 		       credits_ulxc, COALESCE(stripe_transfer_id, ''), paid_at, last_error, created_at
 		FROM market_payouts WHERE workspace_id = $1 ORDER BY created_at DESC, id LIMIT 100`, workspaceID)
 	if err != nil {
@@ -308,7 +325,7 @@ func (s *Store) SellerPayouts(ctx context.Context, api ConnectStripe, workspaceI
 	}
 	p.Payouts, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Payout, error) {
 		var x Payout
-		return x, row.Scan(&x.ID, &x.Method, &x.Month, &x.GrossUSDMicros, &x.AccountFeeUSDMicros, &x.PayoutFeeUSDMicros, &x.NetUSDMicros,
+		return x, row.Scan(&x.ID, &x.Method, &x.Month, &x.Period, &x.GrossUSDMicros, &x.AccountFeeUSDMicros, &x.PayoutFeeUSDMicros, &x.NetUSDMicros,
 			&x.CreditsULXC, &x.StripeTransferID, &x.PaidAt, &x.LastError, &x.CreatedAt)
 	})
 	if err != nil {
@@ -344,12 +361,12 @@ func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceI
 		if err != nil {
 			return err
 		}
-		p = Payout{ID: "mpo_" + uuid.NewString(), Method: PayoutCredits, Month: monthOf(now), GrossUSDMicros: gross, NetUSDMicros: gross,
+		p = Payout{ID: "mpo_" + uuid.NewString(), Method: PayoutCredits, Month: monthOf(now), Period: weekOf(now), GrossUSDMicros: gross, NetUSDMicros: gross,
 			CreditsULXC: gross * ulxcPerUSDMicro}
 		var test bool
-		if err := tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, gross_usd_micros, net_usd_micros, credits_ulxc, paid_at, created_at)
-			VALUES ($1, $2, 'credits', $3, $4, $4, $5, $6, $6) RETURNING paid_at, created_at, test`,
-			p.ID, workspaceID, p.Month, gross, p.CreditsULXC, now).Scan(&p.PaidAt, &p.CreatedAt, &test); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, period, gross_usd_micros, net_usd_micros, credits_ulxc, paid_at, created_at)
+			VALUES ($1, $2, 'credits', $3, $4, $5, $5, $6, $7, $7) RETURNING paid_at, created_at, test`,
+			p.ID, workspaceID, p.Month, p.Period, gross, p.CreditsULXC, now).Scan(&p.PaidAt, &p.CreatedAt, &test); err != nil {
 			return err
 		}
 		// B22.1: credits taken from test earnings are test-funded credits — all of them, for a test workspace (B25.1).
@@ -382,9 +399,11 @@ func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceI
 	return p, err
 }
 
-// PayOut is the monthly payout run: it pays every connected seller not yet paid in money this month whose
-// available balance has reached the minimum, whose account Stripe — asked now — has enabled for payouts, and
-// who is not withheld for their tax details (B32.41), and it retries every transfer Stripe has not yet accepted. It answers how many transfers Stripe
+// PayOut is the weekly payout run (B32.42), made on the payout weekday: it releases every earning past its holdback
+// onto the journal, so that each payout's statement shows what it paid; then it pays every connected seller not yet
+// paid in money this ISO week whose available balance has reached the minimum, whose account Stripe — asked now — has
+// enabled for payouts, and who is not withheld for their tax details (B32.41); and it retries every transfer Stripe
+// has not yet accepted. A seller under the minimum is carried to the next week. It answers how many transfers Stripe
 // accepted.
 func (s *Store) PayOut(ctx context.Context, api ConnectStripe, now time.Time) (int, error) {
 	return s.payOut(ctx, api, now, nil)
@@ -397,11 +416,20 @@ func (s *Store) PayOutSellers(ctx context.Context, api ConnectStripe, test bool,
 	return s.payOut(ctx, api, now, &test)
 }
 
+// RetryPayouts asks Stripe again for every transfer of one kind of seller's payouts it has not yet accepted: what the
+// payout run does on the days between its weekdays.
+func (s *Store) RetryPayouts(ctx context.Context, api ConnectStripe, test bool) (int, error) {
+	return s.transferUnpaid(ctx, api, &test)
+}
+
 func (s *Store) payOut(ctx context.Context, api ConnectStripe, now time.Time, test *bool) (int, error) {
+	if _, err := s.ReleaseDue(ctx, now); err != nil {
+		return 0, err
+	}
 	q, args := `SELECT workspace_id, stripe_account_id FROM market_sellers s
-		WHERE NOT EXISTS (SELECT 1 FROM market_payouts p WHERE p.workspace_id = s.workspace_id AND p.method = 'stripe' AND p.month = $1)
+		WHERE NOT EXISTS (SELECT 1 FROM market_payouts p WHERE p.workspace_id = s.workspace_id AND p.method = 'stripe' AND p.period = $1)
 		  AND NOT `+taxHeldSQL,
-		[]any{monthOf(now)}
+		[]any{weekOf(now)}
 	if test != nil {
 		q, args = q+` AND COALESCE((SELECT synthetic FROM workspaces w WHERE w.id = s.workspace_id), false) = $2`, append(args, *test)
 	}
@@ -460,18 +488,25 @@ func (s *Store) payOut(ctx context.Context, api ConnectStripe, now time.Time, te
 			if due < PayoutMinimumUSDMicros {
 				return nil
 			}
+			// Stripe's account fee is taken on the seller's first payout of the calendar month only.
+			var paidThisMonth bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM market_payouts WHERE workspace_id = $1 AND method = 'stripe' AND month = $2)`,
+				x.ws, monthOf(now)).Scan(&paidThisMonth); err != nil {
+				return err
+			}
 			gross := due / usdMicrosPerCent
-			accountFee, payoutFee, net := PayoutFees(gross)
+			accountFee, payoutFee, net := PayoutFees(gross, !paidThisMonth)
 			id := "mpo_" + uuid.NewString()
 			var test bool
-			err = tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, gross_usd_micros, account_fee_usd_micros, payout_fee_usd_micros,
-				net_usd_micros, stripe_account_id, created_at, livemode)
-				VALUES ($1, $2, 'stripe', $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (workspace_id, month) WHERE method = 'stripe' DO NOTHING
+			err = tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, period, gross_usd_micros, account_fee_usd_micros,
+				payout_fee_usd_micros, net_usd_micros, stripe_account_id, created_at, livemode)
+				VALUES ($1, $2, 'stripe', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				ON CONFLICT (workspace_id, period) WHERE method = 'stripe' AND period <> '' DO NOTHING
 				RETURNING test`,
-				id, x.ws, monthOf(now), gross*usdMicrosPerCent, accountFee*usdMicrosPerCent, payoutFee*usdMicrosPerCent,
+				id, x.ws, monthOf(now), weekOf(now), gross*usdMicrosPerCent, accountFee*usdMicrosPerCent, payoutFee*usdMicrosPerCent,
 				net*usdMicrosPerCent, x.account, now, live).Scan(&test)
 			if errors.Is(err, pgx.ErrNoRows) {
-				return nil // paid this month already
+				return nil // paid this week already
 			}
 			if err != nil {
 				return err
