@@ -53,8 +53,8 @@ const (
 // twice more. The last of them starts the payout hold.
 const Requests = 3
 
-// DefaultReminderEvery is the time between the requests: LENS_SELLER_TAX_REMINDER_DAYS, default 30 — a proposal.
-const DefaultReminderEvery = 30 * 24 * time.Hour
+// defaultReminderEvery is the time between the requests: LENS_SELLER_TAX_REMINDER_DAYS, default 30 — a proposal.
+const defaultReminderEvery = 30 * 24 * time.Hour
 
 // HoldReason is what a withheld seller is told.
 const HoldReason = "Your payouts are on hold until your tax details are complete. Your earnings keep clearing and are paid at the next payout after you complete them."
@@ -136,7 +136,7 @@ type Store struct {
 // NewStore is the details in pool. A nil ring is a Lens with no custody: nothing is stored, no seller is asked for
 // details they could not give, and none is held.
 func NewStore(pool *pgxpool.Pool, ring *envelope.Keyring, taxes Taxes) *Store {
-	return &Store{pool: pool, ring: ring, taxes: taxes, every: DefaultReminderEvery, now: time.Now}
+	return &Store{pool: pool, ring: ring, taxes: taxes, every: defaultReminderEvery, now: time.Now}
 }
 
 // SetReminderEvery is the time between the requests to a seller.
