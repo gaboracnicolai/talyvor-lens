@@ -310,21 +310,30 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry, screener PaymentS
 	return e, nil
 }
 
-// screenOutside screens e when it moves money through a partner account: money in from its counterparty when the
-// partner postings take money out of the partner account, money out to it when they put money in. Each currency
-// through a partner is screened as its own payment, all under the entry's idempotency key.
+// screenOutside screens e when it moves money through a partner account: money out to its counterparty for what the
+// partner postings put into partner accounts, money in from it for what they take out. Each currency and direction
+// is screened as its own payment, under the entry's idempotency key — an entry whose partner postings net to zero is
+// screened both ways.
 func screenOutside(ctx context.Context, e MoneyEntry, postings []MoneyPosting, partner func(string) bool, screener PaymentScreener) error {
-	through := map[string]int64{}
-	var currencies []string
-	for _, p := range postings {
-		if partner(p.AccountID) {
-			if _, ok := through[p.Currency]; !ok {
-				currencies = append(currencies, p.Currency)
-			}
-			through[p.Currency] += p.AmountMinor
-		}
+	type leg struct {
+		currency, direction string
 	}
-	if len(currencies) == 0 {
+	through := map[leg]int64{}
+	var legs []leg
+	for _, p := range postings {
+		if !partner(p.AccountID) {
+			continue
+		}
+		l, amount := leg{p.Currency, "out"}, p.AmountMinor
+		if amount < 0 {
+			l, amount = leg{p.Currency, "in"}, -amount
+		}
+		if _, ok := through[l]; !ok {
+			legs = append(legs, l)
+		}
+		through[l] += amount
+	}
+	if len(legs) == 0 {
 		return nil
 	}
 	switch {
@@ -333,16 +342,9 @@ func screenOutside(ctx context.Context, e MoneyEntry, postings []MoneyPosting, p
 	case screener == nil:
 		return fmt.Errorf("%w: no screener is set, so no money moves in or out through a partner", partners.ErrScreeningUnavailable)
 	}
-	for _, ccy := range currencies {
-		amount, direction := through[ccy], "out"
-		if amount < 0 {
-			amount, direction = -amount, "in"
-		}
-		if amount == 0 {
-			continue
-		}
+	for _, l := range legs {
 		if err := screener.ScreenPayment(ctx, screening.Payment{WorkspaceID: e.WorkspaceID, ID: e.IdempotencyKey, Capability: e.Capability,
-			Direction: direction, Counterparty: e.Counterparty, AmountMinor: amount, Currency: ccy, Funding: e.Funding}); err != nil {
+			Direction: l.direction, Counterparty: e.Counterparty, AmountMinor: through[l], Currency: l.currency, Funding: e.Funding}); err != nil {
 			return err
 		}
 	}

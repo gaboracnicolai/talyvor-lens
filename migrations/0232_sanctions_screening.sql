@@ -6,8 +6,9 @@
 -- are replaced in one transaction, so a screening never sees half a list.
 --
 -- compliance_cases is each match a screening found: an exact one is blocked, a close one is held until an operator
--- releases or refuses it. One case per subject and name, so a retried payment reads its case rather than opening
--- another. B30.7 and B30.8 add their own kinds of case to the same table.
+-- releases or refuses it. One case per subject, name, direction and currency, so a retried payment reads its case
+-- rather than opening another; a release counts only for the amount, funding and capability it was decided on.
+-- B30.7 and B30.8 add their own kinds of case to the same table.
 
 CREATE TABLE IF NOT EXISTS screening_lists (
     list         TEXT PRIMARY KEY CHECK (list <> ''),
@@ -52,7 +53,7 @@ CREATE TABLE IF NOT EXISTS compliance_cases (
     decided_by    TEXT NOT NULL DEFAULT '',
     decided_at    TIMESTAMPTZ,
     decision_note TEXT NOT NULL DEFAULT '',
-    UNIQUE (workspace_id, subject_kind, subject_id, name)
+    UNIQUE (workspace_id, subject_kind, subject_id, name, direction, currency)
 );
 CREATE INDEX IF NOT EXISTS idx_compliance_cases_status ON compliance_cases (status, opened_at DESC);
 

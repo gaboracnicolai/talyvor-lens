@@ -36,13 +36,17 @@ var (
 	ErrHeld = errors.New("screening: held — the name is close to one on a sanctions list, and waits for an operator to release it")
 	// ErrRefused: a close match an operator refused.
 	ErrRefused = errors.New("screening: refused — an operator found the name is the one on the sanctions list")
+	// ErrNotWhatWasReleased: a payment retried under a released case's id, but not the payment the operator released.
+	ErrNotWhatWasReleased = errors.New("screening: refused — the operator released a different payment under this id; " +
+		"a new payment needs a new idempotency key, and is screened again")
 	// ErrCaseNotFound: no compliance case by that id.
 	ErrCaseNotFound = errors.New("screening: no such compliance case")
 	// ErrCaseDecided: a case that is not held is not released or refused.
 	ErrCaseDecided = errors.New("screening: only a held case is released or refused")
 )
 
-// Refusal is a screening that stops the money: the case that says why. It is ErrBlocked, ErrHeld or ErrRefused.
+// Refusal is a screening that stops the money: the case that says why. It is ErrBlocked, ErrHeld, ErrRefused or
+// ErrNotWhatWasReleased.
 type Refusal struct {
 	Case Case
 	err  error
@@ -158,11 +162,13 @@ func (s *Screener) screen(ctx context.Context, c Case, ask func(partners.Screeni
 		return fmt.Errorf("screening: a %s is screened by name, and this one has none", c.SubjectKind)
 	}
 	// A subject already screened under this name reads its case: a held one stays held until it is decided, and a
-	// released one moves.
-	prior, err := scanCase(s.pool.QueryRow(ctx, `SELECT `+caseCols+` FROM compliance_cases
-		WHERE workspace_id = $1 AND subject_kind = $2 AND subject_id = $3 AND name = $4`, c.WorkspaceID, c.SubjectKind, c.SubjectID, c.Name))
+	// released one moves — when it is the very payment the operator released.
+	prior, err := s.caseFor(ctx, c)
 	switch {
 	case err == nil:
+		if prior.Status == CaseReleased && !sameMoney(prior, c) {
+			return &Refusal{Case: prior, err: ErrNotWhatWasReleased}
+		}
 		return refusalFor(prior)
 	case !errors.Is(err, pgx.ErrNoRows):
 		return fmt.Errorf("%w: %v", partners.ErrScreeningUnavailable, err)
@@ -198,21 +204,32 @@ func (s *Screener) screen(ctx context.Context, c Case, ask func(partners.Screeni
 			INSERT INTO compliance_cases (id, workspace_id, kind, subject_kind, subject_id, name, outcome, status, matches, provider,
 				capability, direction, amount_minor, currency, funding)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-			ON CONFLICT (workspace_id, subject_kind, subject_id, name) DO NOTHING RETURNING `+caseCols+`)
+			ON CONFLICT (workspace_id, subject_kind, subject_id, name, direction, currency) DO NOTHING RETURNING `+caseCols+`)
 		SELECT `+caseCols+` FROM ins
 		UNION ALL
 		SELECT `+caseCols+` FROM compliance_cases WHERE workspace_id = $2 AND subject_kind = $4 AND subject_id = $5 AND name = $6
-			AND NOT EXISTS (SELECT 1 FROM ins)`,
+			AND direction = $12 AND currency = $14 AND NOT EXISTS (SELECT 1 FROM ins)`,
 		c.ID, c.WorkspaceID, c.Kind, c.SubjectKind, c.SubjectID, c.Name, c.Outcome, c.Status, matches, c.Provider,
 		c.Capability, c.Direction, c.AmountMinor, c.Currency, c.Funding))
 	if errors.Is(err, pgx.ErrNoRows) { // the other attempt committed after this statement's snapshot
-		opened, err = scanCase(s.pool.QueryRow(ctx, `SELECT `+caseCols+` FROM compliance_cases
-			WHERE workspace_id = $1 AND subject_kind = $2 AND subject_id = $3 AND name = $4`, c.WorkspaceID, c.SubjectKind, c.SubjectID, c.Name))
+		opened, err = s.caseFor(ctx, c)
 	}
 	if err != nil {
 		return fmt.Errorf("%w: open the compliance case: %v", partners.ErrScreeningUnavailable, err)
 	}
 	return refusalFor(opened)
+}
+
+// caseFor is the case already open for c's subject, name, direction and currency.
+func (s *Screener) caseFor(ctx context.Context, c Case) (Case, error) {
+	return scanCase(s.pool.QueryRow(ctx, `SELECT `+caseCols+` FROM compliance_cases WHERE workspace_id = $1 AND subject_kind = $2
+		AND subject_id = $3 AND name = $4 AND direction = $5 AND currency = $6`, c.WorkspaceID, c.SubjectKind, c.SubjectID, c.Name, c.Direction, c.Currency))
+}
+
+// sameMoney says whether a and b move the same money: the amount, funding and capability a release was decided on.
+func sameMoney(a, b Case) bool {
+	sameAmount := a.AmountMinor == nil && b.AmountMinor == nil || a.AmountMinor != nil && b.AmountMinor != nil && *a.AmountMinor == *b.AmountMinor
+	return sameAmount && a.Funding == b.Funding && a.Capability == b.Capability
 }
 
 func refusalFor(c Case) error {

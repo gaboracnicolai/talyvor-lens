@@ -292,13 +292,22 @@ func TestPayment_ToAListedPayeeIsRefusedBeforeAnyPostingAndACaseExists(t *testin
 	// Tried again it is refused again, on the same case.
 	c2 := refusal(t, func() error { _, err := p.payOut("pay-bnc", "Banco Nacional de Cuba", 12_000); return err }(), screening.ErrBlocked)
 	var cases int
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM compliance_cases WHERE workspace_id = $1`, p.ws).Scan(&cases); err != nil || cases != 1 || c2.ID != c.ID {
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM compliance_cases WHERE workspace_id = $1 AND subject_id = 'pay-bnc'`, p.ws).Scan(&cases); err != nil || cases != 1 || c2.ID != c.ID {
 		t.Fatalf("%d cases after a retry (%s, %s), %v", cases, c.ID, c2.ID, err)
 	}
-	// A payment through no partner, and a payment through one that names nobody, are not this.
+	// An outside payment names who it is to; and money out through one partner and in through another, netting to
+	// nothing, is screened both ways.
 	if _, err := p.payOut("pay-nobody", "", 1_000); err == nil || !strings.Contains(err.Error(), "counterparty") {
 		t.Fatalf("an outside payment naming nobody: %v", err)
 	}
+	other, err := p.money.OpenMoneyAccount(ctx, economy.MoneyAccount{WorkspaceID: p.ws, Currency: economy.CurrencyGBP, Purpose: economy.MoneyPartner, Name: "other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.money.PostMoney(ctx, economy.MoneyEntry{WorkspaceID: p.ws, Capability: economy.CapabilityPaymentsOut, Kind: "payment_out",
+		IdempotencyKey: "pay-netted", Funding: economy.FundingTest, Counterparty: "Banco Nacional de Cuba", Postings: []economy.MoneyPosting{
+			{AccountID: p.partner, AmountMinor: 3_000}, {AccountID: other.ID, AmountMinor: -3_000}}})
+	refusal(t, err, screening.ErrBlocked)
 }
 
 func TestPayment_ACloseMatchIsHeldUntilAnOperatorDecides(t *testing.T) {
@@ -314,6 +323,11 @@ func TestPayment_ACloseMatchIsHeldUntilAnOperatorDecides(t *testing.T) {
 	released, err := p.screener.Decide(ctx, c.ID, true, "nicolai", "a different person: date of birth checked")
 	if err != nil || released.Status != screening.CaseReleased || released.DecidedBy != "nicolai" || released.DecidedAt == nil {
 		t.Fatalf("release: %+v, %v", released, err)
+	}
+	// The release is for that payment: the same id carrying more money is not what was released.
+	refusal(t, func() error { _, err := p.payOut("pay-anwari", "Mohamad Taher Anwari", 40_000); return err }(), screening.ErrNotWhatWasReleased)
+	if e, _ := p.posted(t, "pay-anwari"); e != 0 {
+		t.Fatalf("a payment other than the one released wrote %d entries", e)
 	}
 	e, err := p.payOut("pay-anwari", "Mohamad Taher Anwari", 7_500)
 	if err != nil || e.Counterparty != "Mohamad Taher Anwari" {
