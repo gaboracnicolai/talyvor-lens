@@ -299,7 +299,7 @@ func TestB256_ATestUsersBillPayoutsAndCardsStayInStripeTestModeAfterTheLiveSwitc
 	})
 	only("the real seller's Connect account", liveKey, calls, "POST /v2/core/accounts", "POST /v2/core/account_links")
 	calls = fake.during(func() {
-		if n, err := kinds.payOut(ctx, store, now); err != nil || n != 2 {
+		if n, err := kinds.payOut(ctx, store, now, true); err != nil || n != 2 {
 			t.Fatalf("the payout run paid %d, %v; want both sellers", n, err)
 		}
 	})

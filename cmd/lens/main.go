@@ -1895,7 +1895,7 @@ func run() error {
 	})
 	if cfg.BillingEnabled {
 		go haComps.leader.Run(ctx, "market-payouts", 30*time.Second, func(lctx context.Context) {
-			payMarketSellers(lctx, marketStore, stripeKinds)
+			payMarketSellers(lctx, marketStore, stripeKinds, cfg.MarketPayoutWeekday) // B32.42: weekly
 		})
 	}
 	billRoute := newBillingRouter(billingSvc, testBillingSvc, wsManager.GetSynthetic, cfg.StripeSecretKey, cfg.StripeTestSecretKey, cfg.StripeTestWebhookSecret)
