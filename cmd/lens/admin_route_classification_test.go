@@ -47,6 +47,7 @@ var operatorReadable = map[string]string{
 	"/v1/admin/billing/purchases":         "the purchases column of the operator table.",
 	"/v1/admin/marketplace/parked-uses":   "B26.3: billed marketplace uses Stripe refused too often to retry, with its reason — for an operator to see to. market.Store.ParkedUses is Query-only.",
 	"/v1/admin/tax-profiles/flagged":      "B32.38: buyer tax profiles whose Stripe evidence contradicts the declared country, with the reason — for an operator to see to. taxprofile.Store.Flagged is Query-only.",
+	"/v1/admin/screening":                 "B30.6: each sanctions list — entries, when it was loaded, a failed download's reason — and the compliance cases screening opened, for an operator to see to. screening.Store.Lists and Screener.Cases are Query-only.",
 	"/v1/admin/operator-audit":            "B27.28: the operator audit trail, filtered — the Operator screen shows it. operatoraudit.Store.List is Query-only.",
 	"/v1/admin/operator-audit/export":     "B27.28: the same trail as a CSV download. operatoraudit.Store.List is Query-only.",
 	"/v1/admin/pool-royalty/detect":       "self-dealing detection read. Query-only reader, explicitly NOT economy-gated so forensics survive the kill switch.",
@@ -88,6 +89,8 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/rooms/reports":                                    "B32.52: the reported rooms with each report, its reporter's workspace and the reported message's text. requireAdminOrModerator, never the operator read key.",
 	"/v1/admin/rooms/{roomID}/moderate":                          "B32.52: KEEPS, LOCKS, UNLOCKS OR CLOSES A ROOM — a closed room's budget is spent no more — and writes an operator audit row. A write.",
 	"/v1/admin/operator-audit/record":                            "B27.28: appends to the append-only operator audit trail. A write is a write even when it is not money; the web app writes it on its moderator key.",
+	"/v1/admin/screening/cases/{caseID}/release":                 "B30.6: RELEASES A HELD SANCTIONS MATCH — the payment or payee it held may then move money. requireAdmin only.",
+	"/v1/admin/screening/cases/{caseID}/refuse":                  "B30.6: refuses a held sanctions match, so the payment or payee never moves money, and records who decided. requireAdmin only.",
 	"/v1/admin/platform-reports":                                 "B32.44: WRITES THE PLATFORM-REPORTING EXPORT, the sellers' TINs, dates of birth and account numbers in clear, and records the run. requireAdmin only, its list of runs too.",
 
 	// ⚠ MEASURED, AND THE PROVISIONAL CLASSIFICATION WAS WRONG. The W1.3 groundwork report listed

@@ -97,16 +97,22 @@ func (n *WebhookNotifier) Describe() string {
 // synchronous call is what lets a delivery failure be REPORTED rather than dropped, which matters when
 // the whole purpose is that a person finds out.
 func (n *WebhookNotifier) Notify(ctx context.Context, subject, body string) error {
+	return n.NotifyAs(ctx, "catalog_drift", "lens/internal/modelwatch", subject, body)
+}
+
+// NotifyAs delivers one alert as Notify does, for another subsystem: kind and source name it in the payload, so the
+// same operator sink carries alerts that are not catalog drift (B30.6: a sanctions list that did not download).
+func (n *WebhookNotifier) NotifyAs(ctx context.Context, kind, source, subject, body string) error {
 	if n == nil {
 		return fmt.Errorf("no alert sink configured")
 	}
 	payload := operatorAlert{
-		Kind:      "catalog_drift",
+		Kind:      kind,
 		Severity:  "error",
 		Subject:   subject,
 		Body:      body,
 		EmittedAt: time.Now().UTC().Format(time.RFC3339),
-		Source:    "lens/internal/modelwatch",
+		Source:    source,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

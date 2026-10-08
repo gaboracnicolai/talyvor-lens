@@ -149,8 +149,10 @@ func statementAt(lines []string, ln int) string {
 // gateReachable reports whether an authorization decision is reachable from the
 // registration statement, following named references ONE level into package main
 // (a gate wrapper, a handler constructor, or a handler value). via names what it
-// followed, for the failure message and for the census log.
-func gateReachable(stmt string, srcs map[string]string) (via string, ok bool) {
+// followed, for the failure message and for the census log. memo keeps each name's
+// answer for one sweep — the sources do not change within it, and scanning every
+// file for every name at every site took this test 74s under -race (B30.6).
+func gateReachable(stmt string, srcs map[string]string, memo map[string]string) (via string, ok bool) {
 	if strings.Contains(stmt, adminAuthDecisionToken) {
 		return "inline", true
 	}
@@ -161,20 +163,34 @@ func gateReachable(stmt string, srcs map[string]string) (via string, ok bool) {
 			continue
 		}
 		seen[name] = true
-		for file, src := range srcs {
-			if loc := funcDef(name).FindStringIndex(src); loc != nil {
-				if strings.Contains(blockFrom(src, loc[0]), adminAuthDecisionToken) {
-					return "func " + name + " (" + file + ")", true
-				}
-			}
-			if loc := varDef(name).FindStringIndex(src); loc != nil {
-				if strings.Contains(blockFrom(src, loc[0]), adminAuthDecisionToken) {
-					return "value " + name + " (" + file + ")", true
-				}
-			}
+		found, done := memo[name]
+		if !done {
+			found = nameReachesGate(name, srcs)
+			memo[name] = found
+		}
+		if found != "" {
+			return found, true
 		}
 	}
 	return "", false
+}
+
+// nameReachesGate is where name is defined with an authorization decision in its
+// block — "func name (file)" or "value name (file)" — or "" when nowhere.
+func nameReachesGate(name string, srcs map[string]string) string {
+	for file, src := range srcs {
+		if loc := funcDef(name).FindStringIndex(src); loc != nil {
+			if strings.Contains(blockFrom(src, loc[0]), adminAuthDecisionToken) {
+				return "func " + name + " (" + file + ")"
+			}
+		}
+		if loc := varDef(name).FindStringIndex(src); loc != nil {
+			if strings.Contains(blockFrom(src, loc[0]), adminAuthDecisionToken) {
+				return "value " + name + " (" + file + ")"
+			}
+		}
+	}
+	return ""
 }
 
 type adminSite struct {
@@ -186,6 +202,7 @@ type adminSite struct {
 func adminRegistrationSites(t *testing.T) []adminSite {
 	t.Helper()
 	srcs := packageMainSources(t)
+	memo := map[string]string{}
 	var sites []adminSite
 	for file, src := range srcs {
 		lines := strings.Split(src, "\n")
@@ -209,7 +226,7 @@ func adminRegistrationSites(t *testing.T) []adminSite {
 				continue
 			}
 			stmt := statementAt(lines, i+1)
-			via, ok := gateReachable(stmt, srcs)
+			via, ok := gateReachable(stmt, srcs, memo)
 			for _, m := range ms {
 				sites = append(sites, adminSite{file: file, line: i + 1, path: m[1], via: via, gated: ok})
 			}

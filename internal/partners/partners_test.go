@@ -260,6 +260,43 @@ func TestScreeningProvider_ClearHitReviewAndUnavailable(t *testing.T) {
 	}
 }
 
+// fakeList is a sanctions list of fixed matches by name (internal/screening is the real one).
+type fakeList map[string][]ScreeningMatch
+
+func (l fakeList) Match(_ context.Context, name string) ([]ScreeningMatch, error) {
+	if name == "unloaded" {
+		return nil, ErrScreeningUnavailable
+	}
+	return l[name], nil
+}
+
+// B30.6 — with a list, an exact match on a name or a good alias is a hit, a close one or an exact one on a weak alias
+// is held for review, and a list that cannot answer makes the provider unavailable; the test words still work.
+func TestScreeningProvider_ScreensAgainstTheList(t *testing.T) {
+	ctx := context.Background()
+	p := TestScreeningProvider{List: fakeList{
+		"Banco Nacional de Cuba":  {{List: "OFAC", Entry: "306", ScoreBPS: 10_000}},
+		"Banco Nacional de Cubaa": {{List: "OFAC", Entry: "306", ScoreBPS: 9_800}},
+		"Mudir":                   {{List: "UK", Entry: "AFG0009", ScoreBPS: 10_000, Weak: true}},
+	}}
+	for name, want := range map[string]string{"Banco Nacional de Cuba": ScreenHit, "Banco Nacional de Cubaa": ScreenReview, "Mudir": ScreenReview,
+		"Ada Lovelace": ScreenClear, "Ada TESTSANCTION": ScreenHit} {
+		if s := must(p.ScreenName(ctx, NameScreen{Name: name})); s.Outcome != want {
+			t.Fatalf("%s screens %s, want %s", name, s.Outcome, want)
+		}
+	}
+	if _, err := p.ScreenName(ctx, NameScreen{Name: "unloaded"}); !errors.Is(err, ErrScreeningUnavailable) {
+		t.Fatalf("a list that cannot answer: %v", err)
+	}
+	s := must(p.ScreenPayment(ctx, PaymentScreen{ID: "p1", Payee: "Banco Nacional de Cuba", Amount: Money{100, "GBP"}}))
+	if s.Outcome != ScreenHit || len(s.Matches) != 1 {
+		t.Fatalf("a payment to a listed payee, the payer our own: %+v", s)
+	}
+	if _, err := p.ScreenPayment(ctx, PaymentScreen{ID: "p2", Amount: Money{100, "GBP"}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a payment screening naming nobody: %v", err)
+	}
+}
+
 func TestCapitalPartner_SuccessFailureReturnAndPending(t *testing.T) {
 	ctx := context.Background()
 	p := &TestCapitalPartner{}

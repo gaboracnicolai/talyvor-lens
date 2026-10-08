@@ -49,6 +49,7 @@ type Registry struct {
 	insurer    *TestInsurerPartner
 	agentToken *TestAgentTokenProvider
 	tax        *TestTaxPartner
+	screening  TestScreeningProvider
 }
 
 // NewRegistry is a registry that asks clearances before it hands out a real adapter. With nil clearances it
@@ -64,6 +65,13 @@ func (r *Registry) UseTaxData(d TaxData) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tax = &TestTaxPartner{Data: d}
+}
+
+// UseScreeningList is the sanctions lists the Test screening provider screens against (internal/screening, B30.6).
+func (r *Registry) UseScreeningList(l ScreeningList) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.screening = TestScreeningProvider{List: l}
 }
 
 // Configure sets the real adapter for a service. It is used only once a capability the service serves is
@@ -161,7 +169,10 @@ func (r *Registry) Verification() KYCProvider {
 
 // Screening is the screening provider for capability.
 func (r *Registry) Screening(ctx context.Context, capability string) (ScreeningProvider, error) {
-	return pick[ScreeningProvider](ctx, r, ServiceScreening, capability, TestScreeningProvider{})
+	r.mu.RLock()
+	test := r.screening
+	r.mu.RUnlock()
+	return pick[ScreeningProvider](ctx, r, ServiceScreening, capability, test)
 }
 
 // Capital is the capital partner for capability.

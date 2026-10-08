@@ -123,6 +123,7 @@ import (
 	"github.com/talyvor/lens/internal/routingscore"
 	"github.com/talyvor/lens/internal/royaltyhaircut"
 	"github.com/talyvor/lens/internal/safehttp"
+	"github.com/talyvor/lens/internal/screening"
 	"github.com/talyvor/lens/internal/sellertax"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/sessionkey"
@@ -1884,6 +1885,22 @@ func run() error {
 	partnerRegistry := partners.NewRegistry(dualToken)
 	taxData := partners.NewTaxStore(pool)
 	partnerRegistry.UseTaxData(taxData)
+	// B30.6 — every payee and every payment in or out through a partner is screened against the UK Sanctions List and
+	// OFAC's SDN list, downloaded at start and each day; the Test screening provider screens against them, and a match
+	// opens a compliance case the operator sees at /v1/admin/screening.
+	screeningLists := screening.NewStore(pool, screening.Sources(), cfg.ScreeningFuzzyThreshold)
+	partnerRegistry.UseScreeningList(screeningLists)
+	screener := screening.NewScreener(pool, partnerRegistry)
+	dualToken.SetScreener(screener)
+	sanctionsAlert := &sanctionsListAlert{}
+	if sink, err := modelwatch.NewWebhookNotifier(cfg.OperatorAlertWebhookURL, cfg.OperatorAlertWebhookSecret); err != nil {
+		slog.Error("screening: LENS_OPERATOR_ALERT_WEBHOOK_URL is invalid; a sanctions list that does not download is only logged", slog.String("err", err.Error()))
+	} else if sink != nil {
+		sanctionsAlert.sink = sink
+	}
+	go haComps.leader.Run(ctx, "sanctions-lists", 30*time.Second, func(lctx context.Context) {
+		refreshSanctionsLists(lctx, screeningLists, sanctionsAlert)
+	})
 	taxProfiles := taxprofile.NewStore(pool, partnerRegistry)
 	if cfg.BillingEnabled {
 		taxProfiles.SetStripe(taxStripeByKind{isTest: wsManager.GetSynthetic, mainKeyLive: billing.LiveKey(cfg.StripeSecretKey),
@@ -2384,6 +2401,10 @@ func run() error {
 	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
 	// B32.38 — the buyer tax profiles whose Stripe evidence contradicts the declared country. tax_profile_handler.go.
 	r.Get("/v1/admin/tax-profiles/flagged", requireAdminOrOperatorRead(authManager, newTaxProfilesFlaggedHandler(taxProfiles)))
+	// B30.6 — the sanctions lists and the compliance cases screening opened; an admin releases or refuses a held one.
+	r.Get("/v1/admin/screening", requireAdminOrOperatorRead(authManager, newScreeningOverviewHandler(screeningLists, screener)))
+	r.Post("/v1/admin/screening/cases/{caseID}/release", requireAdmin(authManager, newScreeningDecideHandler(screener, true)))
+	r.Post("/v1/admin/screening/cases/{caseID}/refuse", requireAdmin(authManager, newScreeningDecideHandler(screener, false)))
 	// B32.44 — the annual platform-reporting export (UK reporting rules, EU DAC7): the file, with the sellers' TINs in
 	// clear, and the runs recorded with their sha256 — for the global admin key only. platform_report_handler.go.
 	platformReports := platformreport.New(pool, sellerTax)

@@ -61,7 +61,7 @@ func verifiedForLiveMoney(t *testing.T, s *DualTokenStore, pool *pgxpool.Pool, w
 // goes through, and the ledger holds it.
 func TestVerification_AWorkspaceAtL1IsRefusedALivePaymentAndTestMoneyGoesThrough(t *testing.T) {
 	pool := supplyPool(t)
-	s := NewDualTokenStore(nil, pool, nil)
+	s := screenedStore(pool)
 	const ws = "ws-b304-done"
 	gb := verifiedForLiveMoney(t, s, pool, ws)
 	kyc := realKYC{&partners.TestKYCProvider{}}
@@ -82,7 +82,7 @@ func TestVerification_AWorkspaceAtL1IsRefusedALivePaymentAndTestMoneyGoesThrough
 
 	company, partner := openMoney(t, s, ws, CurrencyGBP, MoneyCompany), openMoney(t, s, ws, CurrencyGBP, MoneyPartner)
 	pay := func(key, funding string) (MoneyEntry, error) {
-		return s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityPaymentsOut, Kind: "payment_out", IdempotencyKey: key,
+		return s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityPaymentsOut, Counterparty: "Acme Ltd", Kind: "payment_out", IdempotencyKey: key,
 			Funding: funding, Postings: []MoneyPosting{{AccountID: partner.ID, AmountMinor: 12_000}, {AccountID: company.ID, AmountMinor: -12_000}}})
 	}
 	_, err = pay("live-1", FundingLive)
@@ -130,12 +130,12 @@ func TestVerification_AWorkspaceAtL1IsRefusedALivePaymentAndTestMoneyGoesThrough
 // level at the next read.
 func TestVerification_TestPassesLimitsAndAWithdrawnPass(t *testing.T) {
 	pool := supplyPool(t)
-	s := NewDualTokenStore(nil, pool, nil)
+	s := screenedStore(pool)
 	const ws = "ws-b304-limits"
 	gb := verifiedForLiveMoney(t, s, pool, ws)
 	company, partner := openMoney(t, s, ws, CurrencyGBP, MoneyCompany), openMoney(t, s, ws, CurrencyGBP, MoneyPartner)
 	pay := func(key string, minor int64) error {
-		_, err := s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityPaymentsOut, Kind: "payment_out", IdempotencyKey: key,
+		_, err := s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityPaymentsOut, Counterparty: "Acme Ltd", Kind: "payment_out", IdempotencyKey: key,
 			Funding: FundingLive, Postings: []MoneyPosting{{AccountID: partner.ID, AmountMinor: minor}, {AccountID: company.ID, AmountMinor: -minor}}})
 		return err
 	}

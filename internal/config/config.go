@@ -602,6 +602,10 @@ type Config struct {
 
 	// KYACredentialTTL is how long a Know Your Agent credential is valid (env: LENS_KYA_CREDENTIAL_TTL). Default 24h.
 	KYACredentialTTL time.Duration
+	// ScreeningFuzzyThreshold is how similar a name must be to one on a sanctions list for its payee or payment to be
+	// held for an operator (B30.6), above 0 and at most 1. Env: LENS_SCREENING_FUZZY_THRESHOLD, which Nicolai sets;
+	// until he does, 0.9.
+	ScreeningFuzzyThreshold float64
 
 	// TrustfulComputeMintEnabled gates the LEGACY trust-based compute mint
 	// (ComputeMiner.RecordServedRequest mints LENS per served request with no
@@ -1983,6 +1987,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid LENS_KYA_CREDENTIAL_TTL (must be a positive duration): %s", v)
 		}
 		c.KYACredentialTTL = d
+	}
+	// B30.6 — the similarity to a listed name at which a payee or payment is held. A malformed value is refused.
+	c.ScreeningFuzzyThreshold = 0.9
+	if v := os.Getenv("LENS_SCREENING_FUZZY_THRESHOLD"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f > 0 && f <= 1) {
+			return nil, fmt.Errorf("config: LENS_SCREENING_FUZZY_THRESHOLD must be above 0 and at most 1, got %q", v)
+		}
+		c.ScreeningFuzzyThreshold = f
 	}
 	// HA fail-closed: with LENS_HA_ENABLED every replica must share STABLE
 	// signing keys. Ephemeral per-replica keys "work" at startup and break

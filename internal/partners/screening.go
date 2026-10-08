@@ -35,11 +35,12 @@ type NameScreen struct {
 	DateOfBirth string `json:"date_of_birth,omitempty"`
 }
 
-// PaymentScreen is a payment to screen.
+// PaymentScreen is a payment to screen. A party left empty is not screened — the workspace's own side, verified
+// already (B30.4) — but one party at least is named.
 type PaymentScreen struct {
 	ID     string `json:"id"` // the caller's id for the payment
-	Payer  string `json:"payer"`
-	Payee  string `json:"payee"`
+	Payer  string `json:"payer,omitempty"`
+	Payee  string `json:"payee,omitempty"`
 	Amount Money  `json:"amount"`
 }
 
@@ -56,46 +57,93 @@ type ScreeningMatch struct {
 	List     string `json:"list"`
 	Entry    string `json:"entry"`
 	ScoreBPS int    `json:"score_bps"`
+	Listed   string `json:"listed,omitempty"` // the name or alias as the list prints it
+	Weak     bool   `json:"weak,omitempty"`   // a low-quality alias: a match on it is held for review, never a hit
 }
 
-// TestScreeningProvider is test mode for screening: it reads no list. A name containing TESTSANCTION is a hit,
-// TESTPENDING is held for review, TESTFAIL makes the provider unavailable, and anything else is clear.
-type TestScreeningProvider struct{}
+// ScreeningList is the sanctions lists a Test screening provider screens against (internal/screening): each entry a
+// name is close enough to, and how close. It answers ErrScreeningUnavailable while a list has never been loaded.
+type ScreeningList interface {
+	Match(ctx context.Context, name string) ([]ScreeningMatch, error)
+}
+
+// TestScreeningProvider is test mode for screening. It screens against List — the UK and US sanctions lists Lens
+// downloads each day (internal/screening) — and the test words: a name containing TESTSANCTION is a hit,
+// TESTPENDING is held for review, TESTFAIL makes the provider unavailable. An exact match on a listed name or a good
+// alias is a hit; a close match, or an exact one on a low-quality alias, is held for review; anything else is clear.
+// With no List it screens the test words alone.
+type TestScreeningProvider struct {
+	List ScreeningList
+}
 
 // Name is "test".
 func (TestScreeningProvider) Name() string { return "test" }
 
-// ScreenName screens the name against the test words.
-func (TestScreeningProvider) ScreenName(_ context.Context, req NameScreen) (Screening, error) {
-	return testScreen(req.Name)
+// ScreenName screens the name.
+func (p TestScreeningProvider) ScreenName(ctx context.Context, req NameScreen) (Screening, error) {
+	if strings.TrimSpace(req.Name) == "" {
+		return Screening{}, fmt.Errorf("%w: a screening names who it screens", ErrInvalid)
+	}
+	return p.screen(ctx, req.Name)
 }
 
-// ScreenPayment screens the payer and the payee: the worse outcome of the two.
-func (TestScreeningProvider) ScreenPayment(_ context.Context, req PaymentScreen) (Screening, error) {
+// ScreenPayment screens the payer and the payee it names: the worse outcome of the two.
+func (p TestScreeningProvider) ScreenPayment(ctx context.Context, req PaymentScreen) (Screening, error) {
 	if err := checkID(req.ID); err != nil {
 		return Screening{}, err
 	}
 	if err := checkMoney(req.Amount); err != nil {
 		return Screening{}, err
 	}
+	if strings.TrimSpace(req.Payer) == "" && strings.TrimSpace(req.Payee) == "" {
+		return Screening{}, fmt.Errorf("%w: a payment screening names its payer or its payee", ErrInvalid)
+	}
 	out := Screening{Outcome: ScreenClear, Matches: []ScreeningMatch{}}
 	for _, name := range []string{req.Payer, req.Payee} {
-		s, err := testScreen(name)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		s, err := p.screen(ctx, name)
 		if err != nil {
 			return Screening{}, err
 		}
-		out.Matches = append(out.Matches, s.Matches...)
-		if s.Outcome == ScreenHit || (s.Outcome == ScreenReview && out.Outcome == ScreenClear) {
-			out.Outcome, out.Detail = s.Outcome, s.Detail
-		}
+		out = worse(out, s)
 	}
 	return out, nil
 }
 
-func testScreen(name string) (Screening, error) {
-	if strings.TrimSpace(name) == "" {
-		return Screening{}, fmt.Errorf("%w: a screening names who it screens", ErrInvalid)
+// screen is one name against the test words and then the list.
+func (p TestScreeningProvider) screen(ctx context.Context, name string) (Screening, error) {
+	out, err := testScreen(name)
+	if err != nil || p.List == nil {
+		return out, err
 	}
+	matches, err := p.List.Match(ctx, name)
+	if err != nil {
+		return Screening{}, err
+	}
+	listed := Screening{Outcome: ScreenClear, Matches: matches}
+	for _, m := range matches {
+		switch {
+		case m.ScoreBPS >= 10_000 && !m.Weak:
+			listed.Outcome, listed.Detail = ScreenHit, fmt.Sprintf("%s is on the %s sanctions list", name, m.List)
+		case listed.Outcome == ScreenClear:
+			listed.Outcome, listed.Detail = ScreenReview, fmt.Sprintf("%s is close to %q on the %s sanctions list", name, m.Listed, m.List)
+		}
+	}
+	return worse(out, listed), nil
+}
+
+// worse is a and b together: every match of both, and the worse outcome — a hit, then a review, then clear.
+func worse(a, b Screening) Screening {
+	out := Screening{Outcome: a.Outcome, Detail: a.Detail, Matches: append(append([]ScreeningMatch{}, a.Matches...), b.Matches...)}
+	if b.Outcome == ScreenHit && a.Outcome != ScreenHit || b.Outcome == ScreenReview && a.Outcome == ScreenClear {
+		out.Outcome, out.Detail = b.Outcome, b.Detail
+	}
+	return out
+}
+
+func testScreen(name string) (Screening, error) {
 	n := strings.ToUpper(name)
 	match := func(score int) []ScreeningMatch {
 		return []ScreeningMatch{{Name: name, List: "TEST", Entry: "TESTSANCTION", ScoreBPS: score}}
