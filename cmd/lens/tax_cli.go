@@ -13,6 +13,7 @@ import (
 
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/partners"
+	"github.com/talyvor/lens/internal/platformreport"
 )
 
 const taxUsage = `usage:
@@ -26,7 +27,8 @@ const taxUsage = `usage:
   lens tax registrations                           every registration Talyvor holds
   lens tax registrations add <jurisdiction> --scheme <scheme> --number <number> --from <YYYY-MM-DD>
                                                    record one of Talyvor's registrations, such as
-                                                   GB --scheme "GB VAT", or EU --scheme "EU OSS non-Union"`
+                                                   GB --scheme "GB VAT", or EU --scheme "EU OSS non-Union"
+` + taxReturnUsage
 
 // taxAdmin is the slice of *partners.TaxStore the command needs.
 type taxAdmin interface {
@@ -36,7 +38,8 @@ type taxAdmin interface {
 	Registrations(ctx context.Context) ([]partners.TaxRegistration, error)
 }
 
-// runTax is `lens tax` (B32.37), run inside the lens container so it reaches the same Postgres the server reads.
+// runTax is `lens tax` (B32.37; `lens tax return`, B32.44), run inside the lens container so it reaches the same
+// Postgres the server reads.
 func runTax(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -49,6 +52,9 @@ func runTax(args []string) error {
 		return fmt.Errorf("tax: database: %w", err)
 	}
 	defer pool.Close()
+	if len(args) > 0 && args[0] == "return" {
+		return taxReturnCommand(ctx, platformreport.New(pool, nil), args[1:], os.Stdout)
+	}
 	return taxCommand(ctx, partners.NewTaxStore(pool), args, os.Stdout)
 }
 

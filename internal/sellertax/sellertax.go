@@ -8,8 +8,8 @@
 //   - A VAT number is checked with TaxPartner.ValidateTaxID when it is saved. One that is not valid is kept, marked
 //     invalid, and leaves the details incomplete until it is corrected or removed.
 //   - The TINs, the date of birth and the account identifier are sealed with internal/envelope and read back masked:
-//     each TIN and the account identifier to its last four characters, the date of birth not at all. Nothing here
-//     opens them; the annual platform-reporting export (B32.44) is the only reader they are kept for.
+//     each TIN and the account identifier to its last four characters, the date of birth not at all. Only Identify
+//     opens them, for the annual platform-reporting export (B32.44), the one reader they are kept for.
 //   - A seller with earnings and incomplete details is asked for them at their first earning and reminded twice
 //     more, the reminder interval apart. The second reminder starts the payout hold: the payout run skips the seller
 //     while their earnings keep clearing, until the details are complete.
