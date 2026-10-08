@@ -29,6 +29,9 @@ var Mark = `<span class="tv-mark" aria-hidden="true">` +
 	`<span class="tv-mark-light">` + inline(markFlatLight) + `</span>` +
 	`</span>`
 
+// MarkLightSVG is the light-theme flat mark file as it is, for documents drawn on paper (B32.40's receipt PDF).
+func MarkLightSVG() string { return markFlatLight }
+
 // inline drops the namespace declaration, which HTML supplies for an inline
 // <svg> anyway, so a page carrying the mark contains no http:// URL at all. The
 // drawing is untouched.

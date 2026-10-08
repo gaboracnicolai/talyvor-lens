@@ -36,11 +36,17 @@ func (s *Store) PayTestBill(ctx context.Context, buyerWorkspaceID string, now ti
 		return "", 0, ErrNotTestBuyer
 	}
 	invoiceID := "in_synthetic_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	n, err := s.ClearInvoice(ctx, buyerWorkspaceID, invoiceID, time.Unix(0, 0).UTC(), now.Add(time.Hour), now.Add(-Holdback), false)
+	paidAt := now.Add(-Holdback)
+	n, err := s.ClearInvoice(ctx, buyerWorkspaceID, invoiceID, time.Unix(0, 0).UTC(), now.Add(time.Hour), paidAt, false)
 	if err != nil || n == 0 {
-		invoiceID = ""
+		return "", n, err
 	}
-	return invoiceID, n, err
+	if s.receipts != nil { // B32.40: the paid bill's receipt, in the test series
+		if _, err := s.IssueReceipt(ctx, buyerWorkspaceID, invoiceID, paidAt, false, nil); err != nil {
+			return invoiceID, n, err
+		}
+	}
+	return invoiceID, n, nil
 }
 
 // RefundTestBill refunds a test buyer's paid bill in full, as Stripe's charge.refunded refunds one: a

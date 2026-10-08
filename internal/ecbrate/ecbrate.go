@@ -177,3 +177,64 @@ func USDMicros(amountMinor int64, usdPerEUR, ccyPerEUR string) int64 {
 	}
 	return q.Int64()
 }
+
+// Converted is a US-dollar amount in another currency at a day's reference rate (B32.40: a receipt's tax in the
+// buyer's currency).
+type Converted struct {
+	Currency    string     `json:"currency"`
+	AmountMinor int64      `json:"amount_minor"`        // rounded half-up to the currency's minor unit
+	Rate        string     `json:"rate"`                // units of the currency per US dollar, to six places; "1" for USD
+	RateDate    *time.Time `json:"rate_date,omitempty"` // the ECB day the rate is from; nil for USD
+	Source      string     `json:"source"`              // "ecb", or "none" for USD
+}
+
+// FromUSD prices usdMicros in currency (any the ECB publishes, or EUR or USD) at the reference rate of the latest ECB
+// day on or before `at` (UTC): amount = usdMicros ÷ 10⁶ × (currency per EUR) ÷ (USD per EUR), rounded half-up to the
+// currency's minor unit.
+func (b *Book) FromUSD(ctx context.Context, usdMicros int64, currency string, at time.Time) (Converted, error) {
+	ccy := strings.ToUpper(currency)
+	if ccy == "USD" {
+		return Converted{Currency: ccy, AmountMinor: roundHalfUp(new(big.Rat).SetFrac64(usdMicros, 10_000)), Rate: "1", Source: "none"}, nil
+	}
+	date, usd, err := b.perEUR(ctx, "USD", at.UTC())
+	if err != nil {
+		return Converted{}, err
+	}
+	per := "1"
+	if ccy != "EUR" {
+		var d time.Time
+		if d, per, err = b.perEUR(ctx, ccy, date); err != nil {
+			return Converted{}, err
+		}
+		if !d.Equal(date) {
+			return Converted{}, fmt.Errorf("%w: the ECB's %s rate for %s is missing", ErrNoRate, ccy, date.Format("2006-01-02"))
+		}
+	}
+	usdRat, _ := new(big.Rat).SetString(usd)
+	perRat, _ := new(big.Rat).SetString(per)
+	rate := new(big.Rat).Quo(perRat, usdRat)
+	scale := int64(1)
+	for range minorDigits(ccy) {
+		scale *= 10
+	}
+	v := new(big.Rat).SetFrac64(usdMicros*scale, 1_000_000)
+	v.Mul(v, rate)
+	return Converted{Currency: ccy, AmountMinor: roundHalfUp(v), Rate: rate.FloatString(6), RateDate: &date, Source: "ecb"}, nil
+}
+
+// minorDigits is how many decimal places the currency's minor unit has (ISO 4217): none for the yen, the won and the
+// króna, two for every other currency the ECB publishes.
+func minorDigits(ccy string) int {
+	switch ccy {
+	case "JPY", "KRW", "ISK":
+		return 0
+	}
+	return 2
+}
+
+// roundHalfUp rounds a non-negative rational to the nearest integer, halves up.
+func roundHalfUp(v *big.Rat) int64 {
+	twice := new(big.Int).Mul(v.Num(), big.NewInt(2))
+	twice.Add(twice, v.Denom())
+	return new(big.Int).Quo(twice, new(big.Int).Mul(v.Denom(), big.NewInt(2))).Int64()
+}
