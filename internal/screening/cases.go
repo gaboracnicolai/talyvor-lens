@@ -1,0 +1,272 @@
+package screening
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/partners"
+)
+
+// The statuses of a compliance case.
+const (
+	CaseBlocked  = "blocked"  // an exact match: the money does not move
+	CaseHeld     = "held"     // a close match: the money waits for an operator
+	CaseReleased = "released" // an operator found the close match is not them: the money may move
+	CaseRefused  = "refused"  // an operator found it is: the money does not move
+)
+
+// What a case is about.
+const (
+	SubjectPayee   = "payee"
+	SubjectPayment = "payment"
+)
+
+var (
+	// ErrBlocked: an exact match on a sanctions list.
+	ErrBlocked = errors.New("screening: refused — the name is on a sanctions list")
+	// ErrHeld: a close match, waiting for an operator.
+	ErrHeld = errors.New("screening: held — the name is close to one on a sanctions list, and waits for an operator to release it")
+	// ErrRefused: a close match an operator refused.
+	ErrRefused = errors.New("screening: refused — an operator found the name is the one on the sanctions list")
+	// ErrCaseNotFound: no compliance case by that id.
+	ErrCaseNotFound = errors.New("screening: no such compliance case")
+	// ErrCaseDecided: a case that is not held is not released or refused.
+	ErrCaseDecided = errors.New("screening: only a held case is released or refused")
+)
+
+// Refusal is a screening that stops the money: the case that says why. It is ErrBlocked, ErrHeld or ErrRefused.
+type Refusal struct {
+	Case Case
+	err  error
+}
+
+func (r *Refusal) Error() string { return fmt.Sprintf("%v (compliance case %s)", r.err, r.Case.ID) }
+func (r *Refusal) Unwrap() error { return r.err }
+
+// Case is one compliance case a screening opened.
+type Case struct {
+	ID           string                    `json:"id"`
+	WorkspaceID  string                    `json:"workspace_id"`
+	Kind         string                    `json:"kind"`
+	SubjectKind  string                    `json:"subject_kind"`
+	SubjectID    string                    `json:"subject_id"`
+	Name         string                    `json:"name"`
+	Outcome      string                    `json:"outcome"`
+	Status       string                    `json:"status"`
+	Matches      []partners.ScreeningMatch `json:"matches"`
+	Provider     string                    `json:"provider"`
+	Capability   string                    `json:"capability,omitempty"`
+	Direction    string                    `json:"direction,omitempty"`
+	AmountMinor  *int64                    `json:"amount_minor,omitempty"`
+	Currency     string                    `json:"currency,omitempty"`
+	Funding      string                    `json:"funding,omitempty"`
+	OpenedAt     time.Time                 `json:"opened_at"`
+	DecidedBy    string                    `json:"decided_by,omitempty"`
+	DecidedAt    *time.Time                `json:"decided_at,omitempty"`
+	DecisionNote string                    `json:"decision_note,omitempty"`
+}
+
+const caseCols = `id, workspace_id, kind, subject_kind, subject_id, name, outcome, status, matches, provider, capability, direction,
+	amount_minor, currency, funding, opened_at, decided_by, decided_at, decision_note`
+
+func scanCase(row pgx.Row) (Case, error) {
+	var c Case
+	var matches []byte
+	err := row.Scan(&c.ID, &c.WorkspaceID, &c.Kind, &c.SubjectKind, &c.SubjectID, &c.Name, &c.Outcome, &c.Status, &matches, &c.Provider,
+		&c.Capability, &c.Direction, &c.AmountMinor, &c.Currency, &c.Funding, &c.OpenedAt, &c.DecidedBy, &c.DecidedAt, &c.DecisionNote)
+	if err != nil {
+		return Case{}, err
+	}
+	if err := json.Unmarshal(matches, &c.Matches); err != nil {
+		return Case{}, err
+	}
+	return c, nil
+}
+
+// Providers hands out the screening provider for a wallet capability: *partners.Registry.
+type Providers interface {
+	Screening(ctx context.Context, capability string) (partners.ScreeningProvider, error)
+}
+
+// Screener screens payees and outside payments through the provider for their capability, and opens a compliance case
+// for each match.
+type Screener struct {
+	pool      *pgxpool.Pool
+	providers Providers
+}
+
+// NewScreener keeps cases in pool and asks providers.
+func NewScreener(pool *pgxpool.Pool, providers Providers) *Screener {
+	return &Screener{pool: pool, providers: providers}
+}
+
+// Payment is an outside payment to screen: money in from Counterparty, or out to it.
+type Payment struct {
+	WorkspaceID  string
+	ID           string // the payment's own id: a retry is the same payment, and reads the same case
+	Capability   string // the wallet capability it moves money for
+	Direction    string // in or out
+	Counterparty string // the payer of money in, the payee of money out
+	AmountMinor  int64
+	Currency     string
+	Funding      string // test or live
+}
+
+// ScreenPayment screens p's counterparty before any money moves. It answers nil when the money may move, a *Refusal
+// when a case stops it — blocked, held or refused — and partners.ErrScreeningUnavailable when it could not screen,
+// on which nothing may move either.
+func (s *Screener) ScreenPayment(ctx context.Context, p Payment) error {
+	if p.Direction != "in" && p.Direction != "out" {
+		return fmt.Errorf("screening: a payment is in or out, not %q", p.Direction)
+	}
+	amount := p.AmountMinor
+	c := Case{WorkspaceID: p.WorkspaceID, SubjectKind: SubjectPayment, SubjectID: p.ID, Name: strings.TrimSpace(p.Counterparty),
+		Capability: p.Capability, Direction: p.Direction, AmountMinor: &amount, Currency: p.Currency, Funding: p.Funding}
+	return s.screen(ctx, c, func(prov partners.ScreeningProvider) (partners.Screening, error) {
+		req := partners.PaymentScreen{ID: p.ID, Amount: partners.Money{Minor: p.AmountMinor, Currency: p.Currency}}
+		if p.Direction == "in" {
+			req.Payer = c.Name
+		} else {
+			req.Payee = c.Name
+		}
+		return prov.ScreenPayment(ctx, req)
+	})
+}
+
+// ScreenPayee screens a payee when it is created, by its name, for the capability it will be paid through. It answers
+// as ScreenPayment does.
+func (s *Screener) ScreenPayee(ctx context.Context, workspaceID, payeeID, name, capability string) error {
+	c := Case{WorkspaceID: workspaceID, SubjectKind: SubjectPayee, SubjectID: payeeID, Name: strings.TrimSpace(name), Capability: capability}
+	return s.screen(ctx, c, func(prov partners.ScreeningProvider) (partners.Screening, error) {
+		return prov.ScreenName(ctx, partners.NameScreen{Name: c.Name})
+	})
+}
+
+func (s *Screener) screen(ctx context.Context, c Case, ask func(partners.ScreeningProvider) (partners.Screening, error)) error {
+	switch {
+	case c.WorkspaceID == "" || c.SubjectID == "":
+		return fmt.Errorf("screening: a screening names its workspace and what it screens")
+	case c.Name == "":
+		return fmt.Errorf("screening: a %s is screened by name, and this one has none", c.SubjectKind)
+	}
+	// A subject already screened under this name reads its case: a held one stays held until it is decided, and a
+	// released one moves.
+	prior, err := scanCase(s.pool.QueryRow(ctx, `SELECT `+caseCols+` FROM compliance_cases
+		WHERE workspace_id = $1 AND subject_kind = $2 AND subject_id = $3 AND name = $4`, c.WorkspaceID, c.SubjectKind, c.SubjectID, c.Name))
+	switch {
+	case err == nil:
+		return refusalFor(prior)
+	case !errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("%w: %v", partners.ErrScreeningUnavailable, err)
+	}
+	prov, err := s.providers.Screening(ctx, c.Capability)
+	if err != nil {
+		return fmt.Errorf("%w: %v", partners.ErrScreeningUnavailable, err)
+	}
+	res, err := ask(prov)
+	if err != nil {
+		if errors.Is(err, partners.ErrScreeningUnavailable) {
+			return err
+		}
+		return fmt.Errorf("%w: %v", partners.ErrScreeningUnavailable, err)
+	}
+	switch res.Outcome {
+	case partners.ScreenClear:
+		return nil
+	case partners.ScreenHit:
+		c.Outcome, c.Status = partners.ScreenHit, CaseBlocked
+	case partners.ScreenReview:
+		c.Outcome, c.Status = partners.ScreenReview, CaseHeld
+	default:
+		return fmt.Errorf("%w: the provider answered %q", partners.ErrScreeningUnavailable, res.Outcome)
+	}
+	matches, err := json.Marshal(res.Matches)
+	if err != nil {
+		return err
+	}
+	c.ID, c.Kind, c.Provider = "cc_"+uuid.NewString(), "screening", prov.Name()
+	// Two attempts at once open one case: the second reads the first's.
+	opened, err := scanCase(s.pool.QueryRow(ctx, `WITH ins AS (
+			INSERT INTO compliance_cases (id, workspace_id, kind, subject_kind, subject_id, name, outcome, status, matches, provider,
+				capability, direction, amount_minor, currency, funding)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			ON CONFLICT (workspace_id, subject_kind, subject_id, name) DO NOTHING RETURNING `+caseCols+`)
+		SELECT `+caseCols+` FROM ins
+		UNION ALL
+		SELECT `+caseCols+` FROM compliance_cases WHERE workspace_id = $2 AND subject_kind = $4 AND subject_id = $5 AND name = $6
+			AND NOT EXISTS (SELECT 1 FROM ins)`,
+		c.ID, c.WorkspaceID, c.Kind, c.SubjectKind, c.SubjectID, c.Name, c.Outcome, c.Status, matches, c.Provider,
+		c.Capability, c.Direction, c.AmountMinor, c.Currency, c.Funding))
+	if errors.Is(err, pgx.ErrNoRows) { // the other attempt committed after this statement's snapshot
+		opened, err = scanCase(s.pool.QueryRow(ctx, `SELECT `+caseCols+` FROM compliance_cases
+			WHERE workspace_id = $1 AND subject_kind = $2 AND subject_id = $3 AND name = $4`, c.WorkspaceID, c.SubjectKind, c.SubjectID, c.Name))
+	}
+	if err != nil {
+		return fmt.Errorf("%w: open the compliance case: %v", partners.ErrScreeningUnavailable, err)
+	}
+	return refusalFor(opened)
+}
+
+func refusalFor(c Case) error {
+	switch c.Status {
+	case CaseReleased:
+		return nil
+	case CaseBlocked:
+		return &Refusal{Case: c, err: ErrBlocked}
+	case CaseHeld:
+		return &Refusal{Case: c, err: ErrHeld}
+	default:
+		return &Refusal{Case: c, err: ErrRefused}
+	}
+}
+
+// Cases is the compliance cases in status — every status when it is "" — the newest first, at most limit.
+func (s *Screener) Cases(ctx context.Context, status string, limit int) ([]Case, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+caseCols+` FROM compliance_cases WHERE $1 = '' OR status = $1
+		ORDER BY opened_at DESC, id LIMIT $2`, status, limit)
+	if err != nil {
+		return nil, fmt.Errorf("screening: cases: %w", err)
+	}
+	defer rows.Close()
+	out := []Case{}
+	for rows.Next() {
+		c, err := scanCase(rows)
+		if err != nil {
+			return nil, fmt.Errorf("screening: cases: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// Decide releases a held case — the close match is not them, and the money may move when it is tried again — or
+// refuses it, and records who decided, when and why.
+func (s *Screener) Decide(ctx context.Context, id string, release bool, by, note string) (Case, error) {
+	status := CaseRefused
+	if release {
+		status = CaseReleased
+	}
+	if strings.TrimSpace(by) == "" {
+		return Case{}, errors.New("screening: a decision names who made it")
+	}
+	c, err := scanCase(s.pool.QueryRow(ctx, `UPDATE compliance_cases SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4
+		WHERE id = $1 AND status = 'held' RETURNING `+caseCols, id, status, by, note))
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return c, err
+	}
+	var current string
+	if err := s.pool.QueryRow(ctx, `SELECT status FROM compliance_cases WHERE id = $1`, id).Scan(&current); errors.Is(err, pgx.ErrNoRows) {
+		return Case{}, ErrCaseNotFound
+	} else if err != nil {
+		return Case{}, err
+	}
+	return Case{}, fmt.Errorf("%w; this one is %s", ErrCaseDecided, current)
+}

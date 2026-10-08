@@ -10,6 +10,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/talyvor/lens/internal/partners"
+	"github.com/talyvor/lens/internal/screening"
 )
 
 // money_ledger.go — B30.2: MONEY IN CURRENCIES.
@@ -25,6 +28,10 @@ import (
 // transaction. Every entry names the wallet capability (B30.1) it moves money for, and live money is asked of that
 // capability before anything is written: an uncleared RED or AMBER one refuses it, and the entry is never written.
 // Every entry carries an idempotency key, so a retried movement is the same entry and moves no money twice.
+//
+// Money in or out through a partner account is an outside payment, and names its Counterparty — the payer of money in,
+// the payee of money out. Before any posting it is screened against the sanctions lists (B30.6, internal/screening):
+// a match refuses it with a *screening.Refusal naming the compliance case, and nothing is written.
 //
 // Credits (LXC) are not money accounts: they stay on lxc_ledger and agent_postings, unchanged.
 
@@ -101,9 +108,18 @@ type MoneyEntry struct {
 	IdempotencyKey string         `json:"idempotency_key"`
 	Funding        string         `json:"funding"` // test or live
 	Memo           string         `json:"memo,omitempty"`
+	Counterparty   string         `json:"counterparty,omitempty"` // who money through a partner is from or to, screened first (B30.6)
 	CreatedAt      time.Time      `json:"created_at"`
 	Postings       []MoneyPosting `json:"postings"`
 }
+
+// PaymentScreener screens an outside payment before its money moves: *screening.Screener.
+type PaymentScreener interface {
+	ScreenPayment(ctx context.Context, p screening.Payment) error
+}
+
+// SetScreener is what screens money in and out through a partner (B30.6). Until it is set, no such money moves.
+func (s *DualTokenStore) SetScreener(sc PaymentScreener) { s.screener = sc }
 
 // MoneyBalance is what a money account holds: the sum of its postings, and how much of it is test money.
 type MoneyBalance struct {
@@ -155,14 +171,15 @@ func (s *DualTokenStore) OpenMoneyAccount(ctx context.Context, a MoneyAccount) (
 // the entry as recorded. A posting of zero is left out — a fee that is 0 moves nothing. Live money is first asked of e.Capability, which
 // refuses it with a *CapabilityRefusal while it is uncleared, and then nothing is written. The same idempotency key
 // again answers the entry it first wrote, or ErrIdempotencyKeyReused when the movement differs. An entry that does
-// not sum to zero in each currency is refused when it commits, with ErrMoneyUnbalanced.
+// not sum to zero in each currency is refused when it commits, with ErrMoneyUnbalanced. Money in or out through a
+// partner account is screened first, and a match refuses it with a *screening.Refusal before any posting.
 func (s *DualTokenStore) PostMoney(ctx context.Context, e MoneyEntry) (MoneyEntry, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return MoneyEntry{}, fmt.Errorf("economy: post money: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	out, err := postMoneyTx(ctx, tx, e)
+	out, err := postMoneyTx(ctx, tx, e, s.screener)
 	if err != nil {
 		return MoneyEntry{}, err
 	}
@@ -177,8 +194,8 @@ func (s *DualTokenStore) PostMoney(ctx context.Context, e MoneyEntry) (MoneyEntr
 }
 
 // postMoneyTx is PostMoney on tx, the caller's transaction, so the movement commits or rolls back with the rows
-// that explain it. Whether it balances is judged when tx commits.
-func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, error) {
+// that explain it. Whether it balances is judged when tx commits. screener screens money in or out through a partner.
+func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry, screener PaymentScreener) (MoneyEntry, error) {
 	c, ok := CapabilityByKey(e.Capability)
 	switch {
 	case !ok || !b30[c.Key]:
@@ -205,10 +222,11 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, erro
 		return MoneyEntry{}, errors.New("economy: a money entry must move some money")
 	}
 
+	e.Counterparty = strings.TrimSpace(e.Counterparty)
 	e.ID = "mle_" + uuid.NewString()
-	err := tx.QueryRow(ctx, `INSERT INTO money_entries (id, workspace_id, capability, kind, idempotency_key, memo)
-		VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING created_at`,
-		e.ID, e.WorkspaceID, e.Capability, e.Kind, e.IdempotencyKey, e.Memo).Scan(&e.CreatedAt)
+	err := tx.QueryRow(ctx, `INSERT INTO money_entries (id, workspace_id, capability, kind, idempotency_key, memo, counterparty)
+		VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING created_at`,
+		e.ID, e.WorkspaceID, e.Capability, e.Kind, e.IdempotencyKey, e.Memo, e.Counterparty).Scan(&e.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return replayedMoneyEntry(ctx, tx, e, postings)
 	}
@@ -228,17 +246,17 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, erro
 
 	// Each account is the entry's workspace's — another's is not found — and is held open until tx ends: a freeze
 	// or a close waits for the money already moving.
-	rows, err := tx.Query(ctx, `SELECT id, currency, status FROM money_accounts WHERE id = ANY($1) AND workspace_id = $2 FOR SHARE`,
+	rows, err := tx.Query(ctx, `SELECT id, currency, status, purpose FROM money_accounts WHERE id = ANY($1) AND workspace_id = $2 FOR SHARE`,
 		ids, e.WorkspaceID)
 	if err != nil {
 		return MoneyEntry{}, fmt.Errorf("economy: post money: %w", err)
 	}
-	type held struct{ currency, status string }
+	type held struct{ currency, status, purpose string }
 	accounts := map[string]held{}
 	for rows.Next() {
 		var id string
 		var h held
-		if err := rows.Scan(&id, &h.currency, &h.status); err != nil {
+		if err := rows.Scan(&id, &h.currency, &h.status, &h.purpose); err != nil {
 			rows.Close()
 			return MoneyEntry{}, fmt.Errorf("economy: post money: %w", err)
 		}
@@ -271,6 +289,10 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, erro
 		fmt.Fprintf(&sql, "($1, %d, $%d, $%d, $%d, $2)", i+1, n+1, n+2, n+3)
 		args = append(args, p.AccountID, p.AmountMinor, postings[i].Currency)
 	}
+	// B30.6: money in or out through a partner is screened before any posting.
+	if err := screenOutside(ctx, e, postings, func(id string) bool { return accounts[id].purpose == MoneyPartner }, screener); err != nil {
+		return MoneyEntry{}, err
+	}
 	// B30.4: live money moves within the limit for one movement at the workspace's verification level.
 	if e.Funding == FundingLive {
 		over, err := overLevelLimit(ctx, tx, e.WorkspaceID, c, postings)
@@ -288,15 +310,54 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry) (MoneyEntry, erro
 	return e, nil
 }
 
+// screenOutside screens e when it moves money through a partner account: money in from its counterparty when the
+// partner postings take money out of the partner account, money out to it when they put money in. Each currency
+// through a partner is screened as its own payment, all under the entry's idempotency key.
+func screenOutside(ctx context.Context, e MoneyEntry, postings []MoneyPosting, partner func(string) bool, screener PaymentScreener) error {
+	through := map[string]int64{}
+	var currencies []string
+	for _, p := range postings {
+		if partner(p.AccountID) {
+			if _, ok := through[p.Currency]; !ok {
+				currencies = append(currencies, p.Currency)
+			}
+			through[p.Currency] += p.AmountMinor
+		}
+	}
+	if len(currencies) == 0 {
+		return nil
+	}
+	switch {
+	case e.Counterparty == "":
+		return errors.New("economy: money in or out through a partner names who it is from or to (counterparty), to be screened first")
+	case screener == nil:
+		return fmt.Errorf("%w: no screener is set, so no money moves in or out through a partner", partners.ErrScreeningUnavailable)
+	}
+	for _, ccy := range currencies {
+		amount, direction := through[ccy], "out"
+		if amount < 0 {
+			amount, direction = -amount, "in"
+		}
+		if amount == 0 {
+			continue
+		}
+		if err := screener.ScreenPayment(ctx, screening.Payment{WorkspaceID: e.WorkspaceID, ID: e.IdempotencyKey, Capability: e.Capability,
+			Direction: direction, Counterparty: e.Counterparty, AmountMinor: amount, Currency: ccy, Funding: e.Funding}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // replayedMoneyEntry answers the entry already written under e's idempotency key, when it is the same movement as
-// e: the same capability, kind and funding, and the same postings in the same order.
+// e: the same capability, kind, funding and counterparty, and the same postings in the same order.
 func replayedMoneyEntry(ctx context.Context, tx pgx.Tx, e MoneyEntry, postings []MoneyPosting) (MoneyEntry, error) {
 	first, err := readMoneyEntry(ctx, tx, `e.workspace_id = $1 AND e.idempotency_key = $2`, e.WorkspaceID, e.IdempotencyKey)
 	if err != nil {
 		return MoneyEntry{}, err
 	}
 	same := first.Capability == e.Capability && first.Kind == e.Kind && first.Funding == e.Funding &&
-		len(first.Postings) == len(postings)
+		first.Counterparty == e.Counterparty && len(first.Postings) == len(postings)
 	for i := 0; same && i < len(postings); i++ {
 		p, q := postings[i], first.Postings[i]
 		same = p.AccountID == q.AccountID && p.AmountMinor == q.AmountMinor && (p.Currency == "" || p.Currency == q.Currency)
@@ -309,7 +370,7 @@ func replayedMoneyEntry(ctx context.Context, tx pgx.Tx, e MoneyEntry, postings [
 
 // readMoneyEntry reads the one entry where matches, and its postings in order.
 func readMoneyEntry(ctx context.Context, q pgxDB, where string, args ...any) (MoneyEntry, error) {
-	rows, err := q.Query(ctx, `SELECT e.id, e.workspace_id, e.capability, e.kind, e.idempotency_key, e.memo, e.created_at,
+	rows, err := q.Query(ctx, `SELECT e.id, e.workspace_id, e.capability, e.kind, e.idempotency_key, e.memo, e.counterparty, e.created_at,
 		p.account_id, p.amount_minor, p.currency, p.funding
 		FROM money_entries e JOIN money_postings p ON p.entry_id = e.id WHERE `+where+` ORDER BY p.line`, args...)
 	if err != nil {
@@ -319,7 +380,7 @@ func readMoneyEntry(ctx context.Context, q pgxDB, where string, args ...any) (Mo
 	var e MoneyEntry
 	for rows.Next() {
 		var p MoneyPosting
-		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.Capability, &e.Kind, &e.IdempotencyKey, &e.Memo, &e.CreatedAt,
+		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.Capability, &e.Kind, &e.IdempotencyKey, &e.Memo, &e.Counterparty, &e.CreatedAt,
 			&p.AccountID, &p.AmountMinor, &p.Currency, &p.Funding); err != nil {
 			return MoneyEntry{}, fmt.Errorf("economy: read money entry: %w", err)
 		}

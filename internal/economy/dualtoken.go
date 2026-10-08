@@ -330,6 +330,9 @@ type DualTokenStore struct {
 	ownerVerifier OwnerVerifier
 	// cashOutPartner pays cash-outs out as money (B22.9); nil, cash-out is unavailable.
 	cashOutPartner CashOutPartner
+	// screener screens who money in or out through a partner is from or to before it moves (B30.6); nil, no such
+	// money moves.
+	screener PaymentScreener
 	// B19.17: the marketplace a schedule pays a listing through.
 	listings ListingCharger
 	// B19.15: the marketplace a payment to another company's agent goes through.

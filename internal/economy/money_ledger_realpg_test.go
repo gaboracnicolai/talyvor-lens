@@ -13,9 +13,20 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/lens/internal/partners"
+	"github.com/talyvor/lens/internal/screening"
 )
 
 // B30.2 — money in currencies: accounts and a double-entry ledger in pounds, euros, dollars and USDC (0221).
+
+// screenedStore is a money store whose money in and out through a partner is screened (B30.6) — by the Test provider's
+// words alone, as these tests load no sanctions list.
+func screenedStore(pool *pgxpool.Pool) *DualTokenStore {
+	s := NewDualTokenStore(nil, pool, nil)
+	s.SetScreener(screening.NewScreener(pool, partners.NewRegistry(nil)))
+	return s
+}
 
 func openMoney(t *testing.T, s *DualTokenStore, ws, currency, purpose string) MoneyAccount {
 	t.Helper()
@@ -50,7 +61,7 @@ func moneyCount(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) int {
 func TestMoneyLedger_AnUnbalancedEntryIsRefusedAtCommit(t *testing.T) {
 	pool := supplyPool(t)
 	ctx := context.Background()
-	s := NewDualTokenStore(nil, pool, nil)
+	s := screenedStore(pool)
 	const ws = "ws-b302-unbalanced"
 	company, partner := openMoney(t, s, ws, CurrencyGBP, MoneyCompany), openMoney(t, s, ws, CurrencyGBP, MoneyPartner)
 
@@ -81,7 +92,7 @@ func TestMoneyLedger_AnUnbalancedEntryIsRefusedAtCommit(t *testing.T) {
 	refusedAtCommit("test-against-live", [3]any{company.ID, int64(1_000), "test"}, [3]any{partner.ID, int64(-1_000), "live"})
 	refusedAtCommit("empty")
 
-	_, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Kind: "payment_in",
+	_, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Counterparty: "Acme Ltd", Kind: "payment_in",
 		IdempotencyKey: "short", Funding: FundingTest, Postings: []MoneyPosting{
 			{AccountID: company.ID, AmountMinor: 10_000}, {AccountID: partner.ID, AmountMinor: -9_999}}})
 	if !errors.Is(err, ErrMoneyUnbalanced) {
@@ -100,10 +111,10 @@ func TestMoneyLedger_AnUnbalancedEntryIsRefusedAtCommit(t *testing.T) {
 func TestMoneyLedger_APostingCannotBeUpdatedOrDeleted(t *testing.T) {
 	pool := supplyPool(t)
 	ctx := context.Background()
-	s := NewDualTokenStore(nil, pool, nil)
+	s := screenedStore(pool)
 	const ws = "ws-b302-append-only"
 	company, partner := openMoney(t, s, ws, CurrencyEUR, MoneyCompany), openMoney(t, s, ws, CurrencyEUR, MoneyPartner)
-	e, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Kind: "payment_in",
+	e, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Counterparty: "Acme Ltd", Kind: "payment_in",
 		IdempotencyKey: "in-1", Funding: FundingTest, Postings: []MoneyPosting{
 			{AccountID: company.ID, AmountMinor: 25_00}, {AccountID: partner.ID, AmountMinor: -25_00}}})
 	if err != nil {
@@ -137,7 +148,7 @@ func TestMoneyLedger_APostingCannotBeUpdatedOrDeleted(t *testing.T) {
 func TestMoneyLedger_AThousandRandomEntriesKeepEveryBalance(t *testing.T) {
 	pool := supplyPool(t)
 	gb := WithUseCountry(context.Background(), "GB")
-	s := NewDualTokenStore(nil, pool, nil)
+	s := screenedStore(pool)
 	const ws = "ws-b302-random"
 	if _, err := pool.Exec(gb, `INSERT INTO workspaces (id, name, cache_prefix) VALUES ($1, $1, $1)`, ws); err != nil {
 		t.Fatal(err)
@@ -188,7 +199,7 @@ func TestMoneyLedger_AThousandRandomEntriesKeepEveryBalance(t *testing.T) {
 				postings = append(postings, MoneyPosting{AccountID: accounts[cur][k], AmountMinor: amount, Currency: cur})
 			}
 		}
-		e, err := s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Kind: "random",
+		e, err := s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Counterparty: "Acme Ltd", Kind: "random",
 			IdempotencyKey: fmt.Sprintf("random-%d", i), Funding: funding, Postings: postings})
 		if err != nil {
 			t.Fatalf("entry %d: %v", i, err)
@@ -239,7 +250,7 @@ func TestMoneyLedger_AThousandRandomEntriesKeepEveryBalance(t *testing.T) {
 func TestMoneyLedger_LiveMoneyAsksTheCapability(t *testing.T) {
 	pool := supplyPool(t)
 	gb := WithUseCountry(context.Background(), "GB")
-	s := NewDualTokenStore(nil, pool, nil)
+	s := screenedStore(pool)
 	const ws = "ws-b302-live"
 	if _, err := pool.Exec(gb, `INSERT INTO workspaces (id, name, cache_prefix) VALUES ($1, $1, $1)`, ws); err != nil {
 		t.Fatal(err)
@@ -248,7 +259,7 @@ func TestMoneyLedger_LiveMoneyAsksTheCapability(t *testing.T) {
 	liveVerified(t, pool, ws)
 	company, partner := openMoney(t, s, ws, CurrencyUSDC, MoneyCompany), openMoney(t, s, ws, CurrencyUSDC, MoneyPartner)
 	in := func(key, funding string) (MoneyEntry, error) {
-		return s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Kind: "payment_in",
+		return s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Counterparty: "Acme Ltd", Kind: "payment_in",
 			IdempotencyKey: key, Funding: funding, Postings: []MoneyPosting{
 				{AccountID: company.ID, AmountMinor: 12_500_000}, {AccountID: partner.ID, AmountMinor: -12_500_000}}})
 	}
@@ -296,11 +307,11 @@ func TestMoneyLedger_LiveMoneyAsksTheCapability(t *testing.T) {
 func TestMoneyLedger_ARetryMovesMoneyOnce(t *testing.T) {
 	pool := supplyPool(t)
 	ctx := context.Background()
-	s := NewDualTokenStore(nil, pool, nil)
+	s := screenedStore(pool)
 	const ws = "ws-b302-retry"
 	company, partner := openMoney(t, s, ws, CurrencyUSD, MoneyCompany), openMoney(t, s, ws, CurrencyUSD, MoneyPartner)
 	move := func(key string, cents int64, account string) (MoneyEntry, error) {
-		return s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Kind: "payment_in",
+		return s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Counterparty: "Acme Ltd", Kind: "payment_in",
 			IdempotencyKey: key, Funding: FundingTest, Postings: []MoneyPosting{
 				{AccountID: account, AmountMinor: cents}, {AccountID: partner.ID, AmountMinor: -cents}}})
 	}
@@ -320,7 +331,7 @@ func TestMoneyLedger_ARetryMovesMoneyOnce(t *testing.T) {
 	}
 
 	euros := openMoney(t, s, ws, CurrencyEUR, MoneyCompany)
-	if _, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Kind: "payment_in",
+	if _, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityCurrencyAccounts, Counterparty: "Acme Ltd", Kind: "payment_in",
 		IdempotencyKey: "in-eur", Funding: FundingTest, Postings: []MoneyPosting{
 			{AccountID: euros.ID, AmountMinor: 5_00, Currency: CurrencyUSD}, {AccountID: partner.ID, AmountMinor: -5_00}}}); err == nil {
 		t.Fatal("dollars posted to a euro account were accepted")
@@ -336,7 +347,7 @@ func TestMoneyLedger_ARetryMovesMoneyOnce(t *testing.T) {
 	if _, err := move("in-theirs", 5_00, theirs.ID); !errors.Is(err, ErrMoneyAccountNotFound) {
 		t.Fatalf("money into another workspace's account = %v; want ErrMoneyAccountNotFound", err)
 	}
-	if _, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityBuyListings, Kind: "payment_in",
+	if _, err := s.PostMoney(ctx, MoneyEntry{WorkspaceID: ws, Capability: CapabilityBuyListings, Counterparty: "Acme Ltd", Kind: "payment_in",
 		IdempotencyKey: "in-green", Funding: FundingLive, Postings: []MoneyPosting{
 			{AccountID: company.ID, AmountMinor: 5_00}, {AccountID: partner.ID, AmountMinor: -5_00}}}); err == nil {
 		t.Fatal("live money moved for a capability that is not a money capability")
