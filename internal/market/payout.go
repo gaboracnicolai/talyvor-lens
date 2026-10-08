@@ -534,8 +534,9 @@ func (s *Store) ReverseInvoice(ctx context.Context, invoiceID, cause, ref string
 	if reason == "" {
 		return 0, false, fmt.Errorf("market: reverse invoice %s: unknown cause %q", invoiceID, cause)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT u.id, r.use_id IS NOT NULL, COALESCE(r.cause, ''), u.price_ulxc FROM market_uses u
-		LEFT JOIN market_refunds r ON r.use_id = u.id
+	rows, err := s.pool.Query(ctx, `SELECT u.id, r.use_id IS NOT NULL, COALESCE(r.cause, ''), u.price_ulxc,
+		       CASE WHEN u.tax_metered_at IS NOT NULL THEN COALESCE(t.tax_usd_micros, 0) ELSE 0 END
+		FROM market_uses u LEFT JOIN market_refunds r ON r.use_id = u.id LEFT JOIN market_tax_lines t ON t.use_id = u.id
 		WHERE u.cleared_invoice_id = $1 ORDER BY u.used_at, u.id`, invoiceID)
 	if err != nil {
 		return 0, false, fmt.Errorf("market: uses of invoice %s: %w", invoiceID, err)
@@ -545,10 +546,11 @@ func (s *Store) ReverseInvoice(ctx context.Context, invoiceID, cause, ref string
 		refunded    bool
 		refundCause string
 		priceULXC   int64
+		tax         int64 // µUSD the invoice collected beside the price (B32.39)
 	}
 	uses, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (use, error) {
 		var u use
-		return u, row.Scan(&u.id, &u.refunded, &u.refundCause, &u.priceULXC)
+		return u, row.Scan(&u.id, &u.refunded, &u.refundCause, &u.priceULXC, &u.tax)
 	})
 	if err != nil {
 		return 0, false, fmt.Errorf("market: uses of invoice %s: %w", invoiceID, err)
@@ -559,7 +561,7 @@ func (s *Store) ReverseInvoice(ctx context.Context, invoiceID, cause, ref string
 	var covered int64
 	for _, u := range uses {
 		if u.refundCause == "buyer_refund" || u.refundCause == "chargeback" {
-			covered += u.priceULXC / ulxcPerUSDMicro
+			covered += u.priceULXC/ulxcPerUSDMicro + u.tax
 		}
 	}
 	n := 0
@@ -584,7 +586,7 @@ func (s *Store) ReverseInvoice(ctx context.Context, invoiceID, cause, ref string
 		if err != nil {
 			return n, true, fmt.Errorf("market: reverse use %s: %w", u.id, err)
 		}
-		covered += u.priceULXC / ulxcPerUSDMicro
+		covered += u.priceULXC/ulxcPerUSDMicro + u.tax
 	}
 	return n, true, nil
 }

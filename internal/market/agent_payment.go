@@ -2,6 +2,7 @@ package market
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,6 +28,11 @@ func (s *Store) CompanyPayeeRefusal(ctx context.Context, payerWorkspaceID, payee
 	}
 	if linked {
 		return "the two companies share a card or an owner, and a company cannot pay itself through the marketplace", nil
+	}
+	if err := s.sellable(ctx, payerWorkspaceID); errors.Is(err, ErrNotSoldHere) { // B32.39
+		return err.Error(), nil
+	} else if err != nil {
+		return "", err
 	}
 	return "", nil
 }

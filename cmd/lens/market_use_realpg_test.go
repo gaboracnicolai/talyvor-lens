@@ -29,6 +29,7 @@ type marketStripe struct {
 	failMeter  bool
 	credits    []marketCredit // B20.4: negative lines on a buyer's marketplace bill
 	failCredit bool
+	items      []string // B32.39: the tax price added to a subscription
 }
 
 type marketCredit struct {
@@ -64,6 +65,10 @@ func (f *marketStripe) CreditMarketUse(_ context.Context, customer, subscription
 	}
 	f.credits = append(f.credits, marketCredit{customer, subscription, key, cents})
 	return fmt.Sprintf("ii_%d", len(f.credits)), nil
+}
+func (f *marketStripe) AddMarketSubscriptionItem(_ context.Context, subscription, price string) error {
+	f.items = append(f.items, subscription+" "+price)
+	return nil
 }
 func (f *marketStripe) SendMeterEvent(_ context.Context, name, customer, identifier string, value int64, _ time.Time) error {
 	if f.failMeter {

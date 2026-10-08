@@ -157,7 +157,8 @@ func writeRoomRunErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &need):
 		writeJSONOK(w, http.StatusForbidden, map[string]any{"error": err.Error(), "approval_id": need.ApprovalID})
-	case errors.Is(err, economy.ErrAgentRule), errors.Is(err, workspace.ErrMoneyWall), errors.Is(err, rooms.ErrForbidden):
+	case errors.Is(err, economy.ErrAgentRule), errors.Is(err, workspace.ErrMoneyWall), errors.Is(err, rooms.ErrForbidden),
+		errors.Is(err, market.ErrNotSoldHere):
 		writeJSONErr(w, http.StatusForbidden, err.Error())
 	case writeRoomPlanLimit(w, err):
 	case errors.As(err, &refusal):

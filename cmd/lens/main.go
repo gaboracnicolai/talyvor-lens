@@ -1792,7 +1792,8 @@ func run() error {
 	// The real workspaces' Stripe (B25.6: a test workspace's is on the test-mode key, below).
 	liveSide := stripeSide{cards: agentcard.NewStripe(cfg.StripeSecretKey, cfg.StripeIssuingCurrency)} // B19.12
 	if cfg.BillingEnabled && cfg.MarketBillPriceID != "" {
-		billingSvc = billingSvc.WithMarketBill(liveStripe, cfg.MarketBillPriceID, cfg.MarketMeterEvent, marketStore)
+		billingSvc = billingSvc.WithMarketBill(liveStripe, cfg.MarketBillPriceID, cfg.MarketMeterEvent, marketStore).
+			WithMarketTax(cfg.MarketTaxMeterEvent, cfg.MarketTaxPriceID) // B32.39
 		liveSide.bill = billingSvc
 	}
 	// B20.5 — sellers connect a Stripe account and are paid monthly; a buyer's refund or chargeback reverses
@@ -1830,7 +1831,8 @@ func run() error {
 		// B25.6 — its marketplace bill is metered, refunded and cleared, its seller account made and paid, and its
 		// agents' card purchases settled, all in test mode, from the test-mode webhook.
 		if cfg.StripeTestMarketBillPriceID != "" {
-			testBillingSvc = testBillingSvc.WithMarketBill(testStripe, cfg.StripeTestMarketBillPriceID, cfg.MarketMeterEvent, marketStore)
+			testBillingSvc = testBillingSvc.WithMarketBill(testStripe, cfg.StripeTestMarketBillPriceID, cfg.MarketMeterEvent, marketStore).
+				WithMarketTax(cfg.MarketTaxMeterEvent, cfg.StripeTestMarketTaxPriceID)
 			testSide.bill = testBillingSvc
 		}
 		testBillingSvc = testBillingSvc.WithMarketPayouts(testStripe, marketStore)
@@ -1851,12 +1853,17 @@ func run() error {
 	// B32.38 — a buyer's tax profile, its tax id checked with the tax partner (the Test one until B32.45), and where
 	// the buyer resolves to: the declaration weighed against its Stripe customer's billing and card countries.
 	partnerRegistry := partners.NewRegistry(dualToken)
-	partnerRegistry.UseTaxData(partners.NewTaxStore(pool))
+	taxData := partners.NewTaxStore(pool)
+	partnerRegistry.UseTaxData(taxData)
 	taxProfiles := taxprofile.NewStore(pool, partnerRegistry)
 	if cfg.BillingEnabled {
 		taxProfiles.SetStripe(taxStripeByKind{isTest: wsManager.GetSynthetic, mainKeyLive: billing.LiveKey(cfg.StripeSecretKey),
 			live: liveStripe, test: testStripe})
 	}
+	// B32.39 — every billed marketplace use carries its buyer's tax, worked out when it is metered; while the key is
+	// live, a real buyer's sale Talyvor cannot account for the tax on is refused before it runs.
+	marketStore.SetTax(market.Tax{Partners: partnerRegistry, Buyers: taxProfiles, Registrations: taxData})
+	marketStore.SetLiveStripe(billing.LiveKey(cfg.StripeSecretKey))
 	// Every workspace's bill is picked per workspace: in Stripe, or for a test workspace on a Lens with none in
 	// Stripe, kept by Lens (B17.15). A workspace with neither is refused a paid use and a company payment.
 	var marketMeter market.Meter = stripeKinds

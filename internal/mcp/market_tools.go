@@ -46,7 +46,7 @@ var marketRefusals = []error{
 	market.ErrNotFound, market.ErrTakenDown, market.ErrInvalid, market.ErrNotSoldPerUse, market.ErrOverMaxPrice,
 	market.ErrNoModel, market.ErrNotRunnable, market.ErrNoBill, market.ErrKeyReused,
 	economy.ErrAgentRule, economy.ErrApprovalRequired, economy.ErrAgentFunds, economy.ErrCapabilityNotCleared,
-	economy.ErrOwnerUnverified, economy.ErrAgentOwnerless, workspace.ErrMoneyWall,
+	economy.ErrOwnerUnverified, economy.ErrAgentOwnerless, workspace.ErrMoneyWall, market.ErrNotSoldHere,
 }
 
 func isMarketTool(name string) bool { return strings.HasPrefix(name, "market_") }

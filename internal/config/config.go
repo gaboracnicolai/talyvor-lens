@@ -970,6 +970,16 @@ type Config struct {
 	MarketBillPriceID string
 	MarketMeterEvent  string
 
+	// MarketTaxPriceID is the Stripe metered Price each billed use's tax is invoiced on, as its own line (B32.39): one
+	// µLXC per unit of the meter MarketTaxMeterEvent names, at the LXC peg, like MarketBillPriceID. A buyer's
+	// marketplace subscription gains an item of it the first time a use of theirs owes tax. Env:
+	// LENS_MARKET_TAX_PRICE_ID, default EMPTY — then a use that owes tax waits, unbilled, for an operator.
+	// MarketTaxMeterEvent is that meter's event name. Env: LENS_MARKET_TAX_METER_EVENT.
+	// StripeTestMarketTaxPriceID is its test-mode twin. Env: LENS_STRIPE_TEST_MARKET_TAX_PRICE_ID.
+	MarketTaxPriceID           string
+	MarketTaxMeterEvent        string
+	StripeTestMarketTaxPriceID string
+
 	// MarketTrialMax is the most free trial uses one per_use offer may give each buyer (B32.21). Env:
 	// LENS_MARKET_TRIAL_MAX, default 5 — a proposal for Nicolai; 0 lets no offer give any.
 	MarketTrialMax int
@@ -1323,6 +1333,9 @@ func Load() (*Config, error) {
 		BillingSubscriptionPlans:   parsePlans(os.Getenv("LENS_BILLING_SUBSCRIPTION_PLANS")),
 		MarketBillPriceID:          getEnv("LENS_MARKET_BILL_PRICE_ID", ""),
 		MarketMeterEvent:           getEnv("LENS_MARKET_METER_EVENT", "talyvor_marketplace_use"),
+		MarketTaxPriceID:           getEnv("LENS_MARKET_TAX_PRICE_ID", ""),
+		MarketTaxMeterEvent:        getEnv("LENS_MARKET_TAX_METER_EVENT", "talyvor_marketplace_tax"),
+		StripeTestMarketTaxPriceID: getEnv("LENS_STRIPE_TEST_MARKET_TAX_PRICE_ID", ""),
 		MarketPayoutReturnURL:      getEnv("LENS_MARKET_PAYOUT_RETURN_URL", "https://app.talyvor.com/marketplace/selling?payouts=connected"),
 		MarketPayoutRefreshURL:     getEnv("LENS_MARKET_PAYOUT_REFRESH_URL", "https://app.talyvor.com/marketplace/selling?payouts=expired"),
 		BillingSuccessURL:          getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),

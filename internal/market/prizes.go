@@ -78,6 +78,9 @@ func (s *Store) AwardPrize(ctx context.Context, deps LicenceDeps, buyerWorkspace
 		if err := deps.Capabilities.RequireBilledCapability(ctx, buyerWorkspaceID, economy.CapabilityBuyListings); err != nil {
 			return Licence{}, err
 		}
+		if err := s.sellable(ctx, buyerWorkspaceID); err != nil { // B32.39
+			return Licence{}, err
+		}
 	}
 
 	record := func(tx pgx.Tx) error {

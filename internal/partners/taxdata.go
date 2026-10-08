@@ -50,6 +50,17 @@ func (s *TaxStore) TaxRegistration(ctx context.Context, jurisdiction string, at 
 	return r, err == nil, err
 }
 
+// RegistrationFromFirstSale says whether jurisdiction is marked as needing a supplier registered before its first
+// consumer sale (B32.39). A jurisdiction that is not loaded is not marked.
+func (s *TaxStore) RegistrationFromFirstSale(ctx context.Context, jurisdiction string) (bool, error) {
+	var marked bool
+	err := s.pool.QueryRow(ctx, `SELECT registration_from_first_sale FROM tax_jurisdictions WHERE code = $1`, jurisdiction).Scan(&marked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return marked, err
+}
+
 // TaxRateRow is one line of a rates file: a rate, and the jurisdiction it is in.
 type TaxRateRow struct {
 	TaxRate

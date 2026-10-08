@@ -44,6 +44,11 @@ func (s *Store) ChargeScheduledListing(ctx context.Context, tx pgx.Tx, buyerWork
 	if price > maxULXC {
 		return "", fmt.Sprintf("the listing now costs %s LXC a use, more than this schedule pays (%s LXC)", lxc(price), lxc(maxULXC)), nil
 	}
+	if err := s.sellable(ctx, buyerWorkspaceID); errors.Is(err, ErrNotSoldHere) { // B32.39
+		return "", err.Error(), nil
+	} else if err != nil {
+		return "", "", err
+	}
 	if err := judge(price); err != nil {
 		return "", "", err
 	}

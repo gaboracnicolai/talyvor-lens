@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/talyvor/lens/internal/billing"
 )
 
 // review.go — B20.4: MARKETPLACE SAFETY — REVIEW, REPORTING, TAKEDOWN.
@@ -363,8 +365,10 @@ func (s *Store) refundUses(ctx context.Context, listingID string) (int, error) {
 
 // creditRefunds asks Stripe to credit each refund of a use that was billed (metered) and is not credited yet.
 func (s *Store) creditRefunds(ctx context.Context, refunder Refunder, listingID string) (int, error) {
-	rows, err := s.pool.Query(ctx, `SELECT r.use_id, r.buyer_workspace_id, r.price_ulxc, COALESCE(l.title, '')
+	rows, err := s.pool.Query(ctx, `SELECT r.use_id, r.buyer_workspace_id, r.price_ulxc, COALESCE(l.title, ''),
+		       CASE WHEN u.tax_metered_at IS NOT NULL AND r.tax_credited_at IS NULL THEN COALESCE(t.tax_usd_micros, 0) ELSE 0 END
 		FROM market_refunds r JOIN market_uses u ON u.id = r.use_id LEFT JOIN market_listings l ON l.id = r.listing_id
+		LEFT JOIN market_tax_lines t ON t.use_id = r.use_id
 		WHERE r.credited_at IS NULL AND r.cause = 'takedown' AND u.metered_at IS NOT NULL AND ($1 = '' OR r.listing_id = $1)
 		ORDER BY r.refunded_at, r.use_id LIMIT 200`, listingID)
 	if err != nil {
@@ -372,17 +376,32 @@ func (s *Store) creditRefunds(ctx context.Context, refunder Refunder, listingID 
 	}
 	type due struct {
 		use, buyer, title string
-		ulxc              int64
+		ulxc, tax         int64
 	}
 	todo, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (due, error) {
 		var d due
-		return d, row.Scan(&d.use, &d.buyer, &d.ulxc, &d.title)
+		return d, row.Scan(&d.use, &d.buyer, &d.ulxc, &d.title, &d.tax)
 	})
 	if err != nil {
 		return 0, fmt.Errorf("market: refunds to credit: %w", err)
 	}
 	n := 0
 	for _, d := range todo {
+		// B32.39: its tax is credited back too, as its own line, once per use.
+		if d.tax > 0 {
+			tr, ok := refunder.(TaxRefunder)
+			if !ok {
+				return n, fmt.Errorf("market: credit refund of %s: %w", d.use, billing.ErrNoMarketTax)
+			}
+			if _, err := tr.CreditMarketRefundTax(ctx, d.buyer, d.use, d.tax*ulxcPerUSDMicro,
+				fmt.Sprintf("Refund of tax: %q was taken down (use %s)", d.title, d.use)); err != nil {
+				return n, fmt.Errorf("market: credit refund of %s's tax: %w", d.use, err)
+			}
+			if _, err := s.pool.Exec(ctx, `UPDATE market_refunds SET tax_credited_at = now() WHERE use_id = $1 AND tax_credited_at IS NULL`,
+				d.use); err != nil {
+				return n, fmt.Errorf("market: credit refund of %s's tax: %w", d.use, err)
+			}
+		}
 		creditID, err := refunder.CreditMarketRefund(ctx, d.buyer, d.use, d.ulxc, fmt.Sprintf("Refund: %q was taken down (use %s)", d.title, d.use))
 		if err != nil {
 			return n, fmt.Errorf("market: credit refund of %s: %w", d.use, err)

@@ -184,6 +184,9 @@ func (s *Store) License(ctx context.Context, deps LicenceDeps, buyerWorkspaceID,
 		if err := deps.Capabilities.RequireBilledCapability(ctx, buyerWorkspaceID, capability); err != nil {
 			return Licence{}, false, err
 		}
+		if err := s.sellable(ctx, buyerWorkspaceID); err != nil { // B32.39
+			return Licence{}, false, err
+		}
 	}
 
 	record := func(tx pgx.Tx) error {
