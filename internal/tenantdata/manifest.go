@@ -243,6 +243,7 @@ var Manifest = map[string]Entry{
 	"market_ip_claims":             {Delete, "B32.47: keys `claimant_workspace_id`: the IP claims a workspace filed, with their evidence and decision; claims against its own listings cascade with them"},
 	"market_collections":           {Delete, "B32.50: the collections of listings a workspace curated, public or not; their items cascade"},
 	"market_reviews":               {Delete, "B32.49: keys `buyer_workspace_id`: the reviews a workspace wrote of listings it paid for; reviews of its own listings cascade with them"},
+	"buyer_tax_profiles":           {Delete, "B32.38: the workspace's declared legal name, address, country and tax id as a buyer; the tax lines of its sales keep their own evidence"},
 	"market_listing_reports":       {Delete, "B20.4: keys `reporter_workspace_id`: the reports a workspace made of listings; reports of its own listings cascade with them"},
 	"workspace_passkeys":           {Delete, "B19.16: the owner's passkeys' public keys"},
 	"workspace_provider_keys":      {Delete, "B27.26: the workspace's own provider keys (BYOK), sealed; deleting the row is the end of Talyvor's custody"},
