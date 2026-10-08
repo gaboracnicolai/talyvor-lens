@@ -340,6 +340,15 @@ var CSVHeader = func() []string {
 	return h
 }()
 
+// text is a seller's own words as a CSV cell. The file is opened in a spreadsheet, which runs a cell starting with =,
+// +, -, @, a tab or a carriage return as a formula: such a cell is written after a single quote, so it reads as text.
+func text(v string) string {
+	if v != "" && strings.ContainsRune("=+-@\t\r", rune(v[0])) {
+		return "'" + v
+	}
+	return v
+}
+
 // Render writes rep in format: the bytes of the file.
 func Render(rep Report, format string) ([]byte, error) {
 	var buf bytes.Buffer
@@ -361,9 +370,9 @@ func Render(rep Report, format string) ([]byte, error) {
 			for i, t := range r.TINs {
 				tins[i] = t.Jurisdiction + ":" + t.Number
 			}
-			line := []string{strconv.Itoa(rep.Year), rep.Funding, rep.Currency, r.WorkspaceID, r.SellerType, r.FirstName,
-				r.MiddleName, r.LastName, r.LegalName, r.Address, r.Country, strings.Join(tins, ";"), r.DateOfBirth,
-				r.CompanyRegistrationNumber, r.VATNumber, r.AccountIdentifier, r.AccountHolder,
+			line := []string{strconv.Itoa(rep.Year), rep.Funding, rep.Currency, r.WorkspaceID, r.SellerType, text(r.FirstName),
+				text(r.MiddleName), text(r.LastName), text(r.LegalName), text(r.Address), r.Country, strings.Join(tins, ";"),
+				r.DateOfBirth, text(r.CompanyRegistrationNumber), text(r.VATNumber), r.AccountIdentifier, text(r.AccountHolder),
 				strconv.FormatBool(r.DetailsComplete), r.Activity}
 			for _, q := range append(r.Quarters[:], r.Total) {
 				line = append(line, i64(q.ConsiderationUSDMicros), i64(q.Activities), i64(q.FeesUSDMicros), i64(q.TaxesWithheldUSDMicros))
