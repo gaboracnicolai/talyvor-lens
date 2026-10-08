@@ -35,6 +35,8 @@ import (
 //   - A seller whose tax details are still incomplete after the last request for them (B32.41, internal/sellertax)
 //     is withheld: the payout run skips them and they cannot take credits, while their earnings keep clearing, until
 //     the details are complete.
+//   - To a seller who agreed to self-billing, each payout in money is also a self-billed invoice from them to Talyvor
+//     for the earnings it pays, and the VAT they charge on it is paid on top (B32.43, selfbill.go).
 
 const (
 	// PayoutMinimumUSDMicros: a seller is paid in money once their available balance reaches US$25.
@@ -102,6 +104,7 @@ type Payout struct {
 	Month               string     `json:"month"`
 	Period              string     `json:"period"` // the ISO week it was made in, such as 2026-W41 (B32.42)
 	GrossUSDMicros      int64      `json:"gross_usd_micros"`
+	VATUSDMicros        int64      `json:"vat_usd_micros"` // the seller's VAT on their self-billed invoice, paid on top (B32.43)
 	AccountFeeUSDMicros int64      `json:"account_fee_usd_micros"`
 	PayoutFeeUSDMicros  int64      `json:"payout_fee_usd_micros"`
 	NetUSDMicros        int64      `json:"net_usd_micros"`
@@ -317,7 +320,7 @@ func (s *Store) SellerPayouts(ctx context.Context, api ConnectStripe, workspaceI
 	if accountFee, payoutFee, net := PayoutFees(gross, !p.PaidThisMonth); net > 0 {
 		p.Quote = PayoutQuote{gross * usdMicrosPerCent, accountFee * usdMicrosPerCent, payoutFee * usdMicrosPerCent, net * usdMicrosPerCent}
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, method, month, period, gross_usd_micros, account_fee_usd_micros, payout_fee_usd_micros, net_usd_micros,
+	rows, err := s.pool.Query(ctx, `SELECT id, method, month, period, gross_usd_micros, vat_usd_micros, account_fee_usd_micros, payout_fee_usd_micros, net_usd_micros,
 		       credits_ulxc, COALESCE(stripe_transfer_id, ''), paid_at, last_error, created_at
 		FROM market_payouts WHERE workspace_id = $1 ORDER BY created_at DESC, id LIMIT 100`, workspaceID)
 	if err != nil {
@@ -325,7 +328,7 @@ func (s *Store) SellerPayouts(ctx context.Context, api ConnectStripe, workspaceI
 	}
 	p.Payouts, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Payout, error) {
 		var x Payout
-		return x, row.Scan(&x.ID, &x.Method, &x.Month, &x.Period, &x.GrossUSDMicros, &x.AccountFeeUSDMicros, &x.PayoutFeeUSDMicros, &x.NetUSDMicros,
+		return x, row.Scan(&x.ID, &x.Method, &x.Month, &x.Period, &x.GrossUSDMicros, &x.VATUSDMicros, &x.AccountFeeUSDMicros, &x.PayoutFeeUSDMicros, &x.NetUSDMicros,
 			&x.CreditsULXC, &x.StripeTransferID, &x.PaidAt, &x.LastError, &x.CreatedAt)
 	})
 	if err != nil {
@@ -495,25 +498,40 @@ func (s *Store) payOut(ctx context.Context, api ConnectStripe, now time.Time, te
 				return err
 			}
 			gross := due / usdMicrosPerCent
-			accountFee, payoutFee, net := PayoutFees(gross, !paidThisMonth)
 			id := "mpo_" + uuid.NewString()
+			// B32.43: to a seller who agreed to self-billing the payout is also a self-billed invoice for the earnings it
+			// pays, and the VAT the seller charges on them is paid on top.
+			bill, err := s.selfBillFor(ctx, tx, x.ws, id, gross*usdMicrosPerCent, now)
+			if err != nil {
+				return err
+			}
+			var vat int64
+			if bill != nil {
+				vat = bill.VATUSDMicros / usdMicrosPerCent
+			}
+			accountFee, payoutFee, net := PayoutFees(gross+vat, !paidThisMonth)
 			var test bool
-			err = tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, period, gross_usd_micros, account_fee_usd_micros,
-				payout_fee_usd_micros, net_usd_micros, stripe_account_id, created_at, livemode)
-				VALUES ($1, $2, 'stripe', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			err = tx.QueryRow(ctx, `INSERT INTO market_payouts (id, workspace_id, method, month, period, gross_usd_micros, vat_usd_micros,
+				account_fee_usd_micros, payout_fee_usd_micros, net_usd_micros, stripe_account_id, created_at, livemode)
+				VALUES ($1, $2, 'stripe', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 				ON CONFLICT (workspace_id, period) WHERE method = 'stripe' AND period <> '' DO NOTHING
 				RETURNING test`,
-				id, x.ws, monthOf(now), weekOf(now), gross*usdMicrosPerCent, accountFee*usdMicrosPerCent, payoutFee*usdMicrosPerCent,
-				net*usdMicrosPerCent, x.account, now, live).Scan(&test)
+				id, x.ws, monthOf(now), weekOf(now), gross*usdMicrosPerCent, vat*usdMicrosPerCent, accountFee*usdMicrosPerCent,
+				payoutFee*usdMicrosPerCent, net*usdMicrosPerCent, x.account, now, live).Scan(&test)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil // paid this week already
 			}
 			if err != nil {
 				return err
 			}
+			if bill != nil {
+				if err := issueSelfBillTx(ctx, tx, x.ws, bill, live, test); err != nil {
+					return err
+				}
+			}
 			// B32.17: the payout leaves the seller's available balance — the net to Stripe, Stripe's fees at cost.
 			_, err = PostJournalTx(ctx, tx, JournalPayout, id, funding(live, test), now,
-				Posting{Account: SellerAvailable(x.ws), AmountUSDMicros: gross * usdMicrosPerCent},
+				Posting{Account: SellerAvailable(x.ws), AmountUSDMicros: (gross + vat) * usdMicrosPerCent},
 				Posting{Account: AccountStripeClearing, AmountUSDMicros: -net * usdMicrosPerCent},
 				Posting{Account: AccountConnectFees, AmountUSDMicros: -(accountFee + payoutFee) * usdMicrosPerCent})
 			return err

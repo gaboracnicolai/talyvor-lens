@@ -26,6 +26,8 @@ import (
 //     ReverseInvoice, refundUses, a test-money crossing's reversal — is journalled without being touched. Once
 //     the earning was released, the seller's share comes back out of available instead (migration 0200).
 //   - release, payout, credits: the holdback's escrow and what leaves it (B32.17, escrow.go and payout.go).
+//   - self_bill: the VAT a seller charges Talyvor on a payout's self-billed invoice — −VAT seller:<ws>:available,
+//     +VAT tax:<jurisdiction>:input (B32.43, selfbill.go).
 
 // The journal's accounts. A seller has two: SellerHoldback and SellerAvailable.
 const (
@@ -43,6 +45,7 @@ const (
 	JournalRelease  = "release"
 	JournalPayout   = "payout"
 	JournalCredits  = "credits"
+	JournalSelfBill = "self_bill"
 )
 
 // SellerHoldback is the seller's account for earnings still inside the 14-day holdback.

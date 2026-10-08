@@ -178,6 +178,8 @@ type Store struct {
 	liveStripe bool // Lens's Stripe key is live: a sale Talyvor cannot account for the tax on is refused (B32.39)
 
 	receipts *Receipts // nil: a paid marketplace bill gets no receipt (B32.40, receipts.go)
+
+	selfBilling *SelfBilling // nil: no payout is a self-billed invoice (B32.43, selfbill.go)
 }
 
 func (s *Store) now() time.Time {

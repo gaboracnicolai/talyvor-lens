@@ -988,6 +988,11 @@ type Config struct {
 	SupplierAddress   string
 	SupplierVATNumber string
 
+	// SelfBillingVAT is whether a seller who agreed to self-billing has the VAT on their supply to Talyvor worked out
+	// and paid with their payout (B32.43). Env: LENS_SELF_BILLING_VAT, default false until Talyvor's accountant confirms
+	// the treatment — every self-billed invoice is then issued at zero VAT, "VAT on your supply: under review".
+	SelfBillingVAT bool
+
 	// MarketTrialMax is the most free trial uses one per_use offer may give each buyer (B32.21). Env:
 	// LENS_MARKET_TRIAL_MAX, default 5 — a proposal for Nicolai; 0 lets no offer give any.
 	MarketTrialMax int
@@ -1353,6 +1358,7 @@ func Load() (*Config, error) {
 		SupplierLegalName:          getEnv("LENS_SUPPLIER_LEGAL_NAME", "TALYVOR LTD"),
 		SupplierAddress:            getEnv("LENS_SUPPLIER_ADDRESS", "71-75 Shelton Street, Covent Garden, London, United Kingdom, WC2H 9JQ"),
 		SupplierVATNumber:          getEnv("LENS_SUPPLIER_VAT_NUMBER", ""),
+		SelfBillingVAT:             parseBoolEnv("LENS_SELF_BILLING_VAT"),
 		MarketPayoutReturnURL:      getEnv("LENS_MARKET_PAYOUT_RETURN_URL", "https://app.talyvor.com/marketplace/selling?payouts=connected"),
 		MarketPayoutRefreshURL:     getEnv("LENS_MARKET_PAYOUT_REFRESH_URL", "https://app.talyvor.com/marketplace/selling?payouts=expired"),
 		BillingSuccessURL:          getEnv("LENS_BILLING_SUCCESS_URL", "https://app.talyvor.com/billing/success?session_id={CHECKOUT_SESSION_ID}"),
