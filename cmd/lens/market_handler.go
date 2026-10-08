@@ -24,9 +24,9 @@ import (
 //	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/offers    {offers: [...]}   B32.18: replace how it is sold
 //	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/remix-terms {remix_policy, remix_share_bps}   B32.24: may others build on it
 //	POST /v1/workspaces/{wsID}/marketplace/listings/{id}/remix      {version}   B32.25: accept its remix licence and open its artifact
-//	GET  /v1/workspaces/{wsID}/marketplace/listings                the workspace's own listings
-//	GET  /v1/marketplace/listings?kind=                            the public catalog
-//	GET  /v1/marketplace/listings/{id}                             a listing and its versions (artifacts for its owner only)
+//	GET  /v1/workspaces/{wsID}/marketplace/listings?currency=      the workspace's own listings
+//	GET  /v1/marketplace/listings?kind=&currency=                  the public catalog
+//	GET  /v1/marketplace/listings/{id}?currency=                   a listing and its versions (artifacts for its owner only)
 //	GET  /v1/marketplace/listings/{id}/lineage?version=            B32.24: its ancestors with each edge's share, and its remixes
 //	GET  /v1/marketplace/listings/{id}/trust                       B32.49: verified publisher, reviews, eval score, claims and lineage
 //	PUT  /v1/workspaces/{wsID}/marketplace/listings/{id}/review    {rating, text}   B32.49: a paying buyer's review
@@ -73,12 +73,32 @@ import (
 // (LENS_IP_COUNTER_DAYS after filing); the operator then decides it (POST /v1/admin/marketplace/ip-claims/{id}/decide).
 // Filing and countering take the workspace's owner or an admin.
 //
+// B32.51: every listing read — these, search, a collection's listings and MCP's market_listing and market_search —
+// shows each offer's price beside its US-dollar one in the reader's currency (display, internal/market/display.go):
+// ?currency= (a three-letter ISO code; 400 otherwise), or by default that of the country the reader's tax profile
+// resolves to, at the ECB reference rate. A consumer Talyvor charges VAT sees it included ("incl. VAT"), a business the
+// price before it ("+ VAT"). The charge stays in US dollars on the monthly marketplace bill, and price_note says so.
+//
 // B32.49: the trust panel (internal/market/trust.go) is one read of what a buyer weighs: whether the publisher is
 // verified (payouts enabled, no IP claim upheld against its listings in 12 months), the reviews of buyers who paid for a
 // use or a licence and are not linked to the seller, the eval score of the latest version, the claims against the
 // listing, and the originals and remixes the lineage read gives. Only such a buyer may review a listing (403 otherwise),
 // once, rewriting it as often as it likes; the seller may reply to each review. Both take the workspace's owner or an
 // admin.
+
+// showPrices shows the listings' offers in the reader's currency (B32.51): ?currency=, or the buyer's own.
+func showPrices(store *market.Store, req *http.Request, buyer string, listings ...*market.Listing) error {
+	return store.ShowPrices(req.Context(), buyer, req.URL.Query().Get("currency"), listings...)
+}
+
+// listingRefs points at each listing of list, to be filled in place.
+func listingRefs(list []market.Listing) []*market.Listing {
+	refs := make([]*market.Listing, len(list))
+	for i := range list {
+		refs[i] = &list[i]
+	}
+	return refs
+}
 
 func mountMarketRoutes(r chi.Router, store *market.Store) {
 	writeErr := func(w http.ResponseWriter, err error) {
@@ -190,6 +210,9 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 	}))
 	r.Get("/v1/workspaces/{wsID}/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
 		list, err := store.OwnListings(req.Context(), chi.URLParam(req, "wsID"))
+		if err == nil {
+			err = showPrices(store, req, chi.URLParam(req, "wsID"), listingRefs(list)...)
+		}
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -198,6 +221,10 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 	})
 	r.Get("/v1/marketplace/listings", func(w http.ResponseWriter, req *http.Request) {
 		list, err := store.Catalog(req.Context(), req.URL.Query().Get("kind"))
+		if err == nil {
+			viewer, _ := auth.WorkspaceIdentity(req.Context())
+			err = showPrices(store, req, viewer, listingRefs(list)...)
+		}
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -207,6 +234,9 @@ func mountMarketRoutes(r chi.Router, store *market.Store) {
 	r.Get("/v1/marketplace/listings/{listingID}", func(w http.ResponseWriter, req *http.Request) {
 		viewer, _ := auth.WorkspaceIdentity(req.Context())
 		l, err := store.Get(req.Context(), viewer, chi.URLParam(req, "listingID"))
+		if err == nil {
+			err = showPrices(store, req, viewer, &l)
+		}
 		if err != nil {
 			writeErr(w, err)
 			return

@@ -18,11 +18,11 @@ import (
 
 // B32.50 — discovery: trending by distinct buyers, search by capability and price, public collections.
 //
-//	GET    /v1/marketplace/search?q=&capability=&kind=&licence=&max_price_per_use=&min_eval=&verified_only=&sort=&page=
+//	GET    /v1/marketplace/search?q=&capability=&kind=&licence=&max_price_per_use=&min_eval=&verified_only=&sort=&page=&currency=
 //	GET    /v1/marketplace/capabilities                                   the controlled list a listing declares from
 //	PUT    /v1/workspaces/{wsID}/marketplace/listings/{id}/capabilities   {capabilities: [...]}   what the listing can do
 //	GET    /v1/marketplace/collections                                    the public collections, the featured first
-//	GET    /v1/marketplace/collections/{id}                               a collection and its listings, in its order
+//	GET    /v1/marketplace/collections/{id}?currency=                     a collection and its listings, in its order
 //	GET    /v1/workspaces/{wsID}/marketplace/collections                  the workspace's own collections
 //	POST   /v1/workspaces/{wsID}/marketplace/collections                  {title, description, public, listing_ids}
 //	PUT    /v1/workspaces/{wsID}/marketplace/collections/{id}             the same: replaces it
@@ -84,6 +84,14 @@ func mountMarketDiscoveryRoutes(r chi.Router, store *market.Store) {
 			q.VerifiedOnly = b
 		}
 		page, err := store.Discover(req.Context(), q)
+		if err == nil { // B32.51: each offer's price in the reader's currency too
+			viewer, _ := auth.WorkspaceIdentity(req.Context())
+			hits := make([]*market.Listing, len(page.Listings))
+			for i := range page.Listings {
+				hits[i] = &page.Listings[i].Listing
+			}
+			err = showPrices(store, req, viewer, hits...)
+		}
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -124,6 +132,9 @@ func mountMarketDiscoveryRoutes(r chi.Router, store *market.Store) {
 	r.Get("/v1/marketplace/collections/{collectionID}", func(w http.ResponseWriter, req *http.Request) {
 		viewer, _ := auth.WorkspaceIdentity(req.Context())
 		c, err := store.GetCollection(req.Context(), viewer, chi.URLParam(req, "collectionID"))
+		if err == nil {
+			err = showPrices(store, req, viewer, listingRefs(c.Listings)...)
+		}
 		if err != nil {
 			writeErr(w, err)
 			return

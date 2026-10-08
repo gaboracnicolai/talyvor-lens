@@ -67,6 +67,7 @@ type Listing struct {
 	RemixPolicy     string    `json:"remix_policy"`            // none | free | royalty (lineage.go)
 	RemixShareBPS   int       `json:"remix_share_bps"`         // a royalty's share of each remix's sales
 	Offers          []Offer   `json:"offers"`                  // how it is sold (offers.go); none: it is free
+	PriceNote       string    `json:"price_note,omitempty"`    // how its offers' display prices are charged (B32.51)
 	Capabilities    []string  `json:"capabilities"`            // what it can do, from market_capabilities (B32.50)
 	Versions        []Version `json:"versions,omitempty"`
 }
@@ -180,6 +181,8 @@ type Store struct {
 	receipts *Receipts // nil: a paid marketplace bill gets no receipt (B32.40, receipts.go)
 
 	selfBilling *SelfBilling // nil: no payout is a self-billed invoice (B32.43, selfbill.go)
+
+	displayRates DisplayRates // nil: prices are shown in US dollars only (B32.51, display.go)
 }
 
 func (s *Store) now() time.Time {

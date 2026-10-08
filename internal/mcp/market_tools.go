@@ -141,9 +141,19 @@ func (s *Server) marketTool(ctx context.Context, name, ws, agent string, a marke
 	case "market_search":
 		found, err := s.market.Search(ctx, market.SearchQuery{Text: a.Text, Kind: a.Kind, Capability: a.Capability, Licence: a.Licence,
 			MaxPriceUSDMicros: a.MaxPriceUSDMicros})
+		if err == nil { // B32.51: each offer's price in the workspace's currency too
+			refs := make([]*market.Listing, len(found))
+			for i := range found {
+				refs[i] = &found[i]
+			}
+			err = s.market.ShowPrices(ctx, ws, "", refs...)
+		}
 		return map[string]any{"listings": found}, err
 	case "market_listing":
 		l, err := s.market.Get(ctx, ws, a.ListingID)
+		if err == nil {
+			err = s.market.ShowPrices(ctx, ws, "", &l) // B32.51: each offer's price in the workspace's currency too
+		}
 		if err != nil {
 			return nil, err
 		}
