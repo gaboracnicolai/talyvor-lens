@@ -30,6 +30,9 @@ import (
 //   - An earning an open hold names (a dispute, an IP claim: escrow.go) stays in the holdback past its 14 days.
 //   - Every payout is journalled with its row (B32.17): a Stripe payout moves it from the seller's available to
 //     stripe:clearing (the net) and stripe:connect_fees (Stripe's fees); credits move it to credits:issued.
+//   - A seller whose tax details are still incomplete after the last request for them (B32.41, internal/sellertax)
+//     is withheld: the payout run skips them and they cannot take credits, while their earnings keep clearing, until
+//     the details are complete.
 
 const (
 	// PayoutMinimumUSDMicros: a seller is paid in money once their available balance reaches US$25.
@@ -50,6 +53,12 @@ var ErrNotConnected = errors.New("market: connect a Stripe account to be paid")
 
 // ErrNothingAvailable: no earnings are past their holdback and unpaid.
 var ErrNothingAvailable = errors.New("market: no earnings are available yet — they become available 14 days after the buyer's payment clears")
+
+// ErrTaxHold: the seller's payouts are held until their tax details are complete (B32.41).
+var ErrTaxHold = errors.New("market: your payouts are on hold until your tax details are complete")
+
+// taxHeldSQL is true of a seller s withheld until their tax details are complete (B32.41).
+const taxHeldSQL = `EXISTS (SELECT 1 FROM seller_tax_profiles t WHERE t.workspace_id = s.workspace_id AND t.withheld_since IS NOT NULL)`
 
 // ErrNoContactEmail: the person connecting has no email address, and Stripe opens a seller's account only
 // with one to reach them at (B35.4).
@@ -316,6 +325,13 @@ func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceI
 		if err := lockSeller(ctx, tx, workspaceID); err != nil {
 			return err
 		}
+		var held bool
+		if err := tx.QueryRow(ctx, `SELECT `+taxHeldSQL+` FROM (SELECT $1::text AS workspace_id) s`, workspaceID).Scan(&held); err != nil {
+			return err
+		}
+		if held {
+			return ErrTaxHold
+		}
 		released, _, paid, err := sellerBalance(ctx, tx, workspaceID, now)
 		if err != nil {
 			return err
@@ -360,15 +376,15 @@ func (s *Store) TakeAsCredits(ctx context.Context, crediter Crediter, workspaceI
 			map[string]interface{}{"market_payout_id": p.ID, "usd_micros": gross, "funding": funding, "test_funded_ulxc": testULXC})
 		return err
 	})
-	if err != nil && !errors.Is(err, ErrNothingAvailable) {
+	if err != nil && !errors.Is(err, ErrNothingAvailable) && !errors.Is(err, ErrTaxHold) {
 		err = fmt.Errorf("market: take earnings as credits: %w", err)
 	}
 	return p, err
 }
 
 // PayOut is the monthly payout run: it pays every connected seller not yet paid in money this month whose
-// available balance has reached the minimum and whose account Stripe — asked now — has enabled for
-// payouts, and it retries every transfer Stripe has not yet accepted. It answers how many transfers Stripe
+// available balance has reached the minimum, whose account Stripe — asked now — has enabled for payouts, and
+// who is not withheld for their tax details (B32.41), and it retries every transfer Stripe has not yet accepted. It answers how many transfers Stripe
 // accepted.
 func (s *Store) PayOut(ctx context.Context, api ConnectStripe, now time.Time) (int, error) {
 	return s.payOut(ctx, api, now, nil)
@@ -383,7 +399,8 @@ func (s *Store) PayOutSellers(ctx context.Context, api ConnectStripe, test bool,
 
 func (s *Store) payOut(ctx context.Context, api ConnectStripe, now time.Time, test *bool) (int, error) {
 	q, args := `SELECT workspace_id, stripe_account_id FROM market_sellers s
-		WHERE NOT EXISTS (SELECT 1 FROM market_payouts p WHERE p.workspace_id = s.workspace_id AND p.method = 'stripe' AND p.month = $1)`,
+		WHERE NOT EXISTS (SELECT 1 FROM market_payouts p WHERE p.workspace_id = s.workspace_id AND p.method = 'stripe' AND p.month = $1)
+		  AND NOT `+taxHeldSQL,
 		[]any{monthOf(now)}
 	if test != nil {
 		q, args = q+` AND COALESCE((SELECT synthetic FROM workspaces w WHERE w.id = s.workspace_id), false) = $2`, append(args, *test)

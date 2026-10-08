@@ -82,7 +82,7 @@ func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connectFor conne
 	r.Post("/v1/workspaces/{wsID}/marketplace/payouts/credits", marketOwnerOnly(func(w http.ResponseWriter, req *http.Request) {
 		p, err := store.TakeAsCredits(req.Context(), crediter, chi.URLParam(req, "wsID"), time.Now())
 		switch {
-		case errors.Is(err, market.ErrNothingAvailable):
+		case errors.Is(err, market.ErrNothingAvailable), errors.Is(err, market.ErrTaxHold):
 			writeJSONErr(w, http.StatusConflict, err.Error())
 		case err != nil:
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())

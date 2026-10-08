@@ -121,6 +121,7 @@ import (
 	"github.com/talyvor/lens/internal/routingscore"
 	"github.com/talyvor/lens/internal/royaltyhaircut"
 	"github.com/talyvor/lens/internal/safehttp"
+	"github.com/talyvor/lens/internal/sellertax"
 	"github.com/talyvor/lens/internal/session"
 	"github.com/talyvor/lens/internal/sessionkey"
 	"github.com/talyvor/lens/internal/shadowmint"
@@ -1860,6 +1861,14 @@ func run() error {
 		taxProfiles.SetStripe(taxStripeByKind{isTest: wsManager.GetSynthetic, mainKeyLive: billing.LiveKey(cfg.StripeSecretKey),
 			live: liveStripe, test: testStripe})
 	}
+	// B32.41 — a seller's tax details, sealed under LENS_PROVIDER_SECRET_KEK (none stored without it), their VAT number
+	// checked with the tax partner; a seller with earnings is asked for incomplete ones and, after the last request,
+	// held from the payout run until they are complete.
+	sellerTax := sellertax.NewStore(pool, cfg.ProviderSecretKeyring, partnerRegistry)
+	sellerTax.SetReminderEvery(time.Duration(cfg.SellerTaxReminderDays) * 24 * time.Hour)
+	go haComps.leader.Run(ctx, "seller-tax-reminders", 30*time.Second, func(lctx context.Context) {
+		remindSellersOfTaxDetails(lctx, sellerTax)
+	})
 	// B32.39 — every billed marketplace use carries its buyer's tax, worked out when it is metered; while the key is
 	// live, a real buyer's sale Talyvor cannot account for the tax on is refused before it runs.
 	marketStore.SetTax(market.Tax{Partners: partnerRegistry, Buyers: taxProfiles, Registrations: taxData})
@@ -4432,6 +4441,7 @@ func run() error {
 		mountMarketRoutes(authed, marketStore)                                          // B20.1
 		mountMarketDiscoveryRoutes(authed, marketStore)                                 // B32.50
 		mountTaxProfileRoutes(authed, taxProfiles)                                      // B32.38
+		mountSellerTaxRoutes(authed, sellerTax)                                         // B32.41
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
 		mountMarketReceiptRoutes(authed, marketStore)                                   // B32.40
 		mountMarketPayoutRoutes(authed, marketStore, stripeKinds.connectFor, dualToken, // B20.5

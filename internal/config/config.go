@@ -1007,6 +1007,9 @@ type Config struct {
 	// IPCounterDays is how many days after an IP claim is filed its seller may counter it (B32.47). Env:
 	// LENS_IP_COUNTER_DAYS, default 10 — a proposal for Nicolai.
 	IPCounterDays int
+	// SellerTaxReminderDays is the days between the requests to a seller with earnings for incomplete tax details
+	// (B32.41). Env: LENS_SELLER_TAX_REMINDER_DAYS, default 30 — a proposal for Nicolai.
+	SellerTaxReminderDays int
 	// RoomMessagesPerMinute is how many messages one member posts in one room in a minute (B32.30). Env:
 	// LENS_ROOM_MESSAGES_PER_MINUTE, default 20 — a proposal for Nicolai.
 	RoomMessagesPerMinute int
@@ -2207,6 +2210,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_IP_COUNTER_DAYS must be a positive integer, got %q", v)
 		}
 		c.IPCounterDays = n
+	}
+	// B32.41 — the days between the requests for a seller's tax details. A malformed value is refused.
+	c.SellerTaxReminderDays = 30
+	if v := os.Getenv("LENS_SELLER_TAX_REMINDER_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("config: LENS_SELLER_TAX_REMINDER_DAYS must be a positive integer, got %q", v)
+		}
+		c.SellerTaxReminderDays = n
 	}
 	// B32.30 — a member's messages a minute in a room. A malformed value is refused.
 	c.RoomMessagesPerMinute = 20
