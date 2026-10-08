@@ -101,6 +101,7 @@ import (
 	"github.com/talyvor/lens/internal/passkey"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/plans"
+	"github.com/talyvor/lens/internal/platformreport"
 	"github.com/talyvor/lens/internal/poolroyalty"
 	"github.com/talyvor/lens/internal/poolshadow"
 	"github.com/talyvor/lens/internal/povi"
@@ -215,6 +216,14 @@ func main() {
 	// `lens tax` (B32.37): load the tax rates and Talyvor's registrations the tax partner decides from.
 	if len(os.Args) > 1 && os.Args[1] == "tax" {
 		if err := runTax(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	// `lens platform-report` (B32.44): the annual platform-reporting export for the UK reporting rules and EU DAC7.
+	if len(os.Args) > 1 && os.Args[1] == "platform-report" {
+		if err := runPlatformReport(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -2352,6 +2361,11 @@ func run() error {
 	r.Get("/v1/admin/marketplace/parked-uses", requireAdminOrOperatorRead(authManager, newMarketParkedUsesHandler(marketStore)))
 	// B32.38 — the buyer tax profiles whose Stripe evidence contradicts the declared country. tax_profile_handler.go.
 	r.Get("/v1/admin/tax-profiles/flagged", requireAdminOrOperatorRead(authManager, newTaxProfilesFlaggedHandler(taxProfiles)))
+	// B32.44 — the annual platform-reporting export (UK reporting rules, EU DAC7): the file, with the sellers' TINs in
+	// clear, and the runs recorded with their sha256 — for the global admin key only. platform_report_handler.go.
+	platformReports := platformreport.New(pool, sellerTax)
+	r.Post("/v1/admin/platform-reports", requireAdmin(authManager, newPlatformReportExportHandler(platformReports)))
+	r.Get("/v1/admin/platform-reports", requireAdmin(authManager, newPlatformReportRunsHandler(platformReports)))
 	// B27.19 — an operator retries one: the global key or a moderator key, recorded under the operator's name.
 	r.Post("/v1/admin/marketplace/parked-uses/{useID}/retry", requireAdminOrModerator(authManager, moderatorKeys, newMarketParkedUseRetryHandler(marketStore)))
 	// B32.10 — the operator puts a workspace on an Enterprise contract, with its fees, or ends one; each is

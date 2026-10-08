@@ -88,6 +88,7 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/rooms/reports":                                    "B32.52: the reported rooms with each report, its reporter's workspace and the reported message's text. requireAdminOrModerator, never the operator read key.",
 	"/v1/admin/rooms/{roomID}/moderate":                          "B32.52: KEEPS, LOCKS, UNLOCKS OR CLOSES A ROOM — a closed room's budget is spent no more — and writes an operator audit row. A write.",
 	"/v1/admin/operator-audit/record":                            "B27.28: appends to the append-only operator audit trail. A write is a write even when it is not money; the web app writes it on its moderator key.",
+	"/v1/admin/platform-reports":                                 "B32.44: WRITES THE PLATFORM-REPORTING EXPORT, the sellers' TINs, dates of birth and account numbers in clear, and records the run. requireAdmin only, its list of runs too.",
 
 	// ⚠ MEASURED, AND THE PROVISIONAL CLASSIFICATION WAS WRONG. The W1.3 groundwork report listed
 	// attest/{output_id} as provisionally READ because it is registered with r.Handle and reads
