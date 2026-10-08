@@ -223,8 +223,8 @@ func TestMarketPayouts_OnboardEarnPaidOutAfterHoldbackAndRefundsReverse(t *testi
 		t.Fatalf("after the refund the balance = %+v, want $25.50 available and nothing in the holdback", p)
 	}
 
-	// The monthly run pays the seller the $25.50 past the holdback: one transfer of it less Stripe's fees at cost
-	// ($2 for the account this month, 0.25% + $0.25 for the payout) — and only one this month.
+	// The weekly run pays the seller the $25.50 past the holdback: one transfer of it less Stripe's fees at cost
+	// ($2 for the account this month, 0.25% + $0.25 for the payout) — and only one this week (B32.42).
 	if n, err := store.PayOut(ctx, connect, now); err != nil || n != 1 {
 		t.Fatalf("payout run = %d, %v; want one transfer", n, err)
 	}
@@ -248,6 +248,14 @@ func TestMarketPayouts_OnboardEarnPaidOutAfterHoldbackAndRefundsReverse(t *testi
 	}
 	if p := payouts(); p.AvailableUSDMicros != 0 || p.PaidOutUSDMicros != 25_500_000 || !p.PaidThisMonth || len(p.Payouts) != 1 || p.Payouts[0].PayoutFeeUSDMicros != 310_000 {
 		t.Fatalf("after the payout the page = %+v, want nothing available, $25.50 paid out with its fees shown", p)
+	}
+	// B32.42: the week's statement, which the owner reads, sums to what the payout sent.
+	year, week := now.UTC().ISOWeek()
+	period := fmt.Sprintf("%04d-W%02d", year, week)
+	code, out = call(seller, http.MethodGet, "/v1/workspaces/"+seller+"/marketplace/statements?period="+period, "")
+	var statement market.Statement
+	if _ = json.Unmarshal([]byte(out), &statement); code != http.StatusOK || statement.NetUSDMicros != net || statement.Payout == nil || statement.Payout.ID != id {
+		t.Fatalf("the statement of %s = %d %s; want the payout %s, its net %d", period, code, out, id, net)
 	}
 
 	// A chargeback of one $10 use on bill A, after the holdback and the payout: its $8.50 earning is reversed and

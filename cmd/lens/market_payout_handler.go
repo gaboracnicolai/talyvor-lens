@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talyvor/lens/internal/market"
+	"github.com/talyvor/lens/internal/storedanswers"
 )
 
 // B20.5 — SELLERS ARE PAID IN MONEY, THROUGH STRIPE CONNECT (internal/market/payout.go).
@@ -21,7 +22,8 @@ import (
 //	POST /v1/workspaces/{wsID}/marketplace/payouts/credits  take the available balance as Talyvor credits, 1:1
 //	GET  /v1/workspaces/{wsID}/marketplace/statements       the weeks the seller was paid in (B32.42); ?period=2026-W41
 //	                                                       that week's statement: sales, Talyvor's fee, royalties paid
-//	                                                       and received, refunds, credits, Stripe's fees and the net
+//	                                                       and received, refunds, credits, Stripe's fees and the net;
+//	                                                       the owner or an admin, as for the seller's tax details
 //
 // connectFor is the Connect client a workspace's seller account is made and paid with — a test workspace's in
 // Stripe test mode (B25.6). nil (billing is off, or no test-mode key for a test workspace): the seller cannot
@@ -94,6 +96,10 @@ func mountMarketPayoutRoutes(r chi.Router, store *market.Store, connectFor conne
 		}
 	}))
 	r.Get("/v1/workspaces/{wsID}/marketplace/statements", func(w http.ResponseWriter, req *http.Request) {
+		if _, ok := storedanswers.OwnerOrAdmin(req.Context()); !ok {
+			writeJSONErr(w, http.StatusForbidden, "only the workspace's owner or an admin may read its statements")
+			return
+		}
 		wsID, period := chi.URLParam(req, "wsID"), req.URL.Query().Get("period")
 		if period == "" {
 			list, err := store.SellerStatements(req.Context(), wsID)
