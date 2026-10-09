@@ -1902,7 +1902,7 @@ func run() error {
 	// B30.6 — every payee and every payment in or out through a partner is screened against the UK Sanctions List and
 	// OFAC's SDN list, downloaded at start and each day; the Test screening provider screens against them, and a match
 	// opens a compliance case the operator sees at /v1/admin/screening.
-	screeningLists := screening.NewStore(pool, screening.Sources(), cfg.ScreeningFuzzyThreshold)
+	screeningLists := screening.NewStore(pool, screening.Sources(), cfg.ScreeningFuzzyThreshold, cfg.ScreeningMaxAge)
 	partnerRegistry.UseScreeningList(screeningLists)
 	// B37.5 — every call through a partner rail leaves one audit row in partner_calls.
 	partnerRegistry.UseCallLog(partners.NewCallStore(pool))
@@ -1910,6 +1910,10 @@ func run() error {
 	// a restart and every Lens process show them.
 	go partnerRegistry.WatchRails(ctx, partners.NewRailStore(pool), 5*time.Minute)
 	screener := screening.NewScreener(pool, partnerRegistry)
+	// B37.4 — lists older than LENS_SCREENING_MAX_AGE_HOURS hold every payment in or out for an operator, and the
+	// status page shows the Sanctions screening rail down with their age.
+	screener.HoldWhenListsStale(screeningLists)
+	statusPage.UseScreeningLists(screeningLists)
 	dualToken.SetScreener(screener)
 	// B30.9 — each capability's terms, accepted before first use: version 1 of every text Lens carries
 	// (docs/terms/<capability>.md) is published now, and the capability refuses a workspace that has not accepted it.

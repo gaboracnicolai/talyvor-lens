@@ -169,3 +169,59 @@ func TestStatus_PostgresErrorStaysInTheLog(t *testing.T) {
 		t.Fatalf("the log lacks the PostgreSQL error: %s", logs.String())
 	}
 }
+
+// fakeLists are sanctions lists of a given age.
+type fakeLists struct {
+	age   time.Duration
+	stale bool
+}
+
+func (f fakeLists) ListsAge(context.Context) (time.Duration, bool, error) { return f.age, f.stale, nil }
+
+// B37.4: lists older than LENS_SCREENING_MAX_AGE_HOURS turn the Sanctions screening rail down, saying how old they are,
+// and /status.json's screening rail carries lists_age_hours.
+func TestStatus_StaleSanctionsListsTurnTheScreeningRailDown(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	up := fakeRails{}
+	for _, s := range partners.Services {
+		up = append(up, partners.Rail{Service: s, Mode: "test", LastSuccess: &now})
+	}
+	page := newStatusPage(&fakePinger{}, nil, nil, "test")
+	page.UseMoneyRails(up, nil)
+	page.UseScreeningLists(fakeLists{age: 52*time.Hour + 20*time.Minute, stale: true})
+	page.UpdateCache(page.Check(ctx))
+
+	rec := httptest.NewRecorder()
+	page.ServeJSON(rec, httptest.NewRequest(http.MethodGet, "/status.json", nil))
+	var got struct {
+		Rails []map[string]any `json:"rails"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range got.Rails {
+		age, has := r["lists_age_hours"]
+		switch {
+		case r["service"] == string(partners.ServiceScreening) && (age != float64(52) || r["status"] != string(StatusOutage)):
+			t.Fatalf("the screening rail with lists 52 h old: %v", r)
+		case r["service"] != string(partners.ServiceScreening) && has:
+			t.Fatalf("the %v rail carries lists_age_hours", r["service"])
+		}
+	}
+	rec = httptest.NewRecorder()
+	page.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if body := rec.Body.String(); !strings.Contains(body, `lists <span class="num">52 h</span> old`) ||
+		!strings.Contains(body, "Money rails: 1 of 10 down: Sanctions screening (test partner, lists 52 h old)") {
+		t.Fatal("the status page does not show the screening rail down with its lists' age")
+	}
+
+	// Fresh lists leave the rail up, and still say how old they are.
+	page.UseScreeningLists(fakeLists{age: 3 * time.Hour})
+	fresh := page.Check(ctx)
+	for _, r := range fresh.Rails {
+		if r.Service == partners.ServiceScreening && (r.Status != StatusOperational || r.ListsAgeHours == nil || *r.ListsAgeHours != 3) {
+			t.Fatalf("the screening rail with lists 3 h old: %+v", r)
+		}
+	}
+}

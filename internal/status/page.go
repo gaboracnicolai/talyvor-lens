@@ -126,6 +126,11 @@ type MoneyRail struct {
 	// Status is outage when the partner's last call failed, operational when it succeeded, and unknown before any.
 	Status       ComponentStatus  `json:"status"`
 	Capabilities []RailCapability `json:"capabilities"`
+	// ListsAgeHours is, on the screening rail, how many whole hours ago the sanctions list downloaded longest ago was
+	// last downloaded (B37.4); null while a list never has been. Older than LENS_SCREENING_MAX_AGE_HOURS, the rail is
+	// down.
+	ListsAgeHours *int64 `json:"lists_age_hours,omitempty"`
+	listsUnknown  bool   // a list has never downloaded
 }
 
 // RailCapability is a wallet capability and whether it has a clearance in force; Cleared is null when the
@@ -153,6 +158,11 @@ type StatusResponse struct {
 	Rails        []MoneyRail      `json:"rails"`
 	RailsSummary RailsSummary     `json:"rails_summary"`
 	UpdatedAt    time.Time        `json:"updated_at"`
+}
+
+// screeningLists says how old the sanctions lists are, and whether that makes them stale: *screening.Store.
+type screeningLists interface {
+	ListsAge(ctx context.Context) (time.Duration, bool, error)
 }
 
 // railReader is the partners registry.
@@ -203,6 +213,14 @@ type StatusPage struct {
 	cached     *StatusResponse
 	rails      railReader
 	clearances clearanceReader
+	lists      screeningLists
+}
+
+// UseScreeningLists shows the sanctions lists' age on the screening rail, which reads down while they are stale.
+func (s *StatusPage) UseScreeningLists(lists screeningLists) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lists = lists
 }
 
 // UseMoneyRails adds the money rails to the page: each partner from rails, each capability's clearance from
@@ -384,7 +402,7 @@ func summariseRails(rails []MoneyRail) RailsSummary {
 // and never moves the banner: a partner's failure is not Lens's.
 func (s *StatusPage) moneyRails(ctx context.Context) []MoneyRail {
 	s.mu.RLock()
-	rails, clearances := s.rails, s.clearances
+	rails, clearances, lists := s.rails, s.clearances, s.lists
 	s.mu.RUnlock()
 	if rails == nil {
 		return nil
@@ -409,6 +427,21 @@ func (s *StatusPage) moneyRails(ctx context.Context) []MoneyRail {
 			m.Status = StatusOutage
 		case r.LastSuccess != nil:
 			m.Status = StatusOperational
+		}
+		if r.Service == partners.ServiceScreening && lists != nil {
+			readCtx, cancel := context.WithTimeout(ctx, postgresTimeout)
+			age, stale, err := lists.ListsAge(readCtx)
+			cancel()
+			if err == nil {
+				if age >= 0 {
+					h := int64(age / time.Hour)
+					m.ListsAgeHours = &h
+				}
+				m.listsUnknown = age < 0
+				if stale {
+					m.Status = StatusOutage
+				}
+			}
 		}
 		for _, key := range railCapabilities[r.Service] {
 			c := RailCapability{Key: key}
@@ -776,8 +809,8 @@ func renderHTML(s *StatusResponse) string {
 <div class="tbl"><table class="rails"><thead><tr><th>Rail</th><th>Status</th></tr></thead><tbody>`)
 		// The times sit under the status rather than in columns of their own, so the table fits a 390px phone.
 		for _, r := range s.Rails {
-			fmt.Fprintf(&b, `<tr><td>%s<div class="msg">%s · %s</div></td><td>%s<div class="msg">last success <span class="num">%s</span></div><div class="msg">last failure <span class="num">%s</span></div></td></tr>`,
-				htmlEscape(r.Name), modeWord(r.Mode), clearedWord(r.Capabilities), railPill(r.Status), railTime(r.LastSuccess), railTime(r.LastFailure))
+			fmt.Fprintf(&b, `<tr><td>%s<div class="msg">%s · %s</div></td><td>%s%s<div class="msg">last success <span class="num">%s</span></div><div class="msg">last failure <span class="num">%s</span></div></td></tr>`,
+				htmlEscape(r.Name), modeWord(r.Mode), clearedWord(r.Capabilities), railPill(r.Status), listsAge(r), railTime(r.LastSuccess), railTime(r.LastFailure))
 		}
 		b.WriteString(`</tbody></table></div></section>`)
 	}
@@ -812,7 +845,11 @@ func railsLine(s *StatusResponse) string {
 		var names []string
 		for _, r := range s.Rails {
 			if r.Status == StatusOutage {
-				names = append(names, r.Name+" ("+strings.ToLower(modeWord(r.Mode))+")")
+				what := strings.ToLower(modeWord(r.Mode))
+				if r.ListsAgeHours != nil {
+					what += fmt.Sprintf(", lists %d h old", *r.ListsAgeHours)
+				}
+				names = append(names, r.Name+" ("+what+")")
 			}
 		}
 		cls, text = "pill bad", fmt.Sprintf("Money rails: %d of %d down: %s", s.RailsSummary.Down, len(s.Rails), strings.Join(names, ", "))
@@ -820,6 +857,17 @@ func railsLine(s *StatusResponse) string {
 		cls, text = "pill", fmt.Sprintf("Money rails: %d not called yet", s.RailsSummary.Idle)
 	}
 	return `<div class="railsline"><span class="` + cls + `">` + htmlEscape(text) + `</span></div>`
+}
+
+// listsAge is how old the screening rail's sanctions lists are, under its status.
+func listsAge(r MoneyRail) string {
+	switch {
+	case r.ListsAgeHours != nil:
+		return fmt.Sprintf(`<div class="msg">lists <span class="num">%d h</span> old</div>`, *r.ListsAgeHours)
+	case r.listsUnknown:
+		return `<div class="msg">lists not downloaded yet</div>`
+	}
+	return ""
 }
 
 func modeWord(mode string) string {

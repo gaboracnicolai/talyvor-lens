@@ -24,6 +24,10 @@ const (
 	CaseRefused  = "refused"  // an operator found it is: the money does not move
 )
 
+// OutcomeStale is a payment's case opened because the sanctions lists were stale when it was screened (B37.4): held
+// as a close match is, for an operator to release or refuse.
+const OutcomeStale = "stale"
+
 // What a case is about.
 const (
 	SubjectPayee   = "payee"
@@ -35,6 +39,8 @@ var (
 	ErrBlocked = errors.New("screening: refused — the name is on a sanctions list")
 	// ErrHeld: a close match, waiting for an operator.
 	ErrHeld = errors.New("screening: held — the name is close to one on a sanctions list, and waits for an operator to release it")
+	// ErrListsStale: a payment held because the sanctions lists were stale, waiting for an operator.
+	ErrListsStale = errors.New("screening: held — the sanctions lists are out of date, and the payment waits for an operator to release it")
 	// ErrRefused: a close match an operator refused.
 	ErrRefused = errors.New("screening: refused — an operator found the name is the one on the sanctions list")
 	// ErrNotWhatWasReleased: a payment retried under a released case's id, but not the payment the operator released.
@@ -46,8 +52,8 @@ var (
 	ErrCaseDecided = errors.New("screening: only a held case is released or refused")
 )
 
-// Refusal is a screening that stops the money: the case that says why. It is ErrBlocked, ErrHeld, ErrRefused or
-// ErrNotWhatWasReleased.
+// Refusal is a screening that stops the money: the case that says why. It is ErrBlocked, ErrHeld, ErrListsStale,
+// ErrRefused or ErrNotWhatWasReleased.
 type Refusal struct {
 	Case Case
 	err  error
@@ -106,12 +112,16 @@ type Providers interface {
 type Screener struct {
 	pool      *pgxpool.Pool
 	providers Providers
+	lists     *Store // nil: a payment that clears is never held for stale lists
 }
 
 // NewScreener keeps cases in pool and asks providers.
 func NewScreener(pool *pgxpool.Pool, providers Providers) *Screener {
 	return &Screener{pool: pool, providers: providers}
 }
+
+// HoldWhenListsStale holds every payment in or out that would clear while lists says it is stale (B37.4).
+func (s *Screener) HoldWhenListsStale(lists *Store) { s.lists = lists }
 
 // Payment is an outside payment to screen: money in from Counterparty, or out to it.
 type Payment struct {
@@ -187,7 +197,17 @@ func (s *Screener) screen(ctx context.Context, c Case, ask func(partners.Screeni
 	}
 	switch res.Outcome {
 	case partners.ScreenClear:
-		return nil
+		if c.SubjectKind != SubjectPayment || s.lists == nil {
+			return nil
+		}
+		_, stale, err := s.lists.ListsAge(ctx)
+		if err != nil {
+			return fmt.Errorf("%w: %v", partners.ErrScreeningUnavailable, err)
+		}
+		if !stale {
+			return nil
+		}
+		c.Outcome, c.Status = OutcomeStale, CaseHeld
 	case partners.ScreenHit:
 		c.Outcome, c.Status = partners.ScreenHit, CaseBlocked
 	case partners.ScreenReview:
@@ -240,6 +260,9 @@ func refusalFor(c Case) error {
 	case CaseBlocked:
 		return &Refusal{Case: c, err: ErrBlocked}
 	case CaseHeld:
+		if c.Outcome == OutcomeStale {
+			return &Refusal{Case: c, err: ErrListsStale}
+		}
 		return &Refusal{Case: c, err: ErrHeld}
 	default:
 		return &Refusal{Case: c, err: ErrRefused}

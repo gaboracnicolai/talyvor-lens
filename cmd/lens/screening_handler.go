@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -102,6 +103,33 @@ type sanctionsListAlert struct {
 	sink    operatorAlerter // nil when no sink is configured: the failure is only logged
 	lastMsg string
 	lastAt  time.Time
+	staleAt time.Time // when the operator was last told the lists are stale
+}
+
+// tooOld alerts the operator that the lists are stale and payments are held (B37.4): at most once an hour while they
+// stay so. age is -1 while a list has never downloaded.
+// shortcut: the hour is this leader's memory, so a new leader may alert again within it; persist it if that is noisy.
+func (a *sanctionsListAlert) tooOld(ctx context.Context, age time.Duration, now time.Time) {
+	how := "a sanctions list has never downloaded"
+	if age >= 0 {
+		how = fmt.Sprintf("the sanctions lists are %d h old", int64(age/time.Hour))
+	}
+	slog.Error("screening: " + how + "; every payment in or out is held for an operator until they download")
+	if now.Sub(a.staleAt) < time.Hour {
+		return
+	}
+	if a.sink == nil {
+		slog.Error("screening: no operator alert sink is configured (LENS_OPERATOR_ALERT_WEBHOOK_URL and LENS_OPERATOR_ALERT_WEBHOOK_SECRET); nobody is told payments are held")
+		return
+	}
+	if err := a.sink.NotifyAs(ctx, "sanctions_lists_too_old", "lens/internal/screening",
+		"Payments are held: the sanctions lists are out of date",
+		"Every payment in or out is held for an operator, because "+how+" (LENS_SCREENING_MAX_AGE_HOURS). "+
+			"Release or refuse each at GET /v1/admin/screening."); err != nil {
+		slog.Error("screening: the operator alert did not send", "err", err)
+		return
+	}
+	a.staleAt = now
 }
 
 func (a *sanctionsListAlert) failed(ctx context.Context, err error, now time.Time) {
@@ -131,6 +159,11 @@ func refreshSanctionsLists(ctx context.Context, store *screening.Store, alert *s
 	for {
 		if err := store.RefreshDue(ctx); err != nil {
 			alert.failed(ctx, err, time.Now())
+		}
+		if age, stale, err := store.ListsAge(ctx); err != nil {
+			slog.Error("screening: could not read how old the sanctions lists are", "err", err)
+		} else if stale {
+			alert.tooOld(ctx, age, time.Now())
 		}
 		select {
 		case <-ctx.Done():

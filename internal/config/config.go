@@ -606,6 +606,9 @@ type Config struct {
 	// held for an operator (B30.6), above 0 and at most 1. Env: LENS_SCREENING_FUZZY_THRESHOLD, which Nicolai sets;
 	// until he does, 0.9.
 	ScreeningFuzzyThreshold float64
+	// ScreeningMaxAge is how long ago a sanctions list may have last downloaded before every payment in or out is held
+	// for an operator (B37.4). Env: LENS_SCREENING_MAX_AGE_HOURS, whole hours, which Nicolai sets; until he does, 48.
+	ScreeningMaxAge time.Duration
 
 	// TrustfulComputeMintEnabled gates the LEGACY trust-based compute mint
 	// (ComputeMiner.RecordServedRequest mints LENS per served request with no
@@ -1996,6 +1999,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: LENS_SCREENING_FUZZY_THRESHOLD must be above 0 and at most 1, got %q", v)
 		}
 		c.ScreeningFuzzyThreshold = f
+	}
+	// B37.4 — how old the sanctions lists may get before payments hold. A malformed value is refused.
+	c.ScreeningMaxAge = 48 * time.Hour
+	if v := os.Getenv("LENS_SCREENING_MAX_AGE_HOURS"); v != "" {
+		h, err := strconv.Atoi(v)
+		if err != nil || h <= 0 {
+			return nil, fmt.Errorf("config: LENS_SCREENING_MAX_AGE_HOURS must be a whole number of hours above 0, got %q", v)
+		}
+		c.ScreeningMaxAge = time.Duration(h) * time.Hour
 	}
 	// HA fail-closed: with LENS_HA_ENABLED every replica must share STABLE
 	// signing keys. Ephemeral per-replica keys "work" at startup and break
