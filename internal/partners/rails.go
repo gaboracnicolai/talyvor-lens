@@ -22,7 +22,8 @@ type Rail struct {
 	LastFailure *time.Time `json:"last_failure"`
 }
 
-// railHealth is when a service's partner last answered and last failed, in this process.
+// railHealth is when a service's partner last answered and last failed: this process's calls and probes, and what
+// WatchRails last took from partner_rails.
 type railHealth struct {
 	mu         sync.Mutex
 	ok, failed time.Time
@@ -41,10 +42,8 @@ func (h *railHealth) done(err *error) {
 	}
 }
 
-// Rails is every service's rail, in Services order.
-//
-// shortcut: each Lens process keeps its own, so behind a load balancer a page shows the calls its own process made;
-// share them through Redis if one process's view is not enough.
+// Rails is every service's rail, in Services order. Another process's calls show once WatchRails has shared them,
+// within its interval.
 func (r *Registry) Rails() []Rail {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

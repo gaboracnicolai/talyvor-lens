@@ -74,6 +74,11 @@ var perReplica = map[string]string{
 		"transaction that holds its room's row FOR UPDATE and updates it only WHERE status = 'open', posting the " +
 		"close message in the same transaction; a second replica's update matches no row and posts nothing. It " +
 		"moves no money: a prize that closes charges nothing.",
+	"rail probes": "READ-ONLY AND IN-PROCESS STATE (B37.2). WatchRails asks each partner one read-only question " +
+		"(an account's details, a quote, a status, screening a fixed clean name): none sends or commits money or " +
+		"opens anything, and the Test partners keep one entry for the fixed probe id however often it is asked. It " +
+		"then refreshes this replica's own rails from partner_rails, whose upsert keeps the later of each time, so a " +
+		"second replica's write changes nothing. Leader-gating it would leave every follower showing only its own calls.",
 }
 
 // perReplicaMatch maps a classification key to the CALL that identifies its goroutine: either the
@@ -100,6 +105,7 @@ var perReplicaMatch = map[string]string{
 	"agent schedule run":         "dualToken.RunAgentSchedules",
 	"ECB rate refresh":           "ecbRates.Refresh",
 	"room prize close":           "roomStore.ClosePrizes",
+	"rail probes":                "partnerRegistry.WatchRails",
 }
 
 // ⚠ THE GUARD. A goroutine that is neither leader-gated nor classified is one nobody has decided
