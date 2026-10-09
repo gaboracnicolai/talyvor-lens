@@ -532,6 +532,11 @@ func (s *DualTokenStore) requireBilledCapability(ctx context.Context, q pgxDB, w
 	if !ok {
 		return fmt.Errorf("economy: no wallet capability is called %q", key)
 	}
+	// B30.8: a frozen workspace's AMBER and RED capabilities take no money, test or live. A caller that moves the
+	// money in a transaction asks again inside it (payCompanyAgent).
+	if err := refuseFrozen(ctx, q, workspaceID, c); err != nil {
+		return err
+	}
 	if !s.liveStripe {
 		return nil
 	}
