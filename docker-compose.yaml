@@ -341,7 +341,7 @@ services:
   #                  password so BOTH legs (client→pgbouncer, pgbouncer→postgres)
   #                  complete SCRAM.
   pgbouncer:
-    image: edoburu/pgbouncer:v1.25.1-p0
+    image: edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -387,7 +387,7 @@ services:
       - no-new-privileges:true
 
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.7-pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     environment:
       POSTGRES_DB: talyvor_lens
       POSTGRES_USER: lens
@@ -406,7 +406,7 @@ services:
       - no-new-privileges:true
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     command: redis-server --appendonly yes
     volumes:
       - redisdata:/data
@@ -422,7 +422,7 @@ services:
       - no-new-privileges:true
 
   nats:
-    image: nats:2.10-alpine
+    image: nats:2.10.29-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
     command: ["-js", "-m", "8222"]
     # No host publish. NATS is an INTERNAL message bus — every service reaches it
     # at nats://nats:4222 over the compose network. Publishing 4222 on 0.0.0.0
@@ -450,7 +450,7 @@ services:
   # image is pinned, and it runs no exposed ports — but reviewers should be
   # aware this is the one container with host-level power.
   autoheal:
-    image: willfarrell/autoheal:1.2.0
+    image: willfarrell/autoheal:1.2.0@sha256:31f580ef0279eaced5b38d631b08c474d70d8403c1c2fdd6ddcf2e879d5f3f7c
     restart: unless-stopped
     environment:
       - AUTOHEAL_CONTAINER_LABEL=autoheal
@@ -468,7 +468,7 @@ services:
   # `read_only: true`, a hardening property worth keeping. Caddy owns its own cert
   # store (the caddy_data volume), so lens stays fully locked down and cert-free.
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
     ports:
       - "80:80"
       - "443:443"
