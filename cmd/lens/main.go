@@ -1897,6 +1897,8 @@ func run() error {
 	partnerRegistry := partners.NewRegistry(dualToken)
 	taxData := partners.NewTaxStore(pool)
 	partnerRegistry.UseTaxData(taxData)
+	// B30.12 — the status page lists each partner, Test or live, its last success and failure, and its clearances.
+	statusPage.UseMoneyRails(partnerRegistry, dualToken)
 	// B30.6 — every payee and every payment in or out through a partner is screened against the UK Sanctions List and
 	// OFAC's SDN list, downloaded at start and each day; the Test screening provider screens against them, and a match
 	// opens a compliance case the operator sees at /v1/admin/screening.
