@@ -186,7 +186,8 @@ func (s *DualTokenStore) OpenMoneyAccount(ctx context.Context, a MoneyAccount) (
 // again answers the entry it first wrote, or ErrIdempotencyKeyReused when the movement differs. An entry that does
 // not sum to zero in each currency is refused when it commits, with ErrMoneyUnbalanced. Money in or out through a
 // partner account is screened first, and a match refuses it with a *screening.Refusal before any posting. A workspace
-// an operator has frozen (B30.8) moves nothing: a *CapabilityRefusal that is ErrWorkspaceFrozen.
+// an operator has frozen (B30.8) moves nothing: a *CapabilityRefusal that is ErrWorkspaceFrozen; nor one that has not
+// accepted the capability's latest terms (B30.9): a *CapabilityRefusal that is ErrTermsNotAccepted.
 func (s *DualTokenStore) PostMoney(ctx context.Context, e MoneyEntry) (MoneyEntry, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -261,6 +262,10 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry, screener PaymentS
 	// B30.8: a frozen workspace moves no money in currencies, test or live; a retry of what moved before the freeze
 	// answered above.
 	if err := refuseFrozen(ctx, tx, e.WorkspaceID, c); err != nil {
+		return MoneyEntry{}, err
+	}
+	// B30.9: nor, test or live, until the workspace has accepted the capability's latest terms.
+	if err := refuseUnaccepted(ctx, tx, e.WorkspaceID, c); err != nil {
 		return MoneyEntry{}, err
 	}
 	if e.Funding == FundingLive {
