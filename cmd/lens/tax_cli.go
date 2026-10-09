@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/billing"
 	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/partners"
 	"github.com/talyvor/lens/internal/platformreport"
@@ -138,4 +139,18 @@ func taxRegistration(args []string) (partners.TaxRegistration, error) {
 		return partners.TaxRegistration{}, fmt.Errorf("--from %q is not a day (2026-01-01)", *from)
 	}
 	return partners.TaxRegistration{Jurisdiction: strings.ToUpper(args[0]), Scheme: *scheme, Number: *number, EffectiveFrom: at}, nil
+}
+
+// useTaxPartner makes Stripe Tax the registry's tax partner when LENS_TAX_PARTNER=stripe (B32.45), with the test-mode
+// key config.Load insisted on; Talyvor's sellers' supplies and VAT number checks stay with the tax rows.
+func useTaxPartner(reg *partners.Registry, cfg *config.Config, rows partners.TaxData) error {
+	if cfg.TaxPartner != "stripe" {
+		return nil
+	}
+	key := cfg.StripeTestSecretKey
+	if key == "" {
+		key = cfg.StripeSecretKey
+	}
+	return reg.Configure(partners.ServiceTax, &partners.StripeTaxPartner{API: billing.NewTestModeStripe(key, "", ""),
+		Rows: &partners.TestTaxPartner{Data: rows}})
 }

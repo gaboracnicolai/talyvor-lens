@@ -1,0 +1,86 @@
+{
+  "id": "taxcalc_from_api_reference_de_business",
+  "object": "tax.calculation",
+  "amount_total": 1000,
+  "currency": "usd",
+  "customer": null,
+  "customer_details": {
+    "address": {
+      "city": null,
+      "country": "DE",
+      "line1": null,
+      "line2": null,
+      "postal_code": null,
+      "state": null
+    },
+    "address_source": "billing",
+    "ip_address": null,
+    "tax_ids": [
+      {
+        "type": "eu_vat",
+        "value": "DE123456789"
+      }
+    ],
+    "taxability_override": "none"
+  },
+  "expires_at": 1791763200,
+  "line_items": {
+    "object": "list",
+    "data": [
+      {
+        "id": "tax_li_from_api_reference_de_business",
+        "object": "tax.calculation_line_item",
+        "amount": 1000,
+        "amount_tax": 0,
+        "livemode": false,
+        "product": null,
+        "quantity": 1,
+        "reference": "0",
+        "tax_behavior": "exclusive",
+        "tax_breakdown": [
+          {
+            "amount": 0,
+            "jurisdiction": {
+              "country": "DE",
+              "display_name": "Germany",
+              "level": "country",
+              "state": null
+            },
+            "sourcing": "destination",
+            "tax_rate_details": {
+              "display_name": "VAT",
+              "percentage_decimal": "0.0",
+              "tax_type": "vat"
+            },
+            "taxability_reason": "reverse_charge",
+            "taxable_amount": 1000
+          }
+        ],
+        "tax_code": "txcd_10000000"
+      }
+    ],
+    "has_more": false,
+    "total_count": 1,
+    "url": "/v1/tax/calculations/taxcalc_from_api_reference_de_business/line_items"
+  },
+  "livemode": false,
+  "ship_from_details": null,
+  "shipping_cost": null,
+  "tax_amount_exclusive": 0,
+  "tax_amount_inclusive": 0,
+  "tax_breakdown": [
+    {
+      "amount": 0,
+      "inclusive": false,
+      "tax_rate_details": {
+        "country": "DE",
+        "percentage_decimal": "0.0",
+        "state": null,
+        "tax_type": "vat"
+      },
+      "taxability_reason": "reverse_charge",
+      "taxable_amount": 1000
+    }
+  ],
+  "tax_date": 1791547200
+}

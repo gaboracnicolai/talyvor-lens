@@ -955,3 +955,31 @@ func TestLoad_PoolShadowLogEnabledDefaultsOffAndParses(t *testing.T) {
 			"assertion above is not evidence that the master switch spares the shadow log")
 	}
 }
+
+// B32.45 — LENS_TAX_PARTNER is test by default; stripe calculates in test mode, so it needs a test-mode key: the test
+// workspaces' one, or a test-mode main key. A live main key alone, or a partner Lens does not have, fails startup.
+func TestLoad_TaxPartner(t *testing.T) {
+	for _, c := range []struct {
+		partner, key, testKey string
+		ok                    bool
+	}{
+		{"", "", "", true},
+		{"stripe", "sk_test_x", "", true},
+		{"stripe", "sk_live_x", "sk_test_y", true},
+		{"stripe", "sk_live_x", "", false},
+		{"stripe", "", "", false},
+		{"avalara", "sk_test_x", "", false},
+	} {
+		setRequiredEnv(t)
+		t.Setenv("LENS_TAX_PARTNER", c.partner)
+		t.Setenv("LENS_STRIPE_SECRET_KEY", c.key)
+		t.Setenv("LENS_STRIPE_TEST_SECRET_KEY", c.testKey)
+		cfg, err := Load()
+		if (err == nil) != c.ok {
+			t.Errorf("LENS_TAX_PARTNER=%q with keys %q/%q: err %v, want ok=%v", c.partner, c.key, c.testKey, err, c.ok)
+		}
+		if err == nil && c.partner == "" && cfg.TaxPartner != "test" {
+			t.Errorf("LENS_TAX_PARTNER unset: %q, want test", cfg.TaxPartner)
+		}
+	}
+}

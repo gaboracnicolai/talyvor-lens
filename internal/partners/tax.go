@@ -169,7 +169,6 @@ func (p *TestTaxPartner) Calculate(ctx context.Context, req TaxRequest) (TaxResu
 		switch {
 		case customer.Business && customer.TaxIDValid && !strings.EqualFold(customer.Country, supplier.Country):
 			r.Treatment, r.TaxableMicros = TaxReverseCharge, l.AmountMicros
-			r.Note = "Reverse charge: the customer accounts for the tax due in " + jurisdiction
 		default:
 			registered, err := p.registered(ctx, supplier, jurisdiction, req.At)
 			if err != nil {
@@ -177,7 +176,6 @@ func (p *TestTaxPartner) Calculate(ctx context.Context, req TaxRequest) (TaxResu
 			}
 			if !registered {
 				r.Treatment = TaxNotRegistered
-				r.Note = "No tax charged: the supplier is not registered for tax in " + jurisdiction
 				break
 			}
 			rate, ok, err := p.Data.TaxRate(ctx, jurisdiction, l.TaxCode, req.At)
@@ -186,17 +184,17 @@ func (p *TestTaxPartner) Calculate(ctx context.Context, req TaxRequest) (TaxResu
 			}
 			if !ok {
 				r.Treatment = TaxNoRate
-				r.Note = "No tax charged: no rate for " + l.TaxCode + " in " + jurisdiction
 				break
 			}
 			r.RateBps, r.TaxableMicros = rate.RateBps, l.AmountMicros
 			r.TaxMicros = taxHalfUp(l.AmountMicros, rate.RateBps)
 			if rate.RateBps == 0 {
-				r.Treatment, r.Note = TaxZero, "Zero-rated in "+jurisdiction
+				r.Treatment = TaxZero
 			} else {
-				r.Treatment, r.Note = TaxStandard, "Tax at "+formatBps(rate.RateBps)+" in "+jurisdiction
+				r.Treatment = TaxStandard
 			}
 		}
+		r.Note = taxNote(r.Treatment, jurisdiction, l.TaxCode, r.RateBps)
 		out.Lines = append(out.Lines, r)
 		out.TaxableMicros += r.TaxableMicros
 		out.TaxMicros += r.TaxMicros
@@ -258,6 +256,23 @@ func taxHalfUp(amount int64, bps int) int64 {
 	n := new(big.Int).Mul(big.NewInt(amount), big.NewInt(int64(bps)))
 	n.Add(n, big.NewInt(5000))
 	return n.Quo(n, big.NewInt(10000)).Int64()
+}
+
+// taxNote is what a receipt prints for a line: the same words whichever partner decided the treatment.
+func taxNote(t TaxTreatment, jurisdiction, taxCode string, bps int) string {
+	switch t {
+	case TaxReverseCharge:
+		return "Reverse charge: the customer accounts for the tax due in " + jurisdiction
+	case TaxNotRegistered:
+		return "No tax charged: the supplier is not registered for tax in " + jurisdiction
+	case TaxNoRate:
+		return "No tax charged: no rate for " + taxCode + " in " + jurisdiction
+	case TaxOutsideScope:
+		return "No tax charged: no tax applies to " + taxCode + " in " + jurisdiction
+	case TaxZero:
+		return "Zero-rated in " + jurisdiction
+	}
+	return "Tax at " + formatBps(bps) + " in " + jurisdiction
 }
 
 // formatBps is a rate in basis points as a percentage: 100 is "1%", 1250 is "12.5%", 1205 is "12.05%".

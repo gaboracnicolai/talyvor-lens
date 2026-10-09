@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/talyvor/lens/internal/config"
 	"github.com/talyvor/lens/internal/partners"
 )
 
@@ -60,5 +61,18 @@ func TestTaxCommand_ImportsRatesAndAddsRegistrations(t *testing.T) {
 	out.Reset()
 	if err := taxCommand(ctx, store, []string{"registrations"}, &out); err != nil || !strings.Contains(out.String(), "EU\tEU OSS non-Union\tEU826000001\tfrom 2026-11-01") {
 		t.Fatalf("listed %q, %v", out.String(), err)
+	}
+}
+
+// B32.45 — the registry hands out Stripe Tax once LENS_TAX_PARTNER=stripe, and the Test partner otherwise.
+func TestUseTaxPartner_StripeOnceSet(t *testing.T) {
+	for partner, want := range map[string]string{"test": "test", "stripe": "stripe"} {
+		reg := partners.NewRegistry(nil)
+		if err := useTaxPartner(reg, &config.Config{TaxPartner: partner, StripeSecretKey: "sk_test_x"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := reg.Tax().Name(); got != want {
+			t.Errorf("LENS_TAX_PARTNER=%s: the registry handed out %q, want %q", partner, got, want)
+		}
 	}
 }

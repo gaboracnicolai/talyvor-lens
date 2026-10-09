@@ -1897,6 +1897,10 @@ func run() error {
 	partnerRegistry := partners.NewRegistry(dualToken)
 	taxData := partners.NewTaxStore(pool)
 	partnerRegistry.UseTaxData(taxData)
+	// B32.45 — LENS_TAX_PARTNER=stripe: Stripe Tax, in test mode, works out the tax on Talyvor's own sales.
+	if err := useTaxPartner(partnerRegistry, cfg, taxData); err != nil {
+		return err
+	}
 	// B30.12 — the status page lists each partner, Test or live, its last success and failure, and its clearances.
 	statusPage.UseMoneyRails(partnerRegistry, dualToken)
 	// B30.6 — every payee and every payment in or out through a partner is screened against the UK Sanctions List and
