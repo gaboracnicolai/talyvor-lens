@@ -160,6 +160,14 @@ func seedModels() []Model {
 		// https://platform.claude.com/docs/en/about-claude/models/overview (same date).
 		{ID: "claude-opus-5-5", Provider: "anthropic", DisplayName: "Claude Opus 5.5", ReleaseDate: "2026-09-22", Tier: TierFrontier, InputPer1M: 4.00, OutputPer1M: 20.00, CachedInputPer1M: 0.20, CacheWritePer1M: 5.00, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 128000},
 		{ID: "claude-fable-5-1", Provider: "anthropic", DisplayName: "Claude Fable 5.1", ReleaseDate: "2026-09-01", Tier: TierFrontier, InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 0.25, CacheWritePer1M: 12.50, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 128000},
+		// B37.15 — Sonnet 5.5 and Haiku 5.5, in the /v1/models capture of 2026-10-09 (verified_models_test.go),
+		// which also gives 1M input and 128K output; release dates are its created_at. Rates from
+		// https://platform.claude.com/docs/en/about-claude/pricing (read 2026-10-10). Sonnet 5.5 hits are 0.05x
+		// ($0.10), set explicitly as for Opus 5.5. Haiku 5.5 is priced by prompt length: above 100,000 tokens
+		// (all input, cache reads and writes included) the whole request pays $0.50 / $2.50, write $0.625, hit $0.05.
+		{ID: "claude-sonnet-5-5", Provider: "anthropic", DisplayName: "Claude Sonnet 5.5", ReleaseDate: "2026-09-28", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.10, CacheWritePer1M: 2.50, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 128000},
+		{ID: "claude-haiku-5-5", Provider: "anthropic", DisplayName: "Claude Haiku 5.5", ReleaseDate: "2026-10-07", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, CacheWritePer1M: 0.125, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 100000, InputPer1M: 0.50, OutputPer1M: 2.50, CachedInputPer1M: 0.05, CacheWritePer1M: 0.625}},
 		// claude-mythos-5 IS DELIBERATELY NOT SEEDED. Its rate IS published ($10/$50, same as Fable 5),
 		// so this is not a missing-price case — it is a missing-EXISTENCE case. The page marks it
 		// "limited availability" and it is absent from the pinned /v1/models capture that
@@ -229,6 +237,12 @@ func seedModels() []Model {
 		// model; they stay as aliases so a request already recorded under them still prices the same.
 		{ID: "anthropic.claude-opus-4-6-v1", Provider: "bedrock", DisplayName: "Claude Opus 4.6 (Bedrock)", ReleaseDate: "2026-02-05", Tier: TierFrontier, InputPer1M: 5.00, OutputPer1M: 25.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192, Aliases: []string{"anthropic.claude-opus-4-6-20251101-v1:0"}},
 		{ID: "anthropic.claude-sonnet-4-6", Provider: "bedrock", DisplayName: "Claude Sonnet 4.6 (Bedrock)", ReleaseDate: "2026-02-17", Tier: TierBalanced, InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192, Aliases: []string{"anthropic.claude-sonnet-4-6-20251101-v1:0"}},
+		// B37.15 — ids from each model card's "Programmatic Access" table (fetched 2026-10-10):
+		// …/model-card-anthropic-claude-sonnet-5-5.html and …/model-card-anthropic-claude-haiku-5-5.html. Priced
+		// as the direct models above, the rates Nicolai approved for both (B37.12).
+		{ID: "anthropic.claude-sonnet-5-5", Provider: "bedrock", DisplayName: "Claude Sonnet 5.5 (Bedrock)", ReleaseDate: "2026-09-28", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.10, CacheWritePer1M: 2.50, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 128000},
+		{ID: "anthropic.claude-haiku-5-5", Provider: "bedrock", DisplayName: "Claude Haiku 5.5 (Bedrock)", ReleaseDate: "2026-10-07", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, CacheWritePer1M: 0.125, Capabilities: visionDoc, ContextTokens: 1000000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 100000, InputPer1M: 0.50, OutputPer1M: 2.50, CachedInputPer1M: 0.05, CacheWritePer1M: 0.625}},
 		// NOTE: no Bedrock "claude-haiku-4-6" twin either — the underlying Haiku 4.6 does not exist.
 
 		// ─── Mistral (text-only) ───

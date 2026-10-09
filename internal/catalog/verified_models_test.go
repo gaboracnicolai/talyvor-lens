@@ -50,6 +50,12 @@ var verifiedAnthropicModels = map[string]struct{}{
 	"claude-opus-5-5":  {},
 	"claude-fable-5-1": {},
 
+	// B37.15 — FROM A /v1/models CAPTURE: GET /v1/models?limit=1000 with Nicolai's key, saved 2026-10-09
+	// 21:59:45 UTC as ~/talyvor-queue/anthropic-models-2026-10-09.json (14 models, has_more false). It
+	// lists both undated, with max_input_tokens 1000000 and max_tokens 128000.
+	"claude-sonnet-5-5": {},
+	"claude-haiku-5-5":  {},
+
 	// returned undated by /v1/models
 	"claude-sonnet-5":   {},
 	"claude-fable-5":    {},

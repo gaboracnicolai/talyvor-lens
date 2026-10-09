@@ -58,3 +58,40 @@ func TestB3712_LongPromptChargedTheLongPromptPrice(t *testing.T) {
 		})
 	}
 }
+
+// B37.15 — Claude Haiku 5.5 is $0.10 / $0.50 per 1M for prompts up to 100,000 tokens and $0.50 / $2.50 above,
+// on the whole request (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-10-10). One
+// streamed chat question goes through the real Anthropic handler; the charge is read off the prepaid ledger row.
+func TestB3715_Haiku55LongPromptChargedTheLongPromptPrice(t *testing.T) {
+	cases := []struct {
+		promptTokens      int
+		inPer1M, outPer1M float64
+	}{
+		{150000, 0.50, 2.50},
+		{50000, 0.10, 0.50},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprint(tc.promptTokens), func(t *testing.T) {
+			p, _, _, pool := chatProxy(t, costWireFunded, 0, economy.DefaultAgentCeilingLXC)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, chatSSEWithUsage("Hello", tc.promptTokens, 100))
+			}))
+			t.Cleanup(srv.Close)
+			p.anthropicURL = srv.URL
+
+			q := jsonString(fmt.Sprintf("b3715-%d %s", tc.promptTokens, strings.Repeat("word ", tc.promptTokens*4/5)))
+			body := `{"model":"claude-haiku-5-5","max_tokens":4096,"stream":true,"messages":[{"role":"user","content":` + q + `}]}`
+			res := askNewestModel(t, p, true, true, body)
+			if got, _ := io.ReadAll(res.Body); res.StatusCode != http.StatusOK || !strings.Contains(string(got), "Hello") {
+				t.Fatalf("status=%d body=%.300q — the model did not answer", res.StatusCode, got)
+			}
+
+			want := settleULXC(float64(tc.promptTokens)*tc.inPer1M/1e6 + 100*tc.outPer1M/1e6)
+			if rows, debited, _ := prepaidDebits(t, pool); rows != 1 || debited != want {
+				t.Errorf("prepaid ledger = %d row(s), %d µLXC; want 1 row of %d µLXC (%d in + 100 out at $%.2f/$%.2f per 1M)",
+					rows, debited, want, tc.promptTokens, tc.inPer1M, tc.outPer1M)
+			}
+		})
+	}
+}
