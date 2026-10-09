@@ -995,6 +995,11 @@ type Config struct {
 	MarketTaxMeterEvent        string
 	StripeTestMarketTaxPriceID string
 
+	// TaxPartner is who works out the tax on Talyvor's own sales (B32.45): "test", the Test tax partner over the tax
+	// rows, or "stripe", Stripe Tax in test mode with LENS_STRIPE_TEST_SECRET_KEY, else a test-mode
+	// LENS_STRIPE_SECRET_KEY (startup fails without either). Env: LENS_TAX_PARTNER, default test.
+	TaxPartner string
+
 	// SupplierLegalName, SupplierAddress and SupplierVATNumber are what Talyvor's marketplace receipts print for the
 	// supplier (B32.40). Env: LENS_SUPPLIER_LEGAL_NAME and LENS_SUPPLIER_ADDRESS, default the company and registered
 	// office as the public register has them; LENS_SUPPLIER_VAT_NUMBER, default EMPTY — then every receipt reads "VAT
@@ -1370,6 +1375,7 @@ func Load() (*Config, error) {
 		MarketTaxPriceID:           getEnv("LENS_MARKET_TAX_PRICE_ID", ""),
 		MarketTaxMeterEvent:        getEnv("LENS_MARKET_TAX_METER_EVENT", "talyvor_marketplace_tax"),
 		StripeTestMarketTaxPriceID: getEnv("LENS_STRIPE_TEST_MARKET_TAX_PRICE_ID", ""),
+		TaxPartner:                 getEnv("LENS_TAX_PARTNER", "test"),
 		SupplierLegalName:          getEnv("LENS_SUPPLIER_LEGAL_NAME", "TALYVOR LTD"),
 		SupplierAddress:            getEnv("LENS_SUPPLIER_ADDRESS", "71-75 Shelton Street, Covent Garden, London, United Kingdom, WC2H 9JQ"),
 		SupplierVATNumber:          getEnv("LENS_SUPPLIER_VAT_NUMBER", ""),
@@ -1459,6 +1465,16 @@ func Load() (*Config, error) {
 	// test credits, so it refuses to start — naming the variable, never echoing the key.
 	if k := c.StripeTestSecretKey; k != "" && !strings.HasPrefix(k, "sk_test_") && !strings.HasPrefix(k, "rk_test_") {
 		return nil, errors.New("LENS_STRIPE_TEST_SECRET_KEY must be a Stripe test-mode key (sk_test_… or rk_test_…)")
+	}
+	// B32.45: Stripe Tax answers in test mode only, so it needs a test-mode key.
+	switch c.TaxPartner {
+	case "test":
+	case "stripe":
+		if k := c.StripeSecretKey; c.StripeTestSecretKey == "" && !strings.HasPrefix(k, "sk_test_") && !strings.HasPrefix(k, "rk_test_") {
+			return nil, errors.New("LENS_TAX_PARTNER=stripe needs a Stripe test-mode key: LENS_STRIPE_TEST_SECRET_KEY, or a test-mode LENS_STRIPE_SECRET_KEY")
+		}
+	default:
+		return nil, fmt.Errorf("LENS_TAX_PARTNER is test or stripe, not %q", c.TaxPartner)
 	}
 
 	// HA timers, expressed in whole seconds. Defaults match the

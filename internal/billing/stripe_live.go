@@ -17,6 +17,7 @@ import (
 	"github.com/stripe/stripe-go/v81/price"
 	"github.com/stripe/stripe-go/v81/subscription"
 	"github.com/stripe/stripe-go/v81/subscriptionitem"
+	"github.com/stripe/stripe-go/v81/tax/calculation"
 )
 
 // LiveStripe is the production stripeAPI implementation. It is NOT exercised by
@@ -83,6 +84,12 @@ func (l *LiveStripe) CustomerCountries(ctx context.Context, customerID string) (
 		cardCountry = c.InvoiceSettings.DefaultPaymentMethod.Card.Country
 	}
 	return billingCountry, cardCountry, nil
+}
+
+// CalculateTax asks Stripe Tax for the tax on a sale (B32.45), with this instance's key: partners.StripeTaxPartner's API.
+func (l *LiveStripe) CalculateTax(ctx context.Context, params *stripe.TaxCalculationParams) (*stripe.TaxCalculation, error) {
+	params.Context = ctx
+	return calculation.Client{B: l.backend(), Key: l.key}.New(params)
 }
 
 // CreateCheckoutSession creates a one-off (mode=payment) Checkout Session for a
