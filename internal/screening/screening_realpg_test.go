@@ -105,7 +105,7 @@ func (s *listServer) set(path, state string) {
 
 func (s *listServer) store(pool *pgxpool.Pool) *screening.Store {
 	return screening.NewStore(pool, []screening.Source{screening.UKSource(s.URL + "/uk.csv"),
-		screening.OFACSource(s.URL+"/ofac_sdn.csv", s.URL+"/ofac_alt.csv")}, 0.9)
+		screening.OFACSource(s.URL+"/ofac_sdn.csv", s.URL+"/ofac_alt.csv")}, 0.9, 48*time.Hour)
 }
 
 func listByName(t *testing.T, store *screening.Store) map[string]screening.ListStatus {
@@ -197,6 +197,7 @@ type payments struct {
 	pool             *pgxpool.Pool
 	money            *economy.DualTokenStore
 	screener         *screening.Screener
+	store            *screening.Store
 	ws               string
 	company, partner string
 }
@@ -211,7 +212,8 @@ func newPayments(t *testing.T) payments {
 	}
 	registry := partners.NewRegistry(nil)
 	registry.UseScreeningList(store)
-	p := payments{pool: pool, money: economy.NewDualTokenStore(nil, pool, nil), screener: screening.NewScreener(pool, registry), ws: "ws-b306"}
+	p := payments{pool: pool, money: economy.NewDualTokenStore(nil, pool, nil), screener: screening.NewScreener(pool, registry), store: store, ws: "ws-b306"}
+	p.screener.HoldWhenListsStale(store)
 	p.money.SetScreener(p.screener)
 	for _, a := range []*string{&p.company, &p.partner} {
 		purpose := economy.MoneyCompany
@@ -356,5 +358,47 @@ func TestPayment_ACloseMatchIsHeldUntilAnOperatorDecides(t *testing.T) {
 	}
 	if err := p.screener.ScreenPayee(ctx, p.ws, "payee-2", "Ada Lovelace", economy.CapabilityPaymentsOut); err != nil {
 		t.Fatalf("a payee on no list: %v", err)
+	}
+}
+
+// B37.4 — DONE: with a list last downloaded 49 hours ago — over the 48 LENS_SCREENING_MAX_AGE_HOURS defaults to — a
+// payment to someone on no list holds, writes nothing to the ledger, and opens a case; a fresh download clears
+// payments again.
+func TestPayment_StaleListsHoldEveryPaymentUntilTheyDownloadAgain(t *testing.T) {
+	ctx := context.Background()
+	p := newPayments(t)
+	if _, err := p.pool.Exec(ctx, `UPDATE screening_lists SET loaded_at = now() - interval '49 hours' WHERE list = 'UK'`); err != nil {
+		t.Fatal(err)
+	}
+	if age, stale, err := p.store.ListsAge(ctx); err != nil || !stale || age/time.Hour != 49 {
+		t.Fatalf("lists 49 h old: %v old, stale %v, %v", age, stale, err)
+	}
+
+	c := refusal(t, func() error { _, err := p.payOut("pay-stale", "Ada Lovelace", 2_000); return err }(), screening.ErrListsStale)
+	if e, ps := p.posted(t, "pay-stale"); e != 0 || ps != 0 || p.companyPence(t) != 50_000 {
+		t.Fatalf("a payment held for stale lists wrote %d entries and %d postings", e, ps)
+	}
+	var outcome, status string
+	if err := p.pool.QueryRow(ctx, `SELECT outcome, status FROM compliance_cases WHERE id = $1 AND subject_id = 'pay-stale'`, c.ID).
+		Scan(&outcome, &status); err != nil || outcome != screening.OutcomeStale || status != screening.CaseHeld {
+		t.Fatalf("the case: %s %s, %v", outcome, status, err)
+	}
+
+	// A fresh download clears payments again; the one held waits for an operator, and moves once released.
+	if err := p.store.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.payOut("pay-fresh", "Ada Lovelace", 2_000); err != nil {
+		t.Fatalf("a payment with fresh lists: %v", err)
+	}
+	if e, ps := p.posted(t, "pay-fresh"); e != 1 || ps != 2 || p.companyPence(t) != 48_000 {
+		t.Fatalf("a payment with fresh lists wrote %d entries and %d postings", e, ps)
+	}
+	refusal(t, func() error { _, err := p.payOut("pay-stale", "Ada Lovelace", 2_000); return err }(), screening.ErrListsStale)
+	if _, err := p.screener.Decide(ctx, c.ID, true, "nicolai", "lists downloaded again; Ada Lovelace is on neither"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.payOut("pay-stale", "Ada Lovelace", 2_000); err != nil || p.companyPence(t) != 46_000 {
+		t.Fatalf("a released payment: %v", err)
 	}
 }

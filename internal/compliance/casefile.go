@@ -194,6 +194,9 @@ func opening(c screening.Case) string {
 	if c.Kind == monitoring.CaseKind {
 		return "Transaction monitoring opened the case on the workspace's payments."
 	}
+	if c.Outcome == screening.OutcomeStale {
+		return fmt.Sprintf("Screening held the payment to or from %q because the sanctions lists were out of date; the case is %s.", c.Name, c.Status)
+	}
 	what := "is close to a name"
 	if c.Outcome == "hit" {
 		what = "matches a name"

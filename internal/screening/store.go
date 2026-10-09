@@ -43,6 +43,7 @@ type Store struct {
 	client    *http.Client
 	sources   []Source
 	threshold int // basis points
+	maxAge    time.Duration
 
 	mu      sync.Mutex
 	version string
@@ -55,14 +56,36 @@ type indexed struct {
 	norm string
 }
 
-// NewStore keeps sources' lists in pool, and calls a name close to a listed one when their similarity is at least
-// threshold (0 to 1: LENS_SCREENING_FUZZY_THRESHOLD).
-func NewStore(pool *pgxpool.Pool, sources []Source, threshold float64) *Store {
-	return &Store{pool: pool, client: &http.Client{Timeout: 5 * time.Minute}, sources: sources, threshold: int(threshold*10_000 + 0.5)}
+// NewStore keeps sources' lists in pool, calls a name close to a listed one when their similarity is at least
+// threshold (0 to 1: LENS_SCREENING_FUZZY_THRESHOLD), and calls the lists stale once one was last downloaded more than
+// maxAge ago (LENS_SCREENING_MAX_AGE_HOURS).
+func NewStore(pool *pgxpool.Pool, sources []Source, threshold float64, maxAge time.Duration) *Store {
+	return &Store{pool: pool, client: &http.Client{Timeout: 5 * time.Minute}, sources: sources, threshold: int(threshold*10_000 + 0.5),
+		maxAge: maxAge}
 }
 
 // ThresholdBPS is the similarity, in basis points, at which a name is held for review.
 func (s *Store) ThresholdBPS() int { return s.threshold }
+
+// ListsAge is how long ago the list downloaded longest ago was last downloaded — -1 while a list has never been — and
+// whether that makes the lists stale: older than LENS_SCREENING_MAX_AGE_HOURS, or not all downloaded yet (B37.4).
+func (s *Store) ListsAge(ctx context.Context) (age time.Duration, stale bool, err error) {
+	lists := make([]string, len(s.sources))
+	for i, src := range s.sources {
+		lists[i] = src.List
+	}
+	var loaded int
+	var secs int64
+	if err := s.pool.QueryRow(ctx, `SELECT count(loaded_at), coalesce(floor(extract(epoch FROM max(now() - loaded_at))), 0)::bigint
+		FROM screening_lists WHERE list = ANY($1)`, lists).Scan(&loaded, &secs); err != nil {
+		return 0, true, fmt.Errorf("screening: how old the lists are: %w", err)
+	}
+	if loaded < len(lists) {
+		return -1, true, nil
+	}
+	age = time.Duration(secs) * time.Second
+	return age, age > s.maxAge, nil
+}
 
 // Refresh downloads every list. A list whose download fails, or whose file does not read as the list, keeps the copy
 // already loaded, and its failure is recorded; the answer names every list that failed.

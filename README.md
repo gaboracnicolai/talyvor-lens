@@ -319,7 +319,8 @@ exactly these fields, and no secret, reference id, error text, host name or work
 - `status`, `version`, `uptime_hours`, `updated_at`
 - `components[]`: `name`, `status`, `latency_ms`, `measured`, `message` (a fixed phrase, when there is one), `checked_at`
 - `providers[]`: `name`, `status`, `latency_ms`, `checked_at`
-- `rails[]`: `service`, `name`, `mode`, `status`, `last_success`, `last_failure`, `capabilities[]` (`key`, `cleared`)
+- `rails[]`: `service`, `name`, `mode`, `status`, `last_success`, `last_failure`, `capabilities[]` (`key`, `cleared`), and on
+  the screening rail `lists_age_hours`: how many whole hours ago the sanctions lists last downloaded
 - `rails_summary`: `up`, `down`, `idle`, `down_names`
 
 A new field is added here and to `documentedKeys` in `internal/status/contract_test.go` together.
