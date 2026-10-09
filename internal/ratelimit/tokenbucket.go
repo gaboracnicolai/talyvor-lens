@@ -41,6 +41,10 @@ const (
 	tpmWindow = time.Minute
 )
 
+// tpmNow is the clock the per-minute TPM key is read from; a test pins it so its
+// RecordTokens and CheckTokenBudget can never land in two different minutes.
+var tpmNow = time.Now
+
 // ─── types ───────────────────────────────────────
 
 // LimitTier is one tier in the multi-tier stack.
@@ -351,7 +355,7 @@ func RecordTokens(ctx context.Context, rdb *redis.Client, workspaceID string, to
 	if rdb == nil || tokens <= 0 {
 		return nil
 	}
-	bucket := time.Now().UTC().Format("200601021504") // minute granularity
+	bucket := tpmNow().UTC().Format("200601021504") // minute granularity
 	key := fmt.Sprintf("tpm:ws:%s:%s", workspaceID, bucket)
 	pipe := rdb.Pipeline()
 	pipe.IncrBy(ctx, key, int64(tokens))
@@ -370,7 +374,7 @@ func CheckTokenBudget(ctx context.Context, rdb *redis.Client, workspaceID string
 	if rdb == nil || tpm <= 0 {
 		return true, tpm, nil
 	}
-	bucket := time.Now().UTC().Format("200601021504")
+	bucket := tpmNow().UTC().Format("200601021504")
 	key := fmt.Sprintf("tpm:ws:%s:%s", workspaceID, bucket)
 	v, err := rdb.Get(ctx, key).Int()
 	if err != nil && !errors.Is(err, redis.Nil) {

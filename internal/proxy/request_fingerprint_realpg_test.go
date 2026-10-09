@@ -2,31 +2,26 @@ package proxy
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/compressor"
-	"github.com/talyvor/lens/internal/dbmigrate"
 	"github.com/talyvor/lens/internal/fallback"
 	"github.com/talyvor/lens/internal/guardrails"
 	"github.com/talyvor/lens/internal/injection"
 	"github.com/talyvor/lens/internal/pii"
 	"github.com/talyvor/lens/internal/router"
 	"github.com/talyvor/lens/internal/workspace"
-	"github.com/talyvor/lens/migrations"
 )
 
 // B15.1 — A CACHED ANSWER IS SERVED ONLY TO A REQUEST ASKED UNDER THE SAME SETTINGS.
@@ -81,42 +76,11 @@ func fpDB(t *testing.T) *pgxpool.Pool {
 	if admin == "" {
 		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG request fingerprint test")
 	}
-	ctx := context.Background()
-	name := fmt.Sprintf("lens_reqfp_%d", time.Now().UnixNano())
-	ac, err := pgx.Connect(ctx, admin)
-	if err != nil {
-		t.Fatalf("admin connect: %v", err)
-	}
-	if _, err := ac.Exec(ctx, "CREATE DATABASE "+name); err != nil {
-		_ = ac.Close(ctx)
-		t.Fatalf("create %s: %v", name, err)
-	}
-	_ = ac.Close(ctx)
-	u, err := url.Parse(admin)
+	pool, err := pgxpool.New(context.Background(), migratedDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.Path = "/" + name
-	mc, err := pgx.Connect(ctx, u.String())
-	if err != nil {
-		t.Fatalf("connect %s: %v", name, err)
-	}
-	if _, err := dbmigrate.Run(ctx, mc, migrations.FS); err != nil {
-		_ = mc.Close(ctx)
-		t.Fatalf("migrate: %v", err)
-	}
-	_ = mc.Close(ctx)
-	pool, err := pgxpool.New(ctx, u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		if c, err := pgx.Connect(context.Background(), admin); err == nil {
-			_, _ = c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-			_ = c.Close(context.Background())
-		}
-	})
+	t.Cleanup(pool.Close)
 	return pool
 }
 
