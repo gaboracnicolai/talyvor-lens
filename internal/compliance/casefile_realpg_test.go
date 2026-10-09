@@ -252,3 +252,57 @@ func TestScreeningDecisionIsAudited(t *testing.T) {
 		t.Fatalf("audit row = %q %q, %v", action, detail, err)
 	}
 }
+
+// earnVerified reads workspaces.earn_verified, the operator's verification of a workspace's people.
+type earnVerified struct{}
+
+func (earnVerified) MayEarn(ctx context.Context, tx pgx.Tx, workspaceID string) (bool, error) {
+	var ok bool
+	err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT earn_verified FROM workspaces WHERE id = $1), false)`, workspaceID).Scan(&ok)
+	return ok, err
+}
+
+// A freeze is not stepped round through the owner's second workspace: credits between one owner's agents are
+// GREEN, but none leave or enter the frozen workspace, either way.
+func TestFreezeHoldsAcrossTheOwnersOtherWorkspace(t *testing.T) {
+	ctx := context.Background()
+	pool := casePool(t)
+	money := economy.NewDualTokenStore(nil, pool, nil)
+	money.SetOwnerVerifier(earnVerified{})
+	const frozen, other, lxc = "ws-acme", "ws-acme-2", int64(1_000_000)
+	agents := map[string]economy.Agent{}
+	for _, ws := range []string{frozen, other} {
+		if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id, name, cache_prefix, earn_verified) VALUES ($1, $1, $1, true)`, ws); err != nil {
+			t.Fatal(err)
+		}
+		a, err := money.CreateAgent(ctx, ws, "agent", "user-acme")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := money.CreditLXC(ctx, ws, 10*lxc, "stripe top-up", map[string]interface{}{"funding": economy.FundingTest}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := money.FundAgent(ctx, ws, a.ID, 10*lxc); err != nil {
+			t.Fatal(err)
+		}
+		agents[ws] = a
+	}
+	id := "cc_" + uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO compliance_cases (id, workspace_id, kind, subject_kind, subject_id, name, outcome, status)
+		VALUES ($1, $2, 'monitoring', 'workspace', $2, 'transaction monitoring', 'alert', 'open')`, id, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compliance.New(pool, nil).FreezeWorkspace(ctx, id, "nicolai", "pending review"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := money.SendCredits(ctx, frozen, agents[frozen].ID, agents[other].ID, lxc, "out"); !errors.Is(err, economy.ErrWorkspaceFrozen) {
+		t.Fatalf("credits out of the frozen workspace to the owner's other one = %v; want ErrWorkspaceFrozen", err)
+	}
+	if _, err := money.SendCredits(ctx, other, agents[other].ID, agents[frozen].ID, lxc, "in"); !errors.Is(err, economy.ErrWorkspaceFrozen) {
+		t.Fatalf("credits into the frozen workspace from the owner's other one = %v; want ErrWorkspaceFrozen", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_transfers`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("agent_transfers rows = %d, %v; want none", n, err)
+	}
+}

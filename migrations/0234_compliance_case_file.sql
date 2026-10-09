@@ -24,3 +24,11 @@ CREATE TABLE IF NOT EXISTS compliance_freezes (
 
 -- A case's timeline reads the trail by target.
 CREATE INDEX IF NOT EXISTS operator_audit_target_idx ON operator_audit (target, occurred_at, id);
+
+-- Each 30-second step whose step-up code an operator used (internal/stepup): a code opens one action, once, on any
+-- replica. One row per step at most — under three thousand a day.
+CREATE TABLE IF NOT EXISTS operator_step_up_codes (
+    step     BIGINT PRIMARY KEY,
+    operator TEXT NOT NULL CHECK (operator <> ''),
+    used_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

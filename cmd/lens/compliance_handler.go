@@ -28,18 +28,20 @@ import (
 //	POST /v1/admin/compliance/cases/{caseID}/export      the case file as a report draft, text/plain, for a person to file
 //
 // Each write answers the case file as it now stands, and each action — the export too — is an operator audit row
-// naming the case. Every route, and screening's release and refuse, is behind requireStepUp.
+// naming the case. The two reads are the admin key's; every action, and screening's release and refuse, is behind
+// requireStepUp: a fresh code for each.
 
 // stepUpHeader carries the six-digit code from the operator's authenticator app.
 const stepUpHeader = "X-Talyvor-Step-Up"
 
 // stepUpVerifier is *stepup.Verifier.
 type stepUpVerifier interface {
-	Verify(operator, code string) error
+	Verify(ctx context.Context, operator, code string) error
 }
 
 // requireStepUp gates an operator's compliance action: the global admin key, the operator named in
-// X-Talyvor-Operator — the audit row's who — and a current step-up code in X-Talyvor-Step-Up, used once. A valid
+// X-Talyvor-Operator — the audit row's who — and a current step-up code in X-Talyvor-Step-Up, which nobody has used
+// yet: one code, one action. A valid
 // admin key without a good code is 403, so the web app knows to ask for one; no step-up secret set is 503.
 //
 // FAILS CLOSED like requireAdmin: missing, invalid or nil ⇒ 401; a moderator key or the operator read key ⇒ refused.
@@ -58,7 +60,7 @@ func requireStepUp(am adminAuthenticator, v stepUpVerifier, next http.Handler) h
 			writeJSONErr(w, http.StatusBadRequest, "a compliance action names the operator who takes it in "+moderatorOperatorHeader)
 			return
 		}
-		switch err := v.Verify(operator, r.Header.Get(stepUpHeader)); {
+		switch err := v.Verify(r.Context(), operator, r.Header.Get(stepUpHeader)); {
 		case errors.Is(err, stepup.ErrNotConfigured):
 			writeJSONErr(w, http.StatusServiceUnavailable, err.Error())
 			return

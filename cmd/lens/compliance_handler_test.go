@@ -48,14 +48,14 @@ func (f *fakeCaseFile) Export(context.Context, string, string) (string, error) {
 
 func TestComplianceFreeze_BehindStepUp(t *testing.T) {
 	key := []byte("0123456789abcdef0123")
-	v, err := stepup.New(base32.StdEncoding.EncodeToString(key))
+	v, err := stepup.New(base32.StdEncoding.EncodeToString(key), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cf := &fakeCaseFile{}
 	r := chi.NewRouter()
 	r.Post("/v1/admin/compliance/cases/{caseID}/freeze", requireStepUp(headerAdmin{}, v, newComplianceActionHandler(cf, compliance.ActionFreeze)))
-	unset, _ := stepup.New("")
+	unset, _ := stepup.New("", nil)
 	r.Post("/unset/{caseID}/freeze", requireStepUp(headerAdmin{}, unset, newComplianceActionHandler(cf, compliance.ActionFreeze)))
 	do := func(path, admin, operator, code string) (int, string) {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"reason":"pending the owner's explanation"}`))

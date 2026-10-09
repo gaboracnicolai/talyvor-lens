@@ -48,12 +48,17 @@ func WorkspaceFreeze(ctx context.Context, q interface {
 }
 
 // frozenRefusal refuses capability c for workspaceID while an operator has it frozen — c AMBER or RED, test money or
-// live — and answers nil for a GREEN one, or a workspace not frozen. In a transaction it holds the freeze lock shared
-// until the transaction ends (FreezeLockSQL).
+// live — and answers nil for a GREEN one, or a workspace not frozen.
 func frozenRefusal(ctx context.Context, q pgxDB, workspaceID string, c Capability) (*CapabilityRefusal, error) {
 	if c.Class == ClassGreen {
 		return nil, nil
 	}
+	return freezeRefusal(ctx, q, workspaceID, c)
+}
+
+// freezeRefusal refuses c for workspaceID while it is frozen, whatever c's class. In a transaction it holds the
+// freeze lock shared until the transaction ends (FreezeLockSQL).
+func freezeRefusal(ctx context.Context, q pgxDB, workspaceID string, c Capability) (*CapabilityRefusal, error) {
 	if _, ok := q.(pgx.Tx); ok {
 		if _, err := q.Exec(ctx, FreezeLockSQL, workspaceID); err != nil {
 			return nil, fmt.Errorf("economy: compliance freeze: %w", err)
@@ -68,12 +73,21 @@ func frozenRefusal(ctx context.Context, q pgxDB, workspaceID string, c Capabilit
 
 // refuseFrozen is frozenRefusal as an error: nil when c may move workspaceID's money.
 func refuseFrozen(ctx context.Context, q pgxDB, workspaceID string, c Capability) error {
-	refusal, err := frozenRefusal(ctx, q, workspaceID, c)
+	return refusalErr(frozenRefusal(ctx, q, workspaceID, c))
+}
+
+// refuseFrozenAnyClass is freezeRefusal as an error: money a GREEN capability would move into or out of a frozen
+// workspace — to another workspace of the same owner — is refused too, so a freeze cannot be stepped round.
+func refuseFrozenAnyClass(ctx context.Context, q pgxDB, workspaceID string, c Capability) error {
+	return refusalErr(freezeRefusal(ctx, q, workspaceID, c))
+}
+
+func refusalErr(r *CapabilityRefusal, err error) error {
 	if err != nil {
 		return err
 	}
-	if refusal != nil {
-		return refusal
+	if r != nil {
+		return r
 	}
 	return nil
 }

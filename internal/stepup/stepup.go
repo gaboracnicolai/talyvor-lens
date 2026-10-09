@@ -1,10 +1,11 @@
 // Package stepup is B30.8's step-up authentication for the operator's compliance actions: on top of the admin key,
 // a six-digit time-based code (RFC 6238 — HMAC-SHA1, 30-second steps) from the authenticator app holding
-// LENS_OPERATOR_STEP_UP_SECRET. A code is good for its own step and the one either side of it, and once only: a code
-// an operator already used is refused, so one seen over a shoulder or in a log opens nothing.
+// LENS_OPERATOR_STEP_UP_SECRET. A code is good for its own step and the one either side of it, and once only — by
+// anyone, on any replica (Claims) — so one seen over a shoulder or in a log opens nothing.
 package stepup
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha1" //nolint:gosec // RFC 6238's HMAC-SHA1: what every authenticator app computes
 	"encoding/base32"
@@ -28,23 +29,46 @@ var (
 	ErrNotConfigured = errors.New("stepup: no step-up secret is set (LENS_OPERATOR_STEP_UP_SECRET), so this action cannot be authorised")
 	// ErrInvalid: the code is missing, malformed, wrong or out of date.
 	ErrInvalid = errors.New("stepup: the step-up code is wrong or out of date")
-	// ErrReplayed: the operator already used this code.
+	// ErrReplayed: someone already used this code.
 	ErrReplayed = errors.New("stepup: this step-up code was already used; wait for the next one")
 )
+
+// Claims records each step whose code was used: Claim answers true the first time a step is claimed, and false ever
+// after. The secret is one, so a step's code is the same for every operator: it is claimed once, whoever uses it.
+type Claims interface {
+	Claim(ctx context.Context, step int64, operator string) (bool, error)
+}
+
+// memClaims is Claims in this process alone: for one replica, and for tests.
+type memClaims struct {
+	mu   sync.Mutex
+	used map[int64]bool
+}
+
+func (m *memClaims) Claim(_ context.Context, step int64, _ string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.used[step] {
+		return false, nil
+	}
+	m.used[step] = true
+	return true, nil
+}
 
 // Verifier checks step-up codes against one shared secret.
 type Verifier struct {
 	secret []byte
 	now    func() time.Time
-
-	mu   sync.Mutex
-	used map[string]int64 // each operator's last step a code was accepted for
+	claims Claims
 }
 
-// New is a Verifier for the base32 secret an authenticator app was given. An empty secret is a Verifier that
-// refuses every code with ErrNotConfigured.
-func New(secret string) (*Verifier, error) {
-	v := &Verifier{now: time.Now, used: map[string]int64{}}
+// New is a Verifier for the base32 secret an authenticator app was given, its used codes kept by claims — in this
+// process alone when claims is nil. An empty secret is a Verifier that refuses every code with ErrNotConfigured.
+func New(secret string, claims Claims) (*Verifier, error) {
+	if claims == nil {
+		claims = &memClaims{used: map[int64]bool{}}
+	}
+	v := &Verifier{now: time.Now, claims: claims}
 	secret = strings.ToUpper(strings.Join(strings.Fields(secret), ""))
 	if secret == "" {
 		return v, nil
@@ -63,9 +87,9 @@ func New(secret string) (*Verifier, error) {
 // Configured says whether a secret is set.
 func (v *Verifier) Configured() bool { return len(v.secret) > 0 }
 
-// Verify accepts code for operator once: a code for the current step or the one either side of it, newer than the
-// last code the operator used.
-func (v *Verifier) Verify(operator, code string) error {
+// Verify accepts code for operator once: a code for the current step or the one either side of it that nobody has
+// used yet.
+func (v *Verifier) Verify(ctx context.Context, operator, code string) error {
 	if !v.Configured() {
 		return ErrNotConfigured
 	}
@@ -78,12 +102,13 @@ func (v *Verifier) Verify(operator, code string) error {
 		if !hmac.Equal([]byte(Code(v.secret, c)), []byte(code)) {
 			continue
 		}
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		if last, ok := v.used[operator]; ok && c <= last {
+		first, err := v.claims.Claim(ctx, c, operator)
+		switch {
+		case err != nil:
+			return fmt.Errorf("stepup: record the code's use: %w", err)
+		case !first:
 			return ErrReplayed
 		}
-		v.used[operator] = c
 		return nil
 	}
 	return ErrInvalid
