@@ -9,14 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/auth"
-	"github.com/talyvor/lens/internal/dbmigrate"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/workspace"
-	"github.com/talyvor/lens/migrations"
 )
 
 // B19.1 — EVERY AGENT SPENDS FROM ITS OWN BALANCE, AND THE BOOKS RECONCILE TO THE MICRO-UNIT.
@@ -32,32 +29,7 @@ func agentBankDB(t *testing.T) *pgxpool.Pool {
 	if url == "" {
 		t.Skip("LENS_TEST_DATABASE_URL not set — skipping real-PG agent-accounts test")
 	}
-	const schema = "proxy_b191_agents"
-	ctx := context.Background()
-	cfg, err := pgx.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.RuntimeParams["search_path"] = schema + ",public"
-	conn, err := pgx.ConnectConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, ddl := range []string{`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`, `CREATE SCHEMA ` + schema} {
-		if _, err := conn.Exec(ctx, ddl); err != nil {
-			t.Fatalf("reset schema: %v", err)
-		}
-	}
-	if _, err := dbmigrate.Run(ctx, conn, migrations.FS); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	_ = conn.Close(ctx)
-	poolCfg, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	poolCfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	pool, err := pgxpool.New(context.Background(), migratedDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}

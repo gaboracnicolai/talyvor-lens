@@ -118,6 +118,8 @@ func newFailingUpstreamMeasuredProxy(t *testing.T, ws workspace.Workspace) (*Pro
 		"openai-key", "anthropic-key", "",
 	)
 	pointEveryProviderAt(p, srv.URL)
+	// The default retries of the 500, without their seconds of real backoff (B37.13).
+	p.retryConfig.BaseDelay, p.retryConfig.MaxDelay = 0, 0
 	p.setAlertSink(&recordingAlertSink{})
 	sink := &recordingCompressionSink{}
 	p.SetCompressionSink(sink)

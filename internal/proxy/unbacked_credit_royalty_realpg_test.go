@@ -21,8 +21,6 @@ package proxy
 
 import (
 	"context"
-	"fmt"
-	"net/url"
 	"os"
 	"strconv"
 	"testing"
@@ -30,9 +28,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/talyvor/lens/internal/dbmigrate"
-	"github.com/talyvor/lens/migrations"
 
 	"github.com/talyvor/lens/internal/earnverify"
 	"github.com/talyvor/lens/internal/economy"
@@ -77,40 +72,11 @@ func newUnbackedEnv(t *testing.T, tag string) *unbackedEnv {
 	// these assertions, and these rows break theirs (measured: 14 sibling money-path tests turned red
 	// purely from co-tenancy). An isolated database removes the coupling entirely for one
 	// CREATE/DROP, and is what the repo's other real-PG money tests already do.
-	name := fmt.Sprintf("lens_unbacked_%d", time.Now().UnixNano())
-	ac, err := pgx.Connect(ctx, admin)
+	pool, err := pgxpool.New(ctx, migratedDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ac.Exec(ctx, "CREATE DATABASE "+name); err != nil {
-		_ = ac.Close(ctx)
-		t.Fatal(err)
-	}
-	_ = ac.Close(ctx)
-	u, _ := url.Parse(admin)
-	u.Path = "/" + name
-	mc, err := pgx.Connect(ctx, u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dbmigrate.Run(ctx, mc, migrations.FS); err != nil {
-		_ = mc.Close(ctx)
-		t.Fatal(err)
-	}
-	_ = mc.Close(ctx)
-	pool, err := pgxpool.New(ctx, u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		c, err := pgx.Connect(context.Background(), admin)
-		if err != nil {
-			return
-		}
-		_, _ = c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-		_ = c.Close(context.Background())
-	})
+	t.Cleanup(pool.Close)
 
 	lens := mining.NewLedgerStore(pool)
 	lens.SetMintVerifier(earnverify.New(false)) // U6 floor, wired unconditionally as production does

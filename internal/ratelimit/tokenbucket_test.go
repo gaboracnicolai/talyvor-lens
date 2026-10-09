@@ -108,8 +108,19 @@ func TestInMemoryFallback_DeniesAfterCapacity(t *testing.T) {
 
 // ─── TPM helpers ─────────────────────────────────
 
+// pinTPMClockToMinuteEnd stops the TPM key following the wall clock: it sits on the last
+// millisecond of a minute, where a real clock moved RecordTokens and CheckTokenBudget into
+// two different per-minute keys and the read saw none of the tokens just recorded.
+func pinTPMClockToMinuteEnd(t *testing.T) {
+	t.Helper()
+	at := time.Date(2026, 10, 9, 12, 57, 59, 999_000_000, time.UTC)
+	tpmNow = func() time.Time { return at }
+	t.Cleanup(func() { tpmNow = time.Now })
+}
+
 func TestRecordTokens_UpdatesCount(t *testing.T) {
 	rdb := setupBucketRedis(t)
+	pinTPMClockToMinuteEnd(t)
 	ctx := context.Background()
 	if err := RecordTokens(ctx, rdb, "ws_tpm", 500); err != nil {
 		t.Fatalf("RecordTokens: %v", err)
@@ -131,6 +142,7 @@ func TestRecordTokens_UpdatesCount(t *testing.T) {
 
 func TestCheckTokenBudget_DeniesWhenOverTPM(t *testing.T) {
 	rdb := setupBucketRedis(t)
+	pinTPMClockToMinuteEnd(t)
 	ctx := context.Background()
 	_ = RecordTokens(ctx, rdb, "ws_over", 1_000_000)
 	ok, remaining, err := CheckTokenBudget(ctx, rdb, "ws_over", 100_000)
