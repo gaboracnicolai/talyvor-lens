@@ -46,7 +46,8 @@ func seedModels() []Model {
 		{ID: "text-embedding-3-small", Provider: "openai", DisplayName: "Embedding 3 small", ReleaseDate: "2024-01-25", Tier: TierEmbedding, InputPer1M: 0.02, OutputPer1M: 0, ContextTokens: 8191, MaxOutput: 0},
 		{ID: "text-embedding-3-large", Provider: "openai", DisplayName: "Embedding 3 large", ReleaseDate: "2024-01-25", Tier: TierEmbedding, InputPer1M: 0.13, OutputPer1M: 0, ContextTokens: 8191, MaxOutput: 0},
 		{ID: "text-embedding-ada-002", Provider: "openai", DisplayName: "Embedding ada 002", ReleaseDate: "2022-12-15", Tier: TierEmbedding, InputPer1M: 0.10, OutputPer1M: 0, ContextTokens: 8191, MaxOutput: 0},
-		{ID: "gpt-4.1-nano", Provider: "openai", DisplayName: "GPT-4.1 nano", ReleaseDate: "2025-04-14", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.40, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
+		// B38.1: cached input $0.025 from the pricing page (read 2026-10-09) — see the gpt-4.1 rows below.
+		{ID: "gpt-4.1-nano", Provider: "openai", DisplayName: "GPT-4.1 nano", ReleaseDate: "2025-04-14", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.40, CachedInputPer1M: 0.025, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
 		{ID: "gpt-5.4", Provider: "openai", DisplayName: "GPT-5.4", ReleaseDate: "2026-03-05", Tier: TierBalanced, InputPer1M: 2.50, OutputPer1M: 15.00, CachedInputPer1M: 0.25, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 		{ID: "gpt-5.4-mini", Provider: "openai", DisplayName: "GPT-5.4 mini", ReleaseDate: "2026-03-17", Tier: TierFast, InputPer1M: 0.75, OutputPer1M: 4.50, CachedInputPer1M: 0.075, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 		// ⚠ THE THREE BELOW WERE ON THE PRICING PAGE AND NOT IN THIS CATALOG. Every rate transcribed
@@ -67,8 +68,15 @@ func seedModels() []Model {
 		// a CHARGE deliberately falls back low so a guessed rate never over-bills — which is exactly
 		// why the remedy is to price the model rather than to change the fallback.
 		{ID: "chat-latest", Provider: "openai", DisplayName: "GPT chat-latest", ReleaseDate: "2026-08-06", Tier: TierBalanced, InputPer1M: 5.00, OutputPer1M: 30.00, CachedInputPer1M: 0.50, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
-		{ID: "gpt-4.1", Provider: "openai", DisplayName: "GPT-4.1", ReleaseDate: "2025-04-14", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 8.00, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
-		{ID: "gpt-4.1-mini", Provider: "openai", DisplayName: "GPT-4.1 mini", ReleaseDate: "2025-04-14", Tier: TierFast, InputPer1M: 0.40, OutputPer1M: 1.60, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
+		// B38.1 — https://developers.openai.com/api/docs/pricing, Standard tier, read 2026-10-09 23:40 UTC
+		// (input | cached input | cache writes | output):
+		//   gpt-4.1       $2.00 | $0.50  | - | $8.00
+		//   gpt-4.1-mini  $0.40 | $0.10  | - | $1.60
+		//   gpt-4.1-nano  $0.10 | $0.025 | - | $0.40
+		// Cached input is 0.25x input, not the 0.5x withCacheRates derives for openai, so it is set
+		// explicitly; it had over-billed every cache read 2x. "-" cache writes: a written token is plain input.
+		{ID: "gpt-4.1", Provider: "openai", DisplayName: "GPT-4.1", ReleaseDate: "2025-04-14", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 8.00, CachedInputPer1M: 0.50, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
+		{ID: "gpt-4.1-mini", Provider: "openai", DisplayName: "GPT-4.1 mini", ReleaseDate: "2025-04-14", Tier: TierFast, InputPer1M: 0.40, OutputPer1M: 1.60, CachedInputPer1M: 0.10, Capabilities: vision, ContextTokens: 1000000, MaxOutput: 32768},
 
 		// ─── OpenAI GPT-5.5 / 5.6 ─────────────────────────────────────────────────────────────────
 		//
@@ -76,9 +84,15 @@ func seedModels() []Model {
 		//   (fetched 2026-07-26), Standard tier. Cached-input rates are the page's own "Cached" column —
 		//   0.1x input for these generations, NOT the 0.5x withCacheRates assumes for openai, so they are
 		//   set explicitly.
-		{ID: "gpt-5.6-sol", Provider: "openai", DisplayName: "GPT-5.6 Sol", ReleaseDate: "2026-07-09", Tier: TierFrontier, InputPer1M: 5.00, OutputPer1M: 30.00, CachedInputPer1M: 0.50, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
-		{ID: "gpt-5.6-terra", Provider: "openai", DisplayName: "GPT-5.6 Terra", ReleaseDate: "2026-07-09", Tier: TierBalanced, InputPer1M: 2.50, OutputPer1M: 15.00, CachedInputPer1M: 0.25, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
-		{ID: "gpt-5.6-luna", Provider: "openai", DisplayName: "GPT-5.6 Luna", ReleaseDate: "2026-07-09", Tier: TierFast, InputPer1M: 1.00, OutputPer1M: 6.00, CachedInputPer1M: 0.10, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+		// B38.1: the 5.6 rows were RE-PRICED on the same page, Standard tier, read 2026-10-09 23:40 UTC
+		// (short context: input | cached input | cache writes | output):
+		//   gpt-5.6-sol    $4.00 | $0.40 | $5.00 | $20.00   (catalog had 5.00 | 0.50 | 5.00 derived | 30.00)
+		//   gpt-5.6-terra  $2.00 | $0.20 | $2.50 | $12.00   (catalog had 2.50 | 0.25 | 2.50 derived | 15.00)
+		//   gpt-5.6-luna   $0.20 | $0.02 | $0.25 | $1.20    (catalog had 1.00 | 0.10 | 1.00 derived | 6.00)
+		// Cache writes are now published (1.25x input), so they are set too; gpt-5.5 and below still show "-".
+		{ID: "gpt-5.6-sol", Provider: "openai", DisplayName: "GPT-5.6 Sol", ReleaseDate: "2026-07-09", Tier: TierFrontier, InputPer1M: 4.00, OutputPer1M: 20.00, CachedInputPer1M: 0.40, CacheWritePer1M: 5.00, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+		{ID: "gpt-5.6-terra", Provider: "openai", DisplayName: "GPT-5.6 Terra", ReleaseDate: "2026-07-09", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 12.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+		{ID: "gpt-5.6-luna", Provider: "openai", DisplayName: "GPT-5.6 Luna", ReleaseDate: "2026-07-09", Tier: TierFast, InputPer1M: 0.20, OutputPer1M: 1.20, CachedInputPer1M: 0.02, CacheWritePer1M: 0.25, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 		{ID: "gpt-5.5", Provider: "openai", DisplayName: "GPT-5.5", ReleaseDate: "2026-04-24", Tier: TierBalanced, InputPer1M: 5.00, OutputPer1M: 30.00, CachedInputPer1M: 0.50, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 		// The -pro rows publish "—" in the Cached column: no cached-input discount is offered. Setting
 		// CachedInputPer1M == InputPer1M encodes that honestly; leaving it 0 would let withCacheRates
@@ -91,9 +105,13 @@ func seedModels() []Model {
 		// (gpt-6-astra, gpt-6-sol, gpt-6-luna; fetched 2026-09-26), Standard tier, with the page's own
 		// cached-input column — 0.1x again, so set explicitly. 1.05M context, 128K max output, same pages.
 		// These are reasoning models: the proxy rewrites max_tokens/temperature for them (inference.AdaptReasoningParams).
-		{ID: "gpt-6-astra", Provider: "openai", DisplayName: "GPT-6 Astra", ReleaseDate: "2026-09-03", Tier: TierFrontier, InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
-		{ID: "gpt-6-sol", Provider: "openai", DisplayName: "GPT-6 Sol", ReleaseDate: "2026-09-22", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
-		{ID: "gpt-6-luna", Provider: "openai", DisplayName: "GPT-6 Luna", ReleaseDate: "2026-09-22", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
+		// B38.1: cache writes from https://developers.openai.com/api/docs/pricing, Standard tier, read 2026-10-09
+		// 23:40 UTC — astra $12.50, sol $2.50, luna $0.125 (1.25x input; withCacheRates' 1.0x under-billed them).
+		// Rows: astra $10.00 | $1.00 | $12.50 | $50.00; sol $2.00 | $0.20 | $2.50 | $10.00; luna $0.10 | $0.01 | $0.125 | $0.50.
+		{ID: "gpt-6-astra", Provider: "openai", DisplayName: "GPT-6 Astra", ReleaseDate: "2026-09-03", Tier: TierFrontier, InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, CacheWritePer1M: 12.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
+		{ID: "gpt-6-sol", Provider: "openai", DisplayName: "GPT-6 Sol", ReleaseDate: "2026-09-22", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
+		{ID: "gpt-6-luna", Provider: "openai", DisplayName: "GPT-6 Luna", ReleaseDate: "2026-09-22", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, CacheWritePer1M: 0.125, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
+		// (B38.1: the gpt-4.1 family is on the page again as of 2026-10-09 and is priced from it above.)
 		// ⚠ NOT TOUCHED: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano. They are ABSENT from
 		// the current pricing page, which does not mean they are unavailable — it may mean the page lists
 		// only current models. Their rates here are therefore UNVERIFIED against a published source as of

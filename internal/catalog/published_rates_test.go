@@ -54,9 +54,18 @@ func publishedRateCases() []publishedRateCase {
 		{"claude-fable-5", 10.00, 1.00, 12.50, 50.00, "anthropic pricing: Claude Fable 5"},
 
 		// ── OpenAI (no cache-write charge published for these; write == 0 ⇒ derived, see withCacheRates)
-		{"gpt-5.6-sol", 5.00, 0.50, 0, 30.00, "openai pricing: gpt-5.6-sol"},
-		{"gpt-5.6-terra", 2.50, 0.25, 0, 15.00, "openai pricing: gpt-5.6-terra"},
-		{"gpt-5.6-luna", 1.00, 0.10, 0, 6.00, "openai pricing: gpt-5.6-luna"},
+		// B38.1 — https://developers.openai.com/api/docs/pricing, Standard tier, read 2026-10-09: the 5.6 rows
+		// were re-priced and now publish cache writes; GPT-6 publishes cache writes; the gpt-4.1 family is back
+		// on the page with a cached-input rate ("-" cache writes, so write stays derived and unchecked).
+		{"gpt-5.6-sol", 4.00, 0.40, 5.00, 20.00, "openai pricing: gpt-5.6-sol $4.00 | $0.40 | $5.00 | $20.00 (was 5/0.50/30)"},
+		{"gpt-5.6-terra", 2.00, 0.20, 2.50, 12.00, "openai pricing: gpt-5.6-terra $2.00 | $0.20 | $2.50 | $12.00 (was 2.50/0.25/15)"},
+		{"gpt-5.6-luna", 0.20, 0.02, 0.25, 1.20, "openai pricing: gpt-5.6-luna $0.20 | $0.02 | $0.25 | $1.20 (was 1/0.10/6)"},
+		{"gpt-6-astra", 10.00, 1.00, 12.50, 50.00, "openai pricing: gpt-6-astra $10.00 | $1.00 | $12.50 | $50.00 (write was 10)"},
+		{"gpt-6-sol", 2.00, 0.20, 2.50, 10.00, "openai pricing: gpt-6-sol $2.00 | $0.20 | $2.50 | $10.00 (write was 2)"},
+		{"gpt-6-luna", 0.10, 0.01, 0.125, 0.50, "openai pricing: gpt-6-luna $0.10 | $0.01 | $0.125 | $0.50 (write was 0.10)"},
+		{"gpt-4.1", 2.00, 0.50, 0, 8.00, "openai pricing: gpt-4.1 $2.00 | $0.50 | - | $8.00 (cached was 1.00)"},
+		{"gpt-4.1-mini", 0.40, 0.10, 0, 1.60, "openai pricing: gpt-4.1-mini $0.40 | $0.10 | - | $1.60 (cached was 0.20)"},
+		{"gpt-4.1-nano", 0.10, 0.025, 0, 0.40, "openai pricing: gpt-4.1-nano $0.10 | $0.025 | - | $0.40 (cached was 0.05)"},
 		{"gpt-5.5", 5.00, 0.50, 0, 30.00, "openai pricing: gpt-5.5"},
 		{"gpt-5.5-pro", 30.00, 30.00, 0, 180.00, "openai pricing: gpt-5.5-pro — Cached column is '—', so no discount"},
 		{"gpt-5.4-pro", 30.00, 30.00, 0, 180.00, "openai pricing: gpt-5.4-pro — Cached column is '—'"},
