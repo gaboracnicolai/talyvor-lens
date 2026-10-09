@@ -142,7 +142,7 @@ func (s *Screener) ScreenPayment(ctx context.Context, p Payment) error {
 		} else {
 			req.Payee = c.Name
 		}
-		return prov.ScreenPayment(ctx, req)
+		return prov.ScreenPayment(partners.WithWorkspace(ctx, c.WorkspaceID), req)
 	})
 }
 
@@ -151,7 +151,7 @@ func (s *Screener) ScreenPayment(ctx context.Context, p Payment) error {
 func (s *Screener) ScreenPayee(ctx context.Context, workspaceID, payeeID, name, capability string) error {
 	c := Case{WorkspaceID: workspaceID, SubjectKind: SubjectPayee, SubjectID: payeeID, Name: strings.TrimSpace(name), Capability: capability}
 	return s.screen(ctx, c, func(prov partners.ScreeningProvider) (partners.Screening, error) {
-		return prov.ScreenName(ctx, partners.NameScreen{Name: c.Name})
+		return prov.ScreenName(partners.WithWorkspace(ctx, c.WorkspaceID), partners.NameScreen{Name: c.Name})
 	})
 }
 

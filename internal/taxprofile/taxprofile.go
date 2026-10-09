@@ -201,7 +201,7 @@ func (s *Store) Put(ctx context.Context, workspaceID string, in Input) (Profile,
 	}
 	if p.TaxID != "" {
 		partner := s.taxes.Tax()
-		res, err := partner.ValidateTaxID(ctx, p.Country, p.TaxID)
+		res, err := partner.ValidateTaxID(partners.WithWorkspace(ctx, workspaceID), p.Country, p.TaxID)
 		if errors.Is(err, partners.ErrInvalid) {
 			return Profile{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 		}

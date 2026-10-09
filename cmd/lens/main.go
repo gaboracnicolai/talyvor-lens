@@ -1904,6 +1904,8 @@ func run() error {
 	// opens a compliance case the operator sees at /v1/admin/screening.
 	screeningLists := screening.NewStore(pool, screening.Sources(), cfg.ScreeningFuzzyThreshold)
 	partnerRegistry.UseScreeningList(screeningLists)
+	// B37.5 — every call through a partner rail leaves one audit row in partner_calls.
+	partnerRegistry.UseCallLog(partners.NewCallStore(pool))
 	// B37.2 — every rail answers a read-only probe every 5 minutes, and its last answers are kept in partner_rails, so
 	// a restart and every Lens process show them.
 	go partnerRegistry.WatchRails(ctx, partners.NewRailStore(pool), 5*time.Minute)

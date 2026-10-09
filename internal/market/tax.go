@@ -132,7 +132,7 @@ func (s *Store) taxUse(ctx context.Context, useID, buyer string, ulxc int64, at 
 		l.Treatment, l.Note = TaxUnknownLocation, "No tax charged: where the buyer is is not known"
 	} else {
 		partner := s.tax.Partners.Tax()
-		res, err := partner.Calculate(ctx, partners.TaxRequest{
+		res, err := partner.Calculate(partners.WithWorkspace(ctx, buyer), partners.TaxRequest{
 			Supplier: partners.TaxParty{ID: partners.SupplierTalyvor, Country: SupplierCountry},
 			Customer: r.Customer(),
 			Lines:    []partners.TaxLine{{Ref: useID, TaxCode: TaxCodeDigitalService, AmountMicros: gross, Currency: "USD"}},

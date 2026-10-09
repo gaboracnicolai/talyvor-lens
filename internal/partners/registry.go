@@ -40,6 +40,7 @@ type Registry struct {
 	mu       sync.RWMutex
 	adapters map[Service]any
 	health   map[Service]*railHealth
+	calls    CallLog
 
 	account    *TestAccountPartner
 	fx         *TestFXPartner
@@ -77,6 +78,20 @@ func (r *Registry) UseScreeningList(l ScreeningList) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.screening = TestScreeningProvider{List: l}
+}
+
+// UseCallLog is where every call through the registry's partners is audited (B37.5): a CallStore.
+func (r *Registry) UseCallLog(l CallLog) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = l
+}
+
+// observer is s's rail, audited to the call log.
+func (r *Registry) observer(s Service) observer {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return observer{s, r.health[s], r.calls}
 }
 
 // Configure sets the real adapter for a service. It is used only once a capability the service serves is
@@ -141,7 +156,7 @@ func (r *Registry) Account(ctx context.Context, capability string) (AccountPartn
 	if err != nil {
 		return nil, err
 	}
-	return observedAccount{p, r.health[ServiceAccount]}, nil
+	return observedAccount{p, r.observer(ServiceAccount)}, nil
 }
 
 // FX is the conversion partner for capability.
@@ -150,7 +165,7 @@ func (r *Registry) FX(ctx context.Context, capability string) (FXPartner, error)
 	if err != nil {
 		return nil, err
 	}
-	return observedFX{p, r.health[ServiceFX]}, nil
+	return observedFX{p, r.observer(ServiceFX)}, nil
 }
 
 // Broker is the broker for capability.
@@ -159,7 +174,7 @@ func (r *Registry) Broker(ctx context.Context, capability string) (BrokerPartner
 	if err != nil {
 		return nil, err
 	}
-	return observedBroker{p, r.health[ServiceBroker]}, nil
+	return observedBroker{p, r.observer(ServiceBroker)}, nil
 }
 
 // Stablecoin is the stablecoin partner for capability.
@@ -168,7 +183,7 @@ func (r *Registry) Stablecoin(ctx context.Context, capability string) (Stablecoi
 	if err != nil {
 		return nil, err
 	}
-	return observedStablecoin{p, r.health[ServiceStablecoin]}, nil
+	return observedStablecoin{p, r.observer(ServiceStablecoin)}, nil
 }
 
 // KYC is the verification provider for capability.
@@ -177,7 +192,7 @@ func (r *Registry) KYC(ctx context.Context, capability string) (KYCProvider, err
 	if err != nil {
 		return nil, err
 	}
-	return observedKYC{p, r.health[ServiceKYC]}, nil
+	return observedKYC{p, r.observer(ServiceKYC)}, nil
 }
 
 // Verification is the provider the verification levels' checks go to (B30.4): the real one once it is configured,
@@ -185,11 +200,12 @@ func (r *Registry) KYC(ctx context.Context, capability string) (KYCProvider, err
 // test money only (economy.WorkspaceVerification).
 func (r *Registry) Verification() KYCProvider {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	p := KYCProvider(r.kyc)
 	if adapter, ok := r.adapters[ServiceKYC]; ok {
-		return observedKYC{adapter.(KYCProvider), r.health[ServiceKYC]}
+		p = adapter.(KYCProvider)
 	}
-	return observedKYC{r.kyc, r.health[ServiceKYC]}
+	r.mu.RUnlock()
+	return observedKYC{p, r.observer(ServiceKYC)}
 }
 
 // Screening is the screening provider for capability.
@@ -201,7 +217,7 @@ func (r *Registry) Screening(ctx context.Context, capability string) (ScreeningP
 	if err != nil {
 		return nil, err
 	}
-	return observedScreening{p, r.health[ServiceScreening]}, nil
+	return observedScreening{p, r.observer(ServiceScreening)}, nil
 }
 
 // Capital is the capital partner for capability.
@@ -210,7 +226,7 @@ func (r *Registry) Capital(ctx context.Context, capability string) (CapitalPartn
 	if err != nil {
 		return nil, err
 	}
-	return observedCapital{p, r.health[ServiceCapital]}, nil
+	return observedCapital{p, r.observer(ServiceCapital)}, nil
 }
 
 // Insurer is the insurer for capability.
@@ -219,7 +235,7 @@ func (r *Registry) Insurer(ctx context.Context, capability string) (InsurerPartn
 	if err != nil {
 		return nil, err
 	}
-	return observedInsurer{p, r.health[ServiceInsurer]}, nil
+	return observedInsurer{p, r.observer(ServiceInsurer)}, nil
 }
 
 // AgentToken is the agent-token provider for capability.
@@ -228,16 +244,17 @@ func (r *Registry) AgentToken(ctx context.Context, capability string) (AgentToke
 	if err != nil {
 		return nil, err
 	}
-	return observedAgentToken{p, r.health[ServiceAgentToken]}, nil
+	return observedAgentToken{p, r.observer(ServiceAgentToken)}, nil
 }
 
 // Tax is the tax partner: the real one once it is configured (B32.45), and the Test one until then. Tax moves no
 // money, so no clearance is asked.
 func (r *Registry) Tax() TaxPartner {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	p := TaxPartner(r.tax)
 	if adapter, ok := r.adapters[ServiceTax]; ok {
-		return observedTax{adapter.(TaxPartner), r.health[ServiceTax]}
+		p = adapter.(TaxPartner)
 	}
-	return observedTax{r.tax, r.health[ServiceTax]}
+	r.mu.RUnlock()
+	return observedTax{p, r.observer(ServiceTax)}
 }
