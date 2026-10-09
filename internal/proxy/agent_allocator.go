@@ -289,7 +289,7 @@ func (p *Proxy) agentReserve(ctx context.Context, apiKeyID, wsID, model, prompt,
 	if apiKeyID == "" || p.agentSpender == nil {
 		return ctx, nil
 	}
-	heldLXC := reserveEstimateLXC(model, prompt, maxOut)
+	heldLXC := agentHoldLXC(model, prompt, maxOut)
 	if heldLXC <= 0 {
 		return ctx, nil // ⚠ every embeddings request reaches here, at any size — see the docstring
 	}

@@ -104,7 +104,7 @@ func TestB192_EachAgentRuleRefusesBeforeTheProvider_AndARetryIsChargedOnce(t *te
 		t.Fatalf("a question with no rules = %d %s", a.code, a.body)
 	}
 	charge := 50_000_000 - agentBalance()
-	hold := reserveEstimateLXC("gpt-4o", strings.Repeat("q", 40000), 4096)
+	hold := agentHoldLXC("gpt-4o", strings.Repeat("q", 40000), 4096)
 	if charge <= 0 || hold <= charge {
 		t.Fatalf("a question charged %d µLXC and holds %d — want a positive charge below the hold", charge, hold)
 	}
