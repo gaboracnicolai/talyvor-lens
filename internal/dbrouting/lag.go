@@ -29,7 +29,7 @@ const (
 // the injected setter (wired to the Prometheus gauge in main.go). It also
 // satisfies the health-checker contract (Check). Both are no-ops when no
 // replica is configured, so the gauge stays 0 and the health entry reports a
-// healthy "no replica configured". Decoupled from the metrics/api packages so
+// plain healthy. Decoupled from the metrics/api packages so
 // dbrouting stays dependency-light; the LENS_DB_PGBOUNCER simple-protocol
 // setup is inherited from the pool main.go hands in.
 type LagMonitor struct {
@@ -86,10 +86,11 @@ func (m *LagMonitor) sample(ctx context.Context) {
 
 // Check satisfies api.HealthChecker — (healthy, latencyMs, detail). A
 // configured-but-unreachable replica is unhealthy; no replica configured is a
-// healthy no-op (the feature is off, not broken), so it never trips /healthz.
+// healthy no-op (the feature is off, not broken). Its detail is empty because
+// /healthz reads any detail on a healthy check as degraded (B37.11).
 func (m *LagMonitor) Check(ctx context.Context) (bool, int64, string) {
 	if m == nil || m.replica == nil {
-		return true, 0, "no replica configured"
+		return true, 0, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, lagCheckTimeout)
 	defer cancel()

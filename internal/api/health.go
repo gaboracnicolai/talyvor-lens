@@ -34,6 +34,7 @@ type HealthHandler struct {
 	started  time.Time
 	checkers map[string]HealthChecker
 	sections []healthSection
+	operator func(*http.Request) bool
 }
 
 // healthSection is a top-level field of the response that reports state rather than pass/fail — the
@@ -54,6 +55,14 @@ func NewHealthHandler(version string, checkers map[string]HealthChecker) *Health
 // AddSection adds a top-level field, read on every request, to the response. Wire it before serving.
 func (h *HealthHandler) AddSection(name string, read func(ctx context.Context) any) *HealthHandler {
 	h.sections = append(h.sections, healthSection{name, read})
+	return h
+}
+
+// ForOperator decides who sees the whole answer: check details and every section. Everyone else gets
+// status, version, uptime and each check's status and latency only (B37.11) — the pool counters and
+// slowest routes help someone time a load attack. Unset, nobody sees them.
+func (h *HealthHandler) ForOperator(isOperator func(*http.Request) bool) *HealthHandler {
+	h.operator = isOperator
 	return h
 }
 
@@ -87,6 +96,7 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
+	operator := h.operator != nil && h.operator(r)
 	checks := map[string]any{}
 	anyDown, anyDegraded := false, false
 	for _, r := range results {
@@ -94,7 +104,7 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"status":     statusString(r.healthy, r.detail),
 			"latency_ms": r.latency,
 		}
-		if r.detail != "" {
+		if operator && r.detail != "" {
 			entry["detail"] = r.detail
 		}
 		checks[r.name] = entry
@@ -127,11 +137,15 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds": int64(time.Since(h.started).Seconds()),
 		"checks":         checks,
 	}
-	for _, s := range h.sections {
-		body[s.name] = s.read(r.Context())
+	if operator {
+		for _, s := range h.sections {
+			body[s.name] = s.read(r.Context())
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	// The operator's answer must never be served to the public from a cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }

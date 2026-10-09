@@ -41,6 +41,13 @@ func requireAdmin(am adminAuthenticator, next http.Handler) http.HandlerFunc {
 	}
 }
 
+// isAdmin answers requireAdmin's question without writing a response: true only for the admin key, so
+// /healthz can show the operator what /metrics does and the public a bare health answer (B37.11).
+func isAdmin(am adminAuthenticator, r *http.Request) bool {
+	actx, err := am.Authenticate(r)
+	return err == nil && actx != nil && actx.IsAdmin && actx.AuthMethod != auth.MethodModeratorKey
+}
+
 // requireAdminOrOperatorRead gates a CROSS-TENANT ADMIN READ. Admin reaches it exactly as before;
 // the narrow operator read credential (auth.ScopeOperatorRead, LENS_OPERATOR_READ_KEY) reaches it
 // too, but ONLY with a read method.

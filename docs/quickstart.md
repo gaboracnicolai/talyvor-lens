@@ -60,16 +60,16 @@ curl -s http://localhost:8080/healthz
 #   "checks": {
 #     "database":     {"latency_ms": 1, "status": "healthy"},
 #     "local_models": {"latency_ms": 0, "status": "healthy"},
-#     "read_replica": {"latency_ms": 0, "status": "degraded", "detail": "no replica configured"},
+#     "read_replica": {"latency_ms": 0, "status": "healthy"},
 #     "redis":        {"latency_ms": 0, "status": "healthy"}
 #   },
-#   "status": "degraded",
+#   "status": "healthy",
 #   "uptime_seconds": 42,
 #   "version": "0.1.0"
 # }
 ```
 
-Returns HTTP `200`. On a single-node stack the overall `status` is `degraded`, not `healthy` — the `read_replica` check reports `"no replica configured"`, which is expected and not an error. Only an actual dependency outage flips a check to `unhealthy` and the response to HTTP `503`.
+Returns HTTP `200`. A read replica that is not configured reads `healthy` (it is off, not broken). A check that works with a warning reads `degraded`; only an actual dependency outage flips a check to `unhealthy` and the response to HTTP `503`. With the admin key (`Authorization: Bearer $LENS_API_KEY`) the answer also carries each check's `detail` and the `database_pool` and `requests` sections.
 
 And the public status page:
 

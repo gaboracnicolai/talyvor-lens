@@ -108,7 +108,8 @@ func TestSlowUpstreamRequestShowsOnHealthzAndInTheLog(t *testing.T) {
 	r := chi.NewRouter()
 	r.Use(tr.Middleware(r))
 	r.Get("/healthz", api.NewHealthHandler("test", map[string]api.HealthChecker{}).
-		AddSection("requests", func(ctx context.Context) any { return tr.Snapshot(ctx) }).ServeHTTP)
+		AddSection("requests", func(ctx context.Context) any { return tr.Snapshot(ctx) }).
+		ForOperator(func(*http.Request) bool { return true }).ServeHTTP)
 	r.Post("/v1/workspaces/{ws}/chat", func(w http.ResponseWriter, req *http.Request) {
 		up, _ := http.NewRequestWithContext(req.Context(), http.MethodGet, upstream.URL, nil)
 		resp, err := client.Do(up)
