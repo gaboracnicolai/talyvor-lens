@@ -517,7 +517,7 @@ func run() error {
 	}
 	// U8/U9 lag observability: sample replica replay lag into the Prometheus
 	// gauge + surface it on /healthz. A no-op when replicaPool is nil (gauge
-	// stays 0, health entry reports a healthy "no replica configured").
+	// stays 0, health entry reports a plain healthy).
 	replicaLagMonitor := dbrouting.NewLagMonitor(replicaPool, metrics.SetReplicaLagSeconds, 0, logger)
 	replicaLagMonitor.Start(ctx)
 
@@ -2321,7 +2321,7 @@ func run() error {
 		return reqtrack.PoolStats(pool)
 	}).AddSection("requests", func(ctx context.Context) any {
 		return requestTracker.Snapshot(ctx)
-	})
+	}).ForOperator(func(r *http.Request) bool { return isAdmin(authManager, r) })
 	r.Get("/healthz", healthHandler.ServeHTTP)
 
 	// HA endpoints (Upgrade 7). The existing /healthz above is intentionally

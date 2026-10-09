@@ -55,6 +55,25 @@ func TestRequireAdmin_Gate(t *testing.T) {
 	}
 }
 
+// TestIsAdmin_AgreesWithRequireAdmin — B37.11: /healthz shows its operator sections to exactly the
+// callers requireAdmin (the /metrics gate) lets through, and a moderator key is not one of them.
+func TestIsAdmin_AgreesWithRequireAdmin(t *testing.T) {
+	for _, a := range []fakeAuthn{
+		{ctx: &auth.AuthContext{IsAdmin: true}},
+		{ctx: &auth.AuthContext{IsAdmin: true, AuthMethod: auth.MethodModeratorKey}},
+		{ctx: &auth.AuthContext{WorkspaceID: "wsA"}},
+		{err: auth.ErrMissingCredentials},
+		{},
+	} {
+		spy := &spyHandler{}
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		requireAdmin(a, spy)(httptest.NewRecorder(), req)
+		if got := isAdmin(a, req); got != spy.called {
+			t.Errorf("%+v: isAdmin = %v, requireAdmin let it through = %v", a.ctx, got, spy.called)
+		}
+	}
+}
+
 type fakePoolKey struct{ removed bool }
 
 func (f *fakePoolKey) Remove(string) bool { f.removed = true; return true }

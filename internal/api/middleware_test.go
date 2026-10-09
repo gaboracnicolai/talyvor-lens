@@ -363,6 +363,52 @@ func TestHealthHandler_DegradedWhenDetailPresent(t *testing.T) {
 	}
 }
 
+// TestHealthHandler_PublicAnswerIsBare — B37.11: the public sees status, version, uptime and each
+// check's status and latency; the operator also sees the check's detail and every section.
+func TestHealthHandler_PublicAnswerIsBare(t *testing.T) {
+	h := NewHealthHandler("0.1.0", map[string]HealthChecker{
+		"local_models": HealthCheckFunc(func(_ context.Context) (bool, int64, string) {
+			return true, 5, "1/3 endpoints unhealthy"
+		}),
+	}).AddSection("database_pool", func(context.Context) any { return map[string]int{"in_use": 3} }).
+		AddSection("requests", func(context.Context) any { return map[string]int{"in_flight": 7} }).
+		ForOperator(func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer admin" })
+
+	get := func(authz string) map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		if authz != "" {
+			req.Header.Set("Authorization", authz)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%q: expected 200, got %d", authz, rec.Code)
+		}
+		var got map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &got)
+		return got
+	}
+
+	public := get("")
+	if len(public) != 4 || public["status"] != "degraded" || public["version"] == nil || public["uptime_seconds"] == nil {
+		t.Fatalf("public answer = %v, want exactly status=degraded, version, uptime_seconds, checks", public)
+	}
+	if check := public["checks"].(map[string]any)["local_models"].(map[string]any); len(check) != 2 || check["status"] != "degraded" {
+		t.Fatalf("public check = %v, want only status and latency_ms", check)
+	}
+	if got := get("Bearer someone-else"); got["database_pool"] != nil || got["requests"] != nil {
+		t.Fatalf("a non-operator credential saw the sections: %v", got)
+	}
+
+	op := get("Bearer admin")
+	if op["database_pool"] == nil || op["requests"] == nil {
+		t.Fatalf("operator answer lacks a section: %v", op)
+	}
+	if d := op["checks"].(map[string]any)["local_models"].(map[string]any)["detail"]; d != "1/3 endpoints unhealthy" {
+		t.Fatalf("operator check detail = %v", d)
+	}
+}
+
 func TestHealthHandler_Unhealthy503(t *testing.T) {
 	h := NewHealthHandler("0.1.0", map[string]HealthChecker{
 		"db": HealthCheckFunc(func(_ context.Context) (bool, int64, string) { return false, 0, "connection refused" }),

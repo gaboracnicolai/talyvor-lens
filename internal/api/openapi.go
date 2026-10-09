@@ -104,7 +104,8 @@ func OpenAPISpec() map[string]any {
 						"checks":         map[string]any{"type": "object", "additionalProperties": true},
 						// B27.11: state, not pass/fail — what tells a hang from a restart from a blip.
 						"database_pool": map[string]any{
-							"type": "object",
+							"type":        "object",
+							"description": "admin key only",
 							"properties": map[string]any{
 								"in_use":         map[string]any{"type": "integer"},
 								"idle":           map[string]any{"type": "integer"},
@@ -115,7 +116,8 @@ func OpenAPISpec() map[string]any {
 							},
 						},
 						"requests": map[string]any{
-							"type": "object",
+							"type":        "object",
+							"description": "admin key only",
 							"properties": map[string]any{
 								"in_flight":  map[string]any{"type": "integer", "description": "requests being served, not counting this probe"},
 								"long_lived": map[string]any{"type": "integer", "description": "of those, subscriptions meant to stay open (SSE)"},
@@ -218,8 +220,9 @@ func openAPIPaths() map[string]any {
 	return map[string]any{
 		"/healthz": map[string]any{
 			"get": map[string]any{
-				"summary":  "Liveness + dependency probe",
-				"security": []map[string]any{},
+				"summary":     "Liveness + dependency probe",
+				"description": "Public callers get status, version, uptime_seconds and each check's status and latency_ms. A check's detail and the database_pool and requests sections are shown only with the admin key, the same credential /metrics needs. 503 when a dependency is down.",
+				"security":    []map[string]any{},
 				"responses": map[string]any{
 					"200": map[string]any{
 						"description": "service health",
