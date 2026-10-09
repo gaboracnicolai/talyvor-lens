@@ -373,7 +373,7 @@ func (s *Store) Put(ctx context.Context, workspaceID string, in Input) (Details,
 			return Details{}, invalid("give your country to check your VAT number against")
 		}
 		partner := s.taxes.Tax()
-		res, err := partner.ValidateTaxID(ctx, d.Country, vat)
+		res, err := partner.ValidateTaxID(partners.WithWorkspace(ctx, workspaceID), d.Country, vat)
 		if errors.Is(err, partners.ErrInvalid) {
 			return Details{}, invalid("%v", err)
 		}
