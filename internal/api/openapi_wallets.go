@@ -386,7 +386,7 @@ func openAPIWalletPaths() map[string]any {
 		},
 		"/v1/workspaces/{wsID}/agents/{agentID}/statement": map[string]any{
 			"get": op("Read the agent's statement",
-				"With none of from, to or format: the agent's account, newest first (limit, default 100, at most 1000). With any of them: the statement for the period [from, to), as JSON or CSV.",
+				"With none of from, to or format: the agent's account, newest first (limit, default and at most 1000). With any of them: the statement for the period [from, to), as JSON or CSV.",
 				append([]map[string]any{agent, {"name": "limit", "in": "query", "required": false, "schema": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}}}, periodParams...),
 				map[string]any{
 					"200": ok("the agent's lines", obj(nil, map[string]any{"agent_id": str, "lines": map[string]any{"type": "array", "items": ref("AgentStatementLine")}})),

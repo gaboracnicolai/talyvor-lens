@@ -53,7 +53,7 @@ import (
 //
 //	POST /v1/workspaces/{wsID}/agents/{id}/pay  {"to_agent_id", "amount_ulxc", "memo"}   by the paying agent's own key, or the owner
 //	                                            (to another company's agent: through the marketplace, on the monthly bill — B19.15)
-//	GET  /v1/workspaces/{wsID}/agents/{id}/statement?limit=   the agent's account, newest first (default 100, at most 1000)
+//	GET  /v1/workspaces/{wsID}/agents/{id}/statement?limit=   the agent's account, newest first (default and at most 1000)
 //
 // B19.5 — statements an enterprise can audit (internal/economy/agent_statements.go), for the period
 // [from, to), as JSON or CSV:
@@ -552,7 +552,9 @@ func mountAgentAccountRoutes(r chi.Router, bank agentBank, keys agentKeyIssuer) 
 			}
 			return
 		}
-		limit := 100
+		// B17.118: unasked, a read returns as many lines as it may. Every request writes a hold, a settle and its
+		// fee, so 60 requests in a minute are 180 lines, and a page of 100 showed barely half of their holds.
+		limit := 1000
 		if q := req.URL.Query().Get("limit"); q != "" {
 			n, err := strconv.Atoi(q)
 			if err != nil || n < 1 || n > 1000 {
