@@ -19,6 +19,8 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/talyvor/lens/internal/brand"
+	"github.com/talyvor/lens/internal/economy"
+	"github.com/talyvor/lens/internal/partners"
 )
 
 // pgxPinger is the subset of *pgxpool.Pool the status check uses.
@@ -113,14 +115,62 @@ type ProviderStatus struct {
 	CheckedAt time.Time       `json:"checked_at"`
 }
 
+// MoneyRail is one outside service money moves through (B30.12): the partner's mode, its last success and failure,
+// whether it is up, and whether each capability whose money it moves is cleared. Nothing in it is a secret.
+type MoneyRail struct {
+	partners.Rail
+	Name string `json:"name"`
+	// Status is outage when the partner's last call failed, operational when it succeeded, and unknown before any.
+	Status       ComponentStatus  `json:"status"`
+	Capabilities []RailCapability `json:"capabilities"`
+}
+
+// RailCapability is a wallet capability and whether it has a clearance in force; Cleared is null when the
+// clearances could not be read.
+type RailCapability struct {
+	Key     string `json:"key"`
+	Cleared *bool  `json:"cleared"`
+}
+
 type StatusResponse struct {
 	Status      ComponentStatus  `json:"status"`
 	Version     string           `json:"version"`
 	UptimeHours float64          `json:"uptime_hours"`
 	Components  []Component      `json:"components"`
 	Providers   []ProviderStatus `json:"providers"`
+	Rails       []MoneyRail      `json:"rails"`
 	UpdatedAt   time.Time        `json:"updated_at"`
 }
+
+// railReader is the partners registry.
+type railReader interface{ Rails() []partners.Rail }
+
+// clearanceReader says which wallet capabilities have a clearance in force: *economy.DualTokenStore.
+type clearanceReader interface {
+	WalletCapabilities(ctx context.Context) ([]economy.CapabilityStatus, error)
+}
+
+// railNames and railCapabilities are how the page names each service and the capabilities whose money it moves.
+// Verification, screening and tax move no money of their own, so they need no clearance.
+var (
+	railNames = map[partners.Service]string{
+		partners.ServiceAccount: "Accounts and payments", partners.ServiceFX: "Currency conversion",
+		partners.ServiceBroker: "Trading", partners.ServiceStablecoin: "Stablecoins",
+		partners.ServiceKYC: "Identity verification", partners.ServiceScreening: "Sanctions screening",
+		partners.ServiceCapital: "Credit", partners.ServiceInsurer: "Cover",
+		partners.ServiceAgentToken: "Agent cards", partners.ServiceTax: "Tax",
+	}
+	railCapabilities = map[partners.Service][]string{
+		partners.ServiceAccount: {economy.CapabilityCurrencyAccounts, economy.CapabilityAccountDetails,
+			economy.CapabilityPaymentsIn, economy.CapabilityPaymentsOut, economy.CapabilityPayByBank},
+		partners.ServiceFX:         {economy.CapabilityFX},
+		partners.ServiceBroker:     {economy.CapabilityTradeEquities, economy.CapabilityTradeCrypto, economy.CapabilityTradePrediction},
+		partners.ServiceStablecoin: {economy.CapabilityStablecoins, economy.CapabilityX402},
+		partners.ServiceCapital:    {economy.CapabilityB2BCredit, economy.CapabilitySellerAdvances, economy.CapabilityLendingMarketplace},
+		partners.ServiceInsurer:    {economy.CapabilityCover},
+		partners.ServiceAgentToken: {economy.CapabilityAgentCard},
+	}
+)
 
 type StatusPage struct {
 	pool        pgxPinger
@@ -136,8 +186,18 @@ type StatusPage struct {
 	googleURL    string
 	bedrockURL   string
 
-	mu     sync.RWMutex
-	cached *StatusResponse
+	mu         sync.RWMutex
+	cached     *StatusResponse
+	rails      railReader
+	clearances clearanceReader
+}
+
+// UseMoneyRails adds the money rails to the page: each partner from rails, each capability's clearance from
+// clearances.
+func (s *StatusPage) UseMoneyRails(rails railReader, clearances clearanceReader) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rails, s.clearances = rails, clearances
 }
 
 func New(pool *pgxpool.Pool, redisClient *redis.Client, nc *nats.Conn, version string) *StatusPage {
@@ -278,8 +338,51 @@ func (s *StatusPage) Check(ctx context.Context) StatusResponse {
 		UptimeHours: hours,
 		Components:  components,
 		Providers:   providers,
+		Rails:       s.moneyRails(ctx),
 		UpdatedAt:   now,
 	}
+}
+
+// moneyRails is every partner rail with its clearances. Like a provider, a rail that is down keeps its own row and
+// never moves the banner: a partner's failure is not Lens's.
+func (s *StatusPage) moneyRails(ctx context.Context) []MoneyRail {
+	s.mu.RLock()
+	rails, clearances := s.rails, s.clearances
+	s.mu.RUnlock()
+	if rails == nil {
+		return nil
+	}
+	var cleared map[string]bool
+	if clearances != nil {
+		readCtx, cancel := context.WithTimeout(ctx, postgresTimeout)
+		caps, err := clearances.WalletCapabilities(readCtx)
+		cancel()
+		if err == nil {
+			cleared = map[string]bool{}
+			for _, c := range caps {
+				cleared[c.Key] = c.Clearance != nil
+			}
+		}
+	}
+	out := []MoneyRail{}
+	for _, r := range rails.Rails() {
+		m := MoneyRail{Rail: r, Name: railNames[r.Service], Status: StatusUnknown, Capabilities: []RailCapability{}}
+		switch {
+		case r.LastFailure != nil && (r.LastSuccess == nil || r.LastFailure.After(*r.LastSuccess)):
+			m.Status = StatusOutage
+		case r.LastSuccess != nil:
+			m.Status = StatusOperational
+		}
+		for _, key := range railCapabilities[r.Service] {
+			c := RailCapability{Key: key}
+			if v, ok := cleared[key]; ok {
+				c.Cleared = &v
+			}
+			m.Capabilities = append(m.Capabilities, c)
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 func (s *StatusPage) checkPostgres(ctx context.Context) Component {
@@ -552,6 +655,9 @@ func renderHTML(s *StatusResponse) string {
   th { color: var(--tv-label); font-weight: 500; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
   td.num { white-space: nowrap; }
   .msg { margin-top: 2px; font-size: 13px; color: var(--tv-ink-muted); overflow-wrap: anywhere; }
+  .note { margin: 0 0 6px; font-size: 13px; line-height: 20px; color: var(--tv-ink-muted); }
+  table.rails th:first-child { width: 50%%; }
+  table.rails .msg .num { white-space: nowrap; }
   .meta { color: var(--tv-ink-muted); font-size: 13px; margin-top: 24px; }
   footer { color: var(--tv-ink-muted); font-size: 13px; margin-top: 28px; text-align: center; }
   @media (max-width: 600px) {
@@ -608,6 +714,18 @@ func renderHTML(s *StatusResponse) string {
 	}
 	b.WriteString(`</tbody></table></div></section>`)
 
+	if len(s.Rails) > 0 {
+		b.WriteString(`<section><h2 class="eyebrow">Money rails</h2>
+<p class="note">Preview — test money only. A live partner moves real money only for a cleared capability.</p>
+<div class="tbl"><table class="rails"><thead><tr><th>Rail</th><th>Status</th></tr></thead><tbody>`)
+		// The times sit under the status rather than in columns of their own, so the table fits a 390px phone.
+		for _, r := range s.Rails {
+			fmt.Fprintf(&b, `<tr><td>%s<div class="msg">%s · %s</div></td><td>%s<div class="msg">last success <span class="num">%s</span></div><div class="msg">last failure <span class="num">%s</span></div></td></tr>`,
+				htmlEscape(r.Name), modeWord(r.Mode), clearedWord(r.Capabilities), railPill(r.Status), railTime(r.LastSuccess), railTime(r.LastFailure))
+		}
+		b.WriteString(`</tbody></table></div></section>`)
+	}
+
 	fmt.Fprintf(&b, `<div class="meta">Last updated: <span class="num">%s UTC</span></div>
 <footer>Updated every 60 seconds automatically</footer>
 </main>
@@ -624,6 +742,51 @@ func latencyCell(latencyMs int64, measured bool) string {
 		return "—"
 	}
 	return fmt.Sprintf("%dms", latencyMs)
+}
+
+func modeWord(mode string) string {
+	if mode == "live" {
+		return "Live partner"
+	}
+	return "Test partner"
+}
+
+// clearedWord says how many of a rail's capabilities are cleared.
+func clearedWord(caps []RailCapability) string {
+	if len(caps) == 0 {
+		return "no clearance needed"
+	}
+	n := 0
+	for _, c := range caps {
+		if c.Cleared == nil {
+			return "clearance unknown"
+		}
+		if *c.Cleared {
+			n++
+		}
+	}
+	switch n {
+	case 0:
+		return "not cleared"
+	case len(caps):
+		return "cleared"
+	}
+	return fmt.Sprintf("%d of %d cleared", n, len(caps))
+}
+
+// railPill is a rail's status; a rail nothing has called yet says so rather than "unknown".
+func railPill(s ComponentStatus) string {
+	if s == StatusUnknown {
+		return `<span class="pill">no calls yet</span>`
+	}
+	return statusPill(s)
+}
+
+func railTime(t *time.Time) string {
+	if t == nil {
+		return "—"
+	}
+	return t.UTC().Format("02 Jan 15:04")
 }
 
 func bannerFor(s ComponentStatus) (cls, text string) {

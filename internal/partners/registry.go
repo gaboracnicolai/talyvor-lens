@@ -39,6 +39,7 @@ type Registry struct {
 
 	mu       sync.RWMutex
 	adapters map[Service]any
+	health   map[Service]*railHealth
 
 	account    *TestAccountPartner
 	fx         *TestFXPartner
@@ -55,7 +56,11 @@ type Registry struct {
 // NewRegistry is a registry that asks clearances before it hands out a real adapter. With nil clearances it
 // hands out the Test implementations only.
 func NewRegistry(clearances Clearances) *Registry {
-	return &Registry{clearances: clearances, adapters: map[Service]any{}, account: &TestAccountPartner{}, fx: &TestFXPartner{},
+	health := map[Service]*railHealth{}
+	for _, s := range Services {
+		health[s] = &railHealth{}
+	}
+	return &Registry{clearances: clearances, adapters: map[Service]any{}, health: health, account: &TestAccountPartner{}, fx: &TestFXPartner{},
 		broker: &TestBrokerPartner{}, stablecoin: &TestStablecoinPartner{}, kyc: &TestKYCProvider{}, capital: &TestCapitalPartner{},
 		insurer: &TestInsurerPartner{}, agentToken: &TestAgentTokenProvider{}, tax: &TestTaxPartner{}}
 }
@@ -132,27 +137,47 @@ func pick[T any](ctx context.Context, r *Registry, s Service, capability string,
 
 // Account is the account partner for capability.
 func (r *Registry) Account(ctx context.Context, capability string) (AccountPartner, error) {
-	return pick[AccountPartner](ctx, r, ServiceAccount, capability, r.account)
+	p, err := pick[AccountPartner](ctx, r, ServiceAccount, capability, r.account)
+	if err != nil {
+		return nil, err
+	}
+	return observedAccount{p, r.health[ServiceAccount]}, nil
 }
 
 // FX is the conversion partner for capability.
 func (r *Registry) FX(ctx context.Context, capability string) (FXPartner, error) {
-	return pick[FXPartner](ctx, r, ServiceFX, capability, r.fx)
+	p, err := pick[FXPartner](ctx, r, ServiceFX, capability, r.fx)
+	if err != nil {
+		return nil, err
+	}
+	return observedFX{p, r.health[ServiceFX]}, nil
 }
 
 // Broker is the broker for capability.
 func (r *Registry) Broker(ctx context.Context, capability string) (BrokerPartner, error) {
-	return pick[BrokerPartner](ctx, r, ServiceBroker, capability, r.broker)
+	p, err := pick[BrokerPartner](ctx, r, ServiceBroker, capability, r.broker)
+	if err != nil {
+		return nil, err
+	}
+	return observedBroker{p, r.health[ServiceBroker]}, nil
 }
 
 // Stablecoin is the stablecoin partner for capability.
 func (r *Registry) Stablecoin(ctx context.Context, capability string) (StablecoinPartner, error) {
-	return pick[StablecoinPartner](ctx, r, ServiceStablecoin, capability, r.stablecoin)
+	p, err := pick[StablecoinPartner](ctx, r, ServiceStablecoin, capability, r.stablecoin)
+	if err != nil {
+		return nil, err
+	}
+	return observedStablecoin{p, r.health[ServiceStablecoin]}, nil
 }
 
 // KYC is the verification provider for capability.
 func (r *Registry) KYC(ctx context.Context, capability string) (KYCProvider, error) {
-	return pick[KYCProvider](ctx, r, ServiceKYC, capability, r.kyc)
+	p, err := pick[KYCProvider](ctx, r, ServiceKYC, capability, r.kyc)
+	if err != nil {
+		return nil, err
+	}
+	return observedKYC{p, r.health[ServiceKYC]}, nil
 }
 
 // Verification is the provider the verification levels' checks go to (B30.4): the real one once it is configured,
@@ -162,9 +187,9 @@ func (r *Registry) Verification() KYCProvider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if adapter, ok := r.adapters[ServiceKYC]; ok {
-		return adapter.(KYCProvider)
+		return observedKYC{adapter.(KYCProvider), r.health[ServiceKYC]}
 	}
-	return r.kyc
+	return observedKYC{r.kyc, r.health[ServiceKYC]}
 }
 
 // Screening is the screening provider for capability.
@@ -172,22 +197,38 @@ func (r *Registry) Screening(ctx context.Context, capability string) (ScreeningP
 	r.mu.RLock()
 	test := r.screening
 	r.mu.RUnlock()
-	return pick[ScreeningProvider](ctx, r, ServiceScreening, capability, test)
+	p, err := pick[ScreeningProvider](ctx, r, ServiceScreening, capability, test)
+	if err != nil {
+		return nil, err
+	}
+	return observedScreening{p, r.health[ServiceScreening]}, nil
 }
 
 // Capital is the capital partner for capability.
 func (r *Registry) Capital(ctx context.Context, capability string) (CapitalPartner, error) {
-	return pick[CapitalPartner](ctx, r, ServiceCapital, capability, r.capital)
+	p, err := pick[CapitalPartner](ctx, r, ServiceCapital, capability, r.capital)
+	if err != nil {
+		return nil, err
+	}
+	return observedCapital{p, r.health[ServiceCapital]}, nil
 }
 
 // Insurer is the insurer for capability.
 func (r *Registry) Insurer(ctx context.Context, capability string) (InsurerPartner, error) {
-	return pick[InsurerPartner](ctx, r, ServiceInsurer, capability, r.insurer)
+	p, err := pick[InsurerPartner](ctx, r, ServiceInsurer, capability, r.insurer)
+	if err != nil {
+		return nil, err
+	}
+	return observedInsurer{p, r.health[ServiceInsurer]}, nil
 }
 
 // AgentToken is the agent-token provider for capability.
 func (r *Registry) AgentToken(ctx context.Context, capability string) (AgentTokenProvider, error) {
-	return pick[AgentTokenProvider](ctx, r, ServiceAgentToken, capability, r.agentToken)
+	p, err := pick[AgentTokenProvider](ctx, r, ServiceAgentToken, capability, r.agentToken)
+	if err != nil {
+		return nil, err
+	}
+	return observedAgentToken{p, r.health[ServiceAgentToken]}, nil
 }
 
 // Tax is the tax partner: the real one once it is configured (B32.45), and the Test one until then. Tax moves no
@@ -196,7 +237,7 @@ func (r *Registry) Tax() TaxPartner {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if adapter, ok := r.adapters[ServiceTax]; ok {
-		return adapter.(TaxPartner)
+		return observedTax{adapter.(TaxPartner), r.health[ServiceTax]}
 	}
-	return r.tax
+	return observedTax{r.tax, r.health[ServiceTax]}
 }
