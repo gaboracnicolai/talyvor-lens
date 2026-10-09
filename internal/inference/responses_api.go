@@ -3,6 +3,7 @@ package inference
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 )
 
@@ -17,8 +18,18 @@ import (
 //
 // Carried: the messages (text and image parts), the output cap (max_completion_tokens, else max_tokens)
 // and reasoning_effort. Not carried: temperature and top_p, which these reasoning models reject. A body
-// with tools or functions is refused rather than sent without them, since the answer would silently
-// differ from what was asked.
+// with legacy functions, or a tool that is not a function, is refused rather than sent without it, since
+// the answer would silently differ from what was asked.
+//
+// B17.104 — AND THEY TAKE CHAT'S TOOLS. Chat offers OpenAI models its function tools (Lens's wallet tools,
+// Track, Docs), and a body carrying them was refused here — streamed, it went to /v1/responses untranslated
+// and OpenAI answered 400 "Unsupported parameter: 'messages'", so all three models failed every question
+// (e2e every-model, 2026-10-09). Function tools, tool_choice and parallel_tool_calls now go across; an
+// assistant turn's tool_calls become function_call items and a tool turn a function_call_output, and the
+// model's function_call items come back as chat tool_calls with finish_reason "tool_calls". The same run
+// found GPT-5.6 and GPT-6 refusing function tools on /v1/chat/completions while they reason ("use
+// /v1/responses or set reasoning_effort to 'none'"), so a body offering them tools goes there too
+// (ServedByResponses).
 //
 // The buffered translation lives here so the proxy's forward and ProviderInferer.Infer share it (B26.10);
 // the streamed leg is the proxy's (internal/proxy/responses_api.go).
@@ -37,6 +48,43 @@ func ResponsesOnly(model string) bool {
 	return false
 }
 
+// ServedByResponses reports whether an OpenAI chat body for model is sent to /v1/responses: always for a
+// Responses-only model, and for GPT-5.6 and later (GPT-6 included) when the body offers tools and does
+// not turn reasoning off — /v1/chat/completions refuses those models function tools while they reason.
+func ServedByResponses(model string, body []byte) bool {
+	if ResponsesOnly(model) {
+		return true
+	}
+	if !toolsOnlyOnResponses(model) {
+		return false
+	}
+	var c struct {
+		Tools           json.RawMessage `json:"tools"`
+		ReasoningEffort string          `json:"reasoning_effort"`
+	}
+	if json.Unmarshal(body, &c) != nil || c.ReasoningEffort == "none" {
+		return false
+	}
+	t := strings.TrimSpace(string(c.Tools))
+	return t != "" && t != "null" && t != "[]"
+}
+
+// toolsOnlyOnResponses reports whether model is GPT-5.6 or later: gpt-5.6-luna, gpt-6-sol, gpt-6.1.
+func toolsOnlyOnResponses(model string) bool {
+	rest, ok := strings.CutPrefix(model, "gpt-")
+	if !ok {
+		return false
+	}
+	version, _, _ := strings.Cut(rest, "-")
+	majorS, minorS, _ := strings.Cut(version, ".")
+	major, err := strconv.Atoi(majorS)
+	if err != nil {
+		return false
+	}
+	minor, _ := strconv.Atoi(minorS)
+	return major > 5 || (major == 5 && minor >= 6)
+}
+
 // ResponsesURLFor turns .../v1/chat/completions into .../v1/responses, so an operator's base URL
 // override still applies. A URL without that suffix has no known Responses endpoint.
 func ResponsesURLFor(chatURL string) (string, bool) {
@@ -46,34 +94,94 @@ func ResponsesURLFor(chatURL string) (string, bool) {
 	return "", false
 }
 
-var ErrResponsesTools = errors.New("tools are not carried to the Responses API")
+var ErrResponsesTools = errors.New("only function tools are carried to the Responses API")
+
+// chatToolCall is one call in an assistant turn's tool_calls.
+type chatToolCall struct {
+	ID       string `json:"id"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
 
 // ToResponsesBody translates an OpenAI chat completions body into a Responses body.
 func ToResponsesBody(body []byte) ([]byte, error) {
 	var c struct {
 		Model    string `json:"model"`
 		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
+			Role       string          `json:"role"`
+			Content    json.RawMessage `json:"content"`
+			ToolCalls  []chatToolCall  `json:"tool_calls"`
+			ToolCallID string          `json:"tool_call_id"`
 		} `json:"messages"`
-		MaxTokens           *int            `json:"max_tokens"`
-		MaxCompletionTokens *int            `json:"max_completion_tokens"`
-		Stream              bool            `json:"stream"`
-		ReasoningEffort     string          `json:"reasoning_effort"`
-		Tools               json.RawMessage `json:"tools"`
-		Functions           json.RawMessage `json:"functions"`
+		MaxTokens           *int   `json:"max_tokens"`
+		MaxCompletionTokens *int   `json:"max_completion_tokens"`
+		Stream              bool   `json:"stream"`
+		ReasoningEffort     string `json:"reasoning_effort"`
+		Tools               []struct {
+			Type     string `json:"type"`
+			Function *struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+				Strict      bool            `json:"strict"`
+			} `json:"function"`
+		} `json:"tools"`
+		ToolChoice        json.RawMessage `json:"tool_choice"`
+		ParallelToolCalls *bool           `json:"parallel_tool_calls"`
+		Functions         json.RawMessage `json:"functions"`
 	}
 	if err := json.Unmarshal(body, &c); err != nil {
 		return nil, err
 	}
-	if (len(c.Tools) > 0 && string(c.Tools) != "null") || (len(c.Functions) > 0 && string(c.Functions) != "null") {
+	if len(c.Functions) > 0 && string(c.Functions) != "null" {
 		return nil, ErrResponsesTools
 	}
 	input := make([]map[string]any, 0, len(c.Messages))
 	for _, m := range c.Messages {
-		input = append(input, map[string]any{"role": m.Role, "content": responsesContent(m.Role, m.Content)})
+		switch {
+		case m.Role == "tool":
+			input = append(input, map[string]any{"type": "function_call_output", "call_id": m.ToolCallID, "output": toolOutput(m.Content)})
+		case len(m.ToolCalls) > 0:
+			if said := strings.TrimSpace(string(m.Content)); said != "" && said != "null" && said != `""` && said != "[]" {
+				input = append(input, map[string]any{"role": m.Role, "content": responsesContent(m.Role, m.Content)})
+			}
+			for _, tc := range m.ToolCalls {
+				input = append(input, map[string]any{"type": "function_call", "call_id": tc.ID, "name": tc.Function.Name, "arguments": tc.Function.Arguments})
+			}
+		default:
+			input = append(input, map[string]any{"role": m.Role, "content": responsesContent(m.Role, m.Content)})
+		}
 	}
 	out := map[string]any{"model": c.Model, "input": input, "store": false}
+	if len(c.Tools) > 0 {
+		tools := make([]map[string]any, 0, len(c.Tools))
+		for _, t := range c.Tools {
+			if t.Type != "function" || t.Function == nil {
+				return nil, ErrResponsesTools
+			}
+			// strict is sent as chat had it, false unless set: the Responses API's default is true, and a
+			// strict tool whose schema leaves a property optional is refused.
+			tool := map[string]any{"type": "function", "name": t.Function.Name, "strict": t.Function.Strict}
+			if t.Function.Description != "" {
+				tool["description"] = t.Function.Description
+			}
+			if len(t.Function.Parameters) > 0 && string(t.Function.Parameters) != "null" {
+				tool["parameters"] = t.Function.Parameters
+			} else {
+				tool["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
+			tools = append(tools, tool)
+		}
+		out["tools"] = tools
+	}
+	if tc := responsesToolChoice(c.ToolChoice); tc != nil {
+		out["tool_choice"] = tc
+	}
+	if c.ParallelToolCalls != nil {
+		out["parallel_tool_calls"] = *c.ParallelToolCalls
+	}
 	if c.Stream {
 		out["stream"] = true
 	}
@@ -86,6 +194,47 @@ func ToResponsesBody(body []byte) ([]byte, error) {
 		out["reasoning"] = map[string]any{"effort": c.ReasoningEffort}
 	}
 	return json.Marshal(out)
+}
+
+// responsesToolChoice carries chat's tool_choice: "auto", "none" and "required" as they are, and a named
+// function ({"type":"function","function":{"name":…}}) as the Responses API names one.
+func responsesToolChoice(raw json.RawMessage) any {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var named struct {
+		Type     string `json:"type"`
+		Function *struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if json.Unmarshal(raw, &named) == nil && named.Type == "function" && named.Function != nil {
+		return map[string]any{"type": "function", "name": named.Function.Name}
+	}
+	return raw
+}
+
+// toolOutput is a tool turn's answer as the function_call_output's text: a string as it is, text parts joined.
+func toolOutput(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return string(raw)
+	}
+	var sb strings.Builder
+	for _, p := range parts {
+		sb.WriteString(p.Text)
+	}
+	return sb.String()
 }
 
 // responsesContent carries one chat message's content: a string as it is, content parts retyped —
@@ -156,8 +305,11 @@ type ResponsesReply struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details"`
 	Output []struct {
-		Type    string `json:"type"`
-		Content []struct {
+		Type      string `json:"type"`
+		CallID    string `json:"call_id"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+		Content   []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
@@ -184,14 +336,30 @@ func FromResponsesBody(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	var text strings.Builder
+	var calls []any
 	for _, item := range r.Output {
-		if item.Type != "message" {
-			continue // reasoning summaries are not part of the answer
-		}
-		for _, c := range item.Content {
-			if c.Type == "output_text" {
-				text.WriteString(c.Text)
+		switch item.Type {
+		case "message":
+			for _, c := range item.Content {
+				if c.Type == "output_text" {
+					text.WriteString(c.Text)
+				}
 			}
+		case "function_call":
+			calls = append(calls, map[string]any{"id": item.CallID, "type": "function",
+				"function": map[string]any{"name": item.Name, "arguments": item.Arguments}})
+		}
+		// reasoning summaries are not part of the answer
+	}
+	message := map[string]any{"role": "assistant", "content": text.String()}
+	finish := r.FinishReason()
+	if len(calls) > 0 {
+		message["tool_calls"] = calls
+		if text.Len() == 0 {
+			message["content"] = nil
+		}
+		if finish == "stop" {
+			finish = "tool_calls"
 		}
 	}
 	out := map[string]any{
@@ -201,8 +369,8 @@ func FromResponsesBody(raw []byte) ([]byte, error) {
 		"model":   r.Model,
 		"choices": []any{map[string]any{
 			"index":         0,
-			"message":       map[string]any{"role": "assistant", "content": text.String()},
-			"finish_reason": r.FinishReason(),
+			"message":       message,
+			"finish_reason": finish,
 		}},
 	}
 	if u := r.Usage; u != nil {
