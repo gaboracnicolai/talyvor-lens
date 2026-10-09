@@ -85,14 +85,15 @@ var (
 
 // MoneyAccount is one account in one currency.
 type MoneyAccount struct {
-	ID          string    `json:"id"`
-	WorkspaceID string    `json:"workspace_id"`
-	AgentID     string    `json:"agent_id,omitempty"`
-	Currency    string    `json:"currency"`
-	Purpose     string    `json:"purpose"`
-	Status      string    `json:"status"`
-	Name        string    `json:"name"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID                string    `json:"id"`
+	WorkspaceID       string    `json:"workspace_id"`
+	AgentID           string    `json:"agent_id,omitempty"`
+	Currency          string    `json:"currency"`
+	Purpose           string    `json:"purpose"`
+	Status            string    `json:"status"`
+	Name              string    `json:"name"`
+	PartnerAccountRef string    `json:"partner_account_ref,omitempty"` // a partner account's account at the partner (B30.11)
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // MoneyPosting is one line of a money entry.
@@ -113,6 +114,7 @@ type MoneyEntry struct {
 	Funding        string         `json:"funding"` // test or live
 	Memo           string         `json:"memo,omitempty"`
 	Counterparty   string         `json:"counterparty,omitempty"` // who money through a partner is from or to, screened first (B30.6)
+	PartnerRef     string         `json:"partner_ref,omitempty"`  // the partner's reference for that payment, reconciled daily (B30.11)
 	CreatedAt      time.Time      `json:"created_at"`
 	Postings       []MoneyPosting `json:"postings"`
 }
@@ -159,6 +161,8 @@ func (s *DualTokenStore) OpenMoneyAccount(ctx context.Context, a MoneyAccount) (
 		return MoneyAccount{}, errors.New("economy: an agent's money account needs the agent")
 	case a.AgentID != "" && a.Purpose != MoneyAgent && a.Purpose != MoneyPot && a.Purpose != MoneyHold:
 		return MoneyAccount{}, fmt.Errorf("economy: a %s account belongs to the company, not to an agent", a.Purpose)
+	case a.PartnerAccountRef != "" && a.Purpose != MoneyPartner:
+		return MoneyAccount{}, fmt.Errorf("economy: only a partner account names an account at the partner, not a %s account", a.Purpose)
 	}
 	if a.AgentID != "" {
 		var ok bool
@@ -172,9 +176,9 @@ func (s *DualTokenStore) OpenMoneyAccount(ctx context.Context, a MoneyAccount) (
 	}
 	a.ID = "macc_" + uuid.NewString()
 	a.Status = MoneyOpen
-	if err := s.pool.QueryRow(ctx, `INSERT INTO money_accounts (id, workspace_id, agent_id, currency, purpose, name)
-		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6) RETURNING created_at`,
-		a.ID, a.WorkspaceID, a.AgentID, a.Currency, a.Purpose, a.Name).Scan(&a.CreatedAt); err != nil {
+	if err := s.pool.QueryRow(ctx, `INSERT INTO money_accounts (id, workspace_id, agent_id, currency, purpose, name, partner_account_ref)
+		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7) RETURNING created_at`,
+		a.ID, a.WorkspaceID, a.AgentID, a.Currency, a.Purpose, a.Name, a.PartnerAccountRef).Scan(&a.CreatedAt); err != nil {
 		return MoneyAccount{}, fmt.Errorf("economy: open money account: %w", err)
 	}
 	return a, nil
@@ -248,10 +252,11 @@ func postMoneyTx(ctx context.Context, tx pgx.Tx, e MoneyEntry, screener PaymentS
 	}
 
 	e.Counterparty = strings.TrimSpace(e.Counterparty)
+	e.PartnerRef = strings.TrimSpace(e.PartnerRef)
 	e.ID = "mle_" + uuid.NewString()
-	err := tx.QueryRow(ctx, `INSERT INTO money_entries (id, workspace_id, capability, kind, idempotency_key, memo, counterparty)
-		VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING created_at`,
-		e.ID, e.WorkspaceID, e.Capability, e.Kind, e.IdempotencyKey, e.Memo, e.Counterparty).Scan(&e.CreatedAt)
+	err := tx.QueryRow(ctx, `INSERT INTO money_entries (id, workspace_id, capability, kind, idempotency_key, memo, counterparty, partner_ref)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING created_at`,
+		e.ID, e.WorkspaceID, e.Capability, e.Kind, e.IdempotencyKey, e.Memo, e.Counterparty, e.PartnerRef).Scan(&e.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return replayedMoneyEntry(ctx, tx, e, postings)
 	}
@@ -386,14 +391,14 @@ func screenOutside(ctx context.Context, e MoneyEntry, postings []MoneyPosting, p
 }
 
 // replayedMoneyEntry answers the entry already written under e's idempotency key, when it is the same movement as
-// e: the same capability, kind, funding and counterparty, and the same postings in the same order.
+// e: the same capability, kind, funding, counterparty and partner reference, and the same postings in the same order.
 func replayedMoneyEntry(ctx context.Context, tx pgx.Tx, e MoneyEntry, postings []MoneyPosting) (MoneyEntry, error) {
 	first, err := readMoneyEntry(ctx, tx, `e.workspace_id = $1 AND e.idempotency_key = $2`, e.WorkspaceID, e.IdempotencyKey)
 	if err != nil {
 		return MoneyEntry{}, err
 	}
 	same := first.Capability == e.Capability && first.Kind == e.Kind && first.Funding == e.Funding &&
-		first.Counterparty == e.Counterparty && len(first.Postings) == len(postings)
+		first.Counterparty == e.Counterparty && first.PartnerRef == e.PartnerRef && len(first.Postings) == len(postings)
 	for i := 0; same && i < len(postings); i++ {
 		p, q := postings[i], first.Postings[i]
 		same = p.AccountID == q.AccountID && p.AmountMinor == q.AmountMinor && (p.Currency == "" || p.Currency == q.Currency)
@@ -406,7 +411,7 @@ func replayedMoneyEntry(ctx context.Context, tx pgx.Tx, e MoneyEntry, postings [
 
 // readMoneyEntry reads the one entry where matches, and its postings in order.
 func readMoneyEntry(ctx context.Context, q pgxDB, where string, args ...any) (MoneyEntry, error) {
-	rows, err := q.Query(ctx, `SELECT e.id, e.workspace_id, e.capability, e.kind, e.idempotency_key, e.memo, e.counterparty, e.created_at,
+	rows, err := q.Query(ctx, `SELECT e.id, e.workspace_id, e.capability, e.kind, e.idempotency_key, e.memo, e.counterparty, e.partner_ref, e.created_at,
 		p.account_id, p.amount_minor, p.currency, p.funding
 		FROM money_entries e JOIN money_postings p ON p.entry_id = e.id WHERE `+where+` ORDER BY p.line`, args...)
 	if err != nil {
@@ -416,7 +421,7 @@ func readMoneyEntry(ctx context.Context, q pgxDB, where string, args ...any) (Mo
 	var e MoneyEntry
 	for rows.Next() {
 		var p MoneyPosting
-		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.Capability, &e.Kind, &e.IdempotencyKey, &e.Memo, &e.Counterparty, &e.CreatedAt,
+		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.Capability, &e.Kind, &e.IdempotencyKey, &e.Memo, &e.Counterparty, &e.PartnerRef, &e.CreatedAt,
 			&p.AccountID, &p.AmountMinor, &p.Currency, &p.Funding); err != nil {
 			return MoneyEntry{}, fmt.Errorf("economy: read money entry: %w", err)
 		}
