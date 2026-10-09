@@ -92,6 +92,7 @@ import (
 	"github.com/talyvor/lens/internal/modelcapability"
 	"github.com/talyvor/lens/internal/modelwatch"
 	"github.com/talyvor/lens/internal/moderatorkey"
+	"github.com/talyvor/lens/internal/monitoring"
 	"github.com/talyvor/lens/internal/nodelatency"
 	"github.com/talyvor/lens/internal/operatoraudit"
 	"github.com/talyvor/lens/internal/opsusage"
@@ -2044,6 +2045,18 @@ func run() error {
 	// quotes every instrument from it, so the rates are fetched at start and every three hours (the ECB
 	// publishes once a working day).
 	ecbRates := ecbrate.New(pool, ecbrate.DailyURL)
+	// B30.7 — transaction monitoring: its rules judge each payment in or out through a partner once it has moved, and
+	// nightly over the last day's; a hit opens or extends the workspace's monitoring case, which the operator sees at
+	// /v1/admin/screening, with its alerts at /v1/admin/compliance/alerts. It never moves or stops money.
+	monitorSettings, err := monitoring.LoadEnv()
+	if err != nil {
+		return err
+	}
+	moneyMonitor := monitoring.New(pool, monitorSettings, ecbRates)
+	dualToken.SetMonitor(moneyMonitor)
+	go haComps.leader.Run(ctx, "transaction-monitoring", 30*time.Second, func(lctx context.Context) {
+		sweepTransactionMonitoring(lctx, moneyMonitor)
+	})
 	// B32.40 — every paid marketplace bill gets Talyvor's receipt, as the supplier: the buyer as its tax profile names
 	// it, and the tax also in the buyer's currency at the ECB's reference rate.
 	marketStore.SetReceipts(market.Receipts{Supplier: market.Supplier{LegalName: cfg.SupplierLegalName, Address: cfg.SupplierAddress,
@@ -2405,6 +2418,8 @@ func run() error {
 	r.Get("/v1/admin/screening", requireAdminOrOperatorRead(authManager, newScreeningOverviewHandler(screeningLists, screener)))
 	r.Post("/v1/admin/screening/cases/{caseID}/release", requireAdmin(authManager, newScreeningDecideHandler(screener, true)))
 	r.Post("/v1/admin/screening/cases/{caseID}/refuse", requireAdmin(authManager, newScreeningDecideHandler(screener, false)))
+	// B30.7 — the alerts transaction monitoring raised on its compliance cases, newest first.
+	r.Get("/v1/admin/compliance/alerts", requireAdminOrOperatorRead(authManager, newMonitoringAlertsHandler(moneyMonitor)))
 	// B32.44 — the annual platform-reporting export (UK reporting rules, EU DAC7): the file, with the sellers' TINs in
 	// clear, and the runs recorded with their sha256 — for the global admin key only. platform_report_handler.go.
 	platformReports := platformreport.New(pool, sellerTax)

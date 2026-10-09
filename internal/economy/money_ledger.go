@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -32,6 +33,9 @@ import (
 // Money in or out through a partner account is an outside payment, and names its Counterparty — the payer of money in,
 // the payee of money out. Before any posting it is screened against the sanctions lists (B30.6, internal/screening):
 // a match refuses it with a *screening.Refusal naming the compliance case, and nothing is written.
+//
+// Once it has moved, a payment in or out through a partner is monitored (B30.7, internal/monitoring): a pattern a
+// rule finds opens or extends a compliance case, and never moves or stops money.
 //
 // Credits (LXC) are not money accounts: they stay on lxc_ledger and agent_postings, unchanged.
 
@@ -121,6 +125,15 @@ type PaymentScreener interface {
 // SetScreener is what screens money in and out through a partner (B30.6). Until it is set, no such money moves.
 func (s *DualTokenStore) SetScreener(sc PaymentScreener) { s.screener = sc }
 
+// MoneyMonitor runs transaction monitoring on a payment once it has moved (B30.7): *monitoring.Monitor. A hit opens or
+// extends a compliance case; it never moves or stops money.
+type MoneyMonitor interface {
+	MoneyMoved(ctx context.Context, workspaceID, entryID string) error
+}
+
+// SetMonitor is what judges each payment in or out through a partner once it has moved (B30.7).
+func (s *DualTokenStore) SetMonitor(m MoneyMonitor) { s.monitor = m }
+
 // MoneyBalance is what a money account holds: the sum of its postings, and how much of it is test money.
 type MoneyBalance struct {
 	AccountID   string `json:"account_id"`
@@ -189,6 +202,16 @@ func (s *DualTokenStore) PostMoney(ctx context.Context, e MoneyEntry) (MoneyEntr
 			return MoneyEntry{}, fmt.Errorf("%w: %s", ErrMoneyUnbalanced, pgErr.Message)
 		}
 		return MoneyEntry{}, fmt.Errorf("economy: post money: %w", err)
+	}
+	// B30.7: the payment has moved, and is monitored. Monitoring never undoes it, so a monitor that fails is logged and
+	// the nightly run judges the payment again.
+	if s.monitor != nil && out.Counterparty != "" {
+		mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if err := s.monitor.MoneyMoved(mctx, out.WorkspaceID, out.ID); err != nil {
+			slog.Warn("economy: transaction monitoring did not judge a payment; the nightly run will",
+				"workspace_id", out.WorkspaceID, "entry_id", out.ID, "err", err)
+		}
+		cancel()
 	}
 	return out, nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/lens/internal/monitoring"
 	"github.com/talyvor/lens/internal/screening"
 )
 
@@ -18,7 +19,8 @@ import (
 //
 //	GET  /v1/admin/screening                       each sanctions list — entries, when it was loaded, and a failed
 //	                                               download's reason (stale) — and the compliance cases, newest
-//	                                               first, only those in ?status= when it is given
+//	                                               first — transaction monitoring's too (B30.7, status open) — only
+//	                                               those in ?status= when it is given
 //	POST /v1/admin/screening/cases/{caseID}/release a held case's close match is not them: the money may move on retry
 //	POST /v1/admin/screening/cases/{caseID}/refuse  it is them: the money never moves
 //
@@ -40,9 +42,9 @@ func newScreeningOverviewHandler(lists screeningLists, cases screeningCases) htt
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		status := strings.TrimSpace(req.URL.Query().Get("status"))
 		switch status {
-		case "", screening.CaseBlocked, screening.CaseHeld, screening.CaseReleased, screening.CaseRefused:
+		case "", screening.CaseBlocked, screening.CaseHeld, screening.CaseReleased, screening.CaseRefused, monitoring.CaseOpen:
 		default:
-			writeJSONErr(w, http.StatusBadRequest, "status is blocked, held, released or refused")
+			writeJSONErr(w, http.StatusBadRequest, "status is blocked, held, released, refused or open")
 			return
 		}
 		ls, err := lists.Lists(req.Context())
