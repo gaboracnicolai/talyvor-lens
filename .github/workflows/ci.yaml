@@ -95,6 +95,9 @@ jobs:
       # Pure string counting: no mutation, no `go test`, no database.
       - name: control anchors must still resolve (the census, with its own denominator)
         run: python3 scripts/check-control-anchors.py --ci
+      # B37.6: a floating tag changes under the server at the next pull, with no review.
+      - name: every compose image is pinned by tag and digest
+        run: python3 scripts/check-image-digests.py
       - name: go vet
         run: go vet ./...
       # Real-migration regression guard: the ONLY place migrations/*.sql are
