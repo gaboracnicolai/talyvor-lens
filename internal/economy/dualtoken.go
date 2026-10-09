@@ -336,6 +336,8 @@ type DualTokenStore struct {
 	// monitor runs transaction monitoring on each payment in or out through a partner once it has moved (B30.7);
 	// nil, the nightly run is the only one.
 	monitor MoneyMonitor
+	// accountPartners is where a company's currency account is opened (B30.13); nil, none opens.
+	accountPartners AccountPartners
 	// B19.17: the marketplace a schedule pays a listing through.
 	listings ListingCharger
 	// B19.15: the marketplace a payment to another company's agent goes through.

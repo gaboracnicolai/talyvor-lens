@@ -45,8 +45,12 @@ func TestClearanceCountries_ALivePaymentFromAnUnlistedCountryIsRefusedNamingIt(t
 		t.Fatalf("the French owner's record = %+v, %v; want live country FR", v, err)
 	}
 
+	opened := map[string][2]MoneyAccount{} // a company has one account in a currency (B30.13)
 	pay := func(ws, key, funding string) (MoneyEntry, error) {
-		company, partner := openMoney(t, s, ws, CurrencyGBP, MoneyCompany), openMoney(t, s, ws, CurrencyGBP, MoneyPartner)
+		if _, ok := opened[ws]; !ok {
+			opened[ws] = [2]MoneyAccount{openMoney(t, s, ws, CurrencyGBP, MoneyCompany), openMoney(t, s, ws, CurrencyGBP, MoneyPartner)}
+		}
+		company, partner := opened[ws][0], opened[ws][1]
 		return s.PostMoney(gb, MoneyEntry{WorkspaceID: ws, Capability: CapabilityPaymentsOut, Counterparty: "Acme Ltd", Kind: "payment_out",
 			IdempotencyKey: key, Funding: funding, Postings: []MoneyPosting{{AccountID: partner.ID, AmountMinor: 12_000},
 				{AccountID: company.ID, AmountMinor: -12_000}}})

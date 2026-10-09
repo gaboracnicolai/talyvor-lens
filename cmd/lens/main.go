@@ -1919,6 +1919,8 @@ func run() error {
 	screener.HoldWhenListsStale(screeningLists)
 	statusPage.UseScreeningLists(screeningLists)
 	dualToken.SetScreener(screener)
+	// B30.13 — a company's accounts in pounds, euros and dollars open at the account partner (the Test one until cleared).
+	dualToken.SetAccountPartners(partnerRegistry)
 	// B30.9 — each capability's terms, accepted before first use: version 1 of every text Lens carries
 	// (docs/terms/<capability>.md) is published now, and the capability refuses a workspace that has not accepted it.
 	if published, err := dualToken.PublishFirstTerms(ctx, economy.CapabilityTermsTexts(capabilityterms.FS)); err != nil {
@@ -4580,6 +4582,7 @@ func run() error {
 		mountAgentPotRoutes(authed, dualToken)                                          // B22.7
 		mountSimTradingRoutes(authed, dualToken)                                        // B22.8
 		mountCashOutRoutes(authed, dualToken)                                           // B22.9
+		mountMoneyAccountRoutes(authed, dualToken)                                      // B30.13
 		mountMarketRoutes(authed, marketStore)                                          // B20.1
 		mountMarketDiscoveryRoutes(authed, marketStore)                                 // B32.50
 		mountTaxProfileRoutes(authed, taxProfiles)                                      // B32.38
