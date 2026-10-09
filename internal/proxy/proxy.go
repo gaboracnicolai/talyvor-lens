@@ -1615,7 +1615,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			streamCfg, _ = p.ownKeyConfig(own, cfg.ProviderName())
 			sc.byok = true
 		}
-		ops, oerr := providerStreamOps(streamCfg, upstreamModel)
+		ops, oerr := providerStreamOps(streamCfg, upstreamModel, streamBody)
 		if oerr != nil {
 			writeError(w, http.StatusBadRequest, oerr.Error())
 			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "stream_unsupported").Inc()
@@ -2966,9 +2966,10 @@ func (p *Proxy) forward(ctx context.Context, r *http.Request, body []byte, model
 		upstreamURL = eu
 	}
 	body = inference.AdaptReasoningParams(model, body)
-	// B17.11: OpenAI serves its -pro and -codex models only on /v1/responses (inference/responses_api.go). The
-	// chat body goes there translated, and a successful reply comes back as a chat completion.
-	translate := cfg.ProviderName() == "openai" && inference.ResponsesOnly(model) && classifyEndpoint(r) == endpointChat
+	// B17.11: OpenAI serves its -pro and -codex models only on /v1/responses (inference/responses_api.go), and
+	// B17.104 GPT-5.6 and later their function tools. The chat body goes there translated, and a successful
+	// reply comes back as a chat completion.
+	translate := cfg.ProviderName() == "openai" && inference.ServedByResponses(model, body) && classifyEndpoint(r) == endpointChat
 	if translate {
 		ru, ok := inference.ResponsesURLFor(upstreamURL)
 		if !ok {

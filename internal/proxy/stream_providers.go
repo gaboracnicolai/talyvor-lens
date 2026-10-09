@@ -60,13 +60,13 @@ func upstreamLines(ops streamOps, body io.Reader) lineSource {
 	return scannerSource{sc}
 }
 
-// providerStreamOps is the writer for cfg's provider, streaming model. An error means the provider
-// has no streaming writer and the request must be refused.
-func providerStreamOps(cfg providerConfig, model string) (streamOps, error) {
+// providerStreamOps is the writer for cfg's provider, streaming model with body. An error means the
+// provider has no streaming writer and the request must be refused.
+func providerStreamOps(cfg providerConfig, model string, body []byte) (streamOps, error) {
 	switch name := cfg.ProviderName(); name {
 	case "openai", "mistral", "groq", "vllm":
-		if name == "openai" && inference.ResponsesOnly(model) {
-			return responsesStreamFor(cfg.UpstreamURL(model), cfg.ApplyAuth, model) // B17.11
+		if name == "openai" && inference.ServedByResponses(model, body) {
+			return responsesStreamFor(cfg.UpstreamURL(model), cfg.ApplyAuth, model) // B17.11, B17.104
 		}
 		return openAIStreamOps{url: cfg.UpstreamURL(model), setAuth: cfg.ApplyAuth}, nil
 	case "anthropic":
