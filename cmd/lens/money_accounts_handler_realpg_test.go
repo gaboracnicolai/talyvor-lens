@@ -137,9 +137,13 @@ func TestMoneyAccountRoutes_DetailsReadTESTAndAnAgentsReferenceRoutesMoneyToIt(t
 		return d
 	}
 	for cur, want := range map[string]func(d economy.CurrencyAccountDetails) bool{
-		"GBP": func(d economy.CurrencyAccountDetails) bool { return d.SortCode == "00-00-00" && len(d.AccountNumber) == 8 },
+		"GBP": func(d economy.CurrencyAccountDetails) bool {
+			return d.SortCode == "00-00-00" && len(d.AccountNumber) == 8
+		},
 		"EUR": func(d economy.CurrencyAccountDetails) bool { return strings.Contains(d.IBAN, "TEST") && d.BIC != "" },
-		"USD": func(d economy.CurrencyAccountDetails) bool { return d.RoutingNumber == "000000000" && len(d.AccountNumber) == 8 },
+		"USD": func(d economy.CurrencyAccountDetails) bool {
+			return d.RoutingNumber == "000000000" && len(d.AccountNumber) == 8
+		},
 	} {
 		d := details(company[cur].ID)
 		if !want(d) || d.Mode != economy.DetailsTest || !strings.Contains(d.Notice, "test money only") || d.Currency != cur || d.PaymentReference != "" {
