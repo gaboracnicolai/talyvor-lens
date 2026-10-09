@@ -2075,6 +2075,12 @@ func run() error {
 	go haComps.leader.Run(ctx, "transaction-monitoring", 30*time.Second, func(lctx context.Context) {
 		sweepTransactionMonitoring(lctx, moneyMonitor)
 	})
+	// B30.11 — each day yesterday's money through partner accounts is reconciled with the account partner's statements;
+	// any break is sent to the operator's alert sink, and the runs and the safeguarding view are at
+	// /v1/admin/reconciliation and /v1/admin/safeguarding.
+	go haComps.leader.Run(ctx, "reconciliation", 30*time.Second, func(lctx context.Context) {
+		reconcileDaily(lctx, dualToken, partnerRegistry, sanctionsAlert.sink)
+	})
 	// B30.8 — the compliance case file: the operator reviews a case, freezes or unfreezes the workspace's money
 	// capabilities, closes it with a reason and exports a report draft; every action behind step-up (a code from the
 	// authenticator app holding LENS_OPERATOR_STEP_UP_SECRET, once on any replica; unset, the actions answer 503) and in
@@ -2451,6 +2457,9 @@ func run() error {
 	r.Post("/v1/admin/screening/cases/{caseID}/refuse", requireStepUp(authManager, stepUp, newScreeningDecideHandler(screener, false)))
 	// B30.7 — the alerts transaction monitoring raised on its compliance cases, newest first.
 	r.Get("/v1/admin/compliance/alerts", requireAdminOrOperatorRead(authManager, newMonitoringAlertsHandler(moneyMonitor)))
+	// B30.11 — the daily reconciliation runs with their breaks, and the safeguarding view. reconciliation_handler.go.
+	r.Get("/v1/admin/reconciliation", requireAdminOrOperatorRead(authManager, newReconciliationRunsHandler(dualToken)))
+	r.Get("/v1/admin/safeguarding", requireAdminOrOperatorRead(authManager, newSafeguardingHandler(dualToken)))
 	// B30.8 — the compliance case file: read with the admin key, every action behind step-up. compliance_handler.go.
 	r.Get("/v1/admin/compliance/cases", requireAdmin(authManager, newComplianceCasesHandler(caseFile)))
 	r.Get("/v1/admin/compliance/cases/{caseID}", requireAdmin(authManager, newComplianceCaseHandler(caseFile)))
