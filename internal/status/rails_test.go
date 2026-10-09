@@ -1,12 +1,16 @@
 package status
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/partners"
@@ -88,5 +92,80 @@ func TestStatus_MoneyRails(t *testing.T) {
 	}
 	if strings.Contains(html, "TESTFAIL") {
 		t.Fatal("the status page shows a partner's error text")
+	}
+
+	// B37.1: the banner stays Lens's own, and the line under it names the rail that is down.
+	if got.Status != StatusOperational {
+		t.Fatalf("a Test partner that is down moved the banner to %s", got.Status)
+	}
+	if s := got.RailsSummary; s.Down != 1 || s.Up != 1 || s.Idle != len(partners.Services)-2 || len(s.DownNames) != 1 || s.DownNames[0] != "Sanctions screening" {
+		t.Fatalf("rails_summary %+v, want 1 down (Sanctions screening), 1 up, the rest idle", s)
+	}
+	if want := `<span class="pill bad">Money rails: 1 of 10 down: Sanctions screening (test partner)</span>`; !strings.Contains(html, want) {
+		t.Fatalf("the status page lacks %q", want)
+	}
+}
+
+// fakeRails is a partners registry whose rails are given.
+type fakeRails []partners.Rail
+
+func (f fakeRails) Rails() []partners.Rail { return f }
+
+func TestStatus_RailsLine(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	up := fakeRails{}
+	for _, s := range partners.Services {
+		up = append(up, partners.Rail{Service: s, Mode: "test", LastSuccess: &now})
+	}
+	page := newStatusPage(&fakePinger{}, nil, nil, "test")
+	page.UseMoneyRails(up, nil)
+	got := page.Check(ctx)
+	if got.RailsSummary.Up != len(partners.Services) || !strings.Contains(renderHTML(&got), "Money rails: all answering") {
+		t.Fatalf("every rail up reads %+v, want all answering", got.RailsSummary)
+	}
+
+	// A live rail that is down is real money not moving, so it turns the banner degraded.
+	live := append(fakeRails{}, up...)
+	live[0] = partners.Rail{Service: partners.ServiceAccount, Mode: "live", LastFailure: &now}
+	page.UseMoneyRails(live, nil)
+	got = page.Check(ctx)
+	if got.Status != StatusDegraded {
+		t.Fatalf("a live rail that is down left the banner %s, want degraded", got.Status)
+	}
+	if !strings.Contains(renderHTML(&got), "Money rails: 1 of 10 down: Accounts and payments (live partner)") {
+		t.Fatal("the status page does not name the live rail that is down")
+	}
+}
+
+// B37.1: an unreachable PostgreSQL reads "cannot connect" on the public page, and its error, which names the database
+// user, the database and the address, goes only to the log.
+func TestStatus_PostgresErrorStaysInTheLog(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	secret := "failed to connect to `user=lens database=talyvor_lens`: 127.0.0.1:55433 (localhost): dial error"
+	page := newStatusPage(&fakePinger{err: errors.New(secret)}, nil, nil, "test")
+	for _, path := range []string{"/status", "/status.json"} {
+		rec := httptest.NewRecorder()
+		if path == "/status" {
+			page.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		} else {
+			page.ServeJSON(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "cannot connect") {
+			t.Fatalf("%s does not read cannot connect", path)
+		}
+		for _, leak := range []string{"user=", "talyvor_lens", "127.0.0.1", "55433", "dial error"} {
+			if strings.Contains(body, leak) {
+				t.Fatalf("%s shows %q from the database error", path, leak)
+			}
+		}
+	}
+	if !strings.Contains(logs.String(), "component=PostgreSQL") || !strings.Contains(logs.String(), "127.0.0.1:55433") {
+		t.Fatalf("the log lacks the PostgreSQL error: %s", logs.String())
 	}
 }

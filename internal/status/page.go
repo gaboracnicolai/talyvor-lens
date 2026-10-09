@@ -8,7 +8,10 @@ package status
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -132,14 +135,24 @@ type RailCapability struct {
 	Cleared *bool  `json:"cleared"`
 }
 
+// RailsSummary counts the money rails from the same snapshot as their rows (B37.1): answering, down, and not called
+// yet, with the name of each one that is down.
+type RailsSummary struct {
+	Up        int      `json:"up"`
+	Down      int      `json:"down"`
+	Idle      int      `json:"idle"`
+	DownNames []string `json:"down_names"`
+}
+
 type StatusResponse struct {
-	Status      ComponentStatus  `json:"status"`
-	Version     string           `json:"version"`
-	UptimeHours float64          `json:"uptime_hours"`
-	Components  []Component      `json:"components"`
-	Providers   []ProviderStatus `json:"providers"`
-	Rails       []MoneyRail      `json:"rails"`
-	UpdatedAt   time.Time        `json:"updated_at"`
+	Status       ComponentStatus  `json:"status"`
+	Version      string           `json:"version"`
+	UptimeHours  float64          `json:"uptime_hours"`
+	Components   []Component      `json:"components"`
+	Providers    []ProviderStatus `json:"providers"`
+	Rails        []MoneyRail      `json:"rails"`
+	RailsSummary RailsSummary     `json:"rails_summary"`
+	UpdatedAt    time.Time        `json:"updated_at"`
 }
 
 // railReader is the partners registry.
@@ -326,6 +339,13 @@ func (s *StatusPage) Check(ctx context.Context) StatusResponse {
 	for i, p := range providers {
 		ps[i] = p.Status
 	}
+	rails := s.moneyRails(ctx)
+	for _, r := range rails {
+		// A test rail that is down is a partner's problem, like a provider's; a live one is real money not moving.
+		if r.Mode == "live" && r.Status == StatusOutage {
+			cs = append(cs, StatusDegraded)
+		}
+	}
 	overall := computeOverall(cs, ps)
 
 	// UptimeHours rounded to 2 decimals so the dashboard renders cleanly.
@@ -333,18 +353,35 @@ func (s *StatusPage) Check(ctx context.Context) StatusResponse {
 	hours = float64(int(hours*100+0.5)) / 100
 
 	return StatusResponse{
-		Status:      overall,
-		Version:     s.version,
-		UptimeHours: hours,
-		Components:  components,
-		Providers:   providers,
-		Rails:       s.moneyRails(ctx),
-		UpdatedAt:   now,
+		Status:       overall,
+		Version:      s.version,
+		UptimeHours:  hours,
+		Components:   components,
+		Providers:    providers,
+		Rails:        rails,
+		RailsSummary: summariseRails(rails),
+		UpdatedAt:    now,
 	}
 }
 
-// moneyRails is every partner rail with its clearances. Like a provider, a rail that is down keeps its own row and
-// never moves the banner: a partner's failure is not Lens's.
+func summariseRails(rails []MoneyRail) RailsSummary {
+	sum := RailsSummary{DownNames: []string{}}
+	for _, r := range rails {
+		switch r.Status {
+		case StatusOutage:
+			sum.Down++
+			sum.DownNames = append(sum.DownNames, r.Name)
+		case StatusOperational:
+			sum.Up++
+		default:
+			sum.Idle++
+		}
+	}
+	return sum
+}
+
+// moneyRails is every partner rail with its clearances. Like a provider, a test rail that is down keeps its own row
+// and never moves the banner: a partner's failure is not Lens's.
 func (s *StatusPage) moneyRails(ctx context.Context) []MoneyRail {
 	s.mu.RLock()
 	rails, clearances := s.rails, s.clearances
@@ -400,7 +437,7 @@ func (s *StatusPage) checkPostgres(ctx context.Context) Component {
 	c.Measured = true
 	c.Status = classifyLocalLatency(c.Latency, err)
 	if err != nil {
-		c.Message = err.Error()
+		c.Message = publicMessage(c.Name, err)
 	}
 	return c
 }
@@ -420,7 +457,7 @@ func (s *StatusPage) checkRedis(ctx context.Context) Component {
 	c.Measured = true
 	c.Status = classifyLocalLatency(c.Latency, err)
 	if err != nil {
-		c.Message = err.Error()
+		c.Message = publicMessage(c.Name, err)
 	}
 	return c
 }
@@ -444,7 +481,7 @@ func (s *StatusPage) checkNATS(ctx context.Context) Component {
 	sub, err := s.nc.SubscribeSync("_lens.health")
 	if err != nil {
 		c.Status = StatusOutage
-		c.Message = err.Error()
+		c.Message = publicMessage(c.Name, err)
 		return c
 	}
 	defer func() { _ = sub.Unsubscribe() }()
@@ -453,7 +490,7 @@ func (s *StatusPage) checkNATS(ctx context.Context) Component {
 	start := time.Now()
 	if err := s.nc.Publish("_lens.health", []byte("ping")); err != nil {
 		c.Status = StatusOutage
-		c.Message = err.Error()
+		c.Message = publicMessage(c.Name, err)
 		c.Latency = time.Since(start).Milliseconds()
 		return c
 	}
@@ -462,9 +499,20 @@ func (s *StatusPage) checkNATS(ctx context.Context) Component {
 	c.Measured = true
 	c.Status = classifyLocalLatency(c.Latency, err)
 	if err != nil {
-		c.Message = err.Error()
+		c.Message = publicMessage(c.Name, err)
 	}
 	return c
+}
+
+// publicMessage is the fixed phrase the public page shows for a failed check, and logs the error itself: its text can
+// carry a database user, a database name and an internal address.
+func publicMessage(component string, err error) string {
+	slog.Error("status check failed", slog.String("component", component), slog.String("err", err.Error()))
+	var ne net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) || (errors.As(err, &ne) && ne.Timeout()) {
+		return "timed out"
+	}
+	return "cannot connect"
 }
 
 // checkProxy is the self-check, and it is honest about being one: if this code
@@ -643,6 +691,8 @@ func renderHTML(s *StatusResponse) string {
   .banner.good::before, .pill.good::before { background: var(--tv-positive); }
   .banner.warn::before, .pill.warn::before { background: var(--tv-caution); }
   .banner.bad::before,  .pill.bad::before  { background: var(--tv-critical); }
+  .railsline { margin: -12px 0 24px; padding: 0 20px; font-size: 14px; line-height: 20px; color: var(--tv-ink-muted); }
+  .railsline .pill { white-space: normal; }
   section { background: var(--tv-surface); border: 1px solid var(--tv-line); border-radius: var(--tv-radius-md);
             padding: 18px 20px; margin-bottom: 18px; }
   section h2 { margin: 0 0 6px; }
@@ -682,7 +732,7 @@ func renderHTML(s *StatusResponse) string {
 </header>
 
 <div class="banner %s">%s</div>
-
+%s
 <section>
   <h2 class="eyebrow">Lens components</h2>
   <div class="tbl"><table><thead><tr><th>Component</th><th>Status</th><th>Latency</th></tr></thead><tbody>`,
@@ -692,6 +742,7 @@ func renderHTML(s *StatusResponse) string {
 		formatUptime(s.UptimeHours),
 		bannerClass,
 		bannerText,
+		railsLine(s),
 	)
 
 	for _, c := range s.Components {
@@ -742,6 +793,28 @@ func latencyCell(latencyMs int64, measured bool) string {
 		return "—"
 	}
 	return fmt.Sprintf("%dms", latencyMs)
+}
+
+// railsLine is the one line under the banner that sums up the money rails, so the banner never stands alone above a
+// rail that is down.
+func railsLine(s *StatusResponse) string {
+	if len(s.Rails) == 0 {
+		return ""
+	}
+	cls, text := "pill good", "Money rails: all answering"
+	switch {
+	case s.RailsSummary.Down > 0:
+		var names []string
+		for _, r := range s.Rails {
+			if r.Status == StatusOutage {
+				names = append(names, r.Name+" ("+strings.ToLower(modeWord(r.Mode))+")")
+			}
+		}
+		cls, text = "pill bad", fmt.Sprintf("Money rails: %d of %d down: %s", s.RailsSummary.Down, len(s.Rails), strings.Join(names, ", "))
+	case s.RailsSummary.Idle > 0:
+		cls, text = "pill", fmt.Sprintf("Money rails: %d not called yet", s.RailsSummary.Idle)
+	}
+	return `<div class="railsline"><span class="` + cls + `">` + htmlEscape(text) + `</span></div>`
 }
 
 func modeWord(mode string) string {
