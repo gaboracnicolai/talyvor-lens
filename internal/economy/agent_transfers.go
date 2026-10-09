@@ -264,6 +264,12 @@ func (s *DualTokenStore) transferTx(ctx context.Context, tx pgx.Tx, t AgentTrans
 		return t, err
 	}
 	if t.ToWorkspaceID != t.FromWorkspaceID {
+		// B30.8: nor does a frozen workspace take money from another owner.
+		if c, ok := CapabilityByKey(capability); ok {
+			if err := refuseFrozen(ctx, tx, t.ToWorkspaceID, c); err != nil {
+				return t, err
+			}
+		}
 		if err := moveLXC(ctx, tx, t.FromWorkspaceID, -t.AmountULXC, t); err != nil {
 			return t, err
 		}

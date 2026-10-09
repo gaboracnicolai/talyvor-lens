@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/lens/internal/operatoraudit"
 	"github.com/talyvor/lens/internal/partners"
 )
 
@@ -264,20 +265,51 @@ func (s *Screener) Cases(ctx context.Context, status string, limit int) ([]Case,
 	return out, rows.Err()
 }
 
+// CaseColumns is the columns ScanCase reads, in its order.
+const CaseColumns = caseCols
+
+// ScanCase reads one compliance case selected as CaseColumns.
+func ScanCase(row pgx.Row) (Case, error) { return scanCase(row) }
+
+// Case is the compliance case id, any kind.
+func (s *Screener) Case(ctx context.Context, id string) (Case, error) {
+	c, err := scanCase(s.pool.QueryRow(ctx, `SELECT `+caseCols+` FROM compliance_cases WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Case{}, ErrCaseNotFound
+	}
+	return c, err
+}
+
+// AuditTarget is what the operator audit trail names a compliance case by (B30.8).
+func AuditTarget(caseID string) string { return "compliance_case:" + caseID }
+
 // Decide releases a held case — the close match is not them, and the money may move when it is tried again — or
-// refuses it, and records who decided, when and why.
+// refuses it, and records who decided, when and why: on the case, and in the operator audit trail in the same
+// transaction (B30.8).
 func (s *Screener) Decide(ctx context.Context, id string, release bool, by, note string) (Case, error) {
-	status := CaseRefused
+	status, action := CaseRefused, "compliance.case.refuse"
 	if release {
-		status = CaseReleased
+		status, action = CaseReleased, "compliance.case.release"
 	}
 	if strings.TrimSpace(by) == "" {
 		return Case{}, errors.New("screening: a decision names who made it")
 	}
-	c, err := scanCase(s.pool.QueryRow(ctx, `UPDATE compliance_cases SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Case{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	c, err := scanCase(tx.QueryRow(ctx, `UPDATE compliance_cases SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4
 		WHERE id = $1 AND status = 'held' RETURNING `+caseCols, id, status, by, note))
+	if err == nil {
+		if _, err := operatoraudit.RecordIn(ctx, tx, operatoraudit.Entry{Actor: by, Action: action, Target: AuditTarget(id),
+			Detail: note}); err != nil {
+			return Case{}, err
+		}
+		return c, tx.Commit(ctx)
+	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return c, err
+		return Case{}, err
 	}
 	var current string
 	if err := s.pool.QueryRow(ctx, `SELECT status FROM compliance_cases WHERE id = $1`, id).Scan(&current); errors.Is(err, pgx.ErrNoRows) {

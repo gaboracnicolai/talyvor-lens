@@ -53,6 +53,7 @@ import (
 	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/cohort"
 	"github.com/talyvor/lens/internal/compat"
+	"github.com/talyvor/lens/internal/compliance"
 	"github.com/talyvor/lens/internal/compressmeasure"
 	"github.com/talyvor/lens/internal/compressor"
 	"github.com/talyvor/lens/internal/config"
@@ -130,6 +131,7 @@ import (
 	"github.com/talyvor/lens/internal/sessionkey"
 	"github.com/talyvor/lens/internal/shadowmint"
 	"github.com/talyvor/lens/internal/status"
+	"github.com/talyvor/lens/internal/stepup"
 	"github.com/talyvor/lens/internal/storedanswers"
 	"github.com/talyvor/lens/internal/tare"
 	"github.com/talyvor/lens/internal/tare/kompress"
@@ -2057,6 +2059,17 @@ func run() error {
 	go haComps.leader.Run(ctx, "transaction-monitoring", 30*time.Second, func(lctx context.Context) {
 		sweepTransactionMonitoring(lctx, moneyMonitor)
 	})
+	// B30.8 — the compliance case file: the operator reviews a case, freezes or unfreezes the workspace's money
+	// capabilities, closes it with a reason and exports a report draft; every action behind step-up (a code from the
+	// authenticator app holding LENS_OPERATOR_STEP_UP_SECRET; unset, the routes answer 503) and in the audit trail.
+	caseFile := compliance.New(pool, moneyMonitor)
+	stepUp, err := stepup.New(os.Getenv("LENS_OPERATOR_STEP_UP_SECRET"))
+	if err != nil {
+		return err
+	}
+	if !stepUp.Configured() {
+		slog.Warn("compliance: LENS_OPERATOR_STEP_UP_SECRET is not set; the compliance case file and screening decisions answer 503 until it is")
+	}
 	// B32.40 — every paid marketplace bill gets Talyvor's receipt, as the supplier: the buyer as its tax profile names
 	// it, and the tax also in the buyer's currency at the ECB's reference rate.
 	marketStore.SetReceipts(market.Receipts{Supplier: market.Supplier{LegalName: cfg.SupplierLegalName, Address: cfg.SupplierAddress,
@@ -2416,10 +2429,19 @@ func run() error {
 	r.Get("/v1/admin/tax-profiles/flagged", requireAdminOrOperatorRead(authManager, newTaxProfilesFlaggedHandler(taxProfiles)))
 	// B30.6 — the sanctions lists and the compliance cases screening opened; an admin releases or refuses a held one.
 	r.Get("/v1/admin/screening", requireAdminOrOperatorRead(authManager, newScreeningOverviewHandler(screeningLists, screener)))
-	r.Post("/v1/admin/screening/cases/{caseID}/release", requireAdmin(authManager, newScreeningDecideHandler(screener, true)))
-	r.Post("/v1/admin/screening/cases/{caseID}/refuse", requireAdmin(authManager, newScreeningDecideHandler(screener, false)))
+	// B30.8: a decision is behind step-up, and an operator audit row.
+	r.Post("/v1/admin/screening/cases/{caseID}/release", requireStepUp(authManager, stepUp, newScreeningDecideHandler(screener, true)))
+	r.Post("/v1/admin/screening/cases/{caseID}/refuse", requireStepUp(authManager, stepUp, newScreeningDecideHandler(screener, false)))
 	// B30.7 — the alerts transaction monitoring raised on its compliance cases, newest first.
 	r.Get("/v1/admin/compliance/alerts", requireAdminOrOperatorRead(authManager, newMonitoringAlertsHandler(moneyMonitor)))
+	// B30.8 — the compliance case file, behind step-up. compliance_handler.go.
+	r.Get("/v1/admin/compliance/cases", requireStepUp(authManager, stepUp, newComplianceCasesHandler(caseFile)))
+	r.Get("/v1/admin/compliance/cases/{caseID}", requireStepUp(authManager, stepUp, newComplianceCaseHandler(caseFile)))
+	r.Post("/v1/admin/compliance/cases/{caseID}/notes", requireStepUp(authManager, stepUp, newComplianceActionHandler(caseFile, compliance.ActionNote)))
+	r.Post("/v1/admin/compliance/cases/{caseID}/freeze", requireStepUp(authManager, stepUp, newComplianceActionHandler(caseFile, compliance.ActionFreeze)))
+	r.Post("/v1/admin/compliance/cases/{caseID}/unfreeze", requireStepUp(authManager, stepUp, newComplianceActionHandler(caseFile, compliance.ActionUnfreeze)))
+	r.Post("/v1/admin/compliance/cases/{caseID}/close", requireStepUp(authManager, stepUp, newComplianceActionHandler(caseFile, compliance.ActionClose)))
+	r.Post("/v1/admin/compliance/cases/{caseID}/export", requireStepUp(authManager, stepUp, newComplianceExportHandler(caseFile)))
 	// B32.44 — the annual platform-reporting export (UK reporting rules, EU DAC7): the file, with the sellers' TINs in
 	// clear, and the runs recorded with their sha256 — for the global admin key only. platform_report_handler.go.
 	platformReports := platformreport.New(pool, sellerTax)
