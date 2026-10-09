@@ -45,6 +45,8 @@ type WalletBank interface {
 	MoveToPot(ctx context.Context, workspaceID, agentID, potID string, amount int64) (economy.Pot, error)
 	MoveFromPot(ctx context.Context, workspaceID, agentID, potID string, amount int64) (economy.Pot, error)
 	SimQuotes(ctx context.Context) (economy.Quotes, error)
+	OpenCurrencyAccount(ctx context.Context, workspaceID, agentID, currency, funding string) (economy.CurrencyAccount, error)
+	CurrencyAccounts(ctx context.Context, workspaceID, agentID string) ([]economy.CurrencyAccount, error)
 	OpenPortfolio(ctx context.Context, workspaceID, agentID, name string, cashUUSD int64) (economy.Portfolio, error)
 	ListPortfolios(ctx context.Context, workspaceID, agentID string) ([]economy.Portfolio, error)
 	PlaceSimOrder(ctx context.Context, workspaceID, agentID, portfolioID string, in economy.SimOrderInput) (economy.SimOrder, error)
@@ -67,6 +69,7 @@ var walletRefusals = []error{
 	economy.ErrLoanNotFound, economy.ErrLoanTerms, economy.ErrLoanCompaniesOnly, economy.ErrEscrowNotFound, economy.ErrEscrowTerms,
 	economy.ErrPotNotFound, economy.ErrPotLocked, economy.ErrPot, economy.ErrLiveTrading, economy.ErrNoQuote,
 	economy.ErrPortfolioNotFound, economy.ErrSimOrderNotFound, economy.ErrSimOrder, economy.ErrSimHoldings,
+	economy.ErrCurrencyAccount, economy.ErrCurrencyAccountExists, economy.ErrCompanyAccountNeeded, economy.ErrAccountNotOpened,
 	workspace.ErrMoneyWall,
 }
 
@@ -130,6 +133,9 @@ func walletToolDefinitions() []map[string]any {
 			"portfolio_id", "instrument", "side", "type", "quantity_micros"),
 		tool("wallet_order_cancel", "Cancel an open order in one of your simulated portfolios.",
 			map[string]any{"portfolio_id": str("the portfolio"), "order_id": str("the order")}, "portfolio_id", "order_id"),
+		tool("wallet_accounts", "Your accounts in pounds, euros and dollars and what each holds, test and live money apart.", none),
+		tool("wallet_account_open", "Open your account in GBP, EUR or USD: a sub-account of your company's in that currency, which opens first. "+
+			"It opens at zero.", map[string]any{"currency": str("GBP, EUR or USD"), "funding": str("test (the default) or live")}, "currency"),
 		tool("wallet_credential", "Your Know Your Agent credential: a signed token any platform can check against Talyvor's published keys. "+
 			"It says who you are, who answers for you and how far they are verified, what you may do with live money and your limits.", none),
 	}
@@ -167,6 +173,8 @@ type walletArgs struct {
 	QuantityMicros int64  `json:"quantity_micros"`
 	LimitPriceUSD  string `json:"limit_price_usd"`
 	Mode           string `json:"mode"`
+	Currency       string `json:"currency"`
+	Funding        string `json:"funding"`
 }
 
 func (s *Server) runWalletTool(ctx context.Context, name, workspaceID, agentID string, raw json.RawMessage) (any, error) {
@@ -334,6 +342,11 @@ func (s *Server) walletTool(ctx context.Context, bank WalletBank, name, ws, agen
 			QuantityMicros: a.QuantityMicros, LimitPriceUSD: a.LimitPriceUSD, Mode: a.Mode})
 	case "wallet_order_cancel":
 		return bank.CancelSimOrder(ctx, ws, agent, a.PortfolioID, a.OrderID)
+	case "wallet_accounts": // B30.13
+		accounts, err := bank.CurrencyAccounts(ctx, ws, agent)
+		return map[string]any{"accounts": accounts}, err
+	case "wallet_account_open":
+		return bank.OpenCurrencyAccount(ctx, ws, agent, a.Currency, a.Funding)
 	case "wallet_credential": // B30.5
 		if s.credentials == nil {
 			return nil, errors.New("the Know Your Agent credentials are not configured")
