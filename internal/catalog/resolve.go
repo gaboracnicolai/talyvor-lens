@@ -82,7 +82,13 @@ const (
 // rates are a bound derived from the same provider's known models (see Purpose), and Provenance is
 // ProvenanceFallback so the caller can mark, alert on, and later reprice the charge.
 func (r *Registry) ResolveRates(id string, purpose Purpose) (Rates, Provenance) {
-	if in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); ok && !unpriced(in, out) {
+	return r.ResolveRatesAt(id, purpose, 0)
+}
+
+// ResolveRatesAt is ResolveRates for a request whose prompt is promptTokens input tokens long, cache reads
+// and writes included — above a model's LongPrompt threshold the whole request is priced at its long rates.
+func (r *Registry) ResolveRatesAt(id string, purpose Purpose, promptTokens int) (Rates, Provenance) {
+	if in, cachedIn, cacheWrite, out, ok := r.PriceDetailedAt(id, promptTokens); ok && !unpriced(in, out) {
 		return Rates{InputPer1M: in, CachedInputPer1M: cachedIn, CacheWritePer1M: cacheWrite, OutputPer1M: out},
 			ProvenanceExact
 	}
@@ -188,4 +194,9 @@ func providerFromID(id string) string {
 // ResolveRates on the default registry — the entry point the money path uses.
 func ResolveRates(id string, purpose Purpose) (Rates, Provenance) {
 	return defaultRegistry.ResolveRates(id, purpose)
+}
+
+// ResolveRatesAt on the default registry — what the money path prices a request with.
+func ResolveRatesAt(id string, purpose Purpose, promptTokens int) (Rates, Provenance) {
+	return defaultRegistry.ResolveRatesAt(id, purpose, promptTokens)
 }

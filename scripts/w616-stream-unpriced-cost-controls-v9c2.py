@@ -75,14 +75,14 @@ CONTROLS = [
 
     # ⚠ THE CONTROLS THAT MATTER MOST ON A MONEY PATH: the fix must not move a priced model.
     ("I2", "the resolver is made to ignore the exact price and always fall back",
-     [(RESOLVE, "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); ok && !unpriced(in, out) {",
-       "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); false && ok && !unpriced(in, out) {")],
+     [(RESOLVE, "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailedAt(id, promptTokens); ok && !unpriced(in, out) {",
+       "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailedAt(id, promptTokens); false && ok && !unpriced(in, out) {")],
      PRICED, PREMISE,
      "if the fix started repricing KNOWN models, this is the test that says so"),
 
     ("I3", "the same, seen by the cache-aware byte-identity guard",
-     [(RESOLVE, "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); ok && !unpriced(in, out) {",
-       "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); false && ok && !unpriced(in, out) {")],
+     [(RESOLVE, "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailedAt(id, promptTokens); ok && !unpriced(in, out) {",
+       "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailedAt(id, promptTokens); false && ok && !unpriced(in, out) {")],
      CACHEAWARE, PREMISE,
      "the provider-usage branch with a cache breakdown must be byte-identical to before"),
 

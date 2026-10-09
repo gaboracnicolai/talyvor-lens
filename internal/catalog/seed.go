@@ -175,20 +175,22 @@ func seedModels() []Model {
 
 		// ─── Google Gemini (vision + audio + document) ───
 		// VERIFIED CORRECT for prompts <= 200k tokens (1.25 / 10.00), same source, same date.
-		// ⚠ UNMODELLED TIER: above 200k tokens Google charges 2.50 / 15.00 — double. Lens has no
-		// prompt-size-dependent rate, so long-context requests to this model UNDER-bill 2x. Same
-		// class as Anthropic's fast mode: a price that varies by request shape, not by model id.
-		{ID: "gemini-2.5-pro", Provider: "google", DisplayName: "Gemini 2.5 Pro", ReleaseDate: "2025-06-17", Tier: TierFrontier, InputPer1M: 1.25, OutputPer1M: 10.00, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
+		// B37.12 — above 200k tokens Google charges 2.50 / 15.00, context caching 0.25, on the whole request
+		// (https://ai.google.dev/gemini-api/docs/pricing, paid tier, read 2026-10-09). Before LongPrompt,
+		// long prompts to this model under-billed 2x.
+		{ID: "gemini-2.5-pro", Provider: "google", DisplayName: "Gemini 2.5 Pro", ReleaseDate: "2025-06-17", Tier: TierFrontier, InputPer1M: 1.25, OutputPer1M: 10.00, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192,
+			LongPrompt: &LongPromptRates{AboveTokens: 200000, InputPer1M: 2.50, OutputPer1M: 15.00, CachedInputPer1M: 0.25}},
 		// B15.4 — Google limits the 2.5 models to accounts that already used them, so these are what a
 		// NEW customer can call. Rates and exact API ids from https://ai.google.dev/gemini-api/docs/pricing
 		// (fetched 2026-09-26), Standard paid tier. ContextTokens/MaxOutput mirror the siblings above and
 		// are informational only.
-		// ⚠ gemini-3.1-pro-preview: $2.00/$12.00 is the <=200k-token tier; above 200k Google charges
-		//   $4.00/$18.00. The same unmodelled prompt-size tier as gemini-2.5-pro — long prompts UNDER-bill.
+		// gemini-3.1-pro-preview: $2.00/$12.00 is the <=200k-token tier; above 200k Google charges
+		//   $4.00/$18.00, context caching $0.40 (B37.12, same page, read 2026-10-09) — its LongPrompt.
 		// ⚠ gemini-3.8-flash IS PRICED "THROUGH DECEMBER 31, 2026". From 2027-01-01 the page lists
 		//   $1.50/$7.50 — ON THAT DATE THIS LINE MUST CHANGE. Entering the later rate now would over-bill;
 		//   this one under-bills after the date until someone edits it (the Sonnet 5 precedent above).
-		{ID: "gemini-3.1-pro-preview", Provider: "google", DisplayName: "Gemini 3.1 Pro", ReleaseDate: "2026-02-19", Tier: TierFrontier, InputPer1M: 2.00, OutputPer1M: 12.00, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
+		{ID: "gemini-3.1-pro-preview", Provider: "google", DisplayName: "Gemini 3.1 Pro", ReleaseDate: "2026-02-19", Tier: TierFrontier, InputPer1M: 2.00, OutputPer1M: 12.00, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192,
+			LongPrompt: &LongPromptRates{AboveTokens: 200000, InputPer1M: 4.00, OutputPer1M: 18.00, CachedInputPer1M: 0.40}},
 		{ID: "gemini-3.8-flash", Provider: "google", DisplayName: "Gemini 3.8 Flash", ReleaseDate: "2026-09-02", Tier: TierFast, InputPer1M: 0.75, OutputPer1M: 3.75, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
 		{ID: "gemini-3.5-flash-lite", Provider: "google", DisplayName: "Gemini 3.5 Flash-Lite", ReleaseDate: "2026-07-21", Tier: TierFast, InputPer1M: 0.30, OutputPer1M: 2.50, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
 		// ⚠ CORRECTED 2026-07-26 — UNDER-BILLING BADLY. Held 0.075/0.30 (an older Flash generation's

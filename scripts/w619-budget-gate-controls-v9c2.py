@@ -74,8 +74,8 @@ CONTROLS = [
 
     ("L3", "the resolver is made to ignore exact prices and always fall back",
      [("internal/catalog/resolve.go",
-       "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); ok && !unpriced(in, out) {",
-       "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailed(id); false && ok && !unpriced(in, out) {")],
+       "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailedAt(id, promptTokens); ok && !unpriced(in, out) {",
+       "\tif in, cachedIn, cacheWrite, out, ok := r.PriceDetailedAt(id, promptTokens); false && ok && !unpriced(in, out) {")],
      PRICED, EMPTY,
      "if the change started re-estimating the 45 models the catalog HOLDS, this is what says so"),
 
