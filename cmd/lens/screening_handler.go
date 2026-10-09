@@ -24,7 +24,8 @@ import (
 //	POST /v1/admin/screening/cases/{caseID}/release a held case's close match is not them: the money may move on retry
 //	POST /v1/admin/screening/cases/{caseID}/refuse  it is them: the money never moves
 //
-// The decision records who made it: the operator X-Talyvor-Operator names, or "admin".
+// The decision records who made it: the operator X-Talyvor-Operator names, or "admin". Since B30.8 a decision is
+// behind requireStepUp, which needs that name, and is an operator audit row on the case.
 
 // screeningLists is what the operator reads of the lists: *screening.Store.
 type screeningLists interface {

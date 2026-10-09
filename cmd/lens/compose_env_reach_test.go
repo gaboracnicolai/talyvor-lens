@@ -207,6 +207,10 @@ var credentialExemptions = map[string]string{
 		"like LENS_SYNTHETIC_KEY and for the same reason: an environment: entry would arrive as \"\" and " +
 		"override the lens.env value, turning the approval pushes off.",
 
+	"LENS_OPERATOR_STEP_UP_SECRET": "B30.8's step-up secret for the compliance case file reaches the process " +
+		"through env_file: lens.env, like LENS_SYNTHETIC_KEY and for the same reason: an environment: entry would " +
+		"arrive as \"\" and override the lens.env value, so every compliance action would answer 503.",
+
 	"LENS_STRIPE_ISSUING_WEBHOOK_SECRET": "B19.12's real-time card authorisation secret reaches the process " +
 		"through env_file: lens.env, like LENS_VAPID_PRIVATE_KEY and for the same reason: an environment: entry " +
 		"would arrive as \"\" and override the lens.env value, unregistering the endpoint so no purchase is approved.",

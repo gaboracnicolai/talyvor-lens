@@ -186,6 +186,10 @@ func (s *DualTokenStore) OfferLoan(ctx context.Context, workspaceID, lenderAgent
 	// B22.1: uncleared, an AMBER loan is made of test-funded credits only — refused now, naming the class,
 	// when the lender's are not enough.
 	if c, _ := CapabilityByKey(CapabilityCompanyLoans); c.Class != ClassGreen {
+		// B30.8: a frozen lender lends nothing, test-funded credits included.
+		if err := refuseFrozen(ctx, tx, workspaceID, c); err != nil {
+			return Loan{}, err
+		}
 		refusal, err := capabilityLive(ctx, tx, workspaceID, c)
 		if err != nil {
 			return Loan{}, err

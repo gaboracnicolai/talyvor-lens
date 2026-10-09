@@ -128,6 +128,13 @@ func (s *DualTokenStore) payCompanyAgent(ctx context.Context, workspaceID, payee
 	if err := lockAgent(ctx, tx, workspaceID, pay.FromAgentID); err != nil {
 		return pay, err
 	}
+	// B30.8: neither a frozen payer nor a frozen payee moves money with another owner.
+	c, _ := CapabilityByKey(CapabilityPayAnotherOwner)
+	for _, ws := range []string{workspaceID, payeeWorkspace} {
+		if err := refuseFrozen(ctx, tx, ws, c); err != nil {
+			return pay, err
+		}
+	}
 	if err := enforceAgentRules(ctx, tx, workspaceID, pay.FromAgentID, pay.AmountULXC, "company:"+payeeWorkspace); err != nil {
 		return pay, s.refusedMovement(ctx, tx, err)
 	}

@@ -90,8 +90,15 @@ var operatorMustNotReach = map[string]string{
 	"/v1/admin/rooms/reports":                                    "B32.52: the reported rooms with each report, its reporter's workspace and the reported message's text. requireAdminOrModerator, never the operator read key.",
 	"/v1/admin/rooms/{roomID}/moderate":                          "B32.52: KEEPS, LOCKS, UNLOCKS OR CLOSES A ROOM — a closed room's budget is spent no more — and writes an operator audit row. A write.",
 	"/v1/admin/operator-audit/record":                            "B27.28: appends to the append-only operator audit trail. A write is a write even when it is not money; the web app writes it on its moderator key.",
-	"/v1/admin/screening/cases/{caseID}/release":                 "B30.6: RELEASES A HELD SANCTIONS MATCH — the payment or payee it held may then move money. requireAdmin only.",
-	"/v1/admin/screening/cases/{caseID}/refuse":                  "B30.6: refuses a held sanctions match, so the payment or payee never moves money, and records who decided. requireAdmin only.",
+	"/v1/admin/screening/cases/{caseID}/release":                 "B30.6: RELEASES A HELD SANCTIONS MATCH — the payment or payee it held may then move money. requireStepUp (B30.8), with an operator audit row.",
+	"/v1/admin/screening/cases/{caseID}/refuse":                  "B30.6: refuses a held sanctions match, so the payment or payee never moves money, and records who decided. requireStepUp (B30.8), with an operator audit row.",
+	"/v1/admin/compliance/cases":                                 "B30.8: the compliance cases and a workspace's freeze. requireAdmin only.",
+	"/v1/admin/compliance/cases/{caseID}":                        "B30.8: the case file — the owner's verified name and company number, the agents, the alerts, the notes. requireAdmin only.",
+	"/v1/admin/compliance/cases/{caseID}/notes":                  "B30.8: adds an operator's note to a case, an operator audit row. A write; requireStepUp.",
+	"/v1/admin/compliance/cases/{caseID}/freeze":                 "B30.8: FREEZES A WORKSPACE'S MONEY — every AMBER and RED capability refuses it. A write; requireStepUp.",
+	"/v1/admin/compliance/cases/{caseID}/unfreeze":               "B30.8: LIFTS A FREEZE, so the workspace's money moves again. A write; requireStepUp.",
+	"/v1/admin/compliance/cases/{caseID}/close":                  "B30.8: closes a monitoring case with a reason. A write; requireStepUp.",
+	"/v1/admin/compliance/cases/{caseID}/export":                 "B30.8: the case file as a report draft for filing, recorded in the audit trail. requireStepUp.",
 	"/v1/admin/platform-reports":                                 "B32.44: WRITES THE PLATFORM-REPORTING EXPORT, the sellers' TINs, dates of birth and account numbers in clear, and records the run. requireAdmin only, its list of runs too.",
 
 	// ⚠ MEASURED, AND THE PROVISIONAL CLASSIFICATION WAS WRONG. The W1.3 groundwork report listed

@@ -190,15 +190,21 @@ var ErrCapabilityNotCleared = errors.New("economy: this capability takes test mo
 
 // CapabilityRefusal says which capability refused live money, and its class — or, when the capability is
 // cleared but the workspace's plan keeps it on test money (B32.12), the plan's refusal; or, when the workspace's
-// verification keeps it out (B30.4), the level it needs, or the limit it is over.
+// verification keeps it out (B30.4), the level it needs, or the limit it is over; or, while an operator has the
+// workspace frozen (B30.8), the freeze.
 type CapabilityRefusal struct {
 	Capability Capability
 	Plan       *plans.Refusal
 	Level      *LevelRefusal
+	Freeze     *Freeze
 }
 
 func (e *CapabilityRefusal) Error() string {
 	switch {
+	case e.Freeze != nil:
+		// The workspace is told it is frozen and on which case, never the operator's reason.
+		return fmt.Sprintf("%s is refused: an operator has frozen this workspace's money capabilities on compliance case %s. "+
+			"Talyvor's own services still work", e.Capability.Name, e.Freeze.CaseID)
 	case e.Plan != nil:
 		return e.Plan.Error()
 	case e.Level != nil:
@@ -208,9 +214,11 @@ func (e *CapabilityRefusal) Error() string {
 		e.Capability.Name, e.Capability.Class)
 }
 
-// Is makes a refusal an ErrCapabilityNotCleared, and a verification level's an ErrVerificationNeeded too.
+// Is makes a refusal an ErrCapabilityNotCleared, a verification level's an ErrVerificationNeeded too, and a freeze's
+// an ErrWorkspaceFrozen.
 func (e *CapabilityRefusal) Is(target error) bool {
-	return target == ErrCapabilityNotCleared || (target == ErrVerificationNeeded && e.Level != nil)
+	return target == ErrCapabilityNotCleared || (target == ErrVerificationNeeded && e.Level != nil) ||
+		(target == ErrWorkspaceFrozen && e.Freeze != nil)
 }
 
 // Unwrap is the plan's refusal, when the plan refused.
@@ -476,6 +484,10 @@ func spendForCapability(ctx context.Context, tx pgx.Tx, workspaceID, key string,
 	if amount <= 0 {
 		return 0, nil
 	}
+	// B30.8: a frozen workspace's AMBER and RED capabilities take no money, test-funded credits included.
+	if err := refuseFrozen(ctx, tx, workspaceID, c); err != nil {
+		return 0, err
+	}
 	refusal, err := capabilityLive(ctx, tx, workspaceID, c)
 	if err != nil || refusal == nil {
 		return 0, err
@@ -519,6 +531,11 @@ func (s *DualTokenStore) requireBilledCapability(ctx context.Context, q pgxDB, w
 	c, ok := CapabilityByKey(key)
 	if !ok {
 		return fmt.Errorf("economy: no wallet capability is called %q", key)
+	}
+	// B30.8: a frozen workspace's AMBER and RED capabilities take no money, test or live. A caller that moves the
+	// money in a transaction asks again inside it (payCompanyAgent).
+	if err := refuseFrozen(ctx, q, workspaceID, c); err != nil {
+		return err
 	}
 	if !s.liveStripe {
 		return nil
