@@ -617,10 +617,15 @@ func (s *StatusPage) StartCacher(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// pageCSP is everything the page loads (B37.3): its one inline <style>. It runs no script, loads no font or image
+// (the mark is inline SVG), and the meta refresh is a navigation, which CSP does not govern.
+const pageCSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
 // ServeHTTP serves the status page. JSON if the Accept header asks for
 // it, HTML otherwise. The HTML carries a meta-refresh so customers
 // camping on the page see fresh data every 60s without manual reload.
 func (s *StatusPage) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Security-Policy", pageCSP)
 	if strings.Contains(r.Header.Get("Accept"), "application/json") {
 		s.ServeJSON(w, r)
 		return

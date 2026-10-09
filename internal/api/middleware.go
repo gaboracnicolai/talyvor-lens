@@ -12,7 +12,7 @@ package api
 //   - GzipMiddleware        — opt-in gzip for large JSON bodies
 //   - RateLimitHeaders      — emits X-RateLimit-* on responses
 //   - SecurityHeadersMiddleware — X-Content-Type-Options, X-Frame-Options,
-//     Referrer-Policy, Content-Security-Policy on every response
+//     Referrer-Policy, Content-Security-Policy, Strict-Transport-Security on every response
 //   - CORSMiddleware        — allowlist-based CORS, off by default
 //   - APIError / WriteError — standardised error envelope
 
@@ -309,6 +309,11 @@ func i64toa(n int64) string { return itoa(int(n)) }
 //     are the IBM Plex fonts served by Google Fonts.  All JavaScript and CSS
 //     are inline (no external scripts; nonces are out of scope for now, so
 //     'unsafe-inline' is needed for those two directives).
+//
+//   - Strict-Transport-Security: max-age=31536000 — a browser that reached Lens
+//     over HTTPS (Caddy in front) keeps to HTTPS for a year. Neither
+//     includeSubDomains nor preload (B37.3); the self-TLS server's own
+//     hstsMiddleware value is kept where it already set one.
 func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 	const csp = "default-src 'self'; " +
 		"script-src 'self' 'unsafe-inline'; " +
@@ -325,6 +330,9 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Content-Security-Policy", csp)
+		if w.Header().Get("Strict-Transport-Security") == "" {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

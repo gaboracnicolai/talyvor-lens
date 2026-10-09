@@ -311,6 +311,19 @@ key server-side and calls these for you. Unauthenticated, this host serves only 
 - Anomaly scan: `GET /v1/api/anomalies/scan`.
 - Run benchmarks: `make bench`.
 
+### Status
+
+`/status` and `/status.json` are public and answer from a snapshot refreshed every 60 seconds. `/status.json` holds
+exactly these fields, and no secret, reference id, error text, host name or workspace detail:
+
+- `status`, `version`, `uptime_hours`, `updated_at`
+- `components[]`: `name`, `status`, `latency_ms`, `measured`, `message` (a fixed phrase, when there is one), `checked_at`
+- `providers[]`: `name`, `status`, `latency_ms`, `checked_at`
+- `rails[]`: `service`, `name`, `mode`, `status`, `last_success`, `last_failure`, `capabilities[]` (`key`, `cleared`)
+- `rails_summary`: `up`, `down`, `idle`, `down_names`
+
+A new field is added here and to `documentedKeys` in `internal/status/contract_test.go` together.
+
 ## Documentation
 
 Full index at [`docs/README.md`](docs/README.md). Highlights:

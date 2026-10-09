@@ -488,6 +488,9 @@ func TestSecurityHeadersMiddleware_SetsAllHeaders(t *testing.T) {
 	if got := rec.Header().Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
 		t.Errorf("Referrer-Policy = %q, want strict-origin-when-cross-origin", got)
 	}
+	if got := rec.Header().Get("Strict-Transport-Security"); got != "max-age=31536000" {
+		t.Errorf("Strict-Transport-Security = %q, want max-age=31536000", got)
+	}
 	csp := rec.Header().Get("Content-Security-Policy")
 	if csp == "" {
 		t.Fatal("Content-Security-Policy must be set")
