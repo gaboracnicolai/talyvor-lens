@@ -332,7 +332,7 @@ func TestRealPG_TheReservationHoldIsNeverTakenForAnEmbeddingsRequest(t *testing.
 	if _, blocked := p.agentReserveBlocks(ctx, key, ws, agentTestModel, ordinary, "req-hold-control", 4096); !blocked {
 		t.Fatalf("CONTROL FAILED: an exhausted sub-budget must BLOCK the hold for a %d-byte prompt "+
 			"(hold %d µLXC). Without this the passes below could just mean the reservation path is off.",
-			len(ordinary), reserveEstimateLXC(agentTestModel, ordinary, 4096))
+			len(ordinary), agentHoldLXC(agentTestModel, ordinary, 4096))
 	}
 	if n := holds(); n != 0 {
 		t.Fatalf("a blocked hold must leave no lxc_reservations row (the tx rolls back); got %d", n)

@@ -99,7 +99,7 @@ func TestB196_AnAgentSpendingFiveTimesItsUsualRateIsFlaggedAndPaused(t *testing.
 		t.Fatalf("the probe's question = %d %s", code, body)
 	}
 	charge := 400_000_000 - balanceOf(probe)
-	hold := reserveEstimateLXC("gpt-4o", strings.Repeat("q", 40000), 4096)
+	hold := agentHoldLXC("gpt-4o", strings.Repeat("q", 40000), 4096)
 	if charge <= 0 || hold <= charge || hold >= economy.UnusualSpendMultiple*charge {
 		t.Fatalf("a question charged %d µLXC and holds %d — want 0 < charge < hold < 5 charges", charge, hold)
 	}

@@ -45,7 +45,7 @@ func TestB1913_TheWorkspacesOwnSpendIsHeldToItsUnallocatedLXC(t *testing.T) {
 	}
 
 	const prompt = "what does the ledger say about this quarter?"
-	hold := reserveEstimateLXC("gpt-4o", prompt, maxOut)
+	hold := agentHoldLXC("gpt-4o", prompt, maxOut)
 	if hold <= 2_000_000 || hold > 8_000_000 {
 		t.Fatalf("the question holds %d µLXC — it must cost more than the workspace's 2 unallocated LXC and no more than the agent's 8", hold)
 	}

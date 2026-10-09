@@ -140,6 +140,41 @@ func reserveEstimateLXC(model, prompt string, maxOutTokens int) int64 {
 	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
 }
 
+// agentHoldLXC is the hold an agent's request takes (B17.106): reserveEstimateLXC with its input counted by
+// holdInputTokens rather than len(prompt)/4, so an answer that uses all of its max_tokens still settles inside
+// its hold. The settle cuts a charge to the hold (B35.3) and writes the rest off, so a hold below what the
+// provider counts is an answer the ledger under-charges. Chat admission keeps reserveEstimateLXC.
+func agentHoldLXC(model, prompt string, maxOutTokens int) int64 {
+	if maxOutTokens < 0 {
+		maxOutTokens = 0
+	}
+	estUSD, _ := alerts.CostUSDResolved(model, catalog.PurposeHold, holdInputTokens(prompt), 0, 0, maxOutTokens)
+	return int64(math.Ceil(estUSD / economy.LXCUSDValue * 1e6)) // µLXC
+}
+
+// holdFramingTokens is what a provider adds to a request's text before counting it: the roles and turn markers
+// around each message.
+const holdFramingTokens = 16
+
+// holdInputTokens counts a prompt's input as densely as a provider's tokenizer does: a token for each digit,
+// which Claude counts one by one, a token for every three other bytes, and the request's framing. On 9 Oct the
+// testers' 48-character sum ("What is 4219 + 5977? Reply with the number only.") was 25 input tokens to Claude
+// Sonnet 5; len(prompt)/4 held 12, and the answer that ran to its max_tokens of 16 cost 2100 µLXC against a hold
+// of 1840. Never less than len(prompt)/4, so no hold is smaller than it was. An empty prompt (an embeddings
+// body, which carries `input`, not `messages`) counts nothing, as before.
+func holdInputTokens(prompt string) int {
+	if prompt == "" {
+		return 0
+	}
+	digits := 0
+	for i := 0; i < len(prompt); i++ {
+		if prompt[i] >= '0' && prompt[i] <= '9' {
+			digits++
+		}
+	}
+	return digits + (len(prompt)-digits+2)/3 + holdFramingTokens
+}
+
 // platformFeeReader is the platform fee a charge of an amount would carry (B32.11). *economy.DualTokenStore
 // satisfies it.
 type platformFeeReader interface {
