@@ -140,6 +140,9 @@ var Manifest = map[string]Entry{
 	"workspace_verifications":   {Retain, "B30.4: audit-guarded (0230, append-only): each verification check — level, method, status, date and the provider's evidence reference, never a document; customer due-diligence record retention"},
 	"money_accounts":            {Retain, "B30.2: each account in pounds, euros, dollars or USDC; the append-only money_postings reference it by foreign key, so an account with money moved is closed, never deleted; financial-record retention"},
 
+	// B30.9: its key is longer than the rest, so it stands apart rather than realign them.
+	"capability_terms_acceptances": {Retain, "B30.9: audit-guarded (0235, append-only): each acceptance of a capability's terms — the version, the person, when, and an HMAC of the address it came from, never the address; evidence of what the customer agreed to"},
+
 	// token_events is audit-guarded TOO, but migration 0055's trigger carries a sanctioned
 	// exception: DELETE is permitted while the retention-bypass session flag is set — the flag the
 	// retention sweeper already uses. So it is deletable through a path that exists and is already

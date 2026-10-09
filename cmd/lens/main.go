@@ -31,6 +31,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
+	capabilityterms "github.com/talyvor/lens/docs/terms"
 	"github.com/talyvor/lens/internal/ab"
 	"github.com/talyvor/lens/internal/agentcard"
 	"github.com/talyvor/lens/internal/alerts"
@@ -189,6 +190,14 @@ func main() {
 	// money, or revoke it.
 	if len(os.Args) > 1 && (os.Args[1] == "clearances" || os.Args[1] == "wallet-clearances") {
 		if err := runWalletClearances(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	// `lens terms` (B30.9): each capability's terms, and publishing a changed text as the next version.
+	if len(os.Args) > 1 && os.Args[1] == "terms" {
+		if err := runCapabilityTerms(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -1895,6 +1904,13 @@ func run() error {
 	partnerRegistry.UseScreeningList(screeningLists)
 	screener := screening.NewScreener(pool, partnerRegistry)
 	dualToken.SetScreener(screener)
+	// B30.9 — each capability's terms, accepted before first use: version 1 of every text Lens carries
+	// (docs/terms/<capability>.md) is published now, and the capability refuses a workspace that has not accepted it.
+	if published, err := dualToken.PublishFirstTerms(ctx, economy.CapabilityTermsTexts(capabilityterms.FS)); err != nil {
+		slog.Error("terms: publishing the capabilities' first terms failed; Lens publishes them when it next starts", slog.String("err", err.Error()))
+	} else if len(published) > 0 {
+		slog.Info("terms: published version 1 of the capabilities' terms", slog.Any("capabilities", published))
+	}
 	sanctionsAlert := &sanctionsListAlert{}
 	if sink, err := modelwatch.NewWebhookNotifier(cfg.OperatorAlertWebhookURL, cfg.OperatorAlertWebhookSecret); err != nil {
 		slog.Error("screening: LENS_OPERATOR_ALERT_WEBHOOK_URL is invalid; a sanctions list that does not download is only logged", slog.String("err", err.Error()))
@@ -4545,6 +4561,7 @@ func run() error {
 		mountTaxProfileRoutes(authed, taxProfiles)                                      // B32.38
 		mountSellerTaxRoutes(authed, sellerTax)                                         // B32.41
 		mountVerificationRoutes(authed, dualToken, partnerRegistry.Verification)        // B30.4
+		mountCapabilityTermsRoutes(authed, dualToken)                                   // B30.9
 		mountKYAAgentRoutes(authed, kyaSvc, dualToken)                                  // B30.5
 		mountMarketUseRoutes(authed, marketStore, r, marketMeter, dualToken)            // B20.2
 		mountMarketReceiptRoutes(authed, marketStore)                                   // B32.40

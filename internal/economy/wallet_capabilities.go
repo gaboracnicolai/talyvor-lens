@@ -191,12 +191,14 @@ var ErrCapabilityNotCleared = errors.New("economy: this capability takes test mo
 // CapabilityRefusal says which capability refused live money, and its class — or, when the capability is
 // cleared but the workspace's plan keeps it on test money (B32.12), the plan's refusal; or, when the workspace's
 // verification keeps it out (B30.4), the level it needs, or the limit it is over; or, while an operator has the
-// workspace frozen (B30.8), the freeze.
+// workspace frozen (B30.8), the freeze; or, until the workspace accepts the capability's latest terms (B30.9), their
+// version.
 type CapabilityRefusal struct {
 	Capability Capability
 	Plan       *plans.Refusal
 	Level      *LevelRefusal
 	Freeze     *Freeze
+	Terms      *TermsNeeded
 }
 
 func (e *CapabilityRefusal) Error() string {
@@ -205,6 +207,9 @@ func (e *CapabilityRefusal) Error() string {
 		// The workspace is told it is frozen and on which case, never the operator's reason.
 		return fmt.Sprintf("%s is refused: an operator has frozen this workspace's money capabilities on compliance case %s. "+
 			"Talyvor's own services still work", e.Capability.Name, e.Freeze.CaseID)
+	case e.Terms != nil:
+		return fmt.Sprintf("%s needs its terms accepted before it is used: this workspace has not accepted version %d of them. "+
+			"Read them and accept them, then try again", e.Capability.Name, e.Terms.Version)
 	case e.Plan != nil:
 		return e.Plan.Error()
 	case e.Level != nil:
@@ -214,11 +219,11 @@ func (e *CapabilityRefusal) Error() string {
 		e.Capability.Name, e.Capability.Class)
 }
 
-// Is makes a refusal an ErrCapabilityNotCleared, a verification level's an ErrVerificationNeeded too, and a freeze's
-// an ErrWorkspaceFrozen.
+// Is makes a refusal an ErrCapabilityNotCleared, a verification level's an ErrVerificationNeeded too, a freeze's
+// an ErrWorkspaceFrozen, and unaccepted terms' an ErrTermsNotAccepted.
 func (e *CapabilityRefusal) Is(target error) bool {
 	return target == ErrCapabilityNotCleared || (target == ErrVerificationNeeded && e.Level != nil) ||
-		(target == ErrWorkspaceFrozen && e.Freeze != nil)
+		(target == ErrWorkspaceFrozen && e.Freeze != nil) || (target == ErrTermsNotAccepted && e.Terms != nil)
 }
 
 // Unwrap is the plan's refusal, when the plan refused.
@@ -488,6 +493,10 @@ func spendForCapability(ctx context.Context, tx pgx.Tx, workspaceID, key string,
 	if err := refuseFrozen(ctx, tx, workspaceID, c); err != nil {
 		return 0, err
 	}
+	// B30.9: nor does a capability whose latest terms the workspace has not accepted.
+	if err := refuseUnaccepted(ctx, tx, workspaceID, c); err != nil {
+		return 0, err
+	}
 	refusal, err := capabilityLive(ctx, tx, workspaceID, c)
 	if err != nil || refusal == nil {
 		return 0, err
@@ -535,6 +544,10 @@ func (s *DualTokenStore) requireBilledCapability(ctx context.Context, q pgxDB, w
 	// B30.8: a frozen workspace's AMBER and RED capabilities take no money, test or live. A caller that moves the
 	// money in a transaction asks again inside it (payCompanyAgent).
 	if err := refuseFrozen(ctx, q, workspaceID, c); err != nil {
+		return err
+	}
+	// B30.9: and a capability with terms takes no money until the workspace accepts their latest version.
+	if err := refuseUnaccepted(ctx, q, workspaceID, c); err != nil {
 		return err
 	}
 	if !s.liveStripe {
