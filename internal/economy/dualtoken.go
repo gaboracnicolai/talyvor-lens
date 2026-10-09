@@ -333,6 +333,9 @@ type DualTokenStore struct {
 	// screener screens who money in or out through a partner is from or to before it moves (B30.6); nil, no such
 	// money moves.
 	screener PaymentScreener
+	// monitor runs transaction monitoring on each payment in or out through a partner once it has moved (B30.7);
+	// nil, the nightly run is the only one.
+	monitor MoneyMonitor
 	// B19.17: the marketplace a schedule pays a listing through.
 	listings ListingCharger
 	// B19.15: the marketplace a payment to another company's agent goes through.

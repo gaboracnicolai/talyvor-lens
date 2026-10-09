@@ -48,6 +48,7 @@ var operatorReadable = map[string]string{
 	"/v1/admin/marketplace/parked-uses":   "B26.3: billed marketplace uses Stripe refused too often to retry, with its reason — for an operator to see to. market.Store.ParkedUses is Query-only.",
 	"/v1/admin/tax-profiles/flagged":      "B32.38: buyer tax profiles whose Stripe evidence contradicts the declared country, with the reason — for an operator to see to. taxprofile.Store.Flagged is Query-only.",
 	"/v1/admin/screening":                 "B30.6: each sanctions list — entries, when it was loaded, a failed download's reason — and the compliance cases screening opened, for an operator to see to. screening.Store.Lists and Screener.Cases are Query-only.",
+	"/v1/admin/compliance/alerts":         "B30.7: each alert transaction monitoring raised on a compliance case — the rule, the payments, why — for an operator to see to. monitoring.Monitor.Alerts is Query-only.",
 	"/v1/admin/operator-audit":            "B27.28: the operator audit trail, filtered — the Operator screen shows it. operatoraudit.Store.List is Query-only.",
 	"/v1/admin/operator-audit/export":     "B27.28: the same trail as a CSV download. operatoraudit.Store.List is Query-only.",
 	"/v1/admin/pool-royalty/detect":       "self-dealing detection read. Query-only reader, explicitly NOT economy-gated so forensics survive the kill switch.",

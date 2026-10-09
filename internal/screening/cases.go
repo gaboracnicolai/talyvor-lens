@@ -204,7 +204,7 @@ func (s *Screener) screen(ctx context.Context, c Case, ask func(partners.Screeni
 			INSERT INTO compliance_cases (id, workspace_id, kind, subject_kind, subject_id, name, outcome, status, matches, provider,
 				capability, direction, amount_minor, currency, funding)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-			ON CONFLICT (workspace_id, subject_kind, subject_id, name, direction, currency) DO NOTHING RETURNING `+caseCols+`)
+			ON CONFLICT (workspace_id, subject_kind, subject_id, name, direction, currency) WHERE kind = 'screening' DO NOTHING RETURNING `+caseCols+`)
 		SELECT `+caseCols+` FROM ins
 		UNION ALL
 		SELECT `+caseCols+` FROM compliance_cases WHERE workspace_id = $2 AND subject_kind = $4 AND subject_id = $5 AND name = $6
