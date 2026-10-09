@@ -26,6 +26,7 @@ var documentedKeys = []string{
 	"providers", "providers[].name", "providers[].status", "providers[].latency_ms", "providers[].checked_at",
 	"rails", "rails[].service", "rails[].name", "rails[].mode", "rails[].status", "rails[].last_success",
 	"rails[].last_failure", "rails[].capabilities", "rails[].capabilities[].key", "rails[].capabilities[].cleared",
+	"rails[].lists_age_hours",
 	"rails_summary", "rails_summary.up", "rails_summary.down", "rails_summary.idle", "rails_summary.down_names",
 }
 
@@ -50,11 +51,13 @@ func (halfDown) Rails() []partners.Rail {
 	return out
 }
 
-// statusJSON is /status.json from a page whose PostgreSQL fails with plantedError and whose rails are halfDown.
+// statusJSON is /status.json from a page whose PostgreSQL fails with plantedError, whose rails are halfDown, and whose
+// sanctions lists are 52 hours old.
 func statusJSON(t *testing.T) map[string]any {
 	t.Helper()
 	page := newTestPage(t, &fakePinger{err: errors.New(plantedError)})
 	page.UseMoneyRails(halfDown{}, fxCleared{})
+	page.UseScreeningLists(fakeLists{age: 52 * time.Hour, stale: true})
 	page.UpdateCache(page.Check(context.Background()))
 	rec := httptest.NewRecorder()
 	page.ServeJSON(rec, httptest.NewRequest(http.MethodGet, "/status.json", nil))
