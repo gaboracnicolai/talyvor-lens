@@ -87,7 +87,7 @@ func publishedRateCases() []publishedRateCase {
 		// google gets NO cache discount in withCacheRates (cache read == input), so cachedIn == in.
 		// CORRECTED: held 0.075/0.30, an older Flash generation's rate — 4x under in, 8.3x under out.
 		{"gemini-2.5-flash", 0.30, 0.30, 0, 2.50, "gemini pricing: 2.5 Flash $0.30/$2.50 (was wrongly 0.075/0.30)"},
-		// Correct for prompts <= 200k. Above that Google charges 2.50/15.00 and Lens does not model it.
+		// Prompts <= 200k. Above that its LongPrompt prices apply — see TestLongPromptPrices.
 		{"gemini-2.5-pro", 1.25, 1.25, 0, 10.00, "gemini pricing: 2.5 Pro, <=200k-token tier"},
 
 		// ── Groq ── https://groq.com/pricing (fetched 2026-07-26). BOTH ALREADY CORRECT — pinned so
@@ -131,6 +131,30 @@ func TestLongContextVariantsResolve(t *testing.T) {
 		}
 		if in <= 0 || out <= 0 {
 			t.Errorf("%s resolved to a zero rate: in=%v out=%v", id, in, out)
+		}
+	}
+}
+
+// B37.12 — above 200k prompt tokens Google prices the WHOLE request at its long-prompt rates
+// (https://ai.google.dev/gemini-api/docs/pricing, paid tier, read 2026-10-09); at or below, the standard ones.
+func TestLongPromptPrices(t *testing.T) {
+	cases := []struct {
+		id                string
+		prompt            int
+		in, cachedIn, out float64
+	}{
+		{"gemini-3.1-pro-preview", 250000, 4.00, 0.40, 18.00},
+		{"gemini-3.1-pro-preview", 200000, 2.00, 2.00, 12.00},
+		{"gemini-3.1-pro-preview", 150000, 2.00, 2.00, 12.00},
+		{"gemini-2.5-pro", 250000, 2.50, 0.25, 15.00},
+		{"gemini-2.5-pro", 150000, 1.25, 1.25, 10.00},
+	}
+	for _, c := range cases {
+		rates, prov := ResolveRatesAt(c.id, PurposeCharge, c.prompt)
+		if prov != ProvenanceExact || !nearly(rates.InputPer1M, c.in) || !nearly(rates.CachedInputPer1M, c.cachedIn) ||
+			!nearly(rates.OutputPer1M, c.out) || !nearly(rates.CacheWritePer1M, c.in) {
+			t.Errorf("%s at %d prompt tokens: %+v (%s), want in %v / cache hit %v / cache write %v / out %v, exact",
+				c.id, c.prompt, rates, prov, c.in, c.cachedIn, c.in, c.out)
 		}
 	}
 }

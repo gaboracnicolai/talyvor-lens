@@ -99,7 +99,7 @@ func newAlertManager(pool pgxDB, nc *nats.Conn, rules []SpendRule) *AlertManager
 // from the catalog (the single source of truth — Upgrade 16). Unknown models
 // cost 0 — we'd rather miss an alert than fire a false one off bad data.
 func costUSD(model string, inputTokens, outputTokens int) float64 {
-	inP, outP, ok := catalog.Price(model)
+	inP, _, _, outP, ok := catalog.PriceDetailedAt(model, inputTokens)
 	if !ok {
 		return 0
 	}
@@ -138,7 +138,7 @@ func CostUSD(model string, inputTokens, outputTokens int) float64 {
 // Wire the counts from inference.Usage's normalized breakdown: UncachedInputTokens,
 // CachedInputTokens, CacheWriteInputTokens, OutputTokens.
 func CostUSDDetailed(model string, uncachedInput, cachedInput, cacheWriteInput, output int) float64 {
-	inP, cachedP, writeP, outP, ok := catalog.PriceDetailed(model)
+	inP, cachedP, writeP, outP, ok := catalog.PriceDetailedAt(model, uncachedInput+cachedInput+cacheWriteInput)
 	if !ok {
 		return 0
 	}
@@ -581,7 +581,7 @@ func (a *AlertManager) evaluateAllRules(ctx context.Context) {
 // charge falls back LOW (a defensible floor). See catalog.Purpose.
 func CostUSDResolved(model string, purpose catalog.Purpose,
 	uncachedInput, cachedInput, cacheWriteInput, output int) (float64, catalog.Provenance) {
-	rates, prov := catalog.ResolveRates(model, purpose)
+	rates, prov := catalog.ResolveRatesAt(model, purpose, uncachedInput+cachedInput+cacheWriteInput)
 	usd := (float64(uncachedInput)*rates.InputPer1M +
 		float64(cachedInput)*rates.CachedInputPer1M +
 		float64(cacheWriteInput)*rates.CacheWritePer1M +

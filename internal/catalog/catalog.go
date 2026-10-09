@@ -65,6 +65,19 @@ type Model struct {
 	// guessing either from the name.
 	ReleaseDate string `json:"release_date,omitempty"`
 	Tier        string `json:"tier,omitempty"`
+	// B37.12 — a price that follows the prompt's length (Gemini Pro above 200k tokens). nil = one price.
+	LongPrompt *LongPromptRates `json:"long_prompt,omitempty"`
+}
+
+// LongPromptRates are the prices a provider charges for the WHOLE request — every input, cache and
+// output token — once its prompt is longer than AboveTokens. The prompt's length counts all its input
+// tokens, cache reads and writes included. A zero cache rate falls back to InputPer1M, as in PriceDetailed.
+type LongPromptRates struct {
+	AboveTokens      int     `json:"above_tokens"`
+	InputPer1M       float64 `json:"input_per_1m"`
+	OutputPer1M      float64 `json:"output_per_1m"`
+	CachedInputPer1M float64 `json:"cached_input_per_1m,omitempty"`
+	CacheWritePer1M  float64 `json:"cache_write_per_1m,omitempty"`
 }
 
 // The tiers a model is in: the most capable a provider offers, its everyday middle, its cheap and fast
@@ -165,12 +178,21 @@ func (r *Registry) Price(id string) (in, out float64, ok bool) {
 // fall back to the input rate: the conservative choice that never bills a cached
 // token at zero and never under-states cost.
 func (r *Registry) PriceDetailed(id string) (in, cachedIn, cacheWrite, out float64, ok bool) {
+	return r.PriceDetailedAt(id, 0)
+}
+
+// PriceDetailedAt is PriceDetailed for a request whose prompt is promptTokens input tokens long (cache
+// reads and writes included): above the model's LongPrompt threshold it returns the long-prompt rates.
+func (r *Registry) PriceDetailedAt(id string, promptTokens int) (in, cachedIn, cacheWrite, out float64, ok bool) {
 	m, ok := r.Get(id)
 	if !ok {
 		return 0, 0, 0, 0, false
 	}
 	in, out = m.InputPer1M, m.OutputPer1M
 	cachedIn, cacheWrite = m.CachedInputPer1M, m.CacheWritePer1M
+	if lp := m.LongPrompt; lp != nil && promptTokens > lp.AboveTokens {
+		in, out, cachedIn, cacheWrite = lp.InputPer1M, lp.OutputPer1M, lp.CachedInputPer1M, lp.CacheWritePer1M
+	}
 	if cachedIn == 0 {
 		cachedIn = in
 	}
@@ -334,6 +356,7 @@ func (r *Registry) DecodeOverrides(raw []byte) ([]Model, error) {
 		base := r.byID[probe.ID] // zero Model when the id is new — the pre-existing behaviour
 		base.InputPer1M, base.OutputPer1M = 0, 0
 		base.CachedInputPer1M, base.CacheWritePer1M = 0, 0
+		base.LongPrompt = nil // a price too: a reprice that does not restate it drops it
 		// DisallowUnknownFields HERE and deliberately NOT on the id probe above: the
 		// probe reads one field on purpose, so refusing unknowns there would refuse
 		// every document ever written.
@@ -389,6 +412,9 @@ func Get(id string) (Model, bool)                { return defaultRegistry.Get(id
 func Price(id string) (in, out float64, ok bool) { return defaultRegistry.Price(id) }
 func PriceDetailed(id string) (in, cachedIn, cacheWrite, out float64, ok bool) {
 	return defaultRegistry.PriceDetailed(id)
+}
+func PriceDetailedAt(id string, promptTokens int) (in, cachedIn, cacheWrite, out float64, ok bool) {
+	return defaultRegistry.PriceDetailedAt(id, promptTokens)
 }
 func CapabilitiesOf(id string) Capabilities { return defaultRegistry.CapabilitiesOf(id) }
 func Resolve(id string) string              { return defaultRegistry.Resolve(id) }
