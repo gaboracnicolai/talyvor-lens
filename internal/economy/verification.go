@@ -135,14 +135,15 @@ type VerificationCheck struct {
 	CheckedAt     time.Time         `json:"checked_at"` // when it reached its status
 }
 
-// WorkspaceVerification is the owner's record: the level the checks reach, the level live money is judged by, and
-// every check, newest first.
+// WorkspaceVerification is the owner's record: the level the checks reach, the level live money is judged by, the
+// country live money is used from (B30.10), and every check, newest first.
 type WorkspaceVerification struct {
 	WorkspaceID string              `json:"workspace_id"`
 	Level       VerificationLevel   `json:"level"`
 	Meaning     string              `json:"meaning"`
 	LiveLevel   VerificationLevel   `json:"live_level"` // passes by a real provider only
 	LiveMeaning string              `json:"live_meaning"`
+	LiveCountry string              `json:"live_country,omitempty"` // a real provider confirmed it
 	Checks      []VerificationCheck `json:"checks"`
 }
 
@@ -282,6 +283,7 @@ func (s *DualTokenStore) Verification(ctx context.Context, kyc partners.KYCProvi
 	v := WorkspaceVerification{WorkspaceID: workspaceID, Checks: checks}
 	v.Level, v.LiveLevel = reachedLevels(checks)
 	v.Meaning, v.LiveMeaning = v.Level.Meaning(), v.LiveLevel.Meaning()
+	v.LiveCountry = liveCountry(checks)
 	return v, nil
 }
 
@@ -333,6 +335,28 @@ func liveVerificationLevel(ctx context.Context, q pgxDB, workspaceID string) (Ve
 	}
 	_, live := reachedLevels(checks)
 	return live, nil
+}
+
+// liveCountry is the country the owner is verified in for live money (B30.10): the one the highest-level check a real
+// provider passed confirmed — the company's at L3, the person's at L2 — the newest at that level. "" when none names
+// one.
+func liveCountry(checks []VerificationCheck) string {
+	country, at := "", LevelSignedIn
+	for _, c := range checks { // newest first
+		if c.Status == string(partners.StatusCompleted) && !c.Test && c.Country != "" && c.Level > at {
+			country, at = c.Country, c.Level
+		}
+	}
+	return country
+}
+
+// ownerCountry is the country workspaceID's live money is used from: its owner's verified one (liveCountry).
+func ownerCountry(ctx context.Context, q pgxDB, workspaceID string) (string, error) {
+	checks, err := readVerificationChecks(ctx, q, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return liveCountry(checks), nil
 }
 
 // LevelLimit is the most one movement of live money may move at a level, in a currency's minor units.

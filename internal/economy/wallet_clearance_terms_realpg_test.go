@@ -9,8 +9,8 @@ import (
 )
 
 // B30.1 — on the migrated schema, every new money capability takes test-funded money and refuses live money
-// naming its class, with no ledger row for the refusal; a clearance lets live money through only from a country
-// it lists and only until it expires.
+// naming its class, with no ledger row for the refusal; a clearance lets live money through only for an owner verified
+// in a country it lists and only until it expires.
 func TestB30Capabilities_TestMoneyOnlyUntilClearedForTheCountry(t *testing.T) {
 	pool := supplyPool(t)
 	gb := WithUseCountry(context.Background(), "GB")
@@ -92,39 +92,48 @@ func TestB30Capabilities_TestMoneyOnlyUntilClearedForTheCountry(t *testing.T) {
 		}
 	}
 
-	// A clearance for Ireland: live money from Ireland goes through, live money from Great Britain is refused as
-	// though there were no clearance, and so is a use from no known country.
+	// A clearance for Ireland: live money by an owner verified in Ireland goes through; by one verified in Great
+	// Britain it is refused naming class RED and the country, as though there were no clearance, and so it is by one
+	// verified in no country (B30.10: the owner's country is the one verification confirmed, whatever the caller says).
 	payments, _ := CapabilityByKey(CapabilityPaymentsOut)
-	const liveWS = "ws-b301-live-" + CapabilityPaymentsOut
-	planGatesOnPlan(t, pool, liveWS, "team", false) // B32.12: a plan with live money, which a cleared capability needs
-	liveVerified(t, pool, liveWS)                   // B30.4: and a verification level
+	const liveWS, gbWS, nowhereWS = "ws-b301-live-" + CapabilityPaymentsOut, "ws-b3010-gb", "ws-b3010-nowhere"
+	workspace(gbWS, FundingLive)
+	workspace(nowhereWS, FundingLive)
+	for ws, country := range map[string]string{liveWS: "IE", gbWS: "GB", nowhereWS: ""} {
+		planGatesOnPlan(t, pool, ws, "team", false) // B32.12: a plan with live money, which a cleared capability needs
+		liveVerifiedIn(t, pool, ws, country)        // B30.4: and a verification level
+	}
 	if _, err := s.ClearCapability(gb, CapabilityPaymentsOut, "nicolai", ClearanceTerms{Reference: "partner agreement PA-7",
 		Licence: "EMI-900123", Partner: "Test Payments Ltd", Countries: []string{"ie"}, ExpiresAt: time.Now().Add(24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := use(WithUseCountry(context.Background(), "IE"), liveWS, CapabilityPaymentsOut); err != nil {
-		t.Fatalf("live money from a country the clearance lists = %v, want accepted", err)
+	if err := use(gb, liveWS, CapabilityPaymentsOut); err != nil {
+		t.Fatalf("live money by an owner verified in a country the clearance lists = %v, want accepted", err)
 	}
-	if err := use(gb, liveWS, CapabilityPaymentsOut); !refused(err, payments) {
-		t.Fatalf("live money from a country the clearance does not list = %v, want refused naming class RED", err)
+	if err := use(WithUseCountry(context.Background(), "IE"), gbWS, CapabilityPaymentsOut); !refused(err, payments) ||
+		!strings.Contains(err.Error(), "only for owners verified in IE; this workspace is verified in GB") {
+		t.Fatalf("live money by an owner verified in a country the clearance does not list = %v, want refused naming class RED and GB", err)
 	}
-	if err := use(context.Background(), liveWS, CapabilityPaymentsOut); !refused(err, payments) {
-		t.Fatalf("live money from no known country = %v, want refused naming class RED", err)
+	if err := use(gb, nowhereWS, CapabilityPaymentsOut); !refused(err, payments) || !strings.Contains(err.Error(), "no verified country") {
+		t.Fatalf("live money by an owner verified in no country = %v, want refused naming class RED", err)
 	}
 	if n, sum := ledger(liveWS); n != 1 || sum != -10*lxc {
-		t.Fatalf("after the cleared use and two refusals: %d rows summing %d, want one of −10 LXC", n, sum)
+		t.Fatalf("after the cleared use: %d rows summing %d, want one of −10 LXC", n, sum)
+	}
+	if n, _ := ledger(gbWS); n != 0 {
+		t.Fatalf("the refusal for Great Britain wrote %d ledger rows", n)
 	}
 
-	// A clearance for Great Britain that passed its expiry an hour ago refuses live money from Great Britain.
+	// A clearance for Great Britain that passed its expiry an hour ago refuses live money by an owner verified there.
 	if _, err := pool.Exec(gb, `INSERT INTO wallet_clearances (capability, action, operator, reference, countries, partner,
 		licence_reference, expires_at) VALUES ($1, 'clear', 'nicolai', 'partner agreement PA-8', '{GB}', 'Test Payments Ltd',
 		'EMI-900123', now() - interval '1 hour')`, CapabilityPaymentsOut); err != nil {
 		t.Fatal(err)
 	}
-	if err := use(gb, liveWS, CapabilityPaymentsOut); !refused(err, payments) {
+	if err := use(gb, gbWS, CapabilityPaymentsOut); !refused(err, payments) {
 		t.Fatalf("live money under an expired clearance = %v, want refused naming class RED", err)
 	}
-	if n, _ := ledger(liveWS); n != 1 {
+	if n, _ := ledger(gbWS); n != 0 {
 		t.Fatalf("the refusal under an expired clearance wrote a ledger row: %d rows", n)
 	}
 	caps, err := s.WalletCapabilities(gb)
