@@ -65,8 +65,11 @@ docker compose exec lens /lens clearances log
   - when it ends (`--expires`, a day or an RFC 3339 time).
 
   It also needs a reference: the lawyer's opinion or the partner's agreement.
-- Live money from a country the clearance does not list is refused exactly as if there were no clearance,
-  and so is a use whose country is not known. Once the expiry passes, live money is refused again.
+- Live money is used from the owner's country: the one their verification confirmed (the company's at L3,
+  the person's at L2, from a real provider's check). An owner verified in a country the clearance does not
+  list is refused as if there were no clearance, and the refusal names their country and the ones the
+  clearance lists; so is an owner whose checks confirm no country. Test money is used from everywhere.
+  Once the expiry passes, live money is refused again.
 - A clearance recorded before these terms existed names no country, so it no longer lets live money
   through. Record it again with its terms.
 - Every clear and every revoke is a row of `wallet_clearances`. That table is append-only, so it is the

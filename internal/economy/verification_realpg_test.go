@@ -21,14 +21,21 @@ type realKYC struct{ *partners.TestKYCProvider }
 
 func (realKYC) Name() string { return "kyc-partner" }
 
-// liveVerified records that ws passed every level's check with a real provider, and gives L1 a limit in every
-// currency that no test reaches: then live money asks nothing more of ws's verification.
-func liveVerified(t *testing.T, pool *pgxpool.Pool, ws string) {
+// liveVerified records that ws passed every level's check with a real provider, in Great Britain, and gives L1 a limit
+// in every currency that no test reaches: then live money asks nothing more of ws's verification.
+func liveVerified(t *testing.T, pool *pgxpool.Pool, ws string) { liveVerifiedIn(t, pool, ws, "GB") }
+
+// liveVerifiedIn is liveVerified with the identity and company checks confirming country ("" confirms none).
+func liveVerifiedIn(t *testing.T, pool *pgxpool.Pool, ws, country string) {
 	t.Helper()
 	ctx := context.Background()
 	for level, subject := range map[int]string{1: "contact", 2: "person", 3: "company"} {
-		if _, err := pool.Exec(ctx, `INSERT INTO workspace_verifications (workspace_id, level, subject, method, status, evidence_ref)
-			VALUES ($1, $2, $3, 'kyc-partner', 'completed', $4)`, ws, level, subject, fmt.Sprintf("ref-%s-%d", ws, level)); err != nil {
+		c := country
+		if level == 1 {
+			c = ""
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO workspace_verifications (workspace_id, level, subject, method, status, evidence_ref, country)
+			VALUES ($1, $2, $3, 'kyc-partner', 'completed', $4, $5)`, ws, level, subject, fmt.Sprintf("ref-%s-%d", ws, level), c); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,8 +23,9 @@ import (
 // An AMBER or RED capability takes only test-funded money until the operator records a clearance for it
 // (wallet_clearances, migration 0158: who, when, the lawyer's or partner's reference; 0194, B30.1: the licence,
 // the licensed partner, the countries it covers and its expiry), and revoking the clearance stops live money
-// again from the next use. A clearance past its expiry, or used from a country it does not list
-// (WithUseCountry), refuses live money exactly like no clearance. A GREEN capability takes any.
+// again from the next use. A clearance past its expiry refuses live money exactly like no clearance, and so does a
+// clearance used by an owner verified in a country it does not list (B30.10: the owner's country is the one their
+// verification confirmed), naming that country. A GREEN capability takes any.
 //
 // Money reaches a capability two ways, and both are judged:
 //
@@ -192,13 +194,30 @@ var ErrCapabilityNotCleared = errors.New("economy: this capability takes test mo
 // cleared but the workspace's plan keeps it on test money (B32.12), the plan's refusal; or, when the workspace's
 // verification keeps it out (B30.4), the level it needs, or the limit it is over; or, while an operator has the
 // workspace frozen (B30.8), the freeze; or, until the workspace accepts the capability's latest terms (B30.9), their
-// version.
+// version; or, when the capability is cleared but not for the owner's country (B30.10), that country.
 type CapabilityRefusal struct {
 	Capability Capability
 	Plan       *plans.Refusal
 	Level      *LevelRefusal
 	Freeze     *Freeze
 	Terms      *TermsNeeded
+	Country    *CountryRefusal
+}
+
+// CountryRefusal is a clearance that does not reach the owner's country: the country the owner is verified in ("" when
+// no check confirmed one) and the countries the clearance lists.
+type CountryRefusal struct {
+	Country   string   `json:"country"`
+	Countries []string `json:"countries"`
+}
+
+func (r *CountryRefusal) message(c Capability) string {
+	where := fmt.Sprintf("%s is class %s and takes real money only for owners verified in %s", c.Name, c.Class,
+		strings.Join(r.Countries, ", "))
+	if r.Country == "" {
+		return where + "; this workspace has no verified country yet: its identity or company check confirms one"
+	}
+	return fmt.Sprintf("%s; this workspace is verified in %s", where, r.Country)
 }
 
 func (e *CapabilityRefusal) Error() string {
@@ -214,6 +233,8 @@ func (e *CapabilityRefusal) Error() string {
 		return e.Plan.Error()
 	case e.Level != nil:
 		return e.Level.message(e.Capability)
+	case e.Country != nil:
+		return e.Country.message(e.Capability)
 	}
 	return fmt.Sprintf("%s is class %s: it takes test money only until Talyvor records a clearance for it, and this would use real money",
 		e.Capability.Name, e.Capability.Class)
@@ -428,20 +449,30 @@ func clearancesInForce(ctx context.Context, q pgxDB) (map[string]Clearance, erro
 	return out, rows.Err()
 }
 
+// clearanceCountries is the countries key's clearance in force lists: nil unless its latest clearance row is a clear
+// that has not expired and names its countries.
+func clearanceCountries(ctx context.Context, q pgxDB, key string) ([]string, error) {
+	var countries []string
+	err := q.QueryRow(ctx, `SELECT CASE WHEN action = 'clear' AND COALESCE(expires_at > now(), false) THEN countries END
+		FROM wallet_clearances WHERE capability = $1 ORDER BY id DESC LIMIT 1`, key).Scan(&countries)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("economy: clearance: %w", err)
+	}
+	if len(countries) == 0 {
+		return nil, nil
+	}
+	return countries, nil
+}
+
 // capabilityCleared reports whether key's latest clearance row is a clear that has not expired and lists the
 // country the use comes from (WithUseCountry). Anything else — a revoke, an expired clear, another country, no
 // known country — is no clearance.
 func capabilityCleared(ctx context.Context, q pgxDB, key string) (bool, error) {
-	var cleared bool
-	err := q.QueryRow(ctx, `SELECT action = 'clear' AND COALESCE(expires_at > now(), false) AND $2 = ANY(countries)
-		FROM wallet_clearances WHERE capability = $1 ORDER BY id DESC LIMIT 1`, key, useCountry(ctx)).Scan(&cleared)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("economy: clearance: %w", err)
-	}
-	return cleared, nil
+	countries, err := clearanceCountries(ctx, q, key)
+	return slices.Contains(countries, useCountry(ctx)), err
 }
 
 // CapabilityCleared reports whether capability key has a clearance in force for the country the use comes from
@@ -451,12 +482,15 @@ func (s *DualTokenStore) CapabilityCleared(ctx context.Context, key string) (boo
 }
 
 // capabilityLive says why capability c may not take live money for workspaceID — nil when it may: an AMBER or RED
-// one once it is cleared (capabilityCleared), a GREEN one always — and, B32.12, neither an AMBER or RED one nor any
+// one once it is cleared (clearanceCountries), a GREEN one always — and, B32.12, neither an AMBER or RED one nor any
 // B30 registers while the workspace's plan keeps money capabilities on test money, a clearance or not; and, B30.4,
-// not while the workspace's live verification level is below the one c needs, or no limit is set for it.
+// not while the workspace's live verification level is below the one c needs, or no limit is set for it; and, B30.10,
+// not an AMBER or RED one for an owner verified in a country its clearance does not list.
 func capabilityLive(ctx context.Context, q pgxDB, workspaceID string, c Capability) (*CapabilityRefusal, error) {
+	var countries []string
 	if c.Class != ClassGreen {
-		if cleared, err := capabilityCleared(ctx, q, c.Key); err != nil || !cleared {
+		var err error
+		if countries, err = clearanceCountries(ctx, q, c.Key); err != nil || countries == nil {
 			return &CapabilityRefusal{Capability: c}, err
 		}
 	} else if !b30[c.Key] {
@@ -470,10 +504,20 @@ func capabilityLive(ctx context.Context, q pgxDB, workspaceID string, c Capabili
 		return &CapabilityRefusal{Capability: c, Plan: plan.RefuseLiveMoney(plans.Current(), c.Name)}, nil
 	}
 	level, err := levelRefusal(ctx, q, workspaceID, c)
-	if err != nil || level == nil {
+	if err != nil {
 		return nil, err
 	}
-	return &CapabilityRefusal{Capability: c, Level: level}, nil
+	if level != nil {
+		return &CapabilityRefusal{Capability: c, Level: level}, nil
+	}
+	if c.Class == ClassGreen {
+		return nil, nil
+	}
+	country, err := ownerCountry(ctx, q, workspaceID)
+	if err != nil || slices.Contains(countries, country) {
+		return nil, err
+	}
+	return &CapabilityRefusal{Capability: c, Country: &CountryRefusal{Country: country, Countries: countries}}, nil
 }
 
 // spendForCapability judges a spend of amount µLXC of workspaceID's credits on capability key, in tx. A
