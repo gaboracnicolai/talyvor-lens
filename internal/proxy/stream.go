@@ -402,6 +402,7 @@ func (s *StreamHandler) serve(
 	if result.LastError != nil {
 		metrics.RecordUpstream(upstreamProviderLabel(provider), "error", time.Since(upstreamStart))
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+result.LastError.Error())
+		s.proxy.releaseReservation(r.Context(), "upstream error") // B17.128: nothing was served
 		return result.LastError
 	}
 	resp := result.Response
@@ -412,6 +413,7 @@ func (s *StreamHandler) serve(
 		errBody, _ := io.ReadAll(resp.Body)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(errBody)
+		s.proxy.releaseReservation(r.Context(), fmt.Sprintf("upstream status %d", resp.StatusCode))
 		return fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
 
