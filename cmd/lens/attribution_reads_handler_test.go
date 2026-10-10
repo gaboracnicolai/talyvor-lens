@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/outputverify"
 )
@@ -73,5 +75,25 @@ func TestAttributionList_Handler(t *testing.T) {
 	}
 	if !strings.HasPrefix(strings.TrimSpace(rec.Body.String()), "[") {
 		t.Errorf("attribution list must be a JSON array; body=%s", rec.Body.String())
+	}
+}
+
+// B17.114: GET …/attribution/branches/{branch} for a branch with a slash, sent escaped as the testers send it
+// (encodeURIComponent), reads that branch — chi hands the param over still escaped, and read as sent it
+// counted nothing.
+func TestBranchStats_HandlerUnescapesBranch(t *testing.T) {
+	var gotWS, gotBranch string
+	r := chi.NewRouter()
+	r.Get("/v1/workspaces/{wsID}/attribution/branches/{branch}", newBranchStatsHandler(func(_ context.Context, ws, branch string, _ time.Time) (*attribution.BranchStats, error) {
+		gotWS, gotBranch = ws, branch
+		return &attribution.BranchStats{Branch: branch, RequestCount: 1}, nil
+	}))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/workspaces/wsA/attribution/branches/e2e%2F428045-muyu7nmn", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if gotWS != "wsA" || gotBranch != "e2e/428045-muyu7nmn" {
+		t.Errorf("read workspace %q branch %q, want wsA and e2e/428045-muyu7nmn", gotWS, gotBranch)
 	}
 }
