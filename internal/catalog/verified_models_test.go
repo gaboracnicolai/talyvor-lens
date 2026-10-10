@@ -74,8 +74,8 @@ var verifiedAnthropicModels = map[string]struct{}{
 	// Undated alias of the line above, added 2026-07-28 under this file's stated convention ("Where the
 	// catalog and router use the undated alias of a dated snapshot, BOTH forms are listed"). No widening
 	// of the existence claim: the 2026-07-19 capture already contains the dated form, and Anthropic's
-	// model table gives claude-opus-4-1 as its alias. Deprecated; RETIRES 2026-08-05, at which point
-	// this entry and its seed row should both be removed.
+	// model table gives claude-opus-4-1 as its alias. Retired 2026-08-05; both stay, the seed row Deprecated with
+	// its successor, so a past request still prices and a new one is refused by name (B38.8).
 	"claude-opus-4-1": {},
 }
 

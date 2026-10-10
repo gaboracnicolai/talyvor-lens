@@ -19,3 +19,21 @@ func TestCatalog_RetiredMistralModelsLeaveThePickerAndKeepTheirPrice(t *testing.
 		}
 	}
 }
+
+// B38.8 — Anthropic retired Claude Opus 4.1 on 2026-08-05: out of the picker, its price kept for history, and
+// it names the successor Anthropic documents, which must itself be an offered model.
+func TestCatalog_RetiredOpus41LeavesThePickerKeepsItsPriceAndNamesOpus48(t *testing.T) {
+	m, ok := Get("claude-opus-4-1-20250805")
+	if !ok || m.ID != "claude-opus-4-1" {
+		t.Fatalf("claude-opus-4-1-20250805 resolves to %q (ok=%v) — a past request under it could no longer price", m.ID, ok)
+	}
+	if !m.Deprecated || m.RetiredSuccessor != "claude-opus-4-8" {
+		t.Errorf("claude-opus-4-1 deprecated=%v successor=%q, want retired in favour of claude-opus-4-8", m.Deprecated, m.RetiredSuccessor)
+	}
+	if m.InputPer1M != 15 || m.OutputPer1M != 75 || m.CachedInputPer1M != 1.5 || m.CacheWritePer1M != 18.75 {
+		t.Errorf("claude-opus-4-1 prices changed: %+v", m)
+	}
+	if s, ok := Get(m.RetiredSuccessor); !ok || s.Deprecated || s.RetiredSuccessor != "" {
+		t.Errorf("successor %s is not an offered model (ok=%v, %+v)", m.RetiredSuccessor, ok, s)
+	}
+}

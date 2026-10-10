@@ -157,7 +157,7 @@ func TestDiscovery_ANewModelNeedsAPriceThenIsOfferedOnceItIsPriced(t *testing.T)
 // A model the provider stops listing leaves the picker (its price stays, so a straggling API call is
 // still billed right), and comes back if the provider lists it again.
 func TestDiscovery_AModelTheProviderNoLongerListsLeavesThePickerAndCanComeBack(t *testing.T) {
-	const gone = "claude-opus-4-1"
+	const gone = "claude-opus-4-6"
 	before, ok := catalog.Get(gone)
 	if !ok || !offered(gone) {
 		t.Fatalf("%s must be an offered catalog model for this test to mean anything", gone)
