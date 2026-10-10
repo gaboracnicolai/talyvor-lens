@@ -111,6 +111,12 @@ func seedModels() []Model {
 		{ID: "gpt-6-astra", Provider: "openai", DisplayName: "GPT-6 Astra", ReleaseDate: "2026-09-03", Tier: TierFrontier, InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, CacheWritePer1M: 12.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
 		{ID: "gpt-6-sol", Provider: "openai", DisplayName: "GPT-6 Sol", ReleaseDate: "2026-09-22", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
 		{ID: "gpt-6-luna", Provider: "openai", DisplayName: "GPT-6 Luna", ReleaseDate: "2026-09-22", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, CacheWritePer1M: 0.125, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
+		// B38.4 — GPT-6.1 Sol, in the /v1/models capture of 2026-10-09 (verified_models_test.go). Rates from
+		// https://developers.openai.com/api/docs/pricing and its model page (read 2026-10-10): $2.00 | $0.10 |
+		// $2.50 | $10.00; cached is 0.05x, set explicitly. Above 272K input tokens the whole request pays
+		// $4.00 | $0.20 | $5.00 | $15.00. 1.05M context (922K max input), 128K out; released 2026-09-29 (changelog).
+		{ID: "gpt-6.1-sol", Provider: "openai", DisplayName: "GPT-6.1 Sol", ReleaseDate: "2026-09-29", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.10, CacheWritePer1M: 2.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 4.00, OutputPer1M: 15.00, CachedInputPer1M: 0.20, CacheWritePer1M: 5.00}},
 		// (B38.1: the gpt-4.1 family is on the page again as of 2026-10-09 and is priced from it above.)
 		// ⚠ NOT TOUCHED: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano. They are ABSENT from
 		// the current pricing page, which does not mean they are unavailable — it may mean the page lists
