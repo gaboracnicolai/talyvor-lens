@@ -1291,6 +1291,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 					slog.String("provider", cfg.ProviderName()),
 				)
 			} else {
+				// B17.122: marked like the streamed replay, so a buffered caller can tell its free repeat from a fresh ask.
+				w.Header().Set("X-Talyvor-Cache-Replay", "true")
 				writeBytes(w, http.StatusOK, cached)
 				metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), layer).Inc()
 				metrics.RecordCacheHit(layer)
