@@ -450,5 +450,17 @@ func openAPIWalletPaths() map[string]any {
 					"line1": str, "line2": str, "city": str, "postal_code": str, "country": str,
 				}))),
 		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/card/freeze": map[string]any{
+			"post": op("Freeze the agent's card",
+				"Owner or admin. Every purchase on a frozen card is declined and nothing leaves the agent.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": map[string]any{"description": "the card, frozen"}, "404": map[string]any{"description": "no such agent, or it holds no card"}}),
+		},
+		"/v1/workspaces/{wsID}/agents/{agentID}/card/unfreeze": map[string]any{
+			"post": op("Unfreeze the agent's card",
+				"Owner or admin. Purchases are judged by the agent's rules and balance again.",
+				[]map[string]any{ws, agent},
+				map[string]any{"200": map[string]any{"description": "the card, unfrozen"}, "404": map[string]any{"description": "no such agent, or it holds no card"}}),
+		},
 	}
 }

@@ -34,6 +34,9 @@ var ErrAgentHasCard = errors.New("economy: this agent already holds a card")
 // ErrNoAgentCard: the agent holds no card.
 var ErrNoAgentCard = errors.New("economy: this agent holds no card")
 
+// ErrAgentCardFrozen is why a purchase on a frozen card is declined (B17.111).
+var ErrAgentCardFrozen = errors.New("the card is frozen: unfreeze it to buy with it")
+
 // AgentCard is an agent's virtual card, as Stripe issued it. Livemode is always false (class RED).
 type AgentCard struct {
 	ID                 string    `json:"id"`
@@ -44,6 +47,7 @@ type AgentCard struct {
 	ExpYear            int       `json:"exp_year"`
 	Currency           string    `json:"currency"`
 	Livemode           bool      `json:"livemode"`
+	Frozen             bool      `json:"frozen"` // B17.111: every purchase on it is declined
 	CreatedAt          time.Time `json:"created_at"`
 }
 
@@ -84,13 +88,37 @@ func (s *DualTokenStore) GetAgentCard(ctx context.Context, workspaceID, agentID 
 		return AgentCard{}, ErrAgentNotFound
 	}
 	c := AgentCard{AgentID: agentID}
-	err := s.pool.QueryRow(ctx, `SELECT id, stripe_cardholder_id, last4, exp_month, exp_year, currency, livemode, created_at
+	err := s.pool.QueryRow(ctx, `SELECT id, stripe_cardholder_id, last4, exp_month, exp_year, currency, livemode, frozen, created_at
 		FROM agent_cards WHERE agent_id = $1`, agentID).Scan(&c.ID, &c.StripeCardholderID, &c.Last4, &c.ExpMonth, &c.ExpYear,
-		&c.Currency, &c.Livemode, &c.CreatedAt)
+		&c.Currency, &c.Livemode, &c.Frozen, &c.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c, ErrNoAgentCard
 	}
 	return c, err
+}
+
+// SetAgentCardFrozen freezes or unfreezes the card agentID holds (B17.111). It takes the agent's row lock, as a
+// purchase does, so a purchase being decided finishes first and every later one sees the card as it is now.
+func (s *DualTokenStore) SetAgentCardFrozen(ctx context.Context, workspaceID, agentID string, frozen bool) (AgentCard, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentCard{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgent(ctx, tx, workspaceID, agentID); err != nil {
+		return AgentCard{}, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE agent_cards SET frozen = $3 WHERE agent_id = $1 AND workspace_id = $2`, agentID, workspaceID, frozen)
+	if err != nil {
+		return AgentCard{}, fmt.Errorf("economy: freeze agent card: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return AgentCard{}, ErrNoAgentCard
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentCard{}, err
+	}
+	return s.GetAgentCard(ctx, workspaceID, agentID)
 }
 
 // CardAuthorization is one authorisation request Stripe sent for a card.
@@ -173,6 +201,14 @@ func (s *DualTokenStore) approveCard(ctx context.Context, a CardAuthorization, d
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := lockAgent(ctx, tx, d.WorkspaceID, d.AgentID); err != nil {
 		return d, err
+	}
+	var frozen bool
+	if err := tx.QueryRow(ctx, `SELECT frozen FROM agent_cards WHERE id = $1`, a.CardID).Scan(&frozen); err != nil {
+		return d, err
+	}
+	if frozen {
+		_ = tx.Rollback(ctx)
+		return s.declineCard(ctx, a, d, ErrAgentCardFrozen.Error())
 	}
 	bal, err := accountBalance(ctx, tx, d.WorkspaceID, agentAccount(d.AgentID))
 	if err != nil {
