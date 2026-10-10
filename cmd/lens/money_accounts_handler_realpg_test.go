@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/partners"
+	"github.com/talyvor/lens/internal/screening"
 )
 
 // B30.13 — on test money a company opens GBP and EUR accounts and an agent a GBP account, each at zero on the
@@ -88,5 +90,105 @@ func TestMoneyAccountRoutes_ACompanyAndItsAgentOpenAccountsAtZero(t *testing.T) 
 	var usd int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM money_accounts WHERE workspace_id = $1 AND currency = 'USD'`, ws).Scan(&usd); err != nil || usd != 0 {
 		t.Errorf("the refused live open left %d USD accounts (%v), want none", usd, err)
+	}
+}
+
+// B30.14 — each company account's details read TEST and in its currency's form, an agent's account reads the company's
+// details and its own payment reference, and a test £120.00 quoting that reference — as a payer types it — lands in
+// the agent's account as one balanced entry from the partner account. Details still read after Lens restarts, when
+// the Test partner has forgotten the account.
+func TestMoneyAccountRoutes_DetailsReadTESTAndAnAgentsReferenceRoutesMoneyToIt(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const ws = "ws-b3014-details"
+	store := economy.NewDualTokenStore(nil, pool, nil)
+	store.SetAccountPartners(partners.NewRegistry(nil))
+	store.SetScreener(screening.NewScreener(pool, partners.NewRegistry(nil)))
+	agent, err := store.CreateAgent(ctx, ws, "Collector", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	company := map[string]economy.CurrencyAccount{}
+	for _, cur := range []string{"GBP", "EUR", "USD"} {
+		if company[cur], err = store.OpenCurrencyAccount(ctx, ws, "", cur, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agentGBP, err := store.OpenCurrencyAccount(ctx, ws, agent.ID, "GBP", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Lens restarts: a new registry's Test partner has never seen these accounts.
+	store.SetAccountPartners(partners.NewRegistry(nil))
+
+	r := chi.NewRouter()
+	mountMoneyAccountRoutes(r, store)
+	owner := &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "owner", Scopes: []string{auth.ScopeKeys}}
+	details := func(id string) economy.CurrencyAccountDetails {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/money/accounts/"+id+"/details", nil)
+		req = req.WithContext(auth.WithAuthContext(req.Context(), owner))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		var d economy.CurrencyAccountDetails
+		if err := json.Unmarshal(w.Body.Bytes(), &d); w.Code != http.StatusOK || err != nil {
+			t.Fatalf("details of %s = %d %s", id, w.Code, w.Body.String())
+		}
+		return d
+	}
+	for cur, want := range map[string]func(d economy.CurrencyAccountDetails) bool{
+		"GBP": func(d economy.CurrencyAccountDetails) bool {
+			return d.SortCode == "00-00-00" && len(d.AccountNumber) == 8
+		},
+		"EUR": func(d economy.CurrencyAccountDetails) bool { return strings.Contains(d.IBAN, "TEST") && d.BIC != "" },
+		"USD": func(d economy.CurrencyAccountDetails) bool {
+			return d.RoutingNumber == "000000000" && len(d.AccountNumber) == 8
+		},
+	} {
+		d := details(company[cur].ID)
+		if !want(d) || d.Mode != economy.DetailsTest || !strings.Contains(d.Notice, "test money only") || d.Currency != cur || d.PaymentReference != "" {
+			t.Errorf("the company's %s details = %+v; want made-up %s details, mode TEST, no payment reference", cur, d, cur)
+		}
+	}
+	ad := details(agentGBP.ID)
+	if ad.AccountNumber != details(company["GBP"].ID).AccountNumber || ad.Mode != economy.DetailsTest || len(ad.PaymentReference) != 15 {
+		t.Fatalf("the agent's GBP details = %+v; want the company's GBP details, TEST, and a TLV payment reference", ad)
+	}
+
+	// The payer types the reference in lower case, split up, after an invoice number.
+	quoted := "inv 7 " + strings.ToLower(ad.PaymentReference[:7]+" "+ad.PaymentReference[7:])
+	e, err := store.ReceivePayment(ctx, economy.InboundPayment{PartnerAccountRef: company["GBP"].PartnerAccountRef, PartnerRef: "test_in_b3014",
+		Payer: "Acme Supplies Ltd", Reference: quoted, AmountMinor: 12000, Currency: "GBP"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var partnerID string
+	if err := pool.QueryRow(ctx, `SELECT id FROM money_accounts WHERE purpose = 'partner' AND partner_account_ref = $1`,
+		company["GBP"].PartnerAccountRef).Scan(&partnerID); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(ctx, `SELECT account_id, amount_minor, currency, funding FROM money_postings WHERE entry_id = $1 ORDER BY line`, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for rows.Next() {
+		var acct, cur, funding string
+		var amount int64
+		if err := rows.Scan(&acct, &amount, &cur, &funding); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%s %d %s %s", acct, amount, cur, funding))
+	}
+	rows.Close()
+	want := []string{partnerID + " -12000 GBP test", agentGBP.ID + " 12000 GBP test"}
+	if strings.Join(got, "; ") != strings.Join(want, "; ") {
+		t.Fatalf("the payment in posted %v; want %v", got, want)
+	}
+	if b, _ := store.Balance(ctx, ws, agentGBP.ID); b.TestMinor != 12000 {
+		t.Errorf("the agent's GBP balance = %+v; want 12000 test pence", b)
+	}
+	if b, _ := store.Balance(ctx, ws, company["GBP"].ID); b.AmountMinor != 0 {
+		t.Errorf("the company's GBP balance = %+v; want 0: the money was the agent's", b)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ type WalletBank interface {
 	SimQuotes(ctx context.Context) (economy.Quotes, error)
 	OpenCurrencyAccount(ctx context.Context, workspaceID, agentID, currency, funding string) (economy.CurrencyAccount, error)
 	CurrencyAccounts(ctx context.Context, workspaceID, agentID string) ([]economy.CurrencyAccount, error)
+	CurrencyAccountDetails(ctx context.Context, workspaceID, agentID, accountID string) (economy.CurrencyAccountDetails, error)
 	OpenPortfolio(ctx context.Context, workspaceID, agentID, name string, cashUUSD int64) (economy.Portfolio, error)
 	ListPortfolios(ctx context.Context, workspaceID, agentID string) ([]economy.Portfolio, error)
 	PlaceSimOrder(ctx context.Context, workspaceID, agentID, portfolioID string, in economy.SimOrderInput) (economy.SimOrder, error)
@@ -70,6 +72,7 @@ var walletRefusals = []error{
 	economy.ErrPotNotFound, economy.ErrPotLocked, economy.ErrPot, economy.ErrLiveTrading, economy.ErrNoQuote,
 	economy.ErrPortfolioNotFound, economy.ErrSimOrderNotFound, economy.ErrSimOrder, economy.ErrSimHoldings,
 	economy.ErrCurrencyAccount, economy.ErrCurrencyAccountExists, economy.ErrCompanyAccountNeeded, economy.ErrAccountNotOpened,
+	economy.ErrMoneyAccountNotFound, economy.ErrMoneyAccountNotOpen, economy.ErrNoAccountDetails,
 	workspace.ErrMoneyWall,
 }
 
@@ -136,6 +139,9 @@ func walletToolDefinitions() []map[string]any {
 		tool("wallet_accounts", "Your accounts in pounds, euros and dollars and what each holds, test and live money apart.", none),
 		tool("wallet_account_open", "Open your account in GBP, EUR or USD: a sub-account of your company's in that currency, which opens first. "+
 			"It opens at zero.", map[string]any{"currency": str("GBP, EUR or USD"), "funding": str("test (the default) or live")}, "currency"),
+		tool("wallet_account_details", "The details a payer pays into your account in GBP, EUR or USD: your company's account details and "+
+			"your payment reference, which the payer quotes so the money reaches you. Mode TEST details are made up and reach no bank.",
+			map[string]any{"currency": str("GBP, EUR or USD")}, "currency"),
 		tool("wallet_credential", "Your Know Your Agent credential: a signed token any platform can check against Talyvor's published keys. "+
 			"It says who you are, who answers for you and how far they are verified, what you may do with live money and your limits.", none),
 	}
@@ -347,6 +353,17 @@ func (s *Server) walletTool(ctx context.Context, bank WalletBank, name, ws, agen
 		return map[string]any{"accounts": accounts}, err
 	case "wallet_account_open":
 		return bank.OpenCurrencyAccount(ctx, ws, agent, a.Currency, a.Funding)
+	case "wallet_account_details": // B30.14
+		accounts, err := bank.CurrencyAccounts(ctx, ws, agent)
+		if err != nil {
+			return nil, err
+		}
+		for _, acct := range accounts {
+			if acct.Currency == strings.ToUpper(strings.TrimSpace(a.Currency)) && acct.Status == economy.MoneyOpen {
+				return bank.CurrencyAccountDetails(ctx, ws, agent, acct.ID)
+			}
+		}
+		return nil, fmt.Errorf("%w: you have no open %s account; open it with wallet_account_open", economy.ErrMoneyAccountNotFound, a.Currency)
 	case "wallet_credential": // B30.5
 		if s.credentials == nil {
 			return nil, errors.New("the Know Your Agent credentials are not configured")
