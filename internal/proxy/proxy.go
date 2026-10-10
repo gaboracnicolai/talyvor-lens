@@ -669,6 +669,10 @@ func (p *Proxy) HandleGoogle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig) {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get(WebSearchHeader)), "on") {
+		p.serveSearchingWeb(w, r, cfg) // B28.118: the search and the answer each come back here without the header
+		return
+	}
 	if p.codeRunner != nil && strings.EqualFold(strings.TrimSpace(r.Header.Get(RunCodeHeader)), "on") {
 		p.serveRunningCode(w, r, cfg) // B28.119: each of its rounds comes back here without the header
 		return
