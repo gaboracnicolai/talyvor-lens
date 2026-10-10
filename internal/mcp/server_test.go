@@ -15,6 +15,7 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/api"
 	"github.com/talyvor/lens/internal/auth"
 )
 
@@ -336,6 +337,35 @@ func TestMCP_SSEReturnsEndpointEvent(t *testing.T) {
 	}
 	if !strings.Contains(body, `"uri":"/mcp"`) {
 		t.Errorf(`missing endpoint URI in body:\n%s`, body)
+	}
+}
+
+// B17.131: through Lens's own middleware, whose writer hides http.Flusher, a client still gets the endpoint event at once.
+func TestMCP_SSEEndpointEventReachesClientThroughMiddleware(t *testing.T) {
+	pool, _ := pgxmock.NewPool()
+	t.Cleanup(pool.Close)
+	s := newTestServer(t, pool)
+	srv := httptest.NewServer(api.RateLimitHeadersMiddleware(http.HandlerFunc(s.HandleSSE)))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/mcp/sse", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /mcp/sse sent nothing in 3 s, not even its headers: %v", err)
+	}
+	defer resp.Body.Close()
+	var got string
+	for buf := make([]byte, 256); !strings.Contains(got, "\n\n"); {
+		n, err := resp.Body.Read(buf)
+		got += string(buf[:n])
+		if err != nil {
+			t.Fatalf("stream ended after %q: %v", got, err)
+		}
+	}
+	if want := "event: endpoint\ndata: {\"uri\":\"/mcp\"}\n\n"; got != want {
+		t.Errorf("first event = %q, want %q", got, want)
 	}
 }
 
