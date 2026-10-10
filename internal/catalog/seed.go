@@ -1,5 +1,7 @@
 package catalog
 
+import "time"
+
 // seedModels is the embedded default catalog. PRICING IS MIGRATED
 // BYTE-FOR-BYTE from the previous sources — alerts.modelPrices for the rates
 // and modality.capabilities for the vision/audio/document flags. Do not
@@ -228,12 +230,13 @@ func seedModels() []Model {
 		// are informational only.
 		// gemini-3.1-pro-preview: $2.00/$12.00 is the <=200k-token tier; above 200k Google charges
 		//   $4.00/$18.00, context caching $0.40 (B37.12, same page, read 2026-10-09) — its LongPrompt.
-		// ⚠ gemini-3.8-flash IS PRICED "THROUGH DECEMBER 31, 2026". From 2027-01-01 the page lists
-		//   $1.50/$7.50 — ON THAT DATE THIS LINE MUST CHANGE. Entering the later rate now would over-bill;
-		//   this one under-bills after the date until someone edits it (the Sonnet 5 precedent above).
+		// gemini-3.8-flash: B38.2 — the page prices it "$0.75 through December 31, 2026" and "$1.50 starting
+		//   January 1, 2027" (input), $3.75 → $7.50 (output), context caching $0.075 → $0.15 (read 2026-10-10,
+		//   no timezone stated: UTC midnight). NewPrice charges the later rates from that date and not a day before.
 		{ID: "gemini-3.1-pro-preview", Provider: "google", DisplayName: "Gemini 3.1 Pro", ReleaseDate: "2026-02-19", Tier: TierFrontier, InputPer1M: 2.00, OutputPer1M: 12.00, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192,
 			LongPrompt: &LongPromptRates{AboveTokens: 200000, InputPer1M: 4.00, OutputPer1M: 18.00, CachedInputPer1M: 0.40}},
-		{ID: "gemini-3.8-flash", Provider: "google", DisplayName: "Gemini 3.8 Flash", ReleaseDate: "2026-09-02", Tier: TierFast, InputPer1M: 0.75, OutputPer1M: 3.75, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
+		{ID: "gemini-3.8-flash", Provider: "google", DisplayName: "Gemini 3.8 Flash", ReleaseDate: "2026-09-02", Tier: TierFast, InputPer1M: 0.75, OutputPer1M: 3.75, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192,
+			NewPrice: &DatedRates{From: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), InputPer1M: 1.50, OutputPer1M: 7.50, CachedInputPer1M: 0.15}},
 		{ID: "gemini-3.5-flash-lite", Provider: "google", DisplayName: "Gemini 3.5 Flash-Lite", ReleaseDate: "2026-07-21", Tier: TierFast, InputPer1M: 0.30, OutputPer1M: 2.50, Capabilities: visionAudioDoc, ContextTokens: 1000000, MaxOutput: 8192},
 		// ⚠ CORRECTED 2026-07-26 — UNDER-BILLING BADLY. Held 0.075/0.30 (an older Flash generation's
 		// rate); published is 0.30 in / 2.50 out — 4x under on input and 8.3x under on OUTPUT.

@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Capabilities are the non-text modalities a model can serve. Mirrors
@@ -67,6 +68,19 @@ type Model struct {
 	Tier        string `json:"tier,omitempty"`
 	// B37.12 — a price that follows the prompt's length (Gemini Pro above 200k tokens). nil = one price.
 	LongPrompt *LongPromptRates `json:"long_prompt,omitempty"`
+	// B38.2 — a price the provider has announced for a set date (Gemini 3.8 Flash on 2027-01-01). nil = none.
+	NewPrice *DatedRates `json:"new_price,omitempty"`
+}
+
+// DatedRates replace a model's own rates for every request served at or after From. A LongPrompt still
+// applies above its threshold: no seeded model has both, and one that does needs its long rates dated too.
+// A zero cache rate falls back to InputPer1M, as in PriceDetailed.
+type DatedRates struct {
+	From             time.Time `json:"from"`
+	InputPer1M       float64   `json:"input_per_1m"`
+	OutputPer1M      float64   `json:"output_per_1m"`
+	CachedInputPer1M float64   `json:"cached_input_per_1m,omitempty"`
+	CacheWritePer1M  float64   `json:"cache_write_per_1m,omitempty"`
 }
 
 // LongPromptRates are the prices a provider charges for the WHOLE request — every input, cache and
@@ -118,6 +132,7 @@ type Registry struct {
 	mu      sync.RWMutex
 	byID    map[string]Model
 	aliasTo map[string]string
+	now     func() time.Time // nil: time.Now; when a dated price is in force (B38.2)
 }
 
 // NewRegistry builds a registry from a seed list.
@@ -190,6 +205,9 @@ func (r *Registry) PriceDetailedAt(id string, promptTokens int) (in, cachedIn, c
 	}
 	in, out = m.InputPer1M, m.OutputPer1M
 	cachedIn, cacheWrite = m.CachedInputPer1M, m.CacheWritePer1M
+	if np := m.NewPrice; np != nil && !r.clock().Before(np.From) {
+		in, out, cachedIn, cacheWrite = np.InputPer1M, np.OutputPer1M, np.CachedInputPer1M, np.CacheWritePer1M
+	}
 	if lp := m.LongPrompt; lp != nil && promptTokens > lp.AboveTokens {
 		in, out, cachedIn, cacheWrite = lp.InputPer1M, lp.OutputPer1M, lp.CachedInputPer1M, lp.CacheWritePer1M
 	}
@@ -200,6 +218,16 @@ func (r *Registry) PriceDetailedAt(id string, promptTokens int) (in, cachedIn, c
 		cacheWrite = in
 	}
 	return in, cachedIn, cacheWrite, out, true
+}
+
+func (r *Registry) clock() time.Time {
+	r.mu.RLock()
+	now := r.now
+	r.mu.RUnlock()
+	if now == nil {
+		return time.Now()
+	}
+	return now()
 }
 
 // CapabilitiesOf returns a model's capabilities (zero value = text-only for
@@ -357,6 +385,7 @@ func (r *Registry) DecodeOverrides(raw []byte) ([]Model, error) {
 		base.InputPer1M, base.OutputPer1M = 0, 0
 		base.CachedInputPer1M, base.CacheWritePer1M = 0, 0
 		base.LongPrompt = nil // a price too: a reprice that does not restate it drops it
+		base.NewPrice = nil
 		// DisallowUnknownFields HERE and deliberately NOT on the id probe above: the
 		// probe reads one field on purpose, so refusing unknowns there would refuse
 		// every document ever written.
@@ -424,4 +453,13 @@ func Override(m Model)                      { defaultRegistry.Override(m) }
 func LoadOverrides(models []Model)          { defaultRegistry.LoadOverrides(models) }
 func DecodeOverrides(raw []byte) ([]Model, error) {
 	return defaultRegistry.DecodeOverrides(raw)
+}
+
+// SetClock sets the time the default catalog prices at, so a test can serve a request on either side of a
+// dated price (B38.2); restore puts the wall clock back.
+func SetClock(now func() time.Time) (restore func()) {
+	defaultRegistry.mu.Lock()
+	defaultRegistry.now = now
+	defaultRegistry.mu.Unlock()
+	return func() { SetClock(nil) }
 }
