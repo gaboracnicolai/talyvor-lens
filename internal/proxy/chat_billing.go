@@ -42,10 +42,13 @@ func (p *Proxy) SetSessionSpend(s sessionSpend, boundULXC int64) {
 	p.sessionSpendBound = boundULXC
 }
 
-// chatSession reports whether this request is the browser chat, and its session key's ID.
+// chatSession reports whether this request is charged as the browser chat is, and its session key's ID.
+// B17.132: the workspace's own token (JWT) too — like the session key it carries no APIKeyID, so it never
+// reaches the agent reservation, and a question asked on it was served and charged nothing. It has no
+// session row, so its ID is "" and the per-session bound does not apply.
 func chatSession(ctx context.Context) (string, bool) {
 	actx := auth.GetAuthContext(ctx)
-	if actx == nil || actx.AuthMethod != auth.MethodSessionKey || actx.APIKeyID != "" {
+	if actx == nil || actx.APIKeyID != "" || (actx.AuthMethod != auth.MethodSessionKey && actx.AuthMethod != auth.MethodJWT) {
 		return "", false
 	}
 	return actx.SessionKeyID, true

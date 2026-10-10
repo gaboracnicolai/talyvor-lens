@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
@@ -266,6 +269,45 @@ func TestChatBilling_LoggingNoneIsChargedToo_BothSeams(t *testing.T) {
 			}
 			if rows, debited, desc := prepaidDebits(t, pool); rows != 1 || debited != cost || desc != "chat: metered usage" {
 				t.Errorf("prepaid ledger = %d row(s), %d µLXC, %q; want 1, %d µLXC, %q", rows, debited, desc, cost, "chat: metered usage")
+			}
+			if bal := seamBalance(t, store, "ws-log"); bal != costWireFunded-cost {
+				t.Errorf("balance = %d, want %d", bal, costWireFunded-cost)
+			}
+		})
+	}
+}
+
+// B17.132: a question on the workspace's own token (a refreshed one, in the e2e run) was served and wrote no
+// spend row — a JWT carries no APIKeyID and is not a session key, so no charge on either seam saw it.
+func TestChatBilling_TheWorkspaceTokenIsCharged_BothSeams(t *testing.T) {
+	cost := settleULXC(alerts.CostUSD("gpt-4o", 10000, 100))
+	pk, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := auth.GenerateToken("ws-log", "user-1", []string{"proxy"}, pk, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	actx, err := auth.NewManager("", pk, nil, nil).Authenticate(req)
+	if err != nil || actx.AuthMethod != auth.MethodJWT {
+		t.Fatalf("the real auth.Manager read the token as %+v, %v — want a JWT", actx, err)
+	}
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "buffered", true: "streamed"}[stream], func(t *testing.T) {
+			p, _, store, pool := chatProxy(t, costWireFunded, 0, economy.DefaultAgentCeilingLXC)
+			var calls int64
+			chatUpstream(t, p, stream, &calls)
+			if code := driveWithAuth(t, p, actx, stream, "b17132-jwt"); code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", code)
+			}
+			if atomic.LoadInt64(&calls) != 1 {
+				t.Fatalf("upstream calls = %d, want 1", calls)
+			}
+			if rows, debited, desc := prepaidDebits(t, pool); rows != 1 || debited != cost || desc != "chat: metered usage" {
+				t.Errorf("prepaid ledger = %d row(s), %d µLXC, %q; want 1, %d µLXC, %q (before B17.132: none)", rows, debited, desc, cost, "chat: metered usage")
 			}
 			if bal := seamBalance(t, store, "ws-log"); bal != costWireFunded-cost {
 				t.Errorf("balance = %d, want %d", bal, costWireFunded-cost)
