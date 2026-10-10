@@ -614,18 +614,24 @@ func (s *DualTokenStore) RequireBilledCapability(ctx context.Context, workspaceI
 }
 
 // testFundedULXC locks workspaceID's balance row and reads its test-funded credits: never more than the
-// balance and the workspace's open holds.
+// balance and the workspace's open holds. A test workspace's are all of those (B25.3), its starting grant
+// included, so what it spends, sends or cashes out reads as test money to the last µLXC (B17.105).
 func testFundedULXC(ctx context.Context, tx pgx.Tx, workspaceID string) (int64, error) {
-	var v int64
-	err := tx.QueryRow(ctx, `SELECT LEAST(test_funded_ulxc, GREATEST(balance + (SELECT COALESCE(sum(held_ulxc), 0) FROM lxc_reservations
-		WHERE workspace_id = $1 AND status = 'held'), 0))::bigint FROM lxc_balances WHERE workspace_id = $1 FOR UPDATE`, workspaceID).Scan(&v)
+	var funded, upTo int64
+	var test bool
+	err := tx.QueryRow(ctx, `SELECT test_funded_ulxc, GREATEST(balance + (SELECT COALESCE(sum(held_ulxc), 0) FROM lxc_reservations
+		WHERE workspace_id = $1 AND status = 'held'), 0)::bigint, COALESCE((SELECT synthetic FROM workspaces WHERE id = $1), false)
+		FROM lxc_balances WHERE workspace_id = $1 FOR UPDATE`, workspaceID).Scan(&funded, &upTo, &test)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("economy: test-funded credits: %w", err)
 	}
-	return v, nil
+	if test {
+		return upTo, nil
+	}
+	return min(funded, upTo), nil
 }
 
 // addTestFunded returns amount µLXC of test-funded credits to workspaceID (a test purchase, or a gated spend
