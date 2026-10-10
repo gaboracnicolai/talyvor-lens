@@ -25,8 +25,9 @@ import (
 // offers (priced for output, not deprecated — apps/web/src/areas/chat/chatApi.ts) is asked through the
 // real handler and must answer, and be charged on the prepaid ledger at its catalog price.
 
-// b1711ChatOnlyRefused is the production report's list of models /v1/chat/completions 404'd.
-var b1711ChatOnlyRefused = map[string]bool{"gpt-5.3-codex": true, "gpt-5.4-pro": true, "gpt-5.5-pro": true}
+// b1711ChatOnlyRefused is the production report's list of models /v1/chat/completions 404'd, and gpt-5.2-pro
+// (B38.5), whose model page marks Chat Completions unsupported (read 2026-10-10).
+var b1711ChatOnlyRefused = map[string]bool{"gpt-5.3-codex": true, "gpt-5.4-pro": true, "gpt-5.5-pro": true, "gpt-5.2-pro": true}
 
 type b1711Upstream struct {
 	mu       sync.Mutex
