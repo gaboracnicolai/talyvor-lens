@@ -332,11 +332,11 @@ func TestCostUSD_ClaudeOpus46(t *testing.T) {
 func TestCostUSD_GPT54(t *testing.T) {
 	// gpt-5.4: input $2.50/M, output $15/M — published at
 	// https://developers.openai.com/api/docs/pricing (fetched 2026-07-26).
-	// 1M in + 1M out = 2.50 + 15.00 = 17.50
+	// 100K in + 1M out = 0.25 + 15.00 = 15.25 (above 272K in, its B38.3 long-prompt rates apply instead).
 	//
 	// ⚠ Previously asserted 25.00 (5/20), over-billing input 2x. Same failure as Opus 4.6 above.
-	got := CostUSD("gpt-5.4", 1_000_000, 1_000_000)
-	if math.Abs(got-17.50) > 1e-9 {
-		t.Errorf("CostUSD(gpt-5.4, 1M, 1M) = %v, want 17.50", got)
+	got := CostUSD("gpt-5.4", 100_000, 1_000_000)
+	if math.Abs(got-15.25) > 1e-9 {
+		t.Errorf("CostUSD(gpt-5.4, 100K, 1M) = %v, want 15.25", got)
 	}
 }
