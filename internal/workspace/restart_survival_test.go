@@ -46,6 +46,7 @@ func restartTestPool(t *testing.T) *pgxpool.Pool {
 			compression_policy TEXT NOT NULL DEFAULT 'disabled',
 			tare_policy TEXT NOT NULL DEFAULT 'always',
 			tare_model BOOLEAN NOT NULL DEFAULT false,
+			tare_training BOOLEAN NOT NULL DEFAULT false,
 			cache_poolable BOOLEAN NOT NULL DEFAULT false,
 			distill_poolable BOOLEAN NOT NULL DEFAULT false,
 			cost_optimize_routing BOOLEAN NOT NULL DEFAULT false,

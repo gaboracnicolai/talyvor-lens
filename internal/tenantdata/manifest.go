@@ -328,6 +328,8 @@ var Manifest = map[string]Entry{
 	// retaining pointers to deleted keys would preserve no audit anybody could read while still
 	// naming the customer.
 	"workspace_key_rotations": {Delete, ""},
+	"tare_training_switches":  {Delete, "B27.36: who switched the workspace's Tare training opt-in, and when"},
+	"tare_training_traces":    {Delete, "B27.36: the workspace's prose collected for training Tare's compressor"},
 	"workspace_owner_links":   {Delete, ""},
 	"workspace_pattern_optin": {Delete, ""},
 	"workspaces":              {Delete, "the mapping itself — deleting this is what makes the retained ledger rows unlinkable"},
