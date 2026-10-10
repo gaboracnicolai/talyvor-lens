@@ -123,7 +123,7 @@ func searchFindings(out []byte) ([]webPage, string) {
 			_ = json.Unmarshal(b.Content, &results) // a failed search's content is an error object, not a list
 			for _, res := range results {
 				if res.Type != "web_search_result" || n[res.URL] != 0 || len(pages) == maxWebPages ||
-					!(strings.HasPrefix(res.URL, "https://") || strings.HasPrefix(res.URL, "http://")) {
+					!strings.HasPrefix(res.URL, "https://") && !strings.HasPrefix(res.URL, "http://") {
 					continue
 				}
 				pages = append(pages, webPage{N: len(pages) + 1, URL: res.URL, Title: strings.TrimSpace(res.Title), Age: res.PageAge})
