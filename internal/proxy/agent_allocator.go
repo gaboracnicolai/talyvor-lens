@@ -92,6 +92,11 @@ func agentKeyIDFromContext(ctx context.Context) string {
 	if actx := auth.GetAuthContext(ctx); actx != nil {
 		return actx.APIKeyID
 	}
+	// B17.121: a key from POST /v1/api/keys is stamped as an APIKey only, never an AuthContext; it is the
+	// workspace's own key all the same, so it is held and charged like one ("global" is the synthetic stand-in).
+	if k := auth.GetAPIKey(ctx); k != nil && k.ID != "" && k.ID != "global" {
+		return k.ID
+	}
 	return ""
 }
 

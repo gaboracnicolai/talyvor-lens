@@ -9,8 +9,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
 	"github.com/talyvor/lens/internal/poolroyalty"
+	"github.com/talyvor/lens/internal/tenant"
 )
 
 // Real-PG proofs that the reservation SEAM bills what was DELIVERED. The seam helpers (agentReserveBlocks →
@@ -213,5 +215,45 @@ func TestAndrewBug_ServedCostDissolvesPromptVariance(t *testing.T) {
 	}
 	if bA != 100_000_000-usdToULXC(delivered) {
 		t.Fatalf("charge = %d, want %d (the delivered cost, independent of the hold)", 100_000_000-bA, usdToULXC(delivered))
+	}
+}
+
+// TestAPIKeysKeyIsChargedAndCounted (B17.121): a key from POST /v1/api/keys reaches the proxy as an APIKey
+// with no AuthContext. It is held and settled like a workspace key — its served request has a spend row —
+// and the key's usage counts its requests (a cache hit's release among them) and what they were charged.
+func TestAPIKeysKeyIsChargedAndCounted(t *testing.T) {
+	p, _, pool := seamProxy(t)
+	seamFund(t, pool, "ws", 100_000_000)
+	ctx := auth.WithAPIKey(context.Background(), &auth.APIKey{ID: "api-key-b17121", WorkspaceID: "ws", Active: true})
+	key := agentKeyIDFromContext(ctx)
+	if key != "api-key-b17121" {
+		t.Fatalf("a /v1/api/keys key resolves to scoped key %q, want its own id", key)
+	}
+	rctx, blocked := p.agentReserveBlocks(ctx, key, "ws", "gpt-4o", "prompt", "rq1", 4096)
+	if blocked {
+		t.Fatal("well-funded reserve must not block")
+	}
+	p.settleReservation(rctx, 0.012, "gpt-4o")
+	var spend int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT amount FROM lxc_ledger WHERE workspace_id = 'ws' AND type = 'spend'`).Scan(&spend); err != nil {
+		t.Fatalf("the served request wrote no spend row: %v", err)
+	}
+	if spend != -usdToULXC(0.012) {
+		t.Fatalf("spend row %d µLXC, want %d", spend, -usdToULXC(0.012))
+	}
+
+	hit, _ := p.agentReserveBlocks(ctx, key, "ws", "gpt-4o", "prompt", "rq2", 4096)
+	p.settlePooledServe(hit, "", p.pricePooledServe(nil, "", nil, 4096))         // own cache hit: released, free
+	_, _ = p.agentReserveBlocks(ctx, key, "ws", "gpt-4o", "prompt", "rq3", 4096) // still in flight: not yet counted
+	other, _ := p.agentReserveBlocks(ctx, "another-key", "ws", "gpt-4o", "prompt", "rq4", 4096)
+	p.settleReservation(other, 0.003, "gpt-4o")
+
+	requests, charged, err := tenant.NewStore(pool).KeyUsage(context.Background(), "ws", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || charged != usdToULXC(0.012) {
+		t.Fatalf("the key's usage reads %d requests charged %d µLXC, want 2 charged %d", requests, charged, usdToULXC(0.012))
 	}
 }

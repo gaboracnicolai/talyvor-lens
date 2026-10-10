@@ -3196,10 +3196,15 @@ func run() error {
 			}
 			for _, k := range keys {
 				if k.ID == keyID {
+					requests, chargedULXC, err := tenantStore.KeyUsage(req.Context(), wsID, keyID)
+					if err != nil {
+						writeJSONErr(w, http.StatusInternalServerError, err.Error())
+						return
+					}
 					writeJSONOK(w, http.StatusOK, map[string]any{
 						"last_used_at":   k.LastUsedAt,
-						"total_requests": 0, // wired to token_events in a later upgrade
-						"total_cost":     0,
+						"total_requests": requests,
+						"total_cost":     float64(chargedULXC) / 1e6 * economy.LXCUSDValue, // USD, as before
 					})
 					return
 				}
