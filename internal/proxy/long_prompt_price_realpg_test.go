@@ -95,3 +95,41 @@ func TestB3715_Haiku55LongPromptChargedTheLongPromptPrice(t *testing.T) {
 		})
 	}
 }
+
+// B38.4 — GPT-6.1 Sol is $2.00 / $10.00 per 1M for prompts up to 272,000 input tokens and $4.00 / $15.00 above,
+// on the whole request (https://developers.openai.com/api/docs/pricing, read 2026-10-10). One streamed chat
+// question goes through the real OpenAI handler; the charge is read off the prepaid ledger row.
+func TestB384_GPT61SolLongPromptChargedTheLongPromptPrice(t *testing.T) {
+	cases := []struct {
+		promptTokens      int
+		inPer1M, outPer1M float64
+	}{
+		{300000, 4.00, 15.00},
+		{100000, 2.00, 10.00},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprint(tc.promptTokens), func(t *testing.T) {
+			p, _, _, pool := chatProxy(t, costWireFunded, 0, economy.DefaultAgentCeilingLXC)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n"+
+					"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":100}}\n\ndata: [DONE]\n\n", tc.promptTokens)
+			}))
+			t.Cleanup(srv.Close)
+			p.openAIURL = srv.URL
+
+			q := jsonString(fmt.Sprintf("b384-%d %s", tc.promptTokens, strings.Repeat("word ", tc.promptTokens*4/5)))
+			body := `{"model":"gpt-6.1-sol","stream":true,"messages":[{"role":"user","content":` + q + `}]}`
+			res := askNewestModel(t, p, false, true, body)
+			if got, _ := io.ReadAll(res.Body); res.StatusCode != http.StatusOK || !strings.Contains(string(got), "Hello") {
+				t.Fatalf("status=%d body=%.300q — the model did not answer", res.StatusCode, got)
+			}
+
+			want := settleULXC(float64(tc.promptTokens)*tc.inPer1M/1e6 + 100*tc.outPer1M/1e6)
+			if rows, debited, _ := prepaidDebits(t, pool); rows != 1 || debited != want {
+				t.Errorf("prepaid ledger = %d row(s), %d µLXC; want 1 row of %d µLXC (%d in + 100 out at $%.2f/$%.2f per 1M)",
+					rows, debited, want, tc.promptTokens, tc.inPer1M, tc.outPer1M)
+			}
+		})
+	}
+}

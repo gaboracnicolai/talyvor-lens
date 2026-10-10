@@ -107,3 +107,18 @@ func TestCatalog_NoPhantomAnthropicModel(t *testing.T) {
 		}
 	}
 }
+
+// B38.4 — gpt-6.1-sol is FROM A /v1/models CAPTURE: GET https://api.openai.com/v1/models with Nicolai's
+// read-only key, saved by model-watch.py 2026-10-09 23:04 UTC as ~/talyvor-queue/model-captures/openai-2026-10-09.json
+// (133 ids, shutdown_date null). Its cache rates are not withCacheRates' 0.5x / 1.0x, so they are pinned here.
+func TestCatalog_GPT61SolSeededFromTheOpenAICapture(t *testing.T) {
+	for _, m := range seedModels() {
+		if m.ID == "gpt-6.1-sol" {
+			if m.Provider != "openai" || m.CachedInputPer1M != 0.10 || m.CacheWritePer1M != 2.50 || m.LongPrompt == nil || m.LongPrompt.CachedInputPer1M != 0.20 || m.LongPrompt.CacheWritePer1M != 5.00 {
+				t.Errorf("gpt-6.1-sol = %+v (long %+v); want openai, cached $0.10, write $2.50, long cached $0.20, write $5.00", m, m.LongPrompt)
+			}
+			return
+		}
+	}
+	t.Error("gpt-6.1-sol is in the OpenAI /v1/models capture but not seeded")
+}
