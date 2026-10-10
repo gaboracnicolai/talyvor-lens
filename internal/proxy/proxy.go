@@ -1695,6 +1695,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		writeError(w, http.StatusBadGateway, "upstream LLM error: "+err.Error())
+		p.releaseReservation(ctx, "upstream error")
 		return
 	}
 
@@ -2104,6 +2105,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		)
 		span.SetStatus(codes.Ok, "")
 	} else {
+		// B17.128: a refused request or a blocked output is charged nothing, so its hold goes back now
+		// rather than staying taken until the stranded sweeper refunds it.
+		released := fmt.Sprintf("upstream status %d", statusCode)
+		if outputBlocked {
+			released = "output guardrail block"
+		}
+		p.releaseReservation(ctx, released)
 		metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "upstream_error").Inc()
 		span.SetStatus(codes.Error, fmt.Sprintf("upstream status %d", statusCode))
 	}

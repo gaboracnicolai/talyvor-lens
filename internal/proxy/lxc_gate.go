@@ -157,22 +157,25 @@ func agentHoldLXC(model, prompt string, maxOutTokens int) int64 {
 const holdFramingTokens = 16
 
 // holdInputTokens counts a prompt's input as densely as a provider's tokenizer does: a token for each digit,
-// which Claude counts one by one, a token for every three other bytes, and the request's framing. On 9 Oct the
-// testers' 48-character sum ("What is 4219 + 5977? Reply with the number only.") was 25 input tokens to Claude
-// Sonnet 5; len(prompt)/4 held 12, and the answer that ran to its max_tokens of 16 cost 2100 µLXC against a hold
-// of 1840. Never less than len(prompt)/4, so no hold is smaller than it was. An empty prompt (an embeddings
-// body, which carries `input`, not `messages`) counts nothing, as before.
+// which Claude counts one by one, a token for each ASCII punctuation mark, a token for every three other bytes,
+// and the request's framing. On 9 Oct the testers' 48-character sum ("What is 4219 + 5977? Reply with the
+// number only.") was 25 input tokens to Claude Sonnet 5; len(prompt)/4 held 12, and the answer that ran to its
+// max_tokens of 16 cost 2100 µLXC against a hold of 1840. On 10 Oct forty JSON rows (3571 bytes, 1281 of them
+// quotes, colons, commas and braces) were 1808 input tokens; counting punctuation with the letters held 1560,
+// and the settle cut the charge to the hold (B17.128). Never less than len(prompt)/4, so no hold is smaller
+// than it was. An empty prompt (an embeddings body, which carries `input`, not `messages`) counts nothing.
 func holdInputTokens(prompt string) int {
 	if prompt == "" {
 		return 0
 	}
-	digits := 0
+	dense := 0
 	for i := 0; i < len(prompt); i++ {
-		if prompt[i] >= '0' && prompt[i] <= '9' {
-			digits++
+		c := prompt[i]
+		if c > ' ' && c < 0x7f && !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			dense++ // a digit or a punctuation mark
 		}
 	}
-	return digits + (len(prompt)-digits+2)/3 + holdFramingTokens
+	return dense + (len(prompt)-dense+2)/3 + holdFramingTokens
 }
 
 // platformFeeReader is the platform fee a charge of an amount would carry (B32.11). *economy.DualTokenStore
