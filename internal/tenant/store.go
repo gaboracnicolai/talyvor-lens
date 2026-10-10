@@ -531,6 +531,25 @@ func (s *Store) ListAPIKeys(ctx context.Context, workspaceID string) ([]Workspac
 	return out, rows.Err()
 }
 
+// keyUsageSQL counts a key's resolved holds and sums the charge each settled (B17.121): every request a
+// workspace key makes is held against it, and its settle records the delivered charge (a release, 0).
+// shortcut: lxc_reservations has no index on scoped_key_id, so this scans it; add one if the read slows.
+const keyUsageSQL = `
+SELECT count(*), COALESCE(sum(settled_ulxc), 0)::bigint
+FROM lxc_reservations
+WHERE scoped_key_id = $1 AND workspace_id = $2 AND status <> 'held'`
+
+// KeyUsage returns how many requests the workspace's key has made and the µLXC they were charged.
+func (s *Store) KeyUsage(ctx context.Context, workspaceID, keyID string) (requests, chargedULXC int64, err error) {
+	if s.pool == nil {
+		return 0, 0, nil
+	}
+	if err := s.pool.QueryRow(ctx, keyUsageSQL, keyID, workspaceID).Scan(&requests, &chargedULXC); err != nil {
+		return 0, 0, fmt.Errorf("tenant: key usage: %w", err)
+	}
+	return requests, chargedULXC, nil
+}
+
 // ValidateScopes returns ErrInvalidScope when any scope is
 // outside ValidScopes. Empty slice is OK (request-with-no-
 // permissions; the caller decides how to treat that).
