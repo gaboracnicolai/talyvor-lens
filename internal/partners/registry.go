@@ -3,6 +3,7 @@ package partners
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -52,6 +53,13 @@ type Registry struct {
 	agentToken *TestAgentTokenProvider
 	tax        *TestTaxPartner
 	screening  TestScreeningProvider
+	verifiers  map[string]verifier // by subject
+}
+
+// verifier is a real verification provider and the countries it checks; none is every country.
+type verifier struct {
+	KYCProvider
+	countries []string
 }
 
 // NewRegistry is a registry that asks clearances before it hands out a real adapter. With nil clearances it
@@ -195,17 +203,40 @@ func (r *Registry) KYC(ctx context.Context, capability string) (KYCProvider, err
 	return observedKYC{p, r.observer(ServiceKYC)}, nil
 }
 
-// Verification is the provider the verification levels' checks go to (B30.4): the real one once it is configured,
-// the Test one until then. A check moves no money, so no clearance is asked; a pass by the Test provider counts for
-// test money only (economy.WorkspaceVerification).
-func (r *Registry) Verification() KYCProvider {
+// UseVerifier makes p the provider of checks on subject (KYCPerson, KYCCompany) in countries, or in every country
+// when none is named (B30.112): Persona for a person's identity, Companies House for a UK company.
+func (r *Registry) UseVerifier(subject string, p KYCProvider, countries ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.verifiers == nil {
+		r.verifiers = map[string]verifier{}
+	}
+	r.verifiers[subject] = verifier{p, countries}
+}
+
+// Verifiers is the provider a check on subject in country goes to; synthetic is a tester's workspace.
+type Verifiers func(subject, country string, synthetic bool) KYCProvider
+
+// Verification is the provider a check on subject in country goes to (B30.4): the real one set for the subject and
+// country by UseVerifier, else the configured KYC adapter, else the Test one — and the Test one, always, for a
+// synthetic workspace. A check moves no money, so no clearance is asked; a pass by the Test provider counts for test
+// money only (economy.WorkspaceVerification).
+func (r *Registry) Verification(subject, country string, synthetic bool) KYCProvider {
 	r.mu.RLock()
 	p := KYCProvider(r.kyc)
-	if adapter, ok := r.adapters[ServiceKYC]; ok {
+	if adapter, ok := r.adapters[ServiceKYC]; ok && !synthetic {
 		p = adapter.(KYCProvider)
+	}
+	if v, ok := r.verifiers[subject]; ok && !synthetic && (len(v.countries) == 0 || slices.Contains(v.countries, country)) {
+		p = v.KYCProvider
 	}
 	r.mu.RUnlock()
 	return observedKYC{p, r.observer(ServiceKYC)}
+}
+
+// OneVerifier is p for every check.
+func OneVerifier(p KYCProvider) Verifiers {
+	return func(string, string, bool) KYCProvider { return p }
 }
 
 // Screening is the screening provider for capability.

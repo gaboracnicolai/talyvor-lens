@@ -25,8 +25,9 @@ import (
 //	L2  identity checked
 //	L3  company checked: its number, directors and people with significant control
 //
-// Every check past L0 goes to partners.KYCProvider — the registry's Verification: the Test provider until a real
-// one is configured — and needs the level below it first. Lens keeps each check's level, method (the provider that
+// Every check past L0 goes to partners.KYCProvider — the registry's Verification: Persona for a person's identity
+// and Companies House for a UK company once their keys are set (B30.112), the Test provider otherwise and for a
+// synthetic workspace — and needs the level below it first. Lens keeps each check's level, method (the provider that
 // checked), status, date and the provider's reference as its evidence, never a document (workspace_verifications,
 // migration 0230, append-only). Lens knows a person only through their workspace (B19.11), so the record is the
 // workspace's.
@@ -34,7 +35,7 @@ import (
 // Each capability declares the level its live money needs (Capability.Level): currency accounts, payments, FX and
 // trading L2; credit and merchant acceptance L3; spending on Talyvor itself L0. Live money is judged by the
 // workspace's live level — the checks a real provider passed. A pass by the Test provider is on the record and
-// shows, and counts for nothing live. Test money never asks for a level: with it every level may try everything.
+// shows, and counts for nothing live; so does a pass by a provider's sandbox (a method ending _sandbox). Test money never asks for a level: with it every level may try everything.
 //
 // And a level takes live money only within the limits Nicolai sets for it (`lens verification-limits`): the most one
 // movement of money may move, per currency. Until one is set no level takes live money; a level with no limit of
@@ -92,6 +93,11 @@ var subjects = map[VerificationLevel]string{LevelContact: partners.KYCContact, L
 // testVerifier is the Test provider's name: what it passes counts for test money only.
 const testVerifier = "test"
 
+// testOnly says whether what method passes counts for test money only: the Test provider's and a sandbox's passes.
+func testOnly(method string) bool {
+	return method == testVerifier || strings.HasSuffix(method, "_sandbox")
+}
+
 var (
 	// ErrVerificationInvalid: a check asked for without what it checks.
 	ErrVerificationInvalid = errors.New("economy: invalid verification request")
@@ -123,7 +129,7 @@ type VerificationCheck struct {
 	Level         VerificationLevel `json:"level"`
 	Subject       string            `json:"subject"`
 	Method        string            `json:"method"` // the provider that checked
-	Test          bool              `json:"test"`   // checked by the Test provider: it counts for test money only
+	Test          bool              `json:"test"`   // checked by the Test provider or a sandbox: it counts for test money only
 	Status        string            `json:"status"` // pending, completed, failed or returned (a pass withdrawn)
 	EvidenceRef   string            `json:"evidence_ref"`
 	VerifiedName  string            `json:"verified_name,omitempty"`
@@ -133,6 +139,8 @@ type VerificationCheck struct {
 	RequestedBy   string            `json:"requested_by,omitempty"`
 	StartedAt     time.Time         `json:"started_at"`
 	CheckedAt     time.Time         `json:"checked_at"` // when it reached its status
+	// Link is where the person completes a check still waiting for them (Persona's one-time link); never stored.
+	Link string `json:"link,omitempty"`
 }
 
 // WorkspaceVerification is the owner's record: the level the checks reach, the level live money is judged by, the
@@ -206,7 +214,7 @@ func checkVerificationRequest(in *VerificationRequest) error {
 // StartVerification starts a check for in.Level on workspaceID through kyc and records it, by who asked: L1 needs L0,
 // L2 needs L1, L3 needs L2 — each passed, by any provider. The check is recorded as the provider answers: passed,
 // failed, or pending until a later read finds it decided.
-func (s *DualTokenStore) StartVerification(ctx context.Context, kyc partners.KYCProvider, workspaceID, by string,
+func (s *DualTokenStore) StartVerification(ctx context.Context, verifiers partners.Verifiers, workspaceID, by string,
 	in VerificationRequest) (VerificationCheck, error) {
 	if err := checkVerificationRequest(&in); err != nil {
 		return VerificationCheck{}, err
@@ -220,7 +228,16 @@ func (s *DualTokenStore) StartVerification(ctx context.Context, kyc partners.KYC
 		return VerificationCheck{}, fmt.Errorf("%w: the %s check (%s) needs %s — %s — first; this workspace is at %s",
 			ErrVerificationOrder, in.Level.Meaning(), in.Level, below, below.Meaning(), have)
 	}
+	if person, named := identityNamed(checks, slices.Concat(in.Directors, in.SignificantControl)); in.Level == LevelCompany && !named {
+		return VerificationCheck{}, fmt.Errorf("%w: a company check names %s, whose identity was checked, among its directors or people with significant control",
+			ErrVerificationInvalid, person)
+	}
 	subject := subjects[in.Level]
+	synthetic, err := syntheticWorkspace(ctx, s.pool, workspaceID)
+	if err != nil {
+		return VerificationCheck{}, err
+	}
+	kyc := verifiers(subject, in.Country, synthetic)
 	res, err := kyc.StartCheck(ctx, partners.KYCRequest{ID: "kyc_" + uuid.NewString(), Subject: subject, Name: in.Name,
 		Country: in.Country, DateOfBirth: in.DateOfBirth, Email: in.Email, Phone: in.Phone, CompanyNumber: in.CompanyNumber,
 		Directors: in.Directors, SignificantControl: in.SignificantControl})
@@ -231,7 +248,7 @@ func (s *DualTokenStore) StartVerification(ctx context.Context, kyc partners.KYC
 		return VerificationCheck{}, fmt.Errorf("economy: verification: %w", err)
 	}
 	c := VerificationCheck{Level: in.Level, Subject: subject, Method: kyc.Name(), Status: string(res.Status), EvidenceRef: res.Ref,
-		Country: in.Country, CompanyNumber: in.CompanyNumber, Detail: res.Detail, RequestedBy: by}
+		Country: in.Country, CompanyNumber: in.CompanyNumber, Detail: res.Detail, RequestedBy: by, Link: res.Link}
 	if in.Level != LevelContact {
 		c.VerifiedName = in.Name
 	}
@@ -242,9 +259,23 @@ func (s *DualTokenStore) StartVerification(ctx context.Context, kyc partners.KYC
 	return c, nil
 }
 
+// identityNamed says whether names include the person whose identity check (L2) passed most recently, and who: a
+// company is checked for the person who was.
+func identityNamed(checks []VerificationCheck, names []string) (person string, named bool) {
+	for _, c := range checks { // newest first
+		if c.Level == LevelIdentity && c.Status == string(partners.StatusCompleted) {
+			person = c.VerifiedName
+			break
+		}
+	}
+	return person, slices.ContainsFunc(names, func(n string) bool {
+		return strings.EqualFold(strings.Join(strings.Fields(n), " "), strings.Join(strings.Fields(person), " "))
+	})
+}
+
 // recordVerificationCheck appends c as it stands now, and stamps when.
 func recordVerificationCheck(ctx context.Context, q pgxDB, workspaceID string, c *VerificationCheck) error {
-	c.Test = c.Method == testVerifier
+	c.Test = testOnly(c.Method)
 	if err := q.QueryRow(ctx, `INSERT INTO workspace_verifications (workspace_id, level, subject, method, status, evidence_ref,
 		verified_name, country, company_number, detail, requested_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING created_at`, workspaceID, int(c.Level), c.Subject, c.Method, c.Status, c.EvidenceRef, c.VerifiedName, c.Country,
@@ -254,16 +285,27 @@ func recordVerificationCheck(ctx context.Context, q pgxDB, workspaceID string, c
 	return nil
 }
 
-// Verification is workspaceID's record. A check still pending, or passed, by kyc is asked again first, and a change
-// — a pending check decided, a pass withdrawn — is appended; a provider that cannot answer leaves the check as it
-// was. With a nil kyc nothing is asked.
-func (s *DualTokenStore) Verification(ctx context.Context, kyc partners.KYCProvider, workspaceID string) (WorkspaceVerification, error) {
+// Verification is workspaceID's record. A check still pending, or passed, is asked again first of the provider it
+// went to, if verifiers still sends its kind of check there, and a change — a pending check decided, a pass
+// withdrawn — is appended; a provider that cannot answer leaves the check as it was. With nil verifiers nothing is
+// asked.
+func (s *DualTokenStore) Verification(ctx context.Context, verifiers partners.Verifiers, workspaceID string) (WorkspaceVerification, error) {
 	checks, err := readVerificationChecks(ctx, s.pool, workspaceID)
 	if err != nil {
 		return WorkspaceVerification{}, err
 	}
+	synthetic := false
+	if verifiers != nil {
+		if synthetic, err = syntheticWorkspace(ctx, s.pool, workspaceID); err != nil {
+			return WorkspaceVerification{}, err
+		}
+	}
 	for i, c := range checks {
-		if kyc == nil || c.Method != kyc.Name() || (c.Status != string(partners.StatusPending) && c.Status != string(partners.StatusCompleted)) {
+		if verifiers == nil || (c.Status != string(partners.StatusPending) && c.Status != string(partners.StatusCompleted)) {
+			continue
+		}
+		kyc := verifiers(c.Subject, c.Country, synthetic)
+		if c.Method != kyc.Name() {
 			continue
 		}
 		res, err := kyc.CheckResult(ctx, c.EvidenceRef)
@@ -271,10 +313,11 @@ func (s *DualTokenStore) Verification(ctx context.Context, kyc partners.KYCProvi
 			slog.Warn("economy: verification: the provider could not say where a check stands", "ref", c.EvidenceRef, "err", err)
 			continue
 		}
+		checks[i].Link = res.Link
 		if string(res.Status) == c.Status {
 			continue
 		}
-		c.Status, c.Detail = string(res.Status), res.Detail
+		c.Status, c.Detail, c.Link = string(res.Status), res.Detail, res.Link
 		if err := recordVerificationCheck(ctx, s.pool, workspaceID, &c); err != nil {
 			return WorkspaceVerification{}, err
 		}
@@ -303,7 +346,7 @@ func readVerificationChecks(ctx context.Context, q pgxDB, workspaceID string) ([
 		var level int16
 		err := row.Scan(&level, &c.Subject, &c.Method, &c.Status, &c.EvidenceRef, &c.VerifiedName, &c.Country, &c.CompanyNumber,
 			&c.Detail, &c.RequestedBy, &c.StartedAt, &c.CheckedAt)
-		c.Level, c.Test = VerificationLevel(level), c.Method == testVerifier
+		c.Level, c.Test = VerificationLevel(level), testOnly(c.Method)
 		return c, err
 	})
 }
@@ -325,6 +368,14 @@ func reachedLevels(checks []VerificationCheck) (shown, live VerificationLevel) {
 		live++
 	}
 	return shown, live
+}
+
+// syntheticWorkspace says whether workspaceID is a tester's: its checks stay with the Test provider.
+func syntheticWorkspace(ctx context.Context, q pgxDB, workspaceID string) (synthetic bool, err error) {
+	if err := q.QueryRow(ctx, `SELECT COALESCE((SELECT synthetic FROM workspaces WHERE id = $1), false)`, workspaceID).Scan(&synthetic); err != nil {
+		return false, fmt.Errorf("economy: verification: %w", err)
+	}
+	return synthetic, nil
 }
 
 // liveVerificationLevel is the level workspaceID's live money is judged by.

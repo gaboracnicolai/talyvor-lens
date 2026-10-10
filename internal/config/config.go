@@ -602,6 +602,14 @@ type Config struct {
 
 	// KYACredentialTTL is how long a Know Your Agent credential is valid (env: LENS_KYA_CREDENTIAL_TTL). Default 24h.
 	KYACredentialTTL time.Duration
+	// PersonaAPIKey and PersonaTemplateID are Persona's API key and the inquiry template of its "KYC" solution (env:
+	// LENS_PERSONA_API_KEY, LENS_PERSONA_TEMPLATE_ID, B30.112): with both set a person's identity check (L2) goes to
+	// Persona, and otherwise to the Test provider.
+	PersonaAPIKey     string
+	PersonaTemplateID string
+	// CompaniesHouseAPIKey is a Companies House REST API key (env: LENS_COMPANIES_HOUSE_API_KEY, B30.112): set, a UK
+	// company's check (L3) goes to Companies House, and otherwise to the Test provider.
+	CompaniesHouseAPIKey string
 	// ScreeningFuzzyThreshold is how similar a name must be to one on a sanctions list for its payee or payment to be
 	// held for an operator (B30.6), above 0 and at most 1. Env: LENS_SCREENING_FUZZY_THRESHOLD, which Nicolai sets;
 	// until he does, 0.9.
@@ -2007,6 +2015,8 @@ func Load() (*Config, error) {
 		}
 		c.KYACredentialTTL = d
 	}
+	c.PersonaAPIKey, c.PersonaTemplateID = os.Getenv("LENS_PERSONA_API_KEY"), os.Getenv("LENS_PERSONA_TEMPLATE_ID")
+	c.CompaniesHouseAPIKey = os.Getenv("LENS_COMPANIES_HOUSE_API_KEY")
 	// B30.6 — the similarity to a listed name at which a payee or payment is held. A malformed value is refused.
 	c.ScreeningFuzzyThreshold = 0.9
 	if v := os.Getenv("LENS_SCREENING_FUZZY_THRESHOLD"); v != "" {

@@ -71,7 +71,7 @@ func TestVerification_AWorkspaceAtL1IsRefusedALivePaymentAndTestMoneyGoesThrough
 	s := screenedStore(pool)
 	const ws = "ws-b304-done"
 	gb := verifiedForLiveMoney(t, s, pool, ws)
-	kyc := realKYC{&partners.TestKYCProvider{}}
+	kyc := partners.OneVerifier(realKYC{&partners.TestKYCProvider{}})
 	// L1 has a limit, so only its level keeps the live payment out.
 	if _, err := s.SetLevelLimit(gb, LevelContact, CurrencyGBP, 100_000, "nicolai", "B30.4 test"); err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestVerification_TestPassesLimitsAndAWithdrawnPass(t *testing.T) {
 			Funding: FundingLive, Postings: []MoneyPosting{{AccountID: partner.ID, AmountMinor: minor}, {AccountID: company.ID, AmountMinor: -minor}}})
 		return err
 	}
-	verify := func(kyc partners.KYCProvider, name string) {
+	verify := func(kyc partners.Verifiers, name string) {
 		t.Helper()
 		if _, err := s.StartVerification(gb, kyc, ws, "owner", VerificationRequest{Level: LevelContact, Email: "ada@example.com",
 			Phone: "+447700900123"}); err != nil {
@@ -158,7 +158,7 @@ func TestVerification_TestPassesLimitsAndAWithdrawnPass(t *testing.T) {
 		}
 	}
 
-	test := &partners.TestKYCProvider{}
+	test := partners.OneVerifier(&partners.TestKYCProvider{})
 	verify(test, "Ada Lovelace")
 	if v, err := s.Verification(gb, test, ws); err != nil || v.Level != LevelIdentity || v.LiveLevel != LevelSignedIn || !v.Checks[0].Test {
 		t.Fatalf("after the Test provider's passes the record = %+v, %v; want L2 shown, L0 live", v, err)
@@ -167,7 +167,7 @@ func TestVerification_TestPassesLimitsAndAWithdrawnPass(t *testing.T) {
 		t.Fatalf("a live payment on the Test provider's L2 = %v; want refused at L0", err)
 	}
 
-	real := realKYC{&partners.TestKYCProvider{}}
+	real := partners.OneVerifier(realKYC{&partners.TestKYCProvider{}})
 	verify(real, "Ada TESTRETURN Lovelace")
 	if err := pay("p2", 12_000); !errors.Is(err, ErrVerificationNeeded) || !strings.Contains(err.Error(), "no live limit") {
 		t.Fatalf("a live payment at L2 with no limit set = %v; want refused for want of a limit", err)
