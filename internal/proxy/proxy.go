@@ -1234,7 +1234,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 			// must not retain them — exactly like the upstream turn write
 			// (~1390), which already gates on None. This cache-hit path did not.
 			if sess != nil && loggingPolicy != workspace.LoggingNone {
-				p.recordSessionTurn(ctx, sessionID, prompt, string(cached), model, 0, true)
+				p.recordSessionTurn(ctx, sessionID, prompt, string(cached), model, len(prompt)/4, len(cached)/4, 0, true)
 				setSessionHeaders(w, p, sessionID)
 			}
 			// PRICE THE HIT BEFORE ANY BYTES GO OUT. The serve precedes the settle by design (a
@@ -1795,8 +1795,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// LoggingNone skips the turn write entirely (privacy mode); metadata
 	// and full both record it.
 	if sess != nil && statusCode == http.StatusOK && loggingPolicy != workspace.LoggingNone {
-		turnCost := alerts.CostUSD(upstreamModel, len(prompt)/4, len(upstreamBody)/4)
-		p.recordSessionTurn(ctx, sessionID, prompt, string(upstreamBody), upstreamModel, turnCost, false)
+		// B17.133: the provider's token counts and the catalog price the spend row is charged below, not len/4.
+		turnIn, turnOut := len(prompt)/4, len(upstreamBody)/4
+		turnCost, _ := alerts.CostUSDResolved(upstreamModel, catalog.PurposeCharge, turnIn, 0, 0, turnOut)
+		if u, ok := cfg.ExtractUsage(upstreamBody); ok {
+			turnIn, turnOut = u.InputTokens, u.OutputTokens
+			turnCost, _ = alerts.CostUSDResolved(upstreamModel, catalog.PurposeCharge,
+				u.UncachedInputTokens, u.CachedInputTokens, u.CacheWriteInputTokens, u.OutputTokens)
+		}
+		p.recordSessionTurn(ctx, sessionID, prompt, string(upstreamBody), upstreamModel, turnIn, turnOut, turnCost, false)
 		setSessionHeaders(w, p, sessionID)
 	}
 	// forwardWithFallback always returns OpenAI-shape JSON, so we default
@@ -3144,7 +3151,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // per-turn fields without spreading session.Turn construction across
 // the proxy. Errors are best-effort — session tracking must never
 // break the main response.
-func (p *Proxy) recordSessionTurn(ctx context.Context, sessionID, prompt, response, model string, cost float64, cached bool) {
+func (p *Proxy) recordSessionTurn(ctx context.Context, sessionID, prompt, response, model string, inT, outT int, cost float64, cached bool) {
 	if p.sessionTracker == nil || sessionID == "" {
 		return
 	}
@@ -3153,8 +3160,8 @@ func (p *Proxy) recordSessionTurn(ctx context.Context, sessionID, prompt, respon
 		Prompt:       prompt,
 		Response:     response,
 		Model:        model,
-		InputTokens:  len(prompt) / 4,
-		OutputTokens: len(response) / 4,
+		InputTokens:  inT,
+		OutputTokens: outT,
 		CostUSD:      cost,
 		Cached:       cached,
 		CreatedAt:    time.Now().UTC(),

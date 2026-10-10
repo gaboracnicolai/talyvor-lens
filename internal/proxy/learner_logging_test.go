@@ -9,7 +9,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/talyvor/lens/internal/alerts"
 	"github.com/talyvor/lens/internal/cache"
+	"github.com/talyvor/lens/internal/catalog"
 	"github.com/talyvor/lens/internal/learner"
 	"github.com/talyvor/lens/internal/localrouter"
 	"github.com/talyvor/lens/internal/session"
@@ -208,6 +210,45 @@ func TestSessionTurn_CacheHit_HonoursLoggingNone(t *testing.T) {
 				t.Errorf("policy %q: session TurnCount = %d, want %d (none must not retain prompt/response, even on a cache hit)", tc.policy, sess.TurnCount, tc.wantTurns)
 			}
 		})
+	}
+}
+
+// B17.133: a session's turn holds the provider's token counts and the catalog price it was charged at,
+// not a len/4 guess over the prompt and the response's JSON bytes.
+func TestSessionTurn_HoldsProviderUsageAndCatalogPrice(t *testing.T) {
+	p, sink, _ := newLoggingProxy(t, workspace.LoggingMetadata)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"model":"gpt-4","choices":[{"message":{"role":"assistant","content":"4525"}}],"usage":{"prompt_tokens":36,"completion_tokens":6}}`)
+	}))
+	t.Cleanup(up.Close)
+	p.openAIURL = up.URL
+	p.sessionTracker = session.New(nil)
+
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"What is 3481 + 1044? Reply with the number only."}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/openai/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Talyvor-Workspace", "ws-log")
+	req.Header.Set("X-Talyvor-Session", "sess-b17133")
+	w := httptest.NewRecorder()
+	p.HandleOpenAI(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body=%s", w.Code, w.Body.String())
+	}
+
+	s, ok := p.sessionTracker.GetSession("sess-b17133")
+	if !ok || s.TurnCount != 1 {
+		t.Fatalf("session = %+v (found %v), want one turn", s, ok)
+	}
+	if s.TotalInputTokens != 36 || s.TotalOutputTokens != 6 {
+		t.Errorf("session holds %d in / %d out tokens, want the provider's 36 / 6", s.TotalInputTokens, s.TotalOutputTokens)
+	}
+	want, _ := alerts.CostUSDResolved("gpt-4", catalog.PurposeCharge, 36, 0, 0, 6)
+	if want <= 0 || s.TotalCostUSD != want {
+		t.Errorf("session cost $%v, want the catalog price of 36 / 6 on gpt-4, $%v", s.TotalCostUSD, want)
+	}
+	if sink.lastInput != 36 || sink.lastOutput != 6 {
+		t.Errorf("spend row %d / %d, want the same 36 / 6 the session holds", sink.lastInput, sink.lastOutput)
 	}
 }
 

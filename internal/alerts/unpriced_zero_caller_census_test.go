@@ -29,6 +29,8 @@ import (
 //	                                      resolver, and says so in its own comment
 //	W6.19 (#487)  the budget gate       ← the LXC gate beside it already used the
 //	                                      resolver with catalog.PurposeCharge
+//	B17.133       the session turn      ← the buffered spend row it reports already
+//	                                      used the resolver with catalog.PurposeCharge
 //
 // NONE OF THE NINE BELOW HAS SUCH A TWIN. For each of them, choosing a fallback is
 // choosing what an unpriced model costs on that surface — and the two directions are
@@ -77,7 +79,6 @@ var remainingCallers = map[string]callerRecord{
 	"internal/proxy/distill_integration.go": {1, "avoidedCOGSUSD on a cross-tenant pooled OCR serve — it " +
 		"feeds a ROYALTY MARGIN, so a zero UNDER-PAYS a contributor. ⚠ Direction is a payout " +
 		"design question and this queue holds payout design open (W6.3.2, W6.3.3)."},
-	"internal/proxy/proxy.go":            {1, "turnCost on the session-turn record — the per-turn figure a session summary reports."},
 	"internal/proxy/worktier_capture.go": {1, "the cost signal into worktier.Classify and the worktier sink. Descriptive by design (the admin route table calls worktier 'money-decoupled; never feeds mint/earn/billing'), so a zero mis-TIERS rather than mis-bills."},
 }
 
