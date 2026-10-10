@@ -14,8 +14,9 @@ import (
 )
 
 // B30.4 — verification levels for people and companies (internal/economy/verification.go). Each check goes to the
-// verification provider — the Test one until a real one is configured, and what it passes counts for test money
-// only — and Lens keeps its level, method, status, date and the provider's reference, never a document.
+// verification provider — Persona for a person's identity and Companies House for a UK company once their keys are
+// set (B30.112), the Test one otherwise, and what the Test one or a sandbox passes counts for test money only — and
+// Lens keeps its level, method, status, date and the provider's reference, never a document.
 //
 //	GET  /v1/workspaces/{wsID}/verification            the level the checks reach, the level live money is judged by,
 //	                                                   and every check, newest first; a pending check, or a pass, is
@@ -26,20 +27,21 @@ import (
 //	                                                                                           L3: company checked
 //
 // Each check needs the level below it (409 otherwise) and answers 201 with the check — passed, failed or pending —
-// and the record. The level each capability needs for live money is level_needed on GET /v1/wallets/capabilities.
+// and the record. A check the person completes themselves (Persona's) is pending with its link, where they do; the
+// GET carries a fresh link while it waits. The level each capability needs for live money is level_needed on GET /v1/wallets/capabilities.
 // All four take the workspace's owner or an admin: they are a person's identity.
 type verificationStore interface {
-	Verification(ctx context.Context, kyc partners.KYCProvider, workspaceID string) (economy.WorkspaceVerification, error)
-	StartVerification(ctx context.Context, kyc partners.KYCProvider, workspaceID, by string, in economy.VerificationRequest) (economy.VerificationCheck, error)
+	Verification(ctx context.Context, verifiers partners.Verifiers, workspaceID string) (economy.WorkspaceVerification, error)
+	StartVerification(ctx context.Context, verifiers partners.Verifiers, workspaceID, by string, in economy.VerificationRequest) (economy.VerificationCheck, error)
 }
 
-func mountVerificationRoutes(r chi.Router, store verificationStore, verifier func() partners.KYCProvider) {
+func mountVerificationRoutes(r chi.Router, store verificationStore, verifiers partners.Verifiers) {
 	r.Get("/v1/workspaces/{wsID}/verification", func(w http.ResponseWriter, req *http.Request) {
 		if _, ok := storedanswers.OwnerOrAdmin(req.Context()); !ok {
 			writeJSONErr(w, http.StatusForbidden, "only the workspace's owner or an admin may read its verification")
 			return
 		}
-		v, err := store.Verification(req.Context(), verifier(), chi.URLParam(req, "wsID"))
+		v, err := store.Verification(req.Context(), verifiers, chi.URLParam(req, "wsID"))
 		if err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -59,8 +61,8 @@ func mountVerificationRoutes(r chi.Router, store verificationStore, verifier fun
 				return
 			}
 			in.Level = level
-			ws, kyc := chi.URLParam(req, "wsID"), verifier()
-			c, err := store.StartVerification(req.Context(), kyc, ws, who, in)
+			ws := chi.URLParam(req, "wsID")
+			c, err := store.StartVerification(req.Context(), verifiers, ws, who, in)
 			switch {
 			case errors.Is(err, economy.ErrVerificationInvalid):
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
@@ -72,10 +74,16 @@ func mountVerificationRoutes(r chi.Router, store verificationStore, verifier fun
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			v, err := store.Verification(req.Context(), kyc, ws)
+			// Not asked again: the check has just answered, and asking Persona would make it a second link.
+			v, err := store.Verification(req.Context(), nil, ws)
 			if err != nil {
 				writeJSONErr(w, http.StatusInternalServerError, err.Error())
 				return
+			}
+			for i := range v.Checks {
+				if v.Checks[i].EvidenceRef == c.EvidenceRef {
+					v.Checks[i].Link = c.Link
+				}
 			}
 			writeJSONOK(w, http.StatusCreated, map[string]any{"check": c, "verification": v})
 		}

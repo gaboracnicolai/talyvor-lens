@@ -1913,6 +1913,14 @@ func run() error {
 	if err := useTaxPartner(partnerRegistry, cfg, taxData); err != nil {
 		return err
 	}
+	// B30.112 — a person's identity check goes to Persona and a UK company's to Companies House once their keys are set;
+	// synthetic workspaces' checks stay with the Test provider.
+	if cfg.PersonaAPIKey != "" && cfg.PersonaTemplateID != "" {
+		partnerRegistry.UseVerifier(partners.KYCPerson, &partners.PersonaKYC{Key: cfg.PersonaAPIKey, TemplateID: cfg.PersonaTemplateID})
+	}
+	if cfg.CompaniesHouseAPIKey != "" {
+		partnerRegistry.UseVerifier(partners.KYCCompany, &partners.CompaniesHouseKYC{Key: cfg.CompaniesHouseAPIKey}, "GB")
+	}
 	// B30.12 — the status page lists each partner, Test or live, its last success and failure, and its clearances.
 	statusPage.UseMoneyRails(partnerRegistry, dualToken)
 	// B30.6 — every payee and every payment in or out through a partner is screened against the UK Sanctions List and

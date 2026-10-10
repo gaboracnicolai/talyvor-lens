@@ -17,7 +17,7 @@ import (
 func TestClearanceCountries_ALivePaymentFromAnUnlistedCountryIsRefusedNamingIt(t *testing.T) {
 	pool := supplyPool(t)
 	s := screenedStore(pool)
-	kyc := realKYC{&partners.TestKYCProvider{}}
+	kyc := partners.OneVerifier(realKYC{&partners.TestKYCProvider{}})
 	const fr, gbOwner = "ws-b3010-fr", "ws-b3010-gb-owner"
 	gb := verifiedForLiveMoney(t, s, pool, fr)
 	_ = verifiedForLiveMoney(t, s, pool, gbOwner)

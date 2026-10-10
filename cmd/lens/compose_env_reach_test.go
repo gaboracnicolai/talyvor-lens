@@ -226,6 +226,13 @@ var credentialExemptions = map[string]string{
 		"like LENS_VAPID_PRIVATE_KEY and for the same reason: an environment: entry would arrive as \"\" and override " +
 		"the lens.env value, so every start would sign agent credentials with a new key.",
 
+	"LENS_PERSONA_API_KEY": "B30.112's Persona key reaches the process through env_file: lens.env, like " +
+		"LENS_KYA_SIGNING_KEY and for the same reason: an environment: entry would arrive as \"\" and override the " +
+		"lens.env value, so identity checks would fall back to the Test provider.",
+
+	"LENS_COMPANIES_HOUSE_API_KEY": "B30.112's Companies House key reaches the process through env_file: lens.env, " +
+		"with LENS_PERSONA_API_KEY and for the same reason.",
+
 	// ⚠ FOUR MORE EXEMPTIONS WERE WRITTEN HERE AND REMOVED, because
 	// TestCredentialExemptionsAreStillRead refused them: LENS_TEST_NVIDIA_EAT{,_NONCE},
 	// LENS_POVI_KEY_VALUE and LENS_POVI_KEY_CRASHER are read ONLY from _test.go files, which the

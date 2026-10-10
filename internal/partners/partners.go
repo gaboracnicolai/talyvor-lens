@@ -56,6 +56,9 @@ type Result struct {
 	Ref    string `json:"partner_ref"`
 	Status Status `json:"status"`
 	Detail string `json:"detail,omitempty"`
+	// Link is where a person completes the operation themselves, when the partner needs them to: a verification's
+	// one-time link (B30.112). Lens never stores it.
+	Link string `json:"link,omitempty"`
 }
 
 var (
