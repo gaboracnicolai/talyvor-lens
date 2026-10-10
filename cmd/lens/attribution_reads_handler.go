@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/lens/internal/attribution"
 	"github.com/talyvor/lens/internal/outputverify"
 )
 
@@ -64,5 +67,24 @@ func newAttributionListHandler(authn verdictAuthenticator, reader attributionRea
 			recs = []outputverify.AttributionRecord{}
 		}
 		writeJSONOK(w, http.StatusOK, recs)
+	}
+}
+
+// newBranchStatsHandler serves GET /v1/workspaces/{wsID}/attribution/branches/{branch}. chi matches on the
+// escaped path, so a branch with a slash ("feature/x", sent as feature%2Fx) arrives escaped and is unescaped
+// here — read as sent, it named no branch and counted nothing.
+func newBranchStatsHandler(get func(ctx context.Context, workspaceID, branch string, since time.Time) (*attribution.BranchStats, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		branch, err := url.PathUnescape(chi.URLParam(req, "branch"))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid branch: "+err.Error())
+			return
+		}
+		stats, err := get(req.Context(), chi.URLParam(req, "wsID"), branch, parseSinceParam(req.URL.Query().Get("since")))
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONOK(w, http.StatusOK, stats)
 	}
 }

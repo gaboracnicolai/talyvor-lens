@@ -4434,17 +4434,7 @@ func run() error {
 			writeJSONOK(w, http.StatusOK, rows)
 		})
 
-		authed.Get("/v1/workspaces/{wsID}/attribution/branches/{branch}", func(w http.ResponseWriter, req *http.Request) {
-			wsID := chi.URLParam(req, "wsID")
-			branch := chi.URLParam(req, "branch")
-			since := parseSinceParam(req.URL.Query().Get("since"))
-			stats, err := attrStore.GetBranchStats(req.Context(), wsID, branch, since)
-			if err != nil {
-				writeJSONErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONOK(w, http.StatusOK, stats)
-		})
+		authed.Get("/v1/workspaces/{wsID}/attribution/branches/{branch}", newBranchStatsHandler(attrStore.GetBranchStats))
 
 		authed.Get("/v1/workspaces/{wsID}/attribution/prs/{prNumber}", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
