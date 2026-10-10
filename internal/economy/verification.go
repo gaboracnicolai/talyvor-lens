@@ -93,9 +93,10 @@ var subjects = map[VerificationLevel]string{LevelContact: partners.KYCContact, L
 // testVerifier is the Test provider's name: what it passes counts for test money only.
 const testVerifier = "test"
 
-// testOnly says whether what method passes counts for test money only: the Test provider's and a sandbox's passes.
+// testOnly says whether what method passes counts for test money only: the Test provider's, a sandbox's, and
+// Persona's until it compares the name on the ID with the name given (partners.PersonaKYC).
 func testOnly(method string) bool {
-	return method == testVerifier || strings.HasSuffix(method, "_sandbox")
+	return method == testVerifier || method == "persona" || strings.HasSuffix(method, "_sandbox")
 }
 
 var (

@@ -57,7 +57,8 @@ func callJSON(client *http.Client, req *http.Request, body, out any) (int, error
 // check still waiting for them carries a fresh link each time it is asked about.
 //
 // shortcut: the name and date of birth are prefilled and Persona's decision is taken as it is, not compared with
-// the name on the ID; compare them before a production key's passes count for live money.
+// the name on the ID, so economy counts every Persona pass for test money only; compare them before a production
+// key's passes count live.
 type PersonaKYC struct {
 	Key        string // persona_sandbox_… or persona_production_…
 	TemplateID string // itmpl_…
