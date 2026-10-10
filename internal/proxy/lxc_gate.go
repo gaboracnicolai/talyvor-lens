@@ -171,7 +171,7 @@ func holdInputTokens(prompt string) int {
 	dense := 0
 	for i := 0; i < len(prompt); i++ {
 		c := prompt[i]
-		if c > ' ' && c < 0x7f && !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+		if c > ' ' && c < 0x7f && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
 			dense++ // a digit or a punctuation mark
 		}
 	}
