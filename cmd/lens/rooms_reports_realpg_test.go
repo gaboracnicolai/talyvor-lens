@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/lens/internal/auth"
 	"github.com/talyvor/lens/internal/economy"
@@ -17,12 +19,26 @@ import (
 	"github.com/talyvor/lens/internal/tenant"
 )
 
+// overPgBouncer is pool as production has it: behind PgBouncer (LENS_DB_PGBOUNCER) Lens speaks pgx's simple protocol,
+// where a []byte argument goes out as bytea and a jsonb column refuses it — B17.115: every public room's post was a 500.
+func overPgBouncer(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
+	t.Helper()
+	cfg := pool.Config()
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	return p
+}
+
 // B32.52 — three reports from different workspaces take a public room off GET /v1/rooms until the operator keeps it; a
 // banned member's post and join are refused and a muted member's post is; a locked room is read-only; a closed room
 // refuses a message and a run on its wallet, which posts nothing to the wallet's ledger; each operator action has its
 // operator_audit row.
 func TestRooms_ReportsHideARoom_BanMute_AndTheOperatorLocksAndCloses(t *testing.T) {
-	pool := agentRoutesDB(t)
+	pool := overPgBouncer(t, agentRoutesDB(t))
 	ctx := context.Background()
 	const owner, member, troll, quiet = "ws-b3252-owner", "ws-b3252-member", "ws-b3252-troll", "ws-b3252-quiet"
 	reporters := []string{"ws-b3252-rep-a", "ws-b3252-rep-b", "ws-b3252-rep-c"}

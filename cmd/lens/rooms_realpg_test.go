@@ -335,7 +335,7 @@ func TestRooms_PrivateRoomsInviteLinksAndPlanLimits(t *testing.T) {
 // seconds; its author edits it and the owner removes it, leaving a tombstone; a non-member reading a private room's
 // messages gets 404; a member's 21st message in a minute is refused.
 func TestRooms_MessagesScannedStreamedEditedDeletedAndLimited(t *testing.T) {
-	pool := agentRoutesDB(t)
+	pool := overPgBouncer(t, agentRoutesDB(t))
 	ctx := context.Background()
 	const owner, joiner, outsider = "ws-b3230-owner", "ws-b3230-joiner", "ws-b3230-outsider"
 	r := chi.NewRouter()
