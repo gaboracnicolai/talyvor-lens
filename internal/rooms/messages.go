@@ -249,7 +249,7 @@ func (s *Store) Post(ctx context.Context, ws, user, roomID, body string) (Messag
 		}
 		id := "rmsg_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		if out, err = scanMessage(tx.QueryRow(ctx, `INSERT INTO room_messages AS m (id, room_id, author_workspace_id, author_user_id, author_agent_id, kind, body, scan)
-			VALUES ($1, $2, $3, $4, $5, 'text', $6, $7) RETURNING `+messageCols, id, roomID, ws, user, agentOf(ctx), body, scan), ws); err != nil {
+			VALUES ($1, $2, $3, $4, $5, 'text', $6, $7) RETURNING `+messageCols, id, roomID, ws, user, agentOf(ctx), body, jsonText(scan)), ws); err != nil {
 			return err
 		}
 		if err := appendEvent(ctx, tx, roomID, EventPosted, id); err != nil {
@@ -316,7 +316,7 @@ func (s *Store) Edit(ctx context.Context, ws, roomID, msgID, body string) (Messa
 			}
 		}
 		if out, err = scanMessage(tx.QueryRow(ctx, `UPDATE room_messages AS m SET body = $2, scan = $3, edited_at = now()
-			WHERE m.id = $1 RETURNING `+messageCols, msgID, body, scan), ws); err != nil {
+			WHERE m.id = $1 RETURNING `+messageCols, msgID, body, jsonText(scan)), ws); err != nil {
 			return err
 		}
 		if err := appendEvent(ctx, tx, roomID, EventEdited, msgID); err != nil {
