@@ -272,6 +272,7 @@ func (p *Pipeline) runCasesInternal(ctx context.Context, workspaceID, datasetID 
 		summary.AvgLatencyMs = totalLatency / int64(summary.TotalTests)
 	}
 	summary.TotalCostUSD = totalCost
+	p.chargeRun(ctx, workspaceID, runID, totalCost)
 	completed := time.Now().UTC()
 	summary.CompletedAt = &completed
 

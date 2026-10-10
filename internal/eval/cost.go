@@ -1,10 +1,14 @@
 package eval
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 
 	"github.com/talyvor/lens/internal/alerts"
+	"github.com/talyvor/lens/internal/economy"
 )
 
 // DefaultEstOutputTokens is the assumed per-case response length used when
@@ -71,4 +75,31 @@ func checkCostCap(est CostEstimate, cap float64) error {
 			ErrCostCapExceeded, est.EstCostUSD, cap, est.Cases)
 	}
 	return nil
+}
+
+// LXCCharger debits the workspace's prepaid LXC. A run asks the model on Talyvor's provider keys, so
+// what it cost is the workspace's to pay (B17.110). *economy.DualTokenStore satisfies it; nil (the
+// default) charges nothing — tests and dry runs.
+type LXCCharger interface {
+	SpendLXC(ctx context.Context, workspaceID string, lxcAmount int64, description string) error
+}
+
+// SetLXCCharger wires the charge every run makes on the workspace's ledger.
+func (p *Pipeline) SetLXCCharger(c LXCCharger) { p.lxc = c }
+
+// chargeRun books a finished run as one spend on the workspace's ledger, at the cost the run states.
+// The models have already answered, so a client that hung up does not cancel the charge.
+func (p *Pipeline) chargeRun(ctx context.Context, workspaceID, runID string, costUSD float64) {
+	if p.lxc == nil {
+		return
+	}
+	ulxc := int64(math.Ceil(costUSD / economy.LXCUSDValue * 1e6)) // a charge rounds UP, as the proxy's does
+	if ulxc <= 0 {
+		return
+	}
+	if err := p.lxc.SpendLXC(context.WithoutCancel(ctx), workspaceID, ulxc, "eval: run "+runID); err != nil {
+		slog.Error("eval: run served UNBILLED — prepaid debit failed",
+			slog.String("workspace", workspaceID), slog.String("run", runID),
+			slog.Int64("ulxc", ulxc), slog.String("err", err.Error()))
+	}
 }
