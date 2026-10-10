@@ -61,6 +61,9 @@ func (b2612Bank) SaveAgentCard(_ context.Context, _ string, c economy.AgentCard)
 func (b2612Bank) ListAgentCardAuthorizations(context.Context, string, string, int) ([]economy.CardAuthorizationRecord, error) {
 	return nil, nil
 }
+func (b2612Bank) SetAgentCardFrozen(context.Context, string, string, bool) (economy.AgentCard, error) {
+	return economy.AgentCard{}, economy.ErrNoAgentCard
+}
 
 // B26.12 — a cardholder Stripe refuses answers 400 with Stripe's reason, its ids taken out; Stripe refusing
 // Lens's own key stays a 502 that says nothing.

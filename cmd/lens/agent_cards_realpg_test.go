@@ -196,3 +196,102 @@ func TestAgentCards_ApprovedWithinRulesDeclinedOutsideEveryAuthorisationALedgerR
 		t.Errorf("the agent holds %d and spent %d; want %d and 268,965,520", b.BalanceULXC, b.SpentULXC, 800_000_000-268_965_520)
 	}
 }
+
+// B17.111 — a frozen card declines a purchase and nothing leaves the agent; unfrozen, the next purchase is approved
+// and is one ledger row of what it cost.
+func TestAgentCards_FrozenDeclinesUnfrozenApprovesOnce(t *testing.T) {
+	pool := agentRoutesDB(t)
+	ctx := context.Background()
+	const ws = "ws-cards-freeze"
+	for _, q := range []string{
+		`INSERT INTO lxc_balances (workspace_id, balance, cash_backed_ulxc, test_funded_ulxc) VALUES ('ws-cards-freeze', 1000000000, 1000000000, 1000000000)`,
+		`INSERT INTO workspaces (id, name, cache_prefix) VALUES ('ws-cards-freeze', 'ws-cards-freeze', 'ws-cards-freeze')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := economy.NewDualTokenStore(nil, pool, nil)
+	r := chi.NewRouter()
+	mountAgentAccountRoutes(r, store, tenant.NewStore(pool))
+	mountAgentCardRoutes(r, store, &fakeCardIssuer{})
+	owner := &auth.AuthContext{WorkspaceID: ws, AuthMethod: auth.MethodJWT, UserID: "user-nicolai", Scopes: []string{auth.ScopeKeys}}
+	call := func(method, path, body string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(auth.WithAuthContext(req.Context(), owner))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+	base := "/v1/workspaces/" + ws + "/agents"
+	code, body := call(http.MethodPost, base, `{"name":"buyer"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create agent = %d %s", code, body)
+	}
+	var agent economy.Agent
+	_ = json.Unmarshal([]byte(body), &agent)
+	card := base + "/" + agent.ID + "/card"
+	if code, body := call(http.MethodPost, base+"/"+agent.ID+"/fund", `{"amount_ulxc":800000000}`); code != http.StatusOK {
+		t.Fatalf("fund = %d %s", code, body)
+	}
+	if code, body := call(http.MethodPost, card+"/freeze", ""); code != http.StatusNotFound {
+		t.Fatalf("freezing a card the agent does not hold = %d %s, want 404", code, body)
+	}
+	if code, body := call(http.MethodPost, card, `{"first_name":"Test","last_name":"Shopper","line1":"1 High Street","city":"London","postal_code":"EC1A 1BB"}`); code != http.StatusCreated {
+		t.Fatalf("issue card = %d %s", code, body)
+	}
+	frozen := func(want bool) {
+		t.Helper()
+		var view struct {
+			Card economy.AgentCard `json:"card"`
+		}
+		code, body := call(http.MethodGet, card, "")
+		if err := json.Unmarshal([]byte(body), &view); code != http.StatusOK || err != nil || view.Card.Frozen != want {
+			t.Fatalf("GET card = %d %s, want frozen %t", code, body, want)
+		}
+	}
+	purchase := func(id string) economy.CardDecision {
+		t.Helper()
+		d, err := store.AuthorizeAgentCard(ctx, economy.CardAuthorization{EventID: "evt_" + id, AuthorizationID: "iauth_" + id,
+			CardID: "ic_test_1", AmountMinor: 40, Currency: "gbp", MerchantName: "Shop " + id, At: time.Now(), USDMicros: 500_000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	ledger := func() (rows, sum, agentBal int64) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(sum(amount), 0) FROM lxc_ledger WHERE workspace_id = $1 AND type = 'agent_card'`, ws).
+			Scan(&rows, &sum); err != nil {
+			t.Fatal(err)
+		}
+		book, err := store.AgentBook(ctx, ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows, sum, book.Agents[0].BalanceULXC
+	}
+
+	if code, body := call(http.MethodPost, card+"/freeze", ""); code != http.StatusOK || !strings.Contains(body, `"frozen":true`) {
+		t.Fatalf("freeze = %d %s", code, body)
+	}
+	frozen(true)
+	if d := purchase("frozen"); d.Approved || d.Reason != economy.ErrAgentCardFrozen.Error() {
+		t.Fatalf("a purchase on the frozen card = %+v, want declined as frozen", d)
+	}
+	if rows, sum, bal := ledger(); rows != 0 || sum != 0 || bal != 800_000_000 {
+		t.Fatalf("frozen: %d agent_card rows summing %d, the agent holds %d; want none and 800,000,000", rows, sum, bal)
+	}
+	if code, body := call(http.MethodPost, card+"/unfreeze", ""); code != http.StatusOK || !strings.Contains(body, `"frozen":false`) {
+		t.Fatalf("unfreeze = %d %s", code, body)
+	}
+	frozen(false)
+	// $0.50 is 5,000,000 µLXC at the peg.
+	if d := purchase("open"); !d.Approved || d.AmountULXC != 5_000_000 {
+		t.Fatalf("the next purchase = %+v, want approved at 5,000,000 µLXC", d)
+	}
+	if rows, sum, bal := ledger(); rows != 1 || sum != -5_000_000 || bal != 795_000_000 {
+		t.Fatalf("unfrozen: %d agent_card rows summing %d, the agent holds %d; want one of −5,000,000 and 795,000,000", rows, sum, bal)
+	}
+}
