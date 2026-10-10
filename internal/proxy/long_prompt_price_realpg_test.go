@@ -151,6 +151,13 @@ func TestB383_OpenAILongPromptChargedTheLongPromptPrice(t *testing.T) {
 		{"gpt-5.5-pro", rates{30.00, 30.00, 30.00, 180.00}, rates{60.00, 60.00, 60.00, 270.00}},
 		{"gpt-5.4", rates{2.50, 0.25, 2.50, 15.00}, rates{5.00, 0.50, 5.00, 22.50}},
 		{"gpt-5.4-pro", rates{30.00, 30.00, 30.00, 180.00}, rates{60.00, 60.00, 60.00, 270.00}},
+		// B38.7: the six rows B38.1 re-priced.
+		{"gpt-6-astra", rates{10.00, 1.00, 12.50, 50.00}, rates{20.00, 2.00, 25.00, 75.00}},
+		{"gpt-6-sol", rates{2.00, 0.20, 2.50, 10.00}, rates{4.00, 0.40, 5.00, 15.00}},
+		{"gpt-6-luna", rates{0.10, 0.01, 0.125, 0.50}, rates{0.20, 0.02, 0.25, 0.75}},
+		{"gpt-5.6-sol", rates{4.00, 0.40, 5.00, 20.00}, rates{8.00, 0.80, 10.00, 30.00}},
+		{"gpt-5.6-terra", rates{2.00, 0.20, 2.50, 12.00}, rates{4.00, 0.40, 5.00, 18.00}},
+		{"gpt-5.6-luna", rates{0.20, 0.02, 0.25, 1.20}, rates{0.40, 0.04, 0.50, 1.80}},
 	}
 	const funded = int64(10_000_000_000) // $1,000: a long prompt to a -pro model is ~$18, its hold more
 	for _, m := range models {

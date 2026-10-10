@@ -94,9 +94,13 @@ func seedModels() []Model {
 		//   gpt-5.6-terra  $2.00 | $0.20 | $2.50 | $12.00   (catalog had 2.50 | 0.25 | 2.50 derived | 15.00)
 		//   gpt-5.6-luna   $0.20 | $0.02 | $0.25 | $1.20    (catalog had 1.00 | 0.10 | 1.00 derived | 6.00)
 		// Cache writes are now published (1.25x input), so they are set too; gpt-5.5 and below still show "-".
-		{ID: "gpt-5.6-sol", Provider: "openai", DisplayName: "GPT-5.6 Sol", ReleaseDate: "2026-07-09", Tier: TierFrontier, InputPer1M: 4.00, OutputPer1M: 20.00, CachedInputPer1M: 0.40, CacheWritePer1M: 5.00, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
-		{ID: "gpt-5.6-terra", Provider: "openai", DisplayName: "GPT-5.6 Terra", ReleaseDate: "2026-07-09", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 12.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
-		{ID: "gpt-5.6-luna", Provider: "openai", DisplayName: "GPT-5.6 Luna", ReleaseDate: "2026-07-09", Tier: TierFast, InputPer1M: 0.20, OutputPer1M: 1.20, CachedInputPer1M: 0.02, CacheWritePer1M: 0.25, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+		// B38.7: the LongPrompt on each is the page's "Long context" row, Standard tier, re-read 2026-10-10 (>272K input tokens).
+		{ID: "gpt-5.6-sol", Provider: "openai", DisplayName: "GPT-5.6 Sol", ReleaseDate: "2026-07-09", Tier: TierFrontier, InputPer1M: 4.00, OutputPer1M: 20.00, CachedInputPer1M: 0.40, CacheWritePer1M: 5.00, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 8.00, OutputPer1M: 30.00, CachedInputPer1M: 0.80, CacheWritePer1M: 10.00}},
+		{ID: "gpt-5.6-terra", Provider: "openai", DisplayName: "GPT-5.6 Terra", ReleaseDate: "2026-07-09", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 12.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 4.00, OutputPer1M: 18.00, CachedInputPer1M: 0.40, CacheWritePer1M: 5.00}},
+		{ID: "gpt-5.6-luna", Provider: "openai", DisplayName: "GPT-5.6 Luna", ReleaseDate: "2026-07-09", Tier: TierFast, InputPer1M: 0.20, OutputPer1M: 1.20, CachedInputPer1M: 0.02, CacheWritePer1M: 0.25, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 0.40, OutputPer1M: 1.80, CachedInputPer1M: 0.04, CacheWritePer1M: 0.50}},
 		// B38.3 — above 272K input tokens (272,000: the 400K models' 400,000 less 128,000 output) OpenAI charges 2x
 		//   input and cache rates and 1.5x output on the whole request — the "Long context" columns of
 		//   https://developers.openai.com/api/docs/pricing, Standard tier, read 2026-10-10. The LongPrompt below and on
@@ -132,9 +136,13 @@ func seedModels() []Model {
 		// B38.1: cache writes from https://developers.openai.com/api/docs/pricing, Standard tier, read 2026-10-09
 		// 23:40 UTC — astra $12.50, sol $2.50, luna $0.125 (1.25x input; withCacheRates' 1.0x under-billed them).
 		// Rows: astra $10.00 | $1.00 | $12.50 | $50.00; sol $2.00 | $0.20 | $2.50 | $10.00; luna $0.10 | $0.01 | $0.125 | $0.50.
-		{ID: "gpt-6-astra", Provider: "openai", DisplayName: "GPT-6 Astra", ReleaseDate: "2026-09-03", Tier: TierFrontier, InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, CacheWritePer1M: 12.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
-		{ID: "gpt-6-sol", Provider: "openai", DisplayName: "GPT-6 Sol", ReleaseDate: "2026-09-22", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
-		{ID: "gpt-6-luna", Provider: "openai", DisplayName: "GPT-6 Luna", ReleaseDate: "2026-09-22", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, CacheWritePer1M: 0.125, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000},
+		// B38.7: above 272K input tokens the whole request pays the page's "Long context" row, re-read 2026-10-10.
+		{ID: "gpt-6-astra", Provider: "openai", DisplayName: "GPT-6 Astra", ReleaseDate: "2026-09-03", Tier: TierFrontier, InputPer1M: 10.00, OutputPer1M: 50.00, CachedInputPer1M: 1.00, CacheWritePer1M: 12.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 20.00, OutputPer1M: 75.00, CachedInputPer1M: 2.00, CacheWritePer1M: 25.00}},
+		{ID: "gpt-6-sol", Provider: "openai", DisplayName: "GPT-6 Sol", ReleaseDate: "2026-09-22", Tier: TierBalanced, InputPer1M: 2.00, OutputPer1M: 10.00, CachedInputPer1M: 0.20, CacheWritePer1M: 2.50, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 4.00, OutputPer1M: 15.00, CachedInputPer1M: 0.40, CacheWritePer1M: 5.00}},
+		{ID: "gpt-6-luna", Provider: "openai", DisplayName: "GPT-6 Luna", ReleaseDate: "2026-09-22", Tier: TierFast, InputPer1M: 0.10, OutputPer1M: 0.50, CachedInputPer1M: 0.01, CacheWritePer1M: 0.125, Capabilities: vision, ContextTokens: 1050000, MaxOutput: 128000,
+			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 0.20, OutputPer1M: 0.75, CachedInputPer1M: 0.02, CacheWritePer1M: 0.25}},
 		// B38.4 — GPT-6.1 Sol, in the /v1/models capture of 2026-10-09 (verified_models_test.go). Rates from
 		// https://developers.openai.com/api/docs/pricing and its model page (read 2026-10-10): $2.00 | $0.10 |
 		// $2.50 | $10.00; cached is 0.05x, set explicitly. Above 272K input tokens the whole request pays
