@@ -145,7 +145,9 @@ type Proxy struct {
 	workspaceManager *workspace.Manager
 	// tareModel is Tare phase 2a (internal/tare/kompress), run where phase 1 refuses for a workspace
 	// that opted in (GetTareModel). nil = this lens has no model; SetTareModel installs it.
-	tareModel   tare.Reduction
+	tareModel tare.Reduction
+	// tareTraces keeps prose for Tare phase 2b's training set (B27.36). nil = this lens collects nothing.
+	tareTraces  tareTraceSink
 	localRouter *localrouter.LocalRouter
 
 	// Node auto-route (blocker 6) — optional, flag-gated, nil-safe. When nodeAutoRouteEnabled AND
@@ -835,6 +837,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// under its own key and never answers an unreduced one. tareMeter rides the spend write on both
 	// paths; its zero value means Tare changed nothing.
 	var tareMeter alerts.TareMeter
+	p.keepTareTrace(ctx, r, wsID, body) // B27.36: before Tare changes it, and whatever the Tare policy
 	if p.shouldTare(r, wsID) {
 		if nb, kind, tin, tout, ok := tareReduce(ctx, body, p.tareModelFor(wsID)); ok {
 			if _, np, perr := extractPrompt(nb); perr == nil {

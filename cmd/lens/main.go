@@ -703,6 +703,9 @@ func run() error {
 	if _, err := os.Stat(filepath.Join(tareModelDir, kompress.WeightsFile)); err != nil {
 		logger.Warn("tare: phase 2a weights not found; opted-in workspaces' prose will go upstream unchanged", "dir", tareModelDir, "error", err)
 	}
+	// B27.36 — Tare phase 2b's training set: prose from workspaces that opt in (PUT .../tare-training) and from
+	// synthetic test workspaces, nothing else.
+	p.SetTareTraining(wsManager)
 	// CONSUMER DISCOUNT on cross-tenant pooled cache hits (r). Wired HERE, unconditionally, and
 	// NOT beside the royalty minter below: a pooled hit CHARGES the consumer whether or not royalty
 	// minting is enabled (the mint is skipped, the bill is not), so gating the discount on the mint
@@ -4586,6 +4589,40 @@ func run() error {
 				return
 			}
 			writeJSONOK(w, http.StatusOK, map[string]any{"ok": true, "tare_model": wsManager.GetTareModel(wsID)})
+		})
+
+		// B27.36 — whether Talyvor may train its own compressor on this workspace's prose (migration 0243):
+		// {"enabled": true|false, "by": "<who>"}. OFF for every workspace until an owner turns it on here; separate
+		// from Sharing and from tare-model. Lens keeps who switched it and when — `by` (the app names the signed-in
+		// owner), else the caller's own identity. Switched off, collection stops and the workspace's traces are deleted.
+		authed.Put("/v1/workspaces/{wsID}/tare-training", func(w http.ResponseWriter, req *http.Request) {
+			wsID := chi.URLParam(req, "wsID")
+			var in struct {
+				Enabled *bool  `json:"enabled"`
+				By      string `json:"by"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4<<10)).Decode(&in); err != nil {
+				writeJSONErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				return
+			}
+			if in.Enabled == nil {
+				writeJSONErr(w, http.StatusBadRequest, `body must be {"enabled": true} or {"enabled": false}`)
+				return
+			}
+			by := strings.TrimSpace(in.By)
+			if by == "" {
+				_, by, _ = marketCaller(req, nil, wsID)
+			}
+			if by == "" {
+				by = "unknown"
+			}
+			at, err := wsManager.SetTareTraining(req.Context(), wsID, *in.Enabled, by)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONOK(w, http.StatusOK, map[string]any{"ok": true, "tare_training": wsManager.GetTareTraining(wsID),
+				"changed_by": by, "changed_at": at})
 		})
 
 		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.

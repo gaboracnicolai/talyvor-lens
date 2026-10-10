@@ -62,3 +62,39 @@ func tareReduce(ctx context.Context, body []byte, phase2 tare.Reduction) (out []
 	}
 	return body, "", 0, 0, false
 }
+
+// tareTraceSink keeps a workspace's prose for Tare phase 2b's training set (workspace.Manager.RecordTareTrace).
+type tareTraceSink interface{ RecordTareTrace(wsID, text string) }
+
+// SetTareTraining installs where Tare phase 2b's training traces go (B27.36).
+func (p *Proxy) SetTareTraining(s tareTraceSink) { p.tareTraces = s }
+
+// maxTareTraceBytes: past phase 2a's token budget the model never reads the text, so it teaches nothing.
+const maxTareTraceBytes = 32 << 10
+
+// keepTareTrace keeps the newest message's text for training when every phase-1 reducer refuses it — the text a
+// compressor works on — for a workspace that opted in or is synthetic test traffic. Never a temporary chat's
+// (X-Talyvor-Cache-Store: off) and never one kept out of the shared pool (X-Talyvor-Pool: off).
+func (p *Proxy) keepTareTrace(ctx context.Context, r *http.Request, wsID string, body []byte) {
+	if p.tareTraces == nil || p.workspaceManager == nil || r == nil || !p.workspaceManager.CollectsTareTraining(wsID) ||
+		strings.EqualFold(r.Header.Get("X-Talyvor-Cache-Store"), "off") || strings.EqualFold(r.Header.Get("X-Talyvor-Pool"), "off") {
+		return
+	}
+	// shortcut: runs phase 1 a second time when Tare is on; fold into tareReduce if it shows in a profile.
+	if _, _, _, _, reduced := tareReduce(ctx, body, nil); reduced {
+		return
+	}
+	var c captureText
+	_, _, _, _ = tare.NewPrefixStable(&c, tare.KindProse).Reduce(ctx, body, tare.KindProse)
+	if len(c) > 0 && len(c) <= maxTareTraceBytes {
+		p.tareTraces.RecordTareTrace(wsID, string(c))
+	}
+}
+
+// captureText is a Reduction that changes nothing and remembers what it was given.
+type captureText []byte
+
+func (c *captureText) Reduce(_ context.Context, content []byte, _ tare.Kind) ([]byte, int, int, error) {
+	*c = append((*c)[:0], content...)
+	return content, 0, 0, nil
+}
