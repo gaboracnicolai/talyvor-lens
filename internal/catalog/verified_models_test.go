@@ -122,3 +122,20 @@ func TestCatalog_GPT61SolSeededFromTheOpenAICapture(t *testing.T) {
 	}
 	t.Error("gpt-6.1-sol is in the OpenAI /v1/models capture but not seeded")
 }
+
+// B38.5 — gpt-5.2 and gpt-5.2-pro are FROM THE SAME /v1/models CAPTURE (~/talyvor-queue/model-captures/openai-2026-10-09.json).
+// Rates from https://developers.openai.com/api/docs/pricing, read 2026-10-10. Neither cached rate is withCacheRates' 0.5x.
+func TestCatalog_GPT52SeededFromTheOpenAICapture(t *testing.T) {
+	want := map[string][3]float64{"gpt-5.2": {1.75, 0.175, 14.00}, "gpt-5.2-pro": {21.00, 21.00, 168.00}}
+	for _, m := range seedModels() {
+		if w, ok := want[m.ID]; ok {
+			if got := [3]float64{m.InputPer1M, m.CachedInputPer1M, m.OutputPer1M}; m.Provider != "openai" || got != w {
+				t.Errorf("%s = %s %v; want openai %v (input, cached, output)", m.ID, m.Provider, got, w)
+			}
+			delete(want, m.ID)
+		}
+	}
+	for id := range want {
+		t.Errorf("%s is in the OpenAI /v1/models capture but not seeded", id)
+	}
+}

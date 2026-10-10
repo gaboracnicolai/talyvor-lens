@@ -111,6 +111,18 @@ func seedModels() []Model {
 			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 60.00, OutputPer1M: 270.00, CachedInputPer1M: 60.00}},
 		{ID: "gpt-5.4-pro", Provider: "openai", DisplayName: "GPT-5.4 Pro", ReleaseDate: "2026-03-05", Tier: TierFrontier, InputPer1M: 30.00, OutputPer1M: 180.00, CachedInputPer1M: 30.00, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000,
 			LongPrompt: &LongPromptRates{AboveTokens: 272000, InputPer1M: 60.00, OutputPer1M: 270.00, CachedInputPer1M: 60.00}},
+		// B38.5 — GPT-5.2 and GPT-5.2 Pro, in the /v1/models capture of 2026-10-09 (verified_models_test.go).
+		// https://developers.openai.com/api/docs/pricing, Standard tier, read 2026-10-10 (input | cached | output):
+		//   gpt-5.2      $1.75  | $0.175 | $14.00    (cached 0.1x, set explicitly)
+		//   gpt-5.2-pro  $21.00 | -      | $168.00   ("-": no discount, cached = input, as on the -pro rows above)
+		// No cache-write or long-context price on the page for either. Model pages: 400K context, 128K out,
+		// text and image in; the -pro answers only on /v1/responses (inference.ResponsesOnly). Released
+		// 2025-12-11 (changelog). The other 11 of the item's 13 have a shutdown date on
+		// https://developers.openai.com/api/docs/deprecations (read 2026-10-10), so they are not seeded:
+		// o1, o1-pro, o3-mini, o4-mini, gpt-3.5-turbo on 2026-10-23; gpt-5.1 on 2027-04-01; and gpt-5,
+		// gpt-5-mini, gpt-5-nano, gpt-5-pro, o3 on 2026-12-11 — each id's only snapshot, marked Deprecated on its page.
+		{ID: "gpt-5.2", Provider: "openai", DisplayName: "GPT-5.2", ReleaseDate: "2025-12-11", Tier: TierBalanced, InputPer1M: 1.75, OutputPer1M: 14.00, CachedInputPer1M: 0.175, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
+		{ID: "gpt-5.2-pro", Provider: "openai", DisplayName: "GPT-5.2 Pro", ReleaseDate: "2025-12-11", Tier: TierFrontier, InputPer1M: 21.00, OutputPer1M: 168.00, CachedInputPer1M: 21.00, Capabilities: vision, ContextTokens: 400000, MaxOutput: 128000},
 
 		// ─── OpenAI GPT-6 (B15.4) ────────────────────────────────────────────────────────────────
 		// Every rate transcribed from each model's page under https://developers.openai.com/api/docs/models/
