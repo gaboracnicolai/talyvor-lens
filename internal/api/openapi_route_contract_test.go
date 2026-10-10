@@ -364,7 +364,8 @@ func TestTheHeaderNamesOnlySurfacesTheDocumentCovers(t *testing.T) {
 // 264 → 266 (B30.13): POST and GET /v1/money/accounts.
 // 266 → 267 (B30.14): GET /v1/money/accounts/{id}/details.
 // 267 → 268 (B27.36): PUT /v1/workspaces/{wsID}/tare-training, the opt-in to Tare's training set, beside tare-model.
-const undocumentedNonAdminV1Routes = 268
+// 268 → 270 (B30.15): POST /v1/money/payments-in/webhook and GET /v1/money/accounts/{id}/statement.
+const undocumentedNonAdminV1Routes = 270
 
 func TestUndocumentedNonAdminRouteCountIsRecorded(t *testing.T) {
 	reg, pub := registeredRoutes(t), publishedOps(t)
