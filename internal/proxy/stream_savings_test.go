@@ -161,6 +161,27 @@ func TestStreamSavings_AutoRoutedImageStreamIsServedByACapableModel(t *testing.T
 	}
 }
 
+// B17.116 — Chat's "Auto (cheapest good)" streams model "auto" with routing intelligence off: the provider is
+// sent the model the router chose, never "auto" (a 404 at OpenAI), the stream names it, and the one spend row bills it.
+func TestStreamSavings_AutoStreamWithoutRoutingIntelligenceIsServedByTheRoutersPick(t *testing.T) {
+	p, sink, _ := newLoggingProxy(t, workspace.LoggingMetadata)
+	up := newStreamEcho(t, p)
+
+	w := streamChat(t, p, "auto", `"Name the smallest planet in one word."`, nil)
+	if got := up.sentModel(t, 0); got != "gpt-4o-mini" {
+		t.Fatalf("the auto stream was sent %q, want the router's cheap pick gpt-4o-mini", got)
+	}
+	if h := w.Header().Get("X-Talyvor-Routed"); h != "auto→gpt-4o-mini" {
+		t.Errorf("X-Talyvor-Routed = %q, want auto→gpt-4o-mini", h)
+	}
+	if !strings.Contains(w.Body.String(), `"model":"gpt-4o-mini"`) {
+		t.Errorf("the stream the client received does not name the model that answered:\n%s", w.Body.String())
+	}
+	if len(sink.spends) != 1 || sink.spends[0].model != "gpt-4o-mini" {
+		t.Fatalf("spend rows = %+v, want one billed as gpt-4o-mini", sink.spends)
+	}
+}
+
 // The quieter half of the buffered post-flush seam, on a stream: the session turn, the routing corpus,
 // the work tier and the route decision are all written, against the model that answered.
 func TestStreamSavings_PostServeRecordsAreWrittenForAStream(t *testing.T) {

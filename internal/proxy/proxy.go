@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1459,7 +1460,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		// B27.23: the router's downgrade is a guess from the prompt's shape; it stands only
 		// when the cheaper model measures at or above the named one on this request's cohort.
 		decision := p.router.Route(ctx, cfg.ProviderName(), model, compressedPrompt)
-		if p.router.ShouldOverride(model, decision) {
+		// B17.116: "auto" names no model to rank a downgrade against, and no provider serves it — the router's pick
+		// is the model, when the workspace's allow-list (if it keeps one) names it.
+		namesNoModel := strings.EqualFold(strings.TrimSpace(model), "auto") && decision.Model != ""
+		if p.workspaceManager != nil && namesNoModel {
+			if ws, ok := p.workspaceManager.GetWorkspace(wsID); ok && len(ws.AllowedModels) > 0 {
+				namesNoModel = slices.Contains(ws.AllowedModels, decision.Model)
+			}
+		}
+		if namesNoModel || p.router.ShouldOverride(model, decision) {
 			if ok, why := p.downgradeKeepsQuality(feature, len(compressedPrompt)/4, cfg.ProviderName(), model, decision.Model); ok {
 				upstreamModel = decision.Model
 				overrideModel = decision.Model

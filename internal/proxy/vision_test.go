@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/talyvor/lens/internal/modality"
 	"github.com/talyvor/lens/internal/workspace"
 )
 
@@ -66,8 +67,9 @@ func TestVision_CapableModelPassesAndRecordsModality(t *testing.T) {
 	}
 }
 
-// An auto-route image request whose nominal model can't see the image is
-// redirected to a capable model (not failed, not silently text-only).
+// An auto-route image request is served by a model that can see the image
+// (not failed, not silently text-only). B17.116: "auto" now resolves to the
+// router's pick before the gate, so a capable pick needs no redirect.
 func TestVision_AutoRouteRedirectsToCapable(t *testing.T) {
 	p, sink, _ := newLoggingProxy(t, workspace.LoggingMetadata)
 	w := dispatchBody(t, p, "ws-log", imageBody("auto"))
@@ -75,9 +77,8 @@ func TestVision_AutoRouteRedirectsToCapable(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	redirect := w.Header().Get("X-Talyvor-Vision-Redirect")
-	if !strings.HasPrefix(redirect, "auto→") {
-		t.Fatalf("expected a vision redirect header, got %q", redirect)
+	if served := servedModel(t, sink); !modality.Supports(served, modality.ModalitySet{HasImage: true}) {
+		t.Fatalf("the auto image request was served by %q, a model that cannot see images", served)
 	}
 	if sink.lastModality != "image" {
 		t.Fatalf("spend modality after redirect: got %q want image", sink.lastModality)

@@ -103,11 +103,20 @@ func TestModalityRedirect_ReachableSetIsNarrowerThanTheCatalog(t *testing.T) {
 		return w
 	}
 
-	// ── CONTROL C: with no allow-list the same request is redirected and SERVED. Without this, the
-	// 422 below could just mean the harness cannot serve an image request at all.
-	unpinned := image("ws-log", "no-allow-list")
+	// ── CONTROL C: with a preferred capable model allowed, the same request is redirected and SERVED.
+	// Without this, the 422 below could just mean the harness cannot serve an image request at all.
+	// B17.116: the allow-list leaves out the router's own pick (gpt-4o-mini), so "auto" reaches the gate
+	// unresolved and the redirect runs; with no allow-list "auto" resolves to that capable pick first.
+	if err := p.workspaceManager.RegisterWorkspace(context.Background(), workspace.Workspace{
+		ID: "ws-reach-control", Name: "reach-control", Active: true,
+		LoggingPolicy: workspace.LoggingMetadata,
+		AllowedModels: []string{"auto", "gpt-4o"},
+	}); err != nil {
+		t.Fatalf("RegisterWorkspace: %v", err)
+	}
+	unpinned := image("ws-reach-control", "preferred-model-allowed")
 	if unpinned.Code != http.StatusOK {
-		t.Fatalf("CONTROL C: an auto-route image request on a workspace with NO allow-list returned "+
+		t.Fatalf("CONTROL C: an auto-route image request on a workspace allowed a preferred model returned "+
 			"%d (%s) — the harness cannot serve this shape and nothing below means anything",
 			unpinned.Code, strings.TrimSpace(unpinned.Body.String()))
 	}
