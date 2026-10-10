@@ -202,8 +202,8 @@ func TestStreamSavings_PostServeRecordsAreWrittenForAStream(t *testing.T) {
 	}
 
 	s, ok := p.sessionTracker.GetSession("sess-b153")
-	if !ok || s.TurnCount != 1 || s.TotalCostUSD <= 0 {
-		t.Errorf("session after one streamed answer = %+v (found %v), want 1 turn with its cost", s, ok)
+	if !ok || s.TurnCount != 1 || s.TotalCostUSD <= 0 || s.TotalInputTokens != 1200 || s.TotalOutputTokens != 40 {
+		t.Errorf("session after one streamed answer = %+v (found %v), want 1 turn with its cost and the provider's 1200 / 40 tokens", s, ok)
 	}
 	if len(patterns.pats) != 1 || patterns.pats[0].ModelUsed != served {
 		t.Errorf("routing corpus rows = %+v, want one for %q", patterns.pats, served)

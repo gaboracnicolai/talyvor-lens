@@ -577,7 +577,7 @@ func (p *Proxy) recordStreamPostServe(ctx context.Context, r *http.Request, sc s
 	pp := sc.post
 	inT, outT, estimated, servedCostUSD := streamServedCost(sc, u, outputText)
 	if pp.trackSession && sc.logging != workspace.LoggingNone {
-		p.recordSessionTurn(ctx, sc.sessionID, prompt, outputText, sc.model, servedCostUSD, false)
+		p.recordSessionTurn(ctx, sc.sessionID, prompt, outputText, sc.model, inT, outT, servedCostUSD, false)
 	}
 	if p.alertManager != nil && sc.logging != workspace.LoggingNone {
 		sentTokens := len(pp.compressedPrompt) / 4
