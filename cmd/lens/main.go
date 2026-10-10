@@ -2008,6 +2008,8 @@ func run() error {
 	// (LENS_LXC_SHADOW_SPEND_ENABLED, default off). The proxy debits LXC
 	// alongside the cost_usd write; void/non-gating, cannot affect serving.
 	p.SetLXCSpendSink(dualToken, func() bool { return cfg.LXCShadowSpendEnabled })
+	// B17.110 — an eval run asks the model on Talyvor's keys: each run is one charge on the workspace's ledger.
+	evalPipeline.SetLXCCharger(dualToken)
 	// LXC gating (Stage 2.4/2.5) — pre-serve block; inert unless LXCGatingEnabled
 	// AND LXCShadowSpendEnabled are both on. Default off.
 	p.SetLXCGate(dualToken, func() bool { return cfg.LXCGatingEnabled })

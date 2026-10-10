@@ -111,6 +111,7 @@ type Pipeline struct {
 	scorer       *quality.Scorer
 	httpClient   *http.Client
 	spend        SpendRecorder // optional eval-spend attribution (nil = off)
+	lxc          LXCCharger    // the workspace's charge for a run's model calls (nil = off)
 	openAIKey    string
 	anthropicKey string
 	googleKey    string
@@ -367,6 +368,7 @@ func (p *Pipeline) RunSuite(ctx context.Context, workspaceID string, tags []stri
 		summary.AvgLatencyMs = totalLatency / int64(summary.TotalTests)
 	}
 	summary.TotalCostUSD = totalCost
+	p.chargeRun(ctx, workspaceID, runID, totalCost)
 	completed := time.Now().UTC()
 	summary.CompletedAt = &completed
 
