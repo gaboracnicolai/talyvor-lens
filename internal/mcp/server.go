@@ -168,11 +168,10 @@ func (s *Server) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	flusher, _ := w.(http.Flusher)
+	// Through the wrapping middleware, which hides http.Flusher: a type assertion left the stream unsent (B17.131).
+	rc := http.NewResponseController(w)
 	_, _ = fmt.Fprintf(w, "event: endpoint\ndata: {\"uri\":\"/mcp\"}\n\n")
-	if flusher != nil {
-		flusher.Flush()
-	}
+	_ = rc.Flush()
 
 	ticker := time.NewTicker(ssePingInterval)
 	defer ticker.Stop()
@@ -182,9 +181,7 @@ func (s *Server) HandleSSE(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ticker.C:
 			_, _ = fmt.Fprintf(w, "event: ping\ndata: {}\n\n")
-			if flusher != nil {
-				flusher.Flush()
-			}
+			_ = rc.Flush()
 		}
 	}
 }
