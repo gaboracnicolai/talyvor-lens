@@ -85,7 +85,11 @@ type streamPostServe struct {
 
 const (
 	openAIDoneMarker = "[DONE]"
-	sseScannerMax    = 1 << 20 // 1 MiB per SSE line, plenty for any chunk
+	// reportChargeHeader asks for chargeFrame: what the answer was charged, in µLXC, before the stream's
+	// terminator (B17.129; Chat's chatStream.ts CHARGE_FRAME reads it).
+	reportChargeHeader = "X-Talyvor-Report-Charge"
+	chargeFrame        = "talyvor.charge"
+	sseScannerMax      = 1 << 20 // 1 MiB per SSE line, plenty for any chunk
 )
 
 // StreamHandler proxies streaming LLM responses back to the client SSE-style
@@ -289,6 +293,13 @@ func (anthropicStreamOps) endsAnswer(line []byte) bool {
 	return json.Unmarshal(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))), &ev) == nil && ev.Type == "message_stop"
 }
 
+// endsClientStream reports whether line, as the client is sent it, opens the stream's terminator:
+// `data: [DONE]`, or Anthropic's `event: message_stop` or its data line.
+func endsClientStream(line []byte) bool {
+	return openAIStreamOps{}.endsAnswer(line) || anthropicStreamOps{}.endsAnswer(line) ||
+		bytes.Equal(bytes.TrimSpace(line), []byte("event: message_stop"))
+}
+
 func (anthropicStreamOps) processLine(line []byte, acc *strings.Builder) bool {
 	if !bytes.HasPrefix(line, []byte("data:")) {
 		return false
@@ -430,7 +441,7 @@ func (s *StreamHandler) serve(
 	// client is sent for each (Google and Bedrock are translated to OpenAI chunks).
 	src := upstreamLines(ops, resp.Body)
 	translator, translates := ops.(clientTranslator)
-	send := func(lines [][]byte) {
+	write := func(lines [][]byte) {
 		for _, l := range lines {
 			_, _ = w.Write(l)
 			_, _ = w.Write([]byte("\n"))
@@ -438,6 +449,20 @@ func (s *StreamHandler) serve(
 		if flusher != nil && len(lines) > 0 {
 			flusher.Flush()
 		}
+	}
+	// B17.129: asked to report the charge, the terminator and anything after it are held back, so the
+	// charge frame, written once the answer is booked, comes before it — Chat's reader stops at the terminator.
+	reportCharge := r.Header.Get(reportChargeHeader) == "true"
+	var held [][]byte
+	send := func(lines [][]byte) {
+		for i, l := range lines {
+			if reportCharge && (held != nil || endsClientStream(l)) {
+				held = append(held, lines[i:]...)
+				lines = lines[:i]
+				break
+			}
+		}
+		write(lines)
 	}
 
 	for src.Next() {
@@ -529,7 +554,13 @@ func (s *StreamHandler) serve(
 	// Close the streamed-spend gap: bill on the captured provider usage when
 	// present, else the len/4 estimate. A streamed request must never again
 	// be invisible to budgets/alerts.
-	settled := s.proxy.recordStreamSpend(storeCtx, sc, usage, accumulated.String())
+	settled, chatULXC := s.proxy.recordStreamSpend(storeCtx, sc, usage, accumulated.String())
+	if reportCharge {
+		if chatULXC >= 0 {
+			write([][]byte{[]byte("event: " + chargeFrame), []byte(fmt.Sprintf(`data: {"type":%q,"charged_ulxc":%d}`, chargeFrame, chatULXC)), {}})
+		}
+		write(held)
+	}
 	s.proxy.recordStreamPostServe(storeCtx, r, sc, usage, prompt, accumulated.String(), cached, qualityScore, scored, settled)
 	return nil
 }
