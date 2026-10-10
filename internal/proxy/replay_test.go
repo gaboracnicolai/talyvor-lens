@@ -160,3 +160,34 @@ func TestServe_StreamTrueCacheHit_UsesSSEReplay(t *testing.T) {
 		t.Errorf("body missing [DONE] terminal frame: %q", out)
 	}
 }
+
+// B17.122 — a buffered cache hit is marked a replay too: the pool-isolation testers read a free repeat with no mark as
+// asked afresh.
+func TestServe_BufferedCacheHit_IsMarkedReplay(t *testing.T) {
+	exact, _ := newExactCacheForTest(t)
+	p := New(
+		exact, nil, nil,
+		compressor.New(), router.New(), pii.New(),
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		fallback.New(), nil, nil, guardrails.New(pii.New(), injection.New(injection.DefaultPolicy())),
+		"openai-key", "anthropic-key", "",
+	)
+	cached := []byte(`{"choices":[{"message":{"role":"assistant","content":"cached hello"}}]}`)
+	if err := exact.Set(context.Background(), "openai", "gpt-4", cache.FingerprintedKey("hi", plainFP), cached); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/openai/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	p.HandleOpenAI(w, req)
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "cached hello") {
+		t.Fatalf("status = %d, body=%s; want the cached answer", w.Code, w.Body.String())
+	}
+	if w.Header().Get("X-Talyvor-Cache-Replay") != "true" {
+		t.Error("X-Talyvor-Cache-Replay header missing on a buffered cache hit")
+	}
+}
