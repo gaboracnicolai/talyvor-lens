@@ -52,6 +52,7 @@ import (
 	"github.com/talyvor/lens/internal/cache"
 	"github.com/talyvor/lens/internal/cache_pooling"
 	"github.com/talyvor/lens/internal/catalog"
+	"github.com/talyvor/lens/internal/coderun"
 	"github.com/talyvor/lens/internal/cohort"
 	"github.com/talyvor/lens/internal/compat"
 	"github.com/talyvor/lens/internal/compliance"
@@ -156,6 +157,11 @@ func main() {
 	// that was pulled. CI asserts this output is a real stamp, not "dev".
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println(lensVersion)
+		return
+	}
+	// B28.119: a Run code sandbox child (internal/coderun) — the gateway starts one per run, never a person.
+	if len(os.Args) > 1 && os.Args[1] == coderun.ChildArg {
+		coderun.ChildMain()
 		return
 	}
 	// `lens poolcheck` is a DEPLOY PREFLIGHT for cross-tenant cache pooling. It embeds a
@@ -765,6 +771,12 @@ func run() error {
 	))
 	// B17.1: synthetic workspaces pool among themselves only, and earn only test money (B25.2, B26.6).
 	p.SetSyntheticLookup(wsManager.GetSynthetic)
+	// B28.119: Run code — the model may run JavaScript in the sandbox while it answers, when the request asks.
+	if runner, err := coderun.NewRunner(); err != nil {
+		slog.Warn("run code is off: this binary cannot find itself to start the sandbox", slog.String("err", err.Error()))
+	} else {
+		p.SetCodeRunner(runner)
+	}
 	// Per-team / per-sprint budget governance (Upgrade 19). Seed the
 	// in-memory snapshot from token_events, refresh it periodically, then
 	// wire the gate into the proxy hot path. Load is best-effort — a cold

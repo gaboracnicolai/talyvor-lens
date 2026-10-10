@@ -6,6 +6,7 @@ toolchain go1.26.9 // the version this repo SHIPS: setup-go pins below it are up
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/dop251/goja v0.0.0-20261009133625-a4bedf5f6000
 	github.com/evanw/esbuild v0.28.2
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -33,10 +34,13 @@ require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/dlclark/regexp2/v2 v2.8.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
+	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
