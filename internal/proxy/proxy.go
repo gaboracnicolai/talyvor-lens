@@ -2468,8 +2468,8 @@ func (p *Proxy) recordTokenEvent(ctx context.Context, provider, model, prompt st
 // the durable prompt record is the learner token-event written alongside.
 // recordStreamSpend writes a streamed request's spend row and charge, and returns what the consumer
 // actually paid (the settled reservation, 0 when reservations are off) — the distill royalty's funding,
-// as on the buffered seam.
-func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamUsage, outputText string) float64 {
+// as on the buffered seam — and what a chat request was charged in µLXC, -1 for any other (B17.129).
+func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamUsage, outputText string) (float64, int64) {
 	inT, outT, estimated, servedCostUSD := streamServedCost(sc, u, outputText)
 	// Feed the in-memory budget totals from the SAME billed cost whatever the logging policy, as the
 	// buffered seam does (B15.3: this sat behind the logging gate, so a none-logging workspace's streams
@@ -2493,12 +2493,18 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 	// The LXC charge, mutually exclusive with the settle above by the flag. B17.17: before the logging
 	// gate, as on the buffered seam — a LoggingNone workspace's chat is charged too.
 	// B1.6: the same allowance draw as the buffered seam (see there).
-	subscriber := sc.byok || p.chargeChatUsage(ctx, sc.wsID, servedCostUSD) || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
+	chatULXC, chat := int64(-1), false
+	if !sc.byok {
+		if c, ok := p.chargeChat(ctx, sc.wsID, servedCostUSD); ok {
+			chatULXC, chat = c, true
+		}
+	}
+	subscriber := sc.byok || chat || p.chargeSubscriberUsage(ctx, sc.wsID, servedCostUSD)
 	if !p.reservationActive() && !subscriber {
 		p.shadowSpendLXC(ctx, sc.wsID, servedCostUSD)
 	}
 	if p.alertManager == nil || sc.logging == workspace.LoggingNone {
-		return settled
+		return settled, chatULXC
 	}
 	source := "estimated"
 	if !estimated {
@@ -2521,7 +2527,7 @@ func (p *Proxy) recordStreamSpend(ctx context.Context, sc streamSpend, u streamU
 		slog.Warn("alerts: streamed RecordSpend failed", slog.String("err", recErr.Error()))
 	}
 	p.recordVisionOCRSpend(ctx, sc.wsID, sc.team, sc.sprint, sc.feature, sc.sessionID, sc.requestID, sc.visionOCR)
-	return settled
+	return settled, chatULXC
 }
 
 // streamServedCost is the ONE cost basis for a streamed response — the reservation SETTLE (the customer's

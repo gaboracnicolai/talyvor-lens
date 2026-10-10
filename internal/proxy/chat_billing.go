@@ -98,13 +98,20 @@ func (p *Proxy) chatAdmission(ctx context.Context, workspaceID, model, prompt st
 // reports whether the request was a chat request — the caller then books nothing else for it.
 // VOID with respect to the response: post-serve, errors logged.
 func (p *Proxy) chargeChatUsage(ctx context.Context, workspaceID string, costUSD float64) bool {
+	_, chat := p.chargeChat(ctx, workspaceID, costUSD)
+	return chat
+}
+
+// chargeChat is chargeChatUsage that also returns what it booked, in µLXC: the figure a stream's charge
+// frame reports under the answer (B17.129).
+func (p *Proxy) chargeChat(ctx context.Context, workspaceID string, costUSD float64) (charged int64, chat bool) {
 	sessionID, ok := chatSession(ctx)
 	if !ok || p == nil || workspaceID == "" {
-		return false
+		return 0, false
 	}
 	costULXC := int64(math.Ceil(costUSD / economy.LXCUSDValue * 1e6)) // a charge rounds UP
 	if costULXC <= 0 {
-		return true
+		return 0, true
 	}
 	inPeriod, charged := p.subscriberCharge(ctx, workspaceID, costULXC)
 	if !inPeriod {
@@ -123,7 +130,7 @@ func (p *Proxy) chargeChatUsage(ctx context.Context, workspaceID string, costUSD
 			slog.Warn("billing: chat session spend not recorded", slog.String("err", err.Error()))
 		}
 	}
-	return true
+	return charged, true
 }
 
 // formatLXC renders µLXC as whole LXC for a message.
