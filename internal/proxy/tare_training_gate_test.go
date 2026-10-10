@@ -15,7 +15,8 @@ import (
 
 // B27.36 — what Tare phase 2b's training set receives through the WIRE, on both paths: the newest message's prose
 // from a workspace that opted in or is synthetic test traffic — and nothing from a workspace that did not opt in,
-// a temporary chat, a chat kept out of the shared pool, or text phase 1 already reduces.
+// a temporary chat, a chat kept out of the shared pool, text phase 1 already reduces, text with PII, or a workspace
+// that keeps no content.
 
 type recordingTraces struct {
 	mu   sync.Mutex
@@ -59,17 +60,24 @@ func TestTareTraining_CollectsOnlyFromOptedInOrSyntheticWorkspaces_BothPaths(t *
 			if err := p.workspaceManager.RegisterWorkspace(ctx, workspace.Workspace{ID: "ws-syn", Name: "s", Active: true, Synthetic: true}); err != nil {
 				t.Fatal(err)
 			}
-			if err := p.workspaceManager.RegisterWorkspace(ctx, workspace.Workspace{ID: "ws-in", Name: "i", Active: true}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := p.workspaceManager.SetTareTraining(ctx, "ws-in", true, "user:owner"); err != nil {
-				t.Fatal(err)
+			for _, ws := range []workspace.Workspace{
+				{ID: "ws-in", Name: "i", Active: true, LoggingPolicy: workspace.LoggingMetadata},
+				{ID: "ws-none", Name: "n", Active: true, LoggingPolicy: workspace.LoggingNone},
+			} {
+				if err := p.workspaceManager.RegisterWorkspace(ctx, ws); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := p.workspaceManager.SetTareTraining(ctx, ws.ID, true, "key:bff", "user:owner"); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			dispatchTraced(t, p, stream, "ws-tare", tareProse, nil) // never opted in
 			dispatchTraced(t, p, stream, "ws-in", tareProse, map[string]string{"X-Talyvor-Cache-Store": "off"})
 			dispatchTraced(t, p, stream, "ws-in", tareProse, map[string]string{"X-Talyvor-Pool": "off"})
 			dispatchTraced(t, p, stream, "ws-in", tareToolOutput(), nil) // phase 1 reduces JSON
+			dispatchTraced(t, p, stream, "ws-in", tareProse+" Mail jane.doe@example.com about it.", nil)
+			dispatchTraced(t, p, stream, "ws-none", tareProse, nil)
 			dispatchTraced(t, p, stream, "ws-in", tareProse, nil)
 			dispatchTraced(t, p, stream, "ws-syn", tareProse, nil)
 

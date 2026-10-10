@@ -35,12 +35,12 @@ func TestTareTraining_NotOptedInContributesNothing_OffForgets_Integration(t *tes
 	if m.GetTareTraining("ws-off") || m.GetTareTraining("ws-on") || m.CollectsTareTraining("ws-off") {
 		t.Fatalf("training is on for a workspace that never opted in")
 	}
-	if _, err := m.SetTareTraining(ctx, "ws-on", true, "user:owner-1"); err != nil {
+	if _, err := m.SetTareTraining(ctx, "ws-on", true, "key:bff", "user:owner-1"); err != nil {
 		t.Fatal(err)
 	}
-	var by string
-	if err := pool.QueryRow(ctx, `SELECT changed_by FROM tare_training_switches WHERE workspace_id='ws-on' AND enabled`).Scan(&by); err != nil || by != "user:owner-1" {
-		t.Errorf("who switched it on = %q (%v), want user:owner-1", by, err)
+	var by, forWhom string
+	if err := pool.QueryRow(ctx, `SELECT changed_by, on_behalf_of FROM tare_training_switches WHERE workspace_id='ws-on' AND enabled`).Scan(&by, &forWhom); err != nil || by != "key:bff" || forWhom != "user:owner-1" {
+		t.Errorf("who switched it on = %q for %q (%v), want key:bff for user:owner-1", by, forWhom, err)
 	}
 
 	for _, ws := range []string{"ws-off", "ws-on", "ws-syn", "ws-on"} {
@@ -65,7 +65,7 @@ func TestTareTraining_NotOptedInContributesNothing_OffForgets_Integration(t *tes
 	if err := stale.LoadAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.SetTareTraining(ctx, "ws-on", false, "user:owner-1"); err != nil {
+	if _, err := m.SetTareTraining(ctx, "ws-on", false, "key:bff", "user:owner-1"); err != nil {
 		t.Fatal(err)
 	}
 	if !stale.CollectsTareTraining("ws-on") {

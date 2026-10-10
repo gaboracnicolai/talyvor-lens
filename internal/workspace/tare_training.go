@@ -18,7 +18,8 @@ import (
 const setTareTrainingSQL = `WITH upd AS (
   UPDATE workspaces SET tare_training = $2, updated_at = NOW() WHERE id = $1 RETURNING id
 ), sw AS (
-  INSERT INTO tare_training_switches (workspace_id, enabled, changed_by) SELECT id, $2, $3 FROM upd RETURNING changed_at
+  INSERT INTO tare_training_switches (workspace_id, enabled, changed_by, on_behalf_of) SELECT id, $2, $3, $4 FROM upd
+  RETURNING changed_at
 ), forgot AS (
   DELETE FROM tare_training_traces WHERE workspace_id = $1 AND NOT $2 AND EXISTS (SELECT 1 FROM upd)
 )
@@ -65,9 +66,10 @@ func (m *Manager) CollectsTareTraining(wsID string) bool {
 	return ok && (ws.TareTraining || ws.Synthetic)
 }
 
-// SetTareTraining switches the opt-in and records who did it and when. Switched off, the workspace's collected
-// traces are deleted in the same statement. Returns when the switch was recorded (now, without a DB).
-func (m *Manager) SetTareTraining(ctx context.Context, wsID string, on bool, by string) (time.Time, error) {
+// SetTareTraining switches the opt-in and records who did it — the authenticated caller, and the person it acted
+// for if it named one — and when. Switched off, the workspace's collected traces are deleted in the same
+// statement. Returns when the switch was recorded (now, without a DB).
+func (m *Manager) SetTareTraining(ctx context.Context, wsID string, on bool, by, onBehalfOf string) (time.Time, error) {
 	if by == "" {
 		return time.Time{}, fmt.Errorf("workspace: who switched tare_training is required")
 	}
@@ -84,7 +86,7 @@ func (m *Manager) SetTareTraining(ctx context.Context, wsID string, on bool, by 
 		return m.now(), nil
 	}
 	var at time.Time
-	if err := m.pool.QueryRow(ctx, setTareTrainingSQL, wsID, on, by).Scan(&at); err != nil {
+	if err := m.pool.QueryRow(ctx, setTareTrainingSQL, wsID, on, by, onBehalfOf).Scan(&at); err != nil {
 		return time.Time{}, fmt.Errorf("workspace: update tare_training: %w", err)
 	}
 	return at, nil

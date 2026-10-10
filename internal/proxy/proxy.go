@@ -837,7 +837,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 	// under its own key and never answers an unreduced one. tareMeter rides the spend write on both
 	// paths; its zero value means Tare changed nothing.
 	var tareMeter alerts.TareMeter
-	p.keepTareTrace(ctx, r, wsID, body) // B27.36: before Tare changes it, and whatever the Tare policy
+	tareInput := body // B27.36: Tare's training set keeps the prose as it came, whatever the Tare policy
 	if p.shouldTare(r, wsID) {
 		if nb, kind, tin, tout, ok := tareReduce(ctx, body, p.tareModelFor(wsID)); ok {
 			if _, np, perr := extractPrompt(nb); perr == nil {
@@ -1116,6 +1116,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig
 		if len(gr.Violations) > 0 && piiDetected {
 			metrics.RequestsTotal.WithLabelValues(cfg.ProviderName(), "pii_skip_cache").Inc()
 		}
+	}
+	// B27.36 — never with PII or a tripped guardrail, and never for a workspace that keeps no content.
+	if !guardrailFired && loggingPolicy != workspace.LoggingNone {
+		p.keepTareTrace(ctx, r, wsID, tareInput)
 	}
 
 	// Token-budget enforcement: rewrite the body in place so max_tokens

@@ -4593,8 +4593,9 @@ func run() error {
 
 		// B27.36 — whether Talyvor may train its own compressor on this workspace's prose (migration 0243):
 		// {"enabled": true|false, "by": "<who>"}. OFF for every workspace until an owner turns it on here; separate
-		// from Sharing and from tare-model. Lens keeps who switched it and when — `by` (the app names the signed-in
-		// owner), else the caller's own identity. Switched off, collection stops and the workspace's traces are deleted.
+		// from Sharing and from tare-model. Lens keeps who switched it and when: the authenticated caller, and `by` —
+		// the signed-in owner the app names — beside it, never instead. Switched off, collection stops and the
+		// workspace's traces are deleted.
 		authed.Put("/v1/workspaces/{wsID}/tare-training", func(w http.ResponseWriter, req *http.Request) {
 			wsID := chi.URLParam(req, "wsID")
 			var in struct {
@@ -4609,20 +4610,22 @@ func run() error {
 				writeJSONErr(w, http.StatusBadRequest, `body must be {"enabled": true} or {"enabled": false}`)
 				return
 			}
+			_, caller, _ := marketCaller(req, nil, wsID)
+			if actx := auth.GetAuthContext(req.Context()); caller == "" && actx != nil && actx.AuthMethod != "" {
+				caller = "auth:" + actx.AuthMethod
+			}
+			if caller == "" {
+				writeJSONErr(w, http.StatusUnauthorized, "no caller identity to record the switch under")
+				return
+			}
 			by := strings.TrimSpace(in.By)
-			if by == "" {
-				_, by, _ = marketCaller(req, nil, wsID)
-			}
-			if by == "" {
-				by = "unknown"
-			}
-			at, err := wsManager.SetTareTraining(req.Context(), wsID, *in.Enabled, by)
+			at, err := wsManager.SetTareTraining(req.Context(), wsID, *in.Enabled, caller, by)
 			if err != nil {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
 				return
 			}
 			writeJSONOK(w, http.StatusOK, map[string]any{"ok": true, "tare_training": wsManager.GetTareTraining(wsID),
-				"changed_by": by, "changed_at": at})
+				"changed_by": caller, "on_behalf_of": by, "changed_at": at})
 		})
 
 		// B19.1 — agent accounts, each with its own balance and keys, on a double-entry ledger.

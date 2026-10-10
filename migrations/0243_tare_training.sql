@@ -5,7 +5,8 @@
 -- on with PUT /v1/workspaces/{ws}/tare-training. It is its own switch — separate from Sharing (cache_poolable) and
 -- from the Tare model (tare_model, 0184) — so turning one on never turns on another, and registration never changes it.
 --
--- tare_training_switches is who switched it and when, every time, append-only.
+-- tare_training_switches is who switched it and when, every time: changed_by is the authenticated caller, and
+-- on_behalf_of the person the app names (the signed-in owner), recorded beside it rather than instead of it.
 --
 -- tare_training_traces is what was collected: the newest message's prose that every phase-1 reducer refused — the
 -- text a compressor is trained on. Never a temporary chat's, never a chat's kept out of the shared pool. Switching
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tare_training_switches (
     workspace_id TEXT NOT NULL CHECK (workspace_id <> ''),
     enabled      BOOLEAN NOT NULL,
     changed_by   TEXT NOT NULL CHECK (changed_by <> ''),
+    on_behalf_of TEXT NOT NULL DEFAULT '',
     changed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS tare_training_switches_ws ON tare_training_switches (workspace_id, changed_at DESC);
