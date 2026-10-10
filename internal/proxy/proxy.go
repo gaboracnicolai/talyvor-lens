@@ -177,6 +177,9 @@ type Proxy struct {
 	// synthetic reports a B17.1 synthetic workspace (workspace.Manager.GetSynthetic); nil = none are.
 	synthetic func(wsID string) bool
 
+	// codeRunner runs the code a model asks to run when the request has Run code on (B28.119); nil = never.
+	codeRunner codeRunner
+
 	// limits enforces the spending cap and rate limits a workspace set through PUT .../config
 	// (B18.3). nil = none enforced.
 	limits *workspaceLimits
@@ -666,6 +669,10 @@ func (p *Proxy) HandleGoogle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, cfg providerConfig) {
+	if p.codeRunner != nil && strings.EqualFold(strings.TrimSpace(r.Header.Get(RunCodeHeader)), "on") {
+		p.serveRunningCode(w, r, cfg) // B28.119: each of its rounds comes back here without the header
+		return
+	}
 	ctx := r.Context()
 	// requestStart is captured before any work so the per-request
 	// attribution row can report wall-clock latency for the IDE
