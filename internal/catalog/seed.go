@@ -170,11 +170,14 @@ func seedModels() []Model {
 		// (gpt-4o-2024-11-20); it had simply never been applied to Anthropic's.
 		// https://platform.claude.com/docs/en/about-claude/models/overview (fetched 2026-07-28)
 
-		// Claude Opus 4.1 — DEPRECATED, retires 2026-08-05, still callable first-party until then.
+		// Claude Opus 4.1 — RETIRED 2026-08-05 (B38.8): https://platform.claude.com/docs/en/about-claude/model-deprecations
+		// (read 2026-10-10) lists claude-opus-4-1-20250805 as Retired, deprecated June 5, 2026, recommended replacement
+		// claude-opus-4-8; Anthropic's /v1/models stopped listing it (captures 2026-10-09 and 2026-10-10). Out of the
+		// picker, price kept so a past request still prices, and a new request is refused naming claude-opus-4-8.
 		// $15/$75 against a $1/$5 floor is the largest single under-recovery in the Anthropic set (15x).
 		// Rates transcribed from https://platform.claude.com/docs/en/about-claude/pricing (2026-07-28):
 		// base input $15, 5m cache write $18.75, cache hit $1.50, output $75.
-		{ID: "claude-opus-4-1", Provider: "anthropic", DisplayName: "Claude Opus 4.1", ReleaseDate: "2025-08-05", Tier: TierFrontier, InputPer1M: 15.00, OutputPer1M: 75.00, CachedInputPer1M: 1.50, CacheWritePer1M: 18.75, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 32768, Aliases: []string{"claude-opus-4-1-20250805"}},
+		{ID: "claude-opus-4-1", Provider: "anthropic", DisplayName: "Claude Opus 4.1", ReleaseDate: "2025-08-05", Tier: TierFrontier, InputPer1M: 15.00, OutputPer1M: 75.00, CachedInputPer1M: 1.50, CacheWritePer1M: 18.75, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 32768, Aliases: []string{"claude-opus-4-1-20250805"}, Deprecated: true, RetiredSuccessor: "claude-opus-4-8"},
 		{ID: "claude-opus-4-6", Provider: "anthropic", DisplayName: "Claude Opus 4.6", ReleaseDate: "2026-02-05", Tier: TierFrontier, InputPer1M: 5.00, OutputPer1M: 25.00, CachedInputPer1M: 0.50, CacheWritePer1M: 6.25, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
 		{ID: "claude-sonnet-4-6", Provider: "anthropic", DisplayName: "Claude Sonnet 4.6", ReleaseDate: "2026-02-17", Tier: TierBalanced, InputPer1M: 3.00, OutputPer1M: 15.00, Capabilities: visionDoc, ContextTokens: 200000, MaxOutput: 8192},
 		// NOTE: there is deliberately NO "claude-haiku-4-6" — no Haiku 4.6 exists at any version

@@ -61,6 +61,10 @@ type Model struct {
 	MaxOutput        int          `json:"max_output"`
 	Deprecated       bool         `json:"deprecated,omitempty"`
 	Aliases          []string     `json:"aliases,omitempty"` // e.g. dated snapshots → this canonical id
+	// B38.8 — set only once the provider has RETIRED the model (requests to it fail there), never while it is
+	// merely deprecated: Lens refuses a request for it with a "model retired" error naming this successor, and
+	// never sends it to the successor instead.
+	RetiredSuccessor string `json:"retired_successor,omitempty"`
 	// B18.12 — when the provider released the model (YYYY-MM-DD, from its release notes) and its tier,
 	// so the chat picker can list the newest first and default to the newest frontier model without
 	// guessing either from the name.
